@@ -3112,14 +3112,13 @@ fn proc_start_unix(pid: u32) -> Option<u64> {
     parse_proc_start_unix(&stat, btime, 100)
 }
 
-fn mtime_unix(path: &Path) -> Option<u64> {
+fn mtime_since_epoch(path: &Path) -> Option<Duration> {
     fs::metadata(path)
         .ok()?
         .modified()
         .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()
-        .map(|d| d.as_secs())
 }
 
 /// File the daemon writes under `runtime_state_dir` holding the config file's
@@ -3127,13 +3126,29 @@ fn mtime_unix(path: &Path) -> Option<u64> {
 /// daemon's `config_persister` — keep the name in step with it.
 const LAST_PERSIST_FILE: &str = "config-last-persist";
 
-/// The daemon's own record of the config file as it last read or wrote it.
-fn last_persist_unix(state_dir: &Path) -> Option<u64> {
-    fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+/// What a config-file mtime is judged against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshnessReference {
+    /// The daemon's marker at full mtime resolution: any difference is a
+    /// change the daemon has not read.
+    Exact(Duration),
+    /// A whole-second marker (from an older daemon) or process start: only a
+    /// later second shows a change.
+    Seconds(u64),
+}
+
+/// The daemon's own record of the config file as it last read or wrote it:
+/// `<seconds>.<nanoseconds>`, or whole seconds from an older daemon.
+fn last_persist_marker(state_dir: &Path) -> Option<FreshnessReference> {
+    let text = fs::read_to_string(state_dir.join(LAST_PERSIST_FILE)).ok()?;
+    let text = text.trim();
+    match text.split_once('.') {
+        None => text.parse().ok().map(FreshnessReference::Seconds),
+        Some((seconds, nanos)) if nanos.len() == 9 => Some(FreshnessReference::Exact(
+            Duration::new(seconds.parse().ok()?, nanos.parse().ok()?),
+        )),
+        Some(_) => None,
+    }
 }
 
 /// The timestamp a config-file mtime is judged against.
@@ -3149,24 +3164,29 @@ fn last_persist_unix(state_dir: &Path) -> Option<u64> {
 /// exactly when the daemon reads or writes the file, and not when an operator
 /// edits it. Process start remains the fallback for a daemon that wrote no
 /// marker (no writable state dir, or an older build).
-fn config_freshness_reference(state_dir: &Path, pid: u32) -> Option<u64> {
-    last_persist_unix(state_dir).or_else(|| proc_start_unix(pid))
+fn config_freshness_reference(state_dir: &Path, pid: u32) -> Option<FreshnessReference> {
+    last_persist_marker(state_dir).or_else(|| proc_start_unix(pid).map(FreshnessReference::Seconds))
 }
 
-/// Pure freshness verdict: warn when the config mtime is newer than the
-/// daemon's marker without claiming that the file contents diverge.
+/// Pure freshness verdict: warn when the config mtime differs from the
+/// daemon's exact marker, or is in a later second than a whole-second
+/// reference, without claiming that the file contents diverge.
 fn config_freshness_check(
     pid: u32,
     config_path: &str,
-    config_mtime_unix: u64,
-    daemon_sync_unix: u64,
+    config_mtime: Duration,
+    reference: FreshnessReference,
 ) -> Check {
-    let (status, detail) = if config_mtime_unix > daemon_sync_unix {
+    let changed = match reference {
+        FreshnessReference::Exact(marker) => config_mtime != marker,
+        FreshnessReference::Seconds(seconds) => config_mtime.as_secs() > seconds,
+    };
+    let (status, detail) = if changed {
         (
             CheckStatus::Warn,
             format!(
-                "config {config_path} is newer than daemon pid {pid}'s last config-file marker — \
-                 on-disk changes may be pending; validate with `rustbgpd --check \
+                "config {config_path} has changed since daemon pid {pid}'s last config-file \
+                 marker — on-disk changes may be pending; validate with `rustbgpd --check \
                  {config_path}` and reload with SIGHUP (systemctl reload rustbgpd)"
             ),
         )
@@ -3174,7 +3194,7 @@ fn config_freshness_check(
         (
             CheckStatus::Ok,
             format!(
-                "config {config_path} is not newer than daemon pid {pid}'s last config-file \
+                "config {config_path} has not changed since daemon pid {pid}'s last config-file \
                  marker; this does not prove effective runtime agreement"
             ),
         )
@@ -4708,7 +4728,7 @@ async fn run_with_deadlines(
         && let Some(process) = connection.local_process()
         && let Some(config_path) = proc_cmdline_config_path(process)
         && let (Some(mtime), Some(reference)) = (
-            mtime_unix(&config_path),
+            mtime_since_epoch(&config_path),
             config_freshness_reference(
                 &process_config_path(process.pid, &freshness_state_dir),
                 process.pid,
@@ -8036,11 +8056,22 @@ paths = ["x"]
 
     #[test]
     fn config_modified_after_daemon_start_is_yellow_with_reload_advice() {
-        let stale = config_freshness_check(7, "/etc/rustbgpd/config.toml", 2_000, 1_000);
+        let secs = |s| Duration::from_secs(s);
+        let stale = config_freshness_check(
+            7,
+            "/etc/rustbgpd/config.toml",
+            secs(2_000),
+            FreshnessReference::Seconds(1_000),
+        );
         assert_eq!(stale.status, CheckStatus::Warn);
         assert!(stale.detail.contains("SIGHUP"), "{}", stale.detail);
         assert!(stale.detail.contains("--check"), "{}", stale.detail);
-        let fresh = config_freshness_check(7, "/etc/rustbgpd/config.toml", 1_000, 1_000);
+        let fresh = config_freshness_check(
+            7,
+            "/etc/rustbgpd/config.toml",
+            secs(1_000),
+            FreshnessReference::Seconds(1_000),
+        );
         assert_eq!(fresh.status, CheckStatus::Ok);
         assert!(
             fresh.detail.contains("config-file marker"),
@@ -8065,18 +8096,23 @@ paths = ["x"]
     #[test]
     fn freshness_reference_prefers_the_daemon_last_persist_marker() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(LAST_PERSIST_FILE), "2000\n").unwrap();
+        fs::write(dir.path().join(LAST_PERSIST_FILE), "2000.000000000\n").unwrap();
+        let marker = FreshnessReference::Exact(Duration::from_secs(2_000));
 
         // The marker wins over process start: an unusable pid cannot
         // contribute a fallback, so the reference can only be the marker.
         assert_eq!(
             config_freshness_reference(dir.path(), u32::MAX),
-            Some(2_000)
+            Some(marker)
         );
 
         // A daemon-authored write leaves the config mtime AT the marker.
-        let after_daemon_write =
-            config_freshness_check(1, "/var/lib/rustbgpd/config.toml", 2_000, 2_000);
+        let after_daemon_write = config_freshness_check(
+            1,
+            "/var/lib/rustbgpd/config.toml",
+            Duration::from_secs(2_000),
+            marker,
+        );
         assert_eq!(
             after_daemon_write.status,
             CheckStatus::Ok,
@@ -8085,8 +8121,12 @@ paths = ["x"]
         );
 
         // A genuine external edit lands past it and must still be yellow.
-        let after_external_edit =
-            config_freshness_check(1, "/var/lib/rustbgpd/config.toml", 2_001, 2_000);
+        let after_external_edit = config_freshness_check(
+            1,
+            "/var/lib/rustbgpd/config.toml",
+            Duration::from_secs(2_001),
+            marker,
+        );
         assert_eq!(
             after_external_edit.status,
             CheckStatus::Warn,
@@ -8105,11 +8145,71 @@ paths = ["x"]
     #[test]
     fn freshness_reference_falls_back_to_process_start_without_a_marker() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(last_persist_unix(dir.path()), None);
+        assert_eq!(last_persist_marker(dir.path()), None);
         assert_eq!(
             config_freshness_reference(dir.path(), std::process::id()),
-            proc_start_unix(std::process::id())
+            proc_start_unix(std::process::id()).map(FreshnessReference::Seconds)
         );
+    }
+
+    /// Load-bearing: an external edit in the same second as the daemon's
+    /// marker must warn. At whole seconds it compared equal and read OK.
+    #[test]
+    fn same_second_external_edit_is_yellow() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        // The daemon read the file at `.000000100` into some second; the
+        // operator saved again later in that same second.
+        fs::write(dir.path().join(LAST_PERSIST_FILE), "2000.000000100\n").unwrap();
+        let reference = config_freshness_reference(dir.path(), u32::MAX).unwrap();
+        let edited = config_freshness_check(
+            1,
+            &config.display().to_string(),
+            Duration::new(2_000, 500_000_000),
+            reference,
+        );
+        assert_eq!(edited.status, CheckStatus::Warn, "{}", edited.detail);
+        let unchanged =
+            config_freshness_check(1, "config.toml", Duration::new(2_000, 100), reference);
+        assert_eq!(unchanged.status, CheckStatus::Ok, "{}", unchanged.detail);
+
+        // The same edit on a real file, made within one second of the
+        // marker the daemon would have written for it.
+        loop {
+            fs::write(&config, "a = 1\n").unwrap();
+            let read = mtime_since_epoch(&config).unwrap();
+            fs::write(
+                dir.path().join(LAST_PERSIST_FILE),
+                format!("{}.{:09}\n", read.as_secs(), read.subsec_nanos()),
+            )
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(&config, "a = 2\n").unwrap();
+            let edited = mtime_since_epoch(&config).unwrap();
+            if edited.as_secs() != read.as_secs() {
+                continue; // crossed a second boundary; retry inside one second
+            }
+            let reference = config_freshness_reference(dir.path(), u32::MAX).unwrap();
+            let check = config_freshness_check(1, "config.toml", edited, reference);
+            assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
+            break;
+        }
+    }
+
+    /// An older daemon's whole-second marker keeps the second-resolution
+    /// comparison instead of warning on every sub-second mtime.
+    #[test]
+    fn whole_second_marker_keeps_second_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(LAST_PERSIST_FILE), "2000\n").unwrap();
+        let reference = config_freshness_reference(dir.path(), u32::MAX).unwrap();
+        assert_eq!(reference, FreshnessReference::Seconds(2_000));
+        let same = config_freshness_check(1, "c", Duration::new(2_000, 7), reference);
+        assert_eq!(same.status, CheckStatus::Ok);
+        let later = config_freshness_check(1, "c", Duration::new(2_001, 0), reference);
+        assert_eq!(later.status, CheckStatus::Warn);
+        fs::write(dir.path().join(LAST_PERSIST_FILE), "2000.12\n").unwrap();
+        assert_eq!(last_persist_marker(dir.path()), None, "malformed fraction");
     }
 
     fn posture_dimension(disposition: i32) -> ValidationPolicyDimensionPosture {

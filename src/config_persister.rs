@@ -101,7 +101,7 @@ impl ConfigPersister {
         // The v2 writer owns the one-time legacy-directory permission
         // tightening. Do it synchronously so read-only services can never
         // observe the directory before that ownership boundary is established.
-        persister.record_current_history(persister.current.read_mtime_unix());
+        persister.record_current_history(persister.current.read_mtime());
         persister
     }
 
@@ -183,7 +183,7 @@ impl ConfigPersister {
                             // The mtime of the bytes the reload read, not the
                             // file's mtime now: a save that landed during the
                             // reload is still pending.
-                            p.record_current_history(p.current.read_mtime_unix());
+                            p.record_current_history(p.current.read_mtime());
                         })
                         .await;
                     let _ = adopted.send(());
@@ -362,8 +362,8 @@ impl ConfigPersister {
     /// current — boot, every durable write, and a SIGHUP snapshot refresh —
     /// already funnels here, which is why the marker is recorded here too
     /// rather than at each call site.
-    fn record_history(&self, read_mtime_unix: Option<u64>) {
-        self.record_last_persist(read_mtime_unix);
+    fn record_history(&self, read_mtime: Option<std::time::Duration>) {
+        self.record_last_persist(read_mtime);
         if let Some(dir) = self.history_dir() {
             match crate::config_history::record_accepted(&dir, &self.current) {
                 Ok(
@@ -395,19 +395,22 @@ impl ConfigPersister {
     /// same file — no clock skew or rounding in between. A later external edit
     /// necessarily carries a higher mtime and still warns.
     ///
-    /// `read_mtime_unix` is the mtime captured when an adopted snapshot was
-    /// read from the file (boot, SIGHUP). After the daemon's own write it is
+    /// `read_mtime` is the mtime captured when an adopted snapshot was read
+    /// from the file (boot, SIGHUP). After the daemon's own write it is
     /// `None`, and the file is stated now.
-    fn record_last_persist(&self, read_mtime_unix: Option<u64>) {
+    ///
+    /// The marker is `<seconds>.<nanoseconds>`: at whole seconds an external
+    /// edit in the same second as the daemon's read or write would look
+    /// current.
+    fn record_last_persist(&self, read_mtime: Option<std::time::Duration>) {
         let Some(dir) = &self.state_dir else {
             return;
         };
-        let Some(mtime) = read_mtime_unix.or_else(|| {
+        let Some(mtime) = read_mtime.or_else(|| {
             std::fs::metadata(&self.config_path)
                 .and_then(|meta| meta.modified())
                 .ok()
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|since| since.as_secs())
         }) else {
             return;
         };
@@ -418,7 +421,10 @@ impl ConfigPersister {
         if let Err(error) = std::fs::create_dir_all(dir)
             .map_err(crate::confirm_journal::AtomicPublishError::NotPublished)
             .and_then(|()| {
-                crate::confirm_journal::write_state_atomic(&path, format!("{mtime}\n").as_bytes())
+                crate::confirm_journal::write_state_atomic(
+                    &path,
+                    format!("{}.{:09}\n", mtime.as_secs(), mtime.subsec_nanos()).as_bytes(),
+                )
             })
         {
             warn!(
@@ -429,8 +435,8 @@ impl ConfigPersister {
         }
     }
 
-    fn record_current_history(&self, read_mtime_unix: Option<u64>) {
-        self.record_history(read_mtime_unix);
+    fn record_current_history(&self, read_mtime: Option<std::time::Duration>) {
+        self.record_history(read_mtime);
     }
 }
 
@@ -825,18 +831,13 @@ log_format = "json"
         drop(tx);
         handle.await.unwrap();
 
-        let recorded: u64 = std::fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
-            .expect("a durable write must record the last-persist marker")
-            .trim()
-            .parse()
-            .expect("the marker holds unix seconds");
+        let recorded = read_marker(&state_dir);
         let mtime = std::fs::metadata(&path)
             .unwrap()
             .modified()
             .unwrap()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .unwrap();
         assert_eq!(
             recorded, mtime,
             "the marker must hold the mtime of the file the daemon just wrote, \
@@ -875,13 +876,20 @@ log_format = "json"
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched\n");
         let marker = state_dir.join(LAST_PERSIST_FILE);
         assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
-        assert!(
-            std::fs::read_to_string(&marker)
-                .unwrap()
-                .trim()
-                .parse::<u64>()
-                .is_ok()
-        );
+        let _ = read_marker(&state_dir);
+    }
+
+    /// The marker's `<seconds>.<nanoseconds>` value, which `rbgp doctor`
+    /// compares against the config file's full-resolution mtime.
+    fn read_marker(state_dir: &std::path::Path) -> std::time::Duration {
+        let text = std::fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
+            .expect("a durable write must record the last-persist marker");
+        let (seconds, nanos) = text
+            .trim()
+            .split_once('.')
+            .expect("the marker holds seconds and nanoseconds");
+        assert_eq!(nanos.len(), 9, "{text:?}");
+        std::time::Duration::new(seconds.parse().unwrap(), nanos.parse().unwrap())
     }
 
     /// A SIGHUP reload adopts the bytes it read, which may be minutes older
@@ -946,18 +954,15 @@ log_format = "json"
             .expect("persister exits in time")
             .unwrap();
 
-        let recorded: u64 = std::fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let recorded = read_marker(&state_dir);
         assert_eq!(
-            recorded, read_at,
+            recorded,
+            std::time::Duration::from_secs(read_at),
             "the marker must hold the mtime of the bytes the reload read, not the \
              mtime of a save that landed during the reload"
         );
         assert!(
-            saved_again > recorded,
+            std::time::Duration::from_secs(saved_again) > recorded,
             "doctor must still see the second save as newer than the marker"
         );
     }
