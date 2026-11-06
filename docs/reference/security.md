@@ -425,6 +425,16 @@ failure retains a generationless restart marker, while unavailable clock
 metadata degrades to a complete wall-only marker rather than publishing a
 partial clock identity.
 
+The daemon refuses to start unless `runtime_state_dir` is a real directory
+owned by the daemon user and not group- or world-writable, reached only
+through directories owned by root or the daemon user that no other user can
+write (sticky shared directories such as `/tmp` excepted). Daemon-owned files
+beneath it are published by renaming a fresh owner-only file into place, so a
+symlink at a state-file path is replaced rather than followed. The general FIB
+receipt `fib-owned.json`, which selects the kernel routes the daemon may
+replace or delete, is read only when it is a regular file owned by the daemon
+user and not group- or world-writable.
+
 Use a separate `runtime_state_dir` for every concurrently running daemon.
 The directory is single-writer state for the marker, checkpoint, FIB receipt,
 and Unix socket; owner-only permissions do not make cross-process sharing safe.

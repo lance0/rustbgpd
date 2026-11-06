@@ -2180,7 +2180,7 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
     let Some(path) = &config.owned_state_path else {
         return FibOwnedState::default();
     };
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_owned_state_file(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FibOwnedState::default(),
         Err(e) => {
@@ -2277,7 +2277,7 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
         // case the daemon crashes again before the next persist
         // overwrites it (a rename would strand the unchanged tables'
         // rows as foreign on that second restart).
-        preserve_stale_owned_state_copy(config, "config_mismatch");
+        preserve_stale_owned_state_copy(config, &bytes, "config_mismatch");
     }
 
     let mut owned = FibOwnedState {
@@ -2371,12 +2371,12 @@ fn quarantine_owned_state_file(config: &FibRuntimeConfig, reason: &'static str) 
 /// per-table signature mismatch, where part of the file is still live
 /// state — contrast [`quarantine_owned_state_file`], which renames a
 /// file this build cannot use at all (unsupported version).
-fn preserve_stale_owned_state_copy(config: &FibRuntimeConfig, reason: &'static str) {
+fn preserve_stale_owned_state_copy(config: &FibRuntimeConfig, bytes: &[u8], reason: &'static str) {
     let Some(path) = &config.owned_state_path else {
         return;
     };
     let stale_path = stale_owned_state_path(path);
-    if let Err(e) = std::fs::copy(path, &stale_path) {
+    if let Err(e) = crate::confirm_journal::write_state_atomic(&stale_path, bytes) {
         warn!(
             path = %path.display(),
             stale_path = %stale_path.display(),
@@ -2392,6 +2392,33 @@ fn preserve_stale_owned_state_copy(config: &FibRuntimeConfig, reason: &'static s
             "preserved stale general FIB owned-state copy"
         );
     }
+}
+
+/// Read the owned-state receipt only if it is a regular file owned by this
+/// user and not group- or world-writable. It decides which kernel routes the
+/// daemon may replace or delete, so a symlink, a FIFO, or a file another user
+/// could have written is refused rather than trusted.
+fn read_owned_state_file(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "owned-state file is not a regular file owned by the daemon user and private to it",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn stale_owned_state_path(path: &Path) -> PathBuf {
@@ -2423,8 +2450,9 @@ fn write_owned_state(
             .map_err(|e| not_published(format!("create state dir: {e}")))?;
     }
     // Temp file, file fsync, rename, directory fsync; a failed attempt
-    // removes its temp file and leaves the previous file intact.
-    crate::confirm_journal::write_atomic(path, &bytes)
+    // removes its temp file and leaves the previous file intact. The rename
+    // replaces a planted symlink instead of writing through it.
+    crate::confirm_journal::write_state_atomic(path, &bytes)
 }
 
 fn table_signatures(tables: &[FibTableConfig]) -> Vec<PersistedFibTableSignature> {
@@ -4576,6 +4604,81 @@ mod tests {
         assert_eq!(events[0].reason, "installed");
     }
 
+    /// Owner-only, as the daemon writes it; a plain write under a 002 umask
+    /// leaves the receipt group-writable, which the loader refuses.
+    fn write_private_fixture(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+            .write_all(bytes.as_ref())
+    }
+
+    fn one_owned_route() -> FibOwnedState {
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+        owned
+    }
+
+    /// Load-bearing: following a planted `fib-owned.json` symlink adopts the
+    /// forged routes for kernel replace/delete, and writing through it
+    /// replaces the link's target.
+    #[test]
+    fn owned_state_symlink_is_neither_trusted_nor_written_through() {
+        let state = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = state.path().join("fib-owned.json");
+        let forged = outside.path().join("victim");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        write_owned_state(&forged, &config.tables, &one_owned_route()).unwrap();
+        let forged_bytes = std::fs::read(&forged).unwrap();
+        std::os::unix::fs::symlink(&forged, &path).unwrap();
+
+        assert_eq!(load_owned_state(&config), FibOwnedState::default());
+
+        write_owned_state(&path, &config.tables, &FibOwnedState::default()).unwrap();
+        assert_eq!(std::fs::read(&forged).unwrap(), forged_bytes);
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+
+        // The `.stale` evidence copy is written the same way.
+        let evidence = stale_owned_state_path(&path);
+        std::os::unix::fs::symlink(&forged, &evidence).unwrap();
+        write_owned_state(&path, &config.tables, &one_owned_route()).unwrap();
+        let mut changed = config.clone();
+        changed.tables[0].metric = 201;
+        assert!(load_owned_state(&changed).routes.is_empty());
+        assert_eq!(std::fs::read(&forged).unwrap(), forged_bytes);
+        assert!(std::fs::symlink_metadata(&evidence).unwrap().is_file());
+    }
+
+    /// Load-bearing: a FIFO receipt blocks a plain read at boot, and a
+    /// group-writable one may have been forged by another user.
+    #[test]
+    fn owned_state_non_regular_or_shared_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        assert_eq!(load_owned_state(&config), FibOwnedState::default());
+        std::fs::remove_file(&path).unwrap();
+
+        let owned = one_owned_route();
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+        assert_eq!(load_owned_state(&config), owned, "a private receipt loads");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert_eq!(load_owned_state(&config), FibOwnedState::default());
+    }
+
     #[test]
     fn owned_state_persistence_round_trips_and_ignores_config_mismatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -4796,7 +4899,7 @@ mod tests {
             }
           ]
         }"#;
-        std::fs::write(&path, v1).unwrap();
+        write_private_fixture(&path, v1).unwrap();
 
         let owned = load_owned_state(&config);
 
@@ -4827,7 +4930,7 @@ mod tests {
             multipath_relax: false,
             link_bandwidth_weighted: false,
         };
-        std::fs::write(&path, bytes).unwrap();
+        write_private_fixture(&path, bytes).unwrap();
 
         let owned = load_owned_state(&config);
         let expected: Vec<FibRoute> = [
@@ -4856,7 +4959,7 @@ mod tests {
 
         let future = bytes.replacen("\"version\": 5,", "\"version\": 6,", 1);
         assert_ne!(future, bytes);
-        std::fs::write(&path, &future).unwrap();
+        write_private_fixture(&path, &future).unwrap();
         assert_eq!(load_owned_state(&config), FibOwnedState::default());
         assert!(!path.exists());
         assert_eq!(
@@ -4894,7 +4997,7 @@ mod tests {
         let path = dir.path().join("fib-owned.json");
         let mut config = config();
         config.owned_state_path = Some(path.clone());
-        std::fs::write(&path, fixture).unwrap();
+        write_private_fixture(&path, fixture).unwrap();
         let owned = load_owned_state(&config);
         (dir, path, owned)
     }
@@ -5070,7 +5173,7 @@ mod tests {
             transition_tables: Vec::new(),
         };
         let bytes = serde_json::to_vec_pretty(&persisted).unwrap();
-        std::fs::write(&path, &bytes).unwrap();
+        write_private_fixture(&path, &bytes).unwrap();
 
         let loaded = load_owned_state(&config);
 
@@ -5351,7 +5454,7 @@ mod tests {
             in_flight: Vec::new(),
             transition_tables: Vec::new(),
         };
-        std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+        write_private_fixture(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
 
         let loaded = load_owned_state(&config);
 
@@ -5685,7 +5788,7 @@ mod tests {
 
     fn restore_crash_file(path: &Path, bytes: Option<&Vec<u8>>) {
         match bytes {
-            Some(bytes) => std::fs::write(path, bytes).unwrap(),
+            Some(bytes) => write_private_fixture(path, bytes).unwrap(),
             None => {
                 let _ = std::fs::remove_file(path);
             }
