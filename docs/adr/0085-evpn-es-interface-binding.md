@@ -381,3 +381,12 @@ failure, so its return now counts as a recovery under Decision 3.
   hold-off releases that reason.
 - An explicit-ESI binding that is removed and re-added is still a new
   binding (Decision 1).
+- Each published binding carries an incarnation, a new value each time the
+  ESI's binding appears. When the watch coalesces a departure and a return
+  into one update, the coordinator sees the incarnation change and treats
+  it as a return. The coordinator also checks every planned action against
+  the published incarnation under the apply lock, so an undrain planned
+  for the departed binding cannot clear the `Link` reason seeded for the
+  return.
+- The bond's next binding consumes its history even when that binding is
+  an explicit-ESI one.

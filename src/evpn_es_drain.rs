@@ -353,7 +353,30 @@ pub(crate) async fn apply_ethernet_segment_drain(
     originator: Option<&EvpnOriginatorRuntimeControl>,
 ) -> Result<EsDrainOutcome, EsDrainError> {
     let _guard = apply_lock.lock().await;
+    apply_ethernet_segment_drain_locked(
+        esi,
+        reason,
+        drained,
+        coordinator,
+        drain_state,
+        segment,
+        originator,
+    )
+    .await
+}
 
+/// [`apply_ethernet_segment_drain`] for a caller that already holds the
+/// EVPN runtime apply lock, so it can check its own preconditions against
+/// the committed state first.
+pub(crate) async fn apply_ethernet_segment_drain_locked(
+    esi: EthernetSegmentIdentifier,
+    reason: EsDrainReason,
+    drained: bool,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+    drain_state: &EvpnEsDrainState,
+    segment: Option<&EvpnSegmentRuntimeControl>,
+    originator: Option<&EvpnOriginatorRuntimeControl>,
+) -> Result<EsDrainOutcome, EsDrainError> {
     // Validate against the committed model: drain targets only
     // configured ESIs.
     let (instances, segments) = {

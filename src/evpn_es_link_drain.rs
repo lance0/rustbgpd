@@ -5,7 +5,7 @@
 //! `interface` bindings (republished whenever the committed EVPN
 //! config advances) and the slice-1 link carrier projection
 //! (`rustbgpd_evpn_linux::link_carrier`) — and drives the `Link`
-//! drain reason through the same [`apply_ethernet_segment_drain`]
+//! drain reason through the same [`apply_ethernet_segment_drain`](crate::evpn_es_drain::apply_ethernet_segment_drain)
 //! primitive (and therefore the same EVPN runtime apply lock) the
 //! ADR-0084 RPC uses:
 //!
@@ -59,7 +59,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::EsLinkBinding;
 use crate::evpn_es_drain::{
-    EsDrainError, EsDrainReason, EvpnEsDrainState, apply_ethernet_segment_drain,
+    EsDrainError, EsDrainReason, EvpnEsDrainState, apply_ethernet_segment_drain_locked,
 };
 use crate::evpn_originator::EvpnOriginatorRuntimeControl;
 use crate::evpn_segment::EvpnSegmentRuntimeControl;
@@ -128,7 +128,7 @@ async fn run(
         .await;
     let carrier = feed.carrier_rx.borrow_and_update().clone();
     let actions = planner.replace_bindings(initial, &carrier, Instant::now());
-    apply_actions(actions, &deps, &mut planner).await;
+    apply_actions(actions, &deps, &mut planner, &bindings_rx).await;
 
     loop {
         let deadline = planner.next_deadline();
@@ -164,7 +164,7 @@ async fn run(
                 planner.fire_due(Instant::now())
             }
         };
-        apply_actions(actions, &deps, &mut planner).await;
+        apply_actions(actions, &deps, &mut planner, &bindings_rx).await;
     }
 }
 
@@ -172,17 +172,34 @@ async fn apply_actions(
     actions: Vec<LinkDrainAction>,
     deps: &EsLinkDrainDeps,
     planner: &mut EsLinkDrainPlanner,
+    bindings_rx: &watch::Receiver<EsLinkBindings>,
 ) {
     for action in actions {
         let (esi, drained) = match action {
             LinkDrainAction::Drain(esi) => (esi, true),
             LinkDrainAction::Undrain(esi) => (esi, false),
         };
-        match apply_ethernet_segment_drain(
+        let _guard = deps.apply_lock.lock().await;
+        // Bindings are published under this lock. An action planned for a
+        // binding presence the runtime has since replaced is stale: a
+        // removal's undrain must not clear the reason seeded for the
+        // segment's return. The newer publish is planned next.
+        let expected = planner
+            .bindings
+            .get(&esi)
+            .map(|binding| binding.incarnation);
+        let published = bindings_rx
+            .borrow()
+            .get(&esi)
+            .map(|binding| binding.incarnation);
+        if expected != published {
+            debug!(%esi, drained, "link drain skipped for a superseded binding");
+            continue;
+        }
+        match apply_ethernet_segment_drain_locked(
             esi,
             EsDrainReason::Link,
             drained,
-            &deps.apply_lock,
             &deps.coordinator,
             &deps.drain_state,
             deps.segment.as_ref(),
@@ -416,6 +433,20 @@ impl EsLinkDrainPlanner {
                     }
                     actions.push(LinkDrainAction::Undrain(*esi));
                 }
+                Some(new)
+                    if new.auto_lacp
+                        && *old
+                            == EsLinkBinding {
+                                incarnation: old.incarnation,
+                                ..new.clone()
+                            }
+                        && new.incarnation != old.incarnation =>
+                {
+                    // The segment left and returned between two
+                    // publishes this coordinator saw as one: a return.
+                    self.tracked.insert(*esi, false);
+                    self.pending.remove(esi);
+                }
                 Some(new) if *new != *old => {
                     // Interface or hold-off changed: forget history so
                     // the evaluation below applies the new link's
@@ -426,10 +457,12 @@ impl EsLinkDrainPlanner {
                 Some(_) => {}
             }
         }
+        // Every new binding on a bond consumes that bond's history; only
+        // an `auto-lacp` one under the ESI it left with is a return.
         for (esi, binding) in next.iter() {
-            if binding.auto_lacp
-                && !self.bindings.contains_key(esi)
+            if !self.bindings.contains_key(esi)
                 && self.departed.remove(&binding.interface) == Some(*esi)
+                && binding.auto_lacp
             {
                 self.tracked.insert(*esi, false);
             }
@@ -536,6 +569,7 @@ mod tests {
             interface: interface.to_string(),
             recovery_delay: Duration::from_secs(delay_secs),
             auto_lacp: false,
+            incarnation: 0,
         }
     }
 
@@ -717,6 +751,33 @@ mod tests {
         )
     }
 
+    /// One `auto-lacp` binding of `esi(1)` on `bond0`, in its `incarnation`.
+    fn returning(incarnation: u64) -> EsLinkBindings {
+        let mut binding = binding("bond0", 30);
+        binding.auto_lacp = true;
+        binding.incarnation = incarnation;
+        Arc::new(BTreeMap::from([(esi(1), binding)]))
+    }
+
+    /// Any binding that comes next on a bond consumes its history: an
+    /// explicit segment between the departure and the return makes the
+    /// return a new binding again.
+    /// Mutation-red: consuming history only for `auto-lacp` bindings holds
+    /// the return.
+    #[tokio::test(start_paused = true)]
+    async fn an_explicit_binding_in_between_consumes_the_bond_history() {
+        let now = Instant::now();
+        let up = carrier(&[("bond0", true)]);
+        let mut planner = EsLinkDrainPlanner::new();
+        let _ = planner.replace_bindings(auto_lacp(&[(1, "bond0", 30)]), &up, now);
+        let _ = planner.replace_bindings(bindings(&[]), &up, now);
+        let _ = planner.replace_bindings(bindings(&[(2, "bond0", 30)]), &up, now);
+        let _ = planner.replace_bindings(bindings(&[]), &up, now);
+        let actions = planner.replace_bindings(auto_lacp(&[(1, "bond0", 30)]), &up, now);
+        assert_eq!(actions, vec![LinkDrainAction::Undrain(esi(1))]);
+        assert!(planner.next_deadline().is_none());
+    }
+
     /// History is kept per bond and matched by ESI: an `auto-lacp` bond
     /// returning under the ESI it left with recovers through the hold-off;
     /// under another partner's ESI it is a new segment, probed directly;
@@ -787,6 +848,7 @@ mod tests {
     struct Rig {
         bindings_tx: watch::Sender<EsLinkBindings>,
         carrier_tx: watch::Sender<CarrierMap>,
+        apply_lock: Arc<tokio::sync::Mutex<()>>,
         drain_state: EvpnEsDrainState,
         probe: crate::evpn_segment::EvpnSegmentControlProbe,
         shutdown: CancellationToken,
@@ -816,11 +878,12 @@ mod tests {
             vec![segment(esi(1))],
         )));
         let shutdown = CancellationToken::new();
+        let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
         let task = spawn(
             bindings_rx,
             CarrierFeed::Injected(carrier_rx),
             EsLinkDrainDeps {
-                apply_lock: Arc::new(tokio::sync::Mutex::new(())),
+                apply_lock: apply_lock.clone(),
                 coordinator,
                 drain_state: drain_state.clone(),
                 segment: Some(probe.control.clone()),
@@ -832,6 +895,7 @@ mod tests {
         Rig {
             bindings_tx,
             carrier_tx,
+            apply_lock,
             drain_state,
             probe,
             shutdown,
@@ -896,6 +960,69 @@ mod tests {
         assert!(!rig.probe.drained_rx.borrow_and_update().contains(&esi(1)));
 
         finish(rig).await;
+    }
+
+    /// The removal's undrain can wait for the apply lock while the return
+    /// commits under it, seeding `Link`. Planned for the removed binding,
+    /// it is stale and must not clear the return's reason.
+    /// Mutation-red: applying it anyway undrains the segment during the
+    /// hold-off.
+    #[tokio::test(start_paused = true)]
+    async fn a_return_committed_before_the_departure_undrain_keeps_its_link_reason() {
+        let rig = rig(returning(1), Arc::new(carrier(&[("bond0", true)])));
+        settle().await;
+        assert!(rig.drain_state.snapshot().is_empty());
+
+        // The return's apply holds the lock across the removal's planning.
+        let apply = rig.apply_lock.lock().await;
+        rig.bindings_tx.send_replace(Arc::new(BTreeMap::new()));
+        settle().await;
+        let _ = rig
+            .drain_state
+            .set_reason(esi(1), EsDrainReason::Link, true);
+        rig.bindings_tx.send_replace(returning(2));
+        drop(apply);
+        settle().await;
+        assert_returning_segment_waits_for_the_holdoff(&rig).await;
+        finish(rig).await;
+    }
+
+    /// A removal and a return the watch coalesces still differ by
+    /// incarnation, so the return arms the hold-off instead of leaving the
+    /// seeded `Link` reason with nothing to release it.
+    /// Mutation-red: an incarnation-only change taken as a changed binding
+    /// undrains at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_coalesced_departure_and_return_waits_for_the_holdoff() {
+        let rig = rig(returning(1), Arc::new(carrier(&[("bond0", true)])));
+        settle().await;
+        // Both publications land while the coordinator does not run.
+        rig.bindings_tx.send_replace(Arc::new(BTreeMap::new()));
+        let _ = rig
+            .drain_state
+            .set_reason(esi(1), EsDrainReason::Link, true);
+        rig.bindings_tx.send_replace(returning(2));
+        settle().await;
+        assert_returning_segment_waits_for_the_holdoff(&rig).await;
+        finish(rig).await;
+    }
+
+    async fn assert_returning_segment_waits_for_the_holdoff(rig: &Rig) {
+        let link = BTreeSet::from([EsDrainReason::Link]);
+        assert_eq!(rig.drain_state.reasons_for(esi(1)), link, "held at return");
+        tokio::time::advance(Duration::from_secs(29)).await;
+        settle().await;
+        assert_eq!(
+            rig.drain_state.reasons_for(esi(1)),
+            link,
+            "held in the hold-off"
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+        assert!(
+            rig.drain_state.snapshot().is_empty(),
+            "the hold-off releases it"
+        );
     }
 
     #[tokio::test(start_paused = true)]

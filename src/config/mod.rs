@@ -1463,6 +1463,7 @@ impl Config {
                             .unwrap_or(DEFAULT_ES_RECOVERY_DELAY_SECS),
                     ),
                     auto_lacp: cfg.esi == AUTO_LACP_ESI,
+                    incarnation: 0,
                 },
             );
         }
@@ -7307,6 +7308,11 @@ pub struct EsLinkBinding {
     /// `esi = "auto-lacp"`: the binding leaves while the bond has no
     /// usable LACP partner and returns under the same ESI with it.
     pub auto_lacp: bool,
+    /// Which presence of the binding this is, assigned when the EVPN
+    /// runtime publishes it: a new value each time the ESI's binding
+    /// appears, so a removal and return that the watch coalesces still
+    /// differ. Resolution leaves it 0.
+    pub incarnation: u64,
 }
 
 /// ADR-0140 core-isolation input published to the hold controller on
