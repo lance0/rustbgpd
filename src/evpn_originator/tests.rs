@@ -407,11 +407,13 @@ async fn duplicate_mac_suppress_local_withdraws_without_reinjecting() {
             esi: EthernetSegmentIdentifier::ZERO,
         },
     );
+    // A learn on another port against the remote contender is a locally
+    // detected move (RFC 7432 §15.1); a same-port replay would not be.
     handle_observation(
         &LocalMacObservation::Learned {
             vni: vni(100),
             mac: mac(0xAA),
-            ifindex: 10,
+            ifindex: 11,
         },
         &mut state,
         &instances,
@@ -530,11 +532,13 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
             esi: EthernetSegmentIdentifier::ZERO,
         },
     );
+    // A learn on another port against the remote contender is a locally
+    // detected move (RFC 7432 §15.1); a same-port replay would not be.
     handle_observation(
         &LocalMacObservation::Learned {
             vni: vni(100),
             mac: mac(0xAA),
-            ifindex: 10,
+            ifindex: 11,
         },
         &mut state,
         &instances,
@@ -654,11 +658,13 @@ async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
             esi: EthernetSegmentIdentifier::ZERO,
         },
     );
+    // A learn on another port against the remote contender is a locally
+    // detected move (RFC 7432 §15.1); a same-port replay would not be.
     observe_test(
         LocalMacObservation::Learned {
             vni: vni(100),
             mac: mac(0xAA),
-            ifindex: 10,
+            ifindex: 11,
         },
         &mut state,
         &instances,
@@ -5453,6 +5459,43 @@ async fn peer_sync_sequence_that_beats_the_contender_keeps_the_route_advertised(
         let advertised = h.advertised.lock().await;
         let route = advertised.get(&key).expect("route advertised");
         assert_eq!(extract_mac_mobility_full(&route.attributes).1, Some(10));
+    }
+}
+
+/// RFC 7432 §15 / §15.1: a repeated local notification is not a move.
+/// We hold an equal-sequence tie against a higher-IP PE (our VTEP is
+/// 10.0.0.1); a same-port `Learned` replay, or a repeated `IpAdded`, must
+/// neither raise the sequence nor count toward duplicate-MAC quarantine.
+#[tokio::test]
+async fn repeated_local_notification_while_holding_a_tie_is_not_a_move() {
+    for ip in [None, Some("192.0.2.10")] {
+        let contender = |seq| evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false);
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![contender(3)]);
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        let moves = if ip.is_some() { 2 } else { 1 };
+        assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, moves);
+        h.routes_tx.send_replace(vec![contender(4)]);
+        h.repoll().await;
+        let _ = h.take_log().await;
+
+        for _ in 0..3 {
+            h.observe(if ip.is_some() {
+                ip_added_aa()
+            } else {
+                learned_aa()
+            })
+            .await;
+        }
+        assert_eq!(
+            h.take_log().await,
+            Vec::new(),
+            "{ip:?}: replay re-advertised"
+        );
+        assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, moves);
     }
 }
 

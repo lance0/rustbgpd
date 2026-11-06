@@ -370,10 +370,17 @@ impl LocalMacIpOriginator {
         // `crate::origination`'s module docs. Never wrap to 0.
         let is_first_ever = prior.is_none();
 
-        // Yielded to a winning contender: a replay or a repeated binding
-        // notification is not a newly detected move (RFC 7432 §15). A
-        // local port move re-advertises through `on_local_mac_moved`.
-        if prior.as_ref().is_some_and(|s| s.yielded_to.is_some()) && !sticky_changed {
+        // A replay or a repeated binding notification is not a newly
+        // detected move (RFC 7432 §15). An advertising binding keeps its
+        // sequence, even while it holds an equal-sequence tie or after a
+        // re-advertisement at its retained sequence; a yielded binding
+        // stays withdrawn. A local port move re-advertises through
+        // `on_local_mac_moved`.
+        if prior
+            .as_ref()
+            .is_some_and(|s| s.yielded_to.is_some() || s.originated_key.is_some())
+            && !sticky_changed
+        {
             if let Some(entry) = self.by_key.get_mut(&composite) {
                 entry.last_seen_remote_seq = new_last_seen;
             }
@@ -1061,6 +1068,35 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(10), false);
         assert_eq!(o.advertised_count(), 1);
+    }
+
+    #[test]
+    fn repeated_binding_notification_while_advertising_never_bumps() {
+        let mut o = fresh();
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, Some(&remote(Some(5))));
+        let tie = remote(Some(6));
+        assert_eq!(
+            o.on_remote_ip_changed(mac(0xAA), ip, Some(&tie), local_ip()),
+            Vec::new()
+        );
+        assert_eq!(
+            o.on_local_ip_learned(mac(0xAA), ip, false, Some(&tie)),
+            Vec::new()
+        );
+
+        let mut o = fresh();
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, None);
+        let _ = o.on_remote_ip_changed(mac(0xAA), ip, Some(&remote(Some(3))), local_ip());
+        assert_eq!(
+            o.on_remote_ip_changed(mac(0xAA), ip, None, local_ip())
+                .len(),
+            1
+        );
+        assert_eq!(
+            o.on_local_ip_learned(mac(0xAA), ip, false, None),
+            Vec::new()
+        );
     }
 
     #[test]

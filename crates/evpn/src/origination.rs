@@ -472,10 +472,15 @@ impl LocalMacOriginator {
         // to 0 (a wrapped 0 loses every comparison and flaps forever).
         let is_first_ever = prior.is_none();
 
-        // Yielded to a winning contender and nothing local changed: a
-        // replay or same-port notification is not a newly detected move
-        // (RFC 7432 §15), so stay withdrawn rather than outbid it.
-        if prior.as_ref().is_some_and(|s| s.yielded_to.is_some())
+        // Nothing local changed: a replay or same-port notification is
+        // not a newly detected move (RFC 7432 §15). An advertising entry
+        // keeps its sequence, even while it holds an equal-sequence tie or
+        // after a re-advertisement at its retained sequence below the
+        // highest contender seen; a yielded entry stays withdrawn rather
+        // than outbid the contender. Only the remote history is updated.
+        if prior
+            .as_ref()
+            .is_some_and(|s| s.yielded_to.is_some() || s.originated_key.is_some())
             && !port_changed
             && !sticky_changed
         {
@@ -892,6 +897,33 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(10), false);
         assert_eq!(o.advertised_count(), 1);
+    }
+
+    // RFC 7432 §15: only a locally detected move raises the sequence. A
+    // same-port replay while we hold an equal-sequence tie, or after a
+    // re-advertisement at the retained sequence, is not one.
+    #[test]
+    fn same_port_replay_while_advertising_never_bumps() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, Some(&remote(Some(5))));
+        let tie = remote(Some(6));
+        assert_eq!(
+            o.on_remote_changed(mac(0xAA), Some(&tie), local_ip()),
+            Vec::new()
+        );
+        assert_eq!(
+            o.on_local_learned(mac(0xAA), 10, false, Some(&tie)),
+            Vec::new()
+        );
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(6));
+
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, None);
+        let _ = o.on_remote_changed(mac(0xAA), Some(&remote(Some(3))), local_ip());
+        let comeback = o.on_remote_changed(mac(0xAA), None, local_ip());
+        assert_eq!(comeback.len(), 1);
+        assert_eq!(o.on_local_learned(mac(0xAA), 10, false, None), Vec::new());
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(0));
     }
 
     // RFC 7432 §15.2: a static (sticky) MAC is not subject to MAC moves.
