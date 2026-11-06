@@ -9,7 +9,8 @@
   type did not apply. The session then closed with an FSM Error NOTIFICATION
   but no peer-down, so the routes stayed selected and exported until the
   neighbor later completed a session and went down. A pre-Established
-  End-of-RIB reached the RIB the same way. UPDATE, End-of-RIB and
-  ROUTE-REFRESH received before Established now reach neither BMP nor the RIB:
-  the session answers them with NOTIFICATION FSM Error (code 5, subcode 0) and
-  closes.
+  End-of-RIB reached the RIB the same way, and a pre-Established UPDATE was
+  mirrored to BMP collectors as Route Monitoring for a peer that never sent
+  Peer Up. UPDATE, End-of-RIB and ROUTE-REFRESH received before Established
+  now reach neither BMP nor the RIB: the session answers them with
+  NOTIFICATION FSM Error (code 5, subcode 0) and closes.
