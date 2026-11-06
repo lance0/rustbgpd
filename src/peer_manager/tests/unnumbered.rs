@@ -871,6 +871,62 @@ async fn an_all_peers_gshut_clear_reaches_an_unbound_neighbors_held_intent() {
     );
 }
 
+/// An all-peers graceful-shutdown set also sets the intent an unbound
+/// neighbor holds for its next peer. Mutation-red: setting only the managed
+/// peers rebinds the neighbor without `GRACEFUL_SHUTDOWN`.
+#[tokio::test(start_paused = true)]
+async fn an_all_peers_gshut_set_reaches_an_unbound_neighbors_held_intent() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    assert!(!h.mgr.peers[&key].advertise_graceful_shutdown);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "unbound: only the held state remains"
+    );
+
+    let _ = h.mgr.set_graceful_shutdown(None, true).await;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(
+        h.mgr.peers[&key].advertise_graceful_shutdown,
+        "the next peer must take the all-peers set"
+    );
+}
+
+/// An all-peers graceful-shutdown set also reaches a configured
+/// interface-only neighbor that has never bound, and an all-peers clear
+/// undoes it. Mutation-red: recording the set only in a retired endpoint's
+/// held state binds the neighbor's first peer without `GRACEFUL_SHUTDOWN`.
+#[tokio::test(start_paused = true)]
+async fn an_all_peers_gshut_set_reaches_a_never_bound_neighbor() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.answer_retention();
+    let _ = h.mgr.set_graceful_shutdown(None, true).await;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(
+        h.mgr.peers[&swp1_key(2)].advertise_graceful_shutdown,
+        "the first peer must take the all-peers set"
+    );
+
+    let _ = h.mgr.set_graceful_shutdown(None, false).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = h.peers_at(ll(3));
+    assert_eq!(swp2.len(), 1, "swp2 bound");
+    assert!(
+        !h.mgr.peers[&swp2[0]].advertise_graceful_shutdown,
+        "the first peer must not take a cleared intent"
+    );
+}
+
 /// Without retained routes the address is released as soon as the session
 /// is down.
 #[tokio::test(start_paused = true)]
