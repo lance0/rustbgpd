@@ -31,7 +31,8 @@ pub struct TlsSource {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub client_ca_file: PathBuf,
-    /// Optional PEM CRLs for the client chains; see [`build_tls`].
+    /// Optional PEM CRLs checked against client certificate chains. Once
+    /// configured, a missing, unparsable or expired CRL fails closed.
     pub client_crl_file: Option<PathBuf>,
 }
 
