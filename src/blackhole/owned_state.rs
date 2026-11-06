@@ -40,10 +40,21 @@ pub(super) struct OwnedStateStore {
     pub(super) fault: FaultPoint,
 }
 
+/// The actor's BLACKHOLE ownership. `prefixes` is the in-memory
+/// authority: the rows the actor holds in the kernel. `flush` publishes
+/// it to the receipt; a failed publication keeps ownership in memory, so
+/// withdrawal and shutdown can still remove the rows.
 #[derive(Default)]
 pub(super) struct OwnershipState {
     pub(super) store: Option<OwnedStateStore>,
     pub(super) prefixes: BTreeSet<Prefix>,
+    /// The set the receipt holds, as last written or read back.
+    pub(super) persisted: BTreeSet<Prefix>,
+    /// A failed publication of this set: the receipt holds either it or
+    /// `persisted`, and the next `flush` retries.
+    attempted: Option<BTreeSet<Prefix>>,
+    /// False once receipt authority is lost (unreadable, or changed
+    /// outside the actor). Kernel mutations stay disabled until restart.
     pub(super) available: bool,
 }
 
@@ -56,7 +67,9 @@ impl OwnershipState {
         match OwnedStateStore::load(directory) {
             Ok((store, prefixes)) => Self {
                 store: Some(store),
+                persisted: prefixes.clone(),
                 prefixes,
+                attempted: None,
                 available: true,
             },
             Err(error) => {
@@ -68,42 +81,80 @@ impl OwnershipState {
 
     #[cfg(test)]
     pub(super) fn ephemeral(prefixes: impl IntoIterator<Item = Prefix>) -> Self {
+        let prefixes: BTreeSet<Prefix> = prefixes.into_iter().collect();
         Self {
             store: None,
-            prefixes: prefixes.into_iter().collect(),
+            persisted: prefixes.clone(),
+            prefixes,
+            attempted: None,
             available: true,
         }
     }
 
-    pub(super) fn replace(&mut self, next: BTreeSet<Prefix>) -> bool {
+    /// The last publication failed and has not been retried successfully.
+    pub(super) fn write_failed(&self) -> bool {
+        self.attempted.is_some()
+    }
+
+    pub(super) fn add(&mut self, prefix: Prefix) {
+        self.prefixes.insert(prefix);
+        self.flush();
+    }
+
+    /// Release `prefix`. False when ownership is unavailable: the prefix
+    /// was not owned, or the receipt was changed outside the actor.
+    pub(super) fn remove(&mut self, prefix: Prefix) -> bool {
+        if !self.prefixes.remove(&prefix) {
+            self.available = false;
+            return false;
+        }
+        self.flush();
+        self.available
+    }
+
+    /// Publish `prefixes` if the receipt does not already hold it. An I/O
+    /// failure keeps ownership in memory and is retried by the next call;
+    /// a receipt that holds neither the last durable nor the last
+    /// attempted set was changed outside the actor and disables ownership.
+    pub(super) fn flush(&mut self) -> bool {
         if !self.available {
             return false;
         }
-        if let Some(store) = &self.store
-            && let Err(error) = store.replace(&self.prefixes, &next)
-        {
-            warn!(%error, "BLACKHOLE ownership persistence failed; kernel mutations disabled");
+        let Some(store) = &self.store else {
+            self.persisted.clone_from(&self.prefixes);
+            return true;
+        };
+        if self.attempted.is_none() && self.prefixes == self.persisted {
+            return true;
+        }
+        let on_disk = match store.read() {
+            Ok(on_disk) => on_disk.unwrap_or_default(),
+            Err(error) => {
+                warn!(%error, "BLACKHOLE ownership receipt unreadable; kernel mutations disabled");
+                self.available = false;
+                return false;
+            }
+        };
+        if on_disk != self.persisted && self.attempted.as_ref() != Some(&on_disk) {
+            warn!(
+                "BLACKHOLE ownership receipt changed outside the actor; kernel mutations disabled"
+            );
             self.available = false;
             return false;
         }
-        self.prefixes = next;
-        true
-    }
-
-    pub(super) fn add(&mut self, prefix: Prefix) -> bool {
-        let mut next = self.prefixes.clone();
-        next.insert(prefix);
-        self.replace(next)
-    }
-
-    pub(super) fn remove(&mut self, prefix: Prefix) -> bool {
-        if !self.prefixes.contains(&prefix) {
-            self.available = false;
-            return false;
+        self.persisted = on_disk;
+        match store.replace(&self.persisted, &self.prefixes) {
+            Ok(()) => {
+                self.persisted.clone_from(&self.prefixes);
+                self.attempted = None;
+                true
+            }
+            Err(error) => {
+                warn!(%error, "BLACKHOLE ownership receipt write failed; retrying next pass");
+                self.attempted = Some(self.prefixes.clone());
+                false
+            }
         }
-        let mut next = self.prefixes.clone();
-        next.remove(&prefix);
-        self.replace(next)
     }
 }
 
@@ -320,7 +371,7 @@ fn io_error(error: Errno) -> String {
     std::io::Error::from_raw_os_error(error as i32).to_string()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FaultPoint {
     None,
     Write,
@@ -448,7 +499,8 @@ fn strict_receipt_data_is_refused() {
         std::fs::write(&path, bytes).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut state = OwnershipState::load(Some(store.directory));
-        assert!(!state.available && !state.add(*expected.first().unwrap()));
+        state.add(*expected.first().unwrap());
+        assert!(!state.available && !state.flush());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
     for bytes in [

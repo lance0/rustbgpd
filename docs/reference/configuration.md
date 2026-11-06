@@ -451,8 +451,14 @@ Each successful install records its canonical prefix in private
 `<runtime_state_dir>/blackhole-owned.json`. Restart adopts only receipt∩marker;
 unreceipted marker-identical rows remain foreign. Unclaimed receipt rows stay
 `adopted_pending_reap` until the 500 s deferral expires. Receipt release is
-durable before deletion; a failed delete attempts restoration, and any
-publication ambiguity fail-stops later mutations as `ownership_state_unavailable`.
+published before deletion; a failed delete attempts restoration.
+
+A failed receipt write (for example a full disk) keeps the affected rows owned
+in memory and retries on every pass. Until a write succeeds, rows the receipt
+does not name report `installed/receipt_write_failed`, new installs report
+`failed/receipt_write_failed`, and withdrawal and shutdown still remove owned
+rows. A receipt that is unreadable or changed outside the daemon fail-stops
+later mutations as `ownership_state_unavailable` until restart.
 
 Live daemons require distinct runtime-state directories. Stopped receipt
 deletion and pre-receipt upgrade preserve surviving markers as foreign. Do not
@@ -461,10 +467,11 @@ replacement by an identical marker remains the value-identity limit.
 
 `rbgp rib blackholes` shows the current discard status for every
 BLACKHOLE-marked best route the daemon has observed: `installed`
-(`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
+(`installed` / `owned` / `adopted` / `adopted_pending_reap` /
+`receipt_write_failed`), `rejected`
 (`broad_prefix` / `not_ebgp` / `active_limit_exceeded` / `install_rate_limited`), or `failed` (`foreign_route_exists`,
-`dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`, or the kernel install
-error). The same surface is available as JSON with
+`dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`,
+`receipt_write_failed`, or the kernel install error). The same surface is available as JSON with
 `rbgp -j rib blackholes`. Adoption and reaping are counted by
 `bgp_blackhole_discard_adopted_total` and
 `bgp_blackhole_discard_reaped_total`.

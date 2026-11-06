@@ -817,6 +817,9 @@ async fn reconcile_once<F>(
         }
     };
 
+    if state.ownership.write_failed() {
+        state.ownership.flush();
+    }
     if !state.adoption.swept && state.ownership.available {
         let retained: BTreeSet<Prefix> = state
             .ownership
@@ -825,7 +828,8 @@ async fn reconcile_once<F>(
             .copied()
             .filter(|prefix| presences.get(prefix) == Some(&KernelRoutePresence::Marker))
             .collect();
-        if state.ownership.replace(retained.clone()) {
+        state.ownership.prefixes.clone_from(&retained);
+        if state.ownership.flush() {
             state.adoption.swept = true;
             for prefix in retained {
                 state.adoption.pending.insert(prefix);
@@ -1010,6 +1014,17 @@ async fn reconcile_once<F>(
             }
         }
 
+        if state.ownership.write_failed() {
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer.addr(),
+                peer_interface: candidate.route.peer_interface(),
+                state: BlackholeState::Failed,
+                reason: RECEIPT_WRITE_FAILED.to_string(),
+            });
+            continue;
+        }
+
         if guarded_churn {
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
@@ -1046,10 +1061,7 @@ async fn reconcile_once<F>(
         state.limits.attempted(candidate.prefix);
         match fib.install(candidate.prefix).await {
             Ok(()) => {
-                if !state.ownership.add(candidate.prefix) {
-                    statuses.push(ownership_unavailable_status(&candidate));
-                    continue;
-                }
+                state.ownership.add(candidate.prefix);
                 debug_assert!(!state.adoption.pending.contains(&candidate.prefix));
                 state.owned.insert(
                     candidate.prefix,
@@ -1103,10 +1115,30 @@ async fn reconcile_once<F>(
     )
     .await;
 
+    state.ownership.flush();
+    mark_unreceipted(&state.ownership, &mut statuses);
     state.rejected = current_rejected;
     metrics.set_blackhole_discard_active(state.active_count());
     statuses.sort_by_key(|status| status.prefix);
     status_tx.send_replace(statuses);
+}
+
+/// Status reason for a row whose receipt publication failed: an
+/// `installed` row the receipt does not yet name, or a `failed` install
+/// refused until the receipt can be written again.
+const RECEIPT_WRITE_FAILED: &str = "receipt_write_failed";
+
+/// Report kernel rows the receipt does not durably name. A crash now
+/// would leave them unreceipted, and restart would treat them as foreign.
+fn mark_unreceipted(ownership: &OwnershipState, statuses: &mut [BlackholeStatus]) {
+    if !ownership.write_failed() {
+        return;
+    }
+    for status in statuses.iter_mut().filter(|status| {
+        status.state == BlackholeState::Installed && !ownership.persisted.contains(&status.prefix)
+    }) {
+        status.reason = RECEIPT_WRITE_FAILED.to_string();
+    }
 }
 
 fn ownership_unavailable_status(candidate: &Candidate) -> BlackholeStatus {
@@ -1125,6 +1157,9 @@ enum Removal {
     OwnershipUnavailable,
 }
 
+/// Release `prefix` from the receipt, then delete its kernel row. A
+/// failed receipt write does not stop the delete: the row is known to be
+/// ours, and keeping it would strand a discard no later pass could reach.
 async fn release_then_remove<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
@@ -1143,6 +1178,7 @@ where
         return Removal::OwnershipUnavailable;
     }
     if !ownership.remove(prefix) {
+        ownership.prefixes.insert(prefix);
         return Removal::OwnershipUnavailable;
     }
     match fib.remove(prefix).await {
@@ -1150,11 +1186,8 @@ where
         Err(error) => {
             metrics.record_blackhole_discard_kernel_failure("remove");
             warn!(%prefix, %error, "failed to remove BLACKHOLE discard route; restoring ownership receipt");
-            if ownership.add(prefix) {
-                Removal::KernelFailed
-            } else {
-                Removal::OwnershipUnavailable
-            }
+            ownership.add(prefix);
+            Removal::KernelFailed
         }
     }
 }
@@ -1673,9 +1706,7 @@ pub(super) mod tests {
         receipt: Option<BTreeSet<Prefix>>,
         receipt_disk: Option<BTreeSet<Prefix>>,
         receipt_path: Option<PathBuf>,
-        receipt_fault: Option<owned_state::FaultPoint>,
         remove_receipt_after_dump: bool,
-        drain_after_reconcile: bool,
         install_calls: Vec<Prefix>,
         install_counter: Option<Arc<AtomicUsize>>,
         install_log: Option<Arc<Mutex<Vec<Prefix>>>>,
@@ -2433,21 +2464,17 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let pinned = Arc::new(PinnedRuntimeStateDirectory::prepare(dir.path()).unwrap());
-        let (mut store, empty) = owned_state::OwnedStateStore::load(pinned).unwrap();
+        let (store, empty) = owned_state::OwnedStateStore::load(pinned).unwrap();
         store.replace(&empty, &receipt).unwrap();
-        store.fault = fib
-            .receipt_fault
-            .take()
-            .unwrap_or(owned_state::FaultPoint::None);
         fib.receipt_path = Some(dir.path().join("blackhole-owned.json"));
         let mut state = ReconcilerState {
             owned: std::mem::take(owned),
             rejected: std::mem::take(rejected),
             adoption: std::mem::replace(adoption, reapable_adoption()),
-            ownership: OwnershipState {
-                store: Some(store),
-                prefixes: receipt,
-                available: true,
+            ownership: {
+                let mut ownership = OwnershipState::ephemeral(receipt);
+                ownership.store = Some(store);
+                ownership
             },
             limits: limits::InstallLimits::new(
                 config.max_active,
@@ -2456,9 +2483,6 @@ pub(super) mod tests {
             ),
         };
         reconcile_once(config, &rib_tx, fib, metrics, &status_tx, &mut state).await;
-        if fib.drain_after_reconcile {
-            drain_owned(fib, metrics, &mut state).await;
-        }
         *owned = state.owned;
         *rejected = state.rejected;
         *adoption = state.adoption;
@@ -4166,7 +4190,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn receipt_loss_and_ambiguous_publication_failstop_actor() {
+    async fn receipt_loss_failstops_actor() {
         let announced = |prefix| {
             route(
                 prefix,
@@ -4203,31 +4227,6 @@ pub(super) mod tests {
         let boundary = src.find(concat!("if !ownership.", "available")).unwrap();
         let warning = src.find(concat!("receipt lacks owned ", "prefix")).unwrap();
         assert!(boundary < warning && !missing.available && fib.remove_calls.is_empty());
-        let retained = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32));
-        let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 8), 32));
-        let mut fib = FakeFib {
-            receipt_fault: Some(owned_state::FaultPoint::DirectorySync),
-            drain_after_reconcile: true,
-            ..Default::default()
-        };
-        fib.installed.extend([retained, pending]);
-        let mut owned = HashMap::from([(retained, owned_blackhole(peer))]);
-        let mut adoption = reapable_adoption();
-        adoption.pending.insert(pending);
-        let statuses = reconcile_for_test_with_adoption(
-            vec![announced(retained), announced(old), announced(later)],
-            &mut fib,
-            &mut owned,
-            &mut rejected,
-            &metrics,
-            &mut adoption,
-        )
-        .await;
-        assert_eq!(fib.install_calls, vec![old]);
-        assert!(fib.remove_calls.is_empty() && !fib.installed.contains(&later));
-        assert_eq!(fib.receipt_disk, Some([retained, pending, old].into()));
-        let unavailable = |row: &&BlackholeStatus| row.reason == "ownership_state_unavailable";
-        assert_eq!(statuses.iter().filter(unavailable).count(), 2);
     }
 
     /// A failed kernel dump degrades the pass: stale owned routes are
@@ -4335,6 +4334,185 @@ pub(super) mod tests {
             assert_eq!(statuses[0].reason, "adopted_pending_reap");
         }
         assert_eq!(fib.remove_calls.len(), 0);
+    }
+
+    const RECEIPT_FAULTS: [owned_state::FaultPoint; 4] = [
+        owned_state::FaultPoint::Write,
+        owned_state::FaultPoint::FileSync,
+        owned_state::FaultPoint::Rename,
+        owned_state::FaultPoint::DirectorySync,
+    ];
+
+    /// A durable receipt in a fresh private directory, with `fault`
+    /// injected into every publication until a test clears it.
+    fn durable_ownership(
+        fault: owned_state::FaultPoint,
+    ) -> (
+        tempfile::TempDir,
+        Arc<PinnedRuntimeStateDirectory>,
+        OwnershipState,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = Arc::new(PinnedRuntimeStateDirectory::prepare(dir.path()).unwrap());
+        let mut ownership = OwnershipState::load(Some(Arc::clone(&pinned)));
+        assert!(ownership.available);
+        ownership.store.as_mut().unwrap().fault = fault;
+        (dir, pinned, ownership)
+    }
+
+    fn receipt_store(state: &mut ReconcilerState) -> &mut owned_state::OwnedStateStore {
+        state.ownership.store.as_mut().unwrap()
+    }
+
+    fn receipt_on_disk(state: &mut ReconcilerState) -> BTreeSet<Prefix> {
+        receipt_store(state).read().unwrap().unwrap_or_default()
+    }
+
+    fn blackholed(prefixes: &[Prefix]) -> Vec<Route> {
+        prefixes
+            .iter()
+            .map(|prefix| {
+                route(
+                    *prefix,
+                    RouteOrigin::Ebgp,
+                    vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+                )
+            })
+            .collect()
+    }
+
+    fn enabled() -> BlackholeConfig {
+        BlackholeConfig {
+            enabled: true,
+            ..BlackholeConfig::default()
+        }
+    }
+
+    async fn pass(
+        state: &mut ReconcilerState,
+        fib: &mut FakeFib,
+        routes: Vec<Route>,
+    ) -> Vec<BlackholeStatus> {
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        reconcile_once(
+            enabled(),
+            &rib_with_routes(routes),
+            fib,
+            &metrics,
+            &status_tx,
+            state,
+        )
+        .await;
+        status_rx.borrow().clone()
+    }
+
+    fn reason_of(statuses: &[BlackholeStatus], prefix: Prefix) -> (BlackholeState, &str) {
+        let row = statuses.iter().find(|row| row.prefix == prefix).unwrap();
+        (row.state, row.reason.as_str())
+    }
+
+    /// A receipt write that fails after a successful install must not
+    /// strand the discard row: withdrawal and the shutdown drain still
+    /// remove it, and a restart finds nothing left behind.
+    #[tokio::test]
+    async fn receipt_write_failure_keeps_discard_removable() {
+        let prefix = v4(32);
+        for fault in RECEIPT_FAULTS {
+            for withdraw in [true, false] {
+                let (_dir, pinned, ownership) = durable_ownership(fault);
+                let mut state =
+                    ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+                let mut fib = FakeFib::default();
+                let installed = pass(&mut state, &mut fib, blackholed(&[prefix])).await;
+                assert!(fib.installed.contains(&prefix), "{fault:?}: not installed");
+                if withdraw {
+                    pass(&mut state, &mut fib, Vec::new()).await;
+                } else {
+                    let metrics = BgpMetrics::with_registry(Registry::new());
+                    drain_owned(&mut fib, &metrics, &mut state).await;
+                }
+                assert!(
+                    !fib.installed.contains(&prefix),
+                    "{fault:?} withdraw={withdraw}: discard row stranded after receipt write failure"
+                );
+                assert!(
+                    state.ownership.available,
+                    "{fault:?}: I/O failure fail-stopped"
+                );
+                // A failed directory sync can leave the rename visible, so
+                // the receipt may already name the row.
+                if fault != owned_state::FaultPoint::DirectorySync {
+                    assert_eq!(
+                        reason_of(&installed, prefix),
+                        (BlackholeState::Installed, "receipt_write_failed"),
+                        "{fault:?}"
+                    );
+                }
+
+                drop(state);
+                let mut restarted = ReconcilerState::new(
+                    enabled(),
+                    reapable_adoption().reap_after,
+                    OwnershipState::load(Some(pinned)),
+                );
+                pass(&mut restarted, &mut fib, Vec::new()).await;
+                assert!(fib.installed.is_empty(), "{fault:?}: restart found a row");
+                assert!(restarted.ownership.available && restarted.ownership.prefixes.is_empty());
+            }
+        }
+    }
+
+    /// The first successful publication after a failed one restores
+    /// installs. While the receipt cannot be written, new installs are
+    /// refused rather than adding rows a crash would strand.
+    #[tokio::test]
+    async fn receipt_write_recovery_restores_installs() {
+        let (first, second) = (v4_host(1), v4_host(2));
+        for fault in RECEIPT_FAULTS {
+            let (_dir, _pinned, ownership) = durable_ownership(fault);
+            let mut state =
+                ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+            let mut fib = FakeFib::default();
+            pass(&mut state, &mut fib, blackholed(&[first])).await;
+            let failing = pass(&mut state, &mut fib, blackholed(&[first, second])).await;
+            receipt_store(&mut state).fault = owned_state::FaultPoint::None;
+            let recovered = pass(&mut state, &mut fib, blackholed(&[first, second])).await;
+
+            assert_eq!(fib.install_calls, vec![first, second], "{fault:?}");
+            assert_eq!(
+                receipt_on_disk(&mut state),
+                [first, second].into(),
+                "{fault:?}"
+            );
+            assert!(state.ownership.available, "{fault:?}");
+            assert_eq!(
+                reason_of(&recovered, first),
+                (BlackholeState::Installed, "owned")
+            );
+            assert_eq!(
+                reason_of(&recovered, second),
+                (BlackholeState::Installed, "installed")
+            );
+            // After a failed directory sync the rename is visible: the
+            // receipt names `first`, so only power loss could drop it.
+            let first_reason = if fault == owned_state::FaultPoint::DirectorySync {
+                "owned"
+            } else {
+                "receipt_write_failed"
+            };
+            assert_eq!(
+                reason_of(&failing, first),
+                (BlackholeState::Installed, first_reason),
+                "{fault:?}"
+            );
+            assert_eq!(
+                reason_of(&failing, second),
+                (BlackholeState::Failed, "receipt_write_failed"),
+                "{fault:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

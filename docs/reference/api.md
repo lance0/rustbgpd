@@ -2942,8 +2942,11 @@ Returns one row per currently observed best route carrying the RFC 7999
 `reason` carries values such as `installed`, `owned`, `adopted`,
 `adopted_pending_reap`, `broad_prefix`, `not_ebgp`, `active_limit_exceeded`,
 `install_rate_limited`, `route_churn_deferred`, `foreign_route_exists`,
-`ownership_state_unavailable`, `dump_failed`, `remove_failed`, `reap_failed`,
-or the kernel install error string. Both limit reasons are retryable and may
+`ownership_state_unavailable`, `receipt_write_failed`, `dump_failed`,
+`remove_failed`, `reap_failed`, or the kernel install error string.
+`receipt_write_failed` with `INSTALLED` marks a discard row the ownership
+receipt does not yet name; with `FAILED` it marks an install refused until a
+receipt write succeeds. Both limit reasons are retryable and may
 transition to installed when active capacity or a token becomes available.
 Discard routes adopted from a previous run at startup are also listed: a
 leftover that no BGP route has claimed yet appears as `adopted_pending_reap`
