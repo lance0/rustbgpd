@@ -6,5 +6,8 @@
   NOTIFICATION does. Before, it reconnected after the base
   `connect_retry_secs` wait without advancing the streak, so a peer whose
   sessions kept ending this way re-sent its table at the shortest interval.
-  An administrative reset whose close drain raises the Cease/8 still clears
-  the streak, as an administrative reset does.
+  From the second consecutive Cease/8, the neighbor's inbound connections
+  are also held for the wait, so `BgpInboundNotificationBackoffDrops` can
+  fire for a Cease/8 loop. An administrative reset whose close drain raises
+  the Cease/8 now clears the streak, as an administrative reset does;
+  before, it left the streak unchanged.

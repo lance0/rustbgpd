@@ -307,13 +307,19 @@ fn notification_end(notification_gr: bool) -> Vec<&'static str> {
 }
 
 /// Drive one local Cease/8 teardown of an Established graceful-restart
-/// session through writer exit; return the session-end messages it queued.
-async fn local_cease8_end(caller: LocalCease8, notification_gr: bool) -> Vec<&'static str> {
+/// session through writer exit, from a NOTIFICATION backoff streak of 2;
+/// return the session-end messages it queued and the resulting
+/// `(reconnect wait in seconds, streak)`.
+async fn local_cease8_end(
+    caller: LocalCease8,
+    notification_gr: bool,
+) -> (Vec<&'static str>, (u128, u32)) {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     negotiate_graceful_restart(&mut session, notification_gr);
+    session.notification_idle_failures = 2;
     let cause = match caller {
         LocalCease8::BulkSaturation => {
             session.trigger_outbound_saturation_teardown();
@@ -356,16 +362,29 @@ async fn local_cease8_end(caller: LocalCease8, notification_gr: bool) -> Vec<&'s
         !session.notification_teardown,
         "SessionDown clears the latch"
     );
-    session_ends(&mut rib_rx)
+    let wait = session
+        .reconnect_timer
+        .as_ref()
+        .expect("the fall to Idle arms the reconnect")
+        .deadline()
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_millis()
+        .div_ceil(1000);
+    (
+        session_ends(&mut rib_rx),
+        (wait, session.notification_idle_failures),
+    )
 }
 
 /// Every local Cease/8 is a NOTIFICATION we sent, so a graceful-restart peer
 /// without the N bit has its routes purged (`PeerDown`, RFC 4724 §4); with
-/// the N bit they stay on the graceful-restart path (RFC 8538 §4). The
-/// close-drain class is pinned below and the RIB-stall class in
-/// `rib_park.rs`.
+/// the N bit they stay on the graceful-restart path (RFC 8538 §4). It also
+/// escalates the reconnect backoff, here from a streak of 2 to a 120 s wait
+/// and a streak of 3. The close-drain class is pinned below and the
+/// RIB-stall class in `rib_park.rs`.
 /// Mutation-red: without the latch in the shared Cease/8 teardown, every
-/// N-bit-less case queues `PeerGracefulRestart`.
+/// N-bit-less case queues `PeerGracefulRestart`; without the backoff latch,
+/// every case keeps `(30, 2)`.
 #[tokio::test]
 async fn local_cease8_purges_without_notification_gr_for_every_caller() {
     let mut got = Vec::new();
@@ -382,7 +401,11 @@ async fn local_cease8_purges_without_notification_gr_for_every_caller() {
                 notification_gr,
                 local_cease8_end(caller, notification_gr).await,
             ));
-            want.push((caller, notification_gr, notification_end(notification_gr)));
+            want.push((
+                caller,
+                notification_gr,
+                (notification_end(notification_gr), (120, 3)),
+            ));
         }
     }
     // Compared whole, so a failure names every caller class that regressed.
