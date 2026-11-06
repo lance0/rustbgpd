@@ -1837,7 +1837,10 @@ not this path.
 A control packet selects its session by Your Discriminator (RFC 5880 §6.8.6),
 whatever its source address. Local discriminators are random, unique and
 non-zero, so a configured peer cannot guess another session's discriminator
-from its own. Link-local and interface-only sessions also drop packets that
+from its own. A packet with Your Discriminator zero, which the peer sends
+before it has learned ours, is matched by source address. A Down session
+accepts it as the bootstrap. An Init or Up session accepts it only when its
+My Discriminator is the one already learned from the peer. Link-local and interface-only sessions also drop packets that
 arrive on any interface other than their own. This is not authentication:
 an unauthenticated sender that can observe a session's packets on the same
 segment can still forge that session's state (RFC 5880 §9).
