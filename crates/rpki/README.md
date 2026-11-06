@@ -76,7 +76,9 @@ a configured `retry_interval` at 7200 seconds.
   `DEFAULT_MAX_CACHE_RECORDS` (4000000) and `DEFAULT_MAX_TOTAL_RECORDS`
   (10000000). A transaction that would exceed a cap is refused while it is
   decoded, with `RtrError::RecordLimit`. The cache's last accepted data is
-  kept, and the next query is a Reset Query.
+  kept, and the next query is a Reset Query. With the cache inventory
+  attached, data queued for or held by `VrpManager` stays charged until the
+  manager replaces or removes it.
   Starting with `0.3.1`, `RtrClient::new` bounds the configured timers to RFC
   8210 §6 and logs a warning when it changes one: a zero `refresh_interval` or
   `retry_interval` becomes 1 second, a zero `expire_interval` or

@@ -3378,7 +3378,9 @@ third of the total. Records are counted as each transfer is received:
   the next full table. On a long session with heavy churn, the count can
   therefore reach the limit and trigger a full table early.
 - While a full table is received, it counts toward `max_records_total`
-  together with the data it replaces.
+  together with the data it replaces. Accepted data still waiting to be
+  applied to the validation table also counts, until it replaces the old data
+  or is removed.
 - If no full table fits, the retained data is discarded when it expires, as
   for an unreachable cache.
 

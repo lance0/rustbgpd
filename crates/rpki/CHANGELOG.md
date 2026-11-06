@@ -10,7 +10,13 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   provider ASNs) are charged while a transaction is decoded. A transaction that
   would exceed either cap ends the session with the new
   `RtrError::RecordLimit`, publishes nothing, and keeps the cache's last
-  accepted data. The next query is a Reset Query.
+  accepted data. The next query is a Reset Query. With
+  `RtrClient::with_cache_inventory`, the charge travels with each accepted
+  update: it stays charged while the update waits for `VrpManager`, and the
+  manager releases it when that cache's data is replaced or removed. Without
+  the inventory attachment, the client keeps the charge for its last accepted
+  data, so a consumer of the plain `VrpUpdate` channel that queues updates is
+  not covered.
 - **Behavior change:** without `with_record_limits`, a client uses
   `DEFAULT_MAX_CACHE_RECORDS` (4000000) and its own `DEFAULT_MAX_TOTAL_RECORDS`
   (10000000) budget. Previously the only limit was the per-transaction record
