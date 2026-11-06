@@ -430,7 +430,10 @@ still carry `BLACKHOLE` after import policy, only installs routes learned
 from EBGP, and only installs IPv4 `/32` or IPv6 `/128` host routes unless
 `allow_blackhole_broad_prefixes = true` is also set. Existing foreign kernel
 routes for the same prefix are treated as install failures rather than
-overwritten, so operator/static or other-daemon routes are preserved.
+overwritten, so operator/static or other-daemon routes are preserved. A
+foreign route added later at another metric beside an owned discard route
+does not release it: the discard stays owned, and withdrawal removes only
+the daemon's row.
 
 The optional guardrails are startup-only, and every configured guardrail must
 be greater than zero; zero is invalid. Omitting the active cap means unlimited

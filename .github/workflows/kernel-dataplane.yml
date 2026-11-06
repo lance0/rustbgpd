@@ -1006,6 +1006,9 @@ jobs:
       - name: ADR-0061 FIB runtime netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
 
+      - name: BLACKHOLE discard beside foreign routes netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh blackhole_discard
+
       # This supplementary invocation denies AF_INET6 to prove the IPv4 BFD
       # path does not depend on that family. It is intentionally omitted from
       # the canonical selector receipt below.
