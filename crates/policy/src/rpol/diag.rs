@@ -189,9 +189,8 @@ impl Diagnostics {
     /// each span's `file` index, so an error in an imported file renders
     /// an excerpt of — and names — that file.
     ///
-    /// The output is bounded: at most [`MAX_RENDERED_DIAGNOSTICS`]
-    /// reports and about [`MAX_RENDERED_BYTES`] bytes, with a closing
-    /// line counting what was left out. The sources are indexed once for
+    /// The output is bounded: at most 50 reports and about 256 KiB, with
+    /// a closing line counting what was left out. The sources are indexed once for
     /// all reports, so the cost is linear in source size plus the
     /// reports rendered.
     #[must_use]
@@ -353,7 +352,7 @@ pub(crate) fn with_suggestion_budget<T>(budget: usize, work: impl FnOnce() -> T)
 /// `.rpol` frontend and the TOML config diagnostics.
 ///
 /// Bounded: a name over 64 characters, a candidate set over 1024 names or
-/// an exhausted [`with_suggestion_budget`] gets no suggestion, and
+/// an exhausted per-compile suggestion budget gets no suggestion, and
 /// candidates whose length alone puts them out of range are skipped before
 /// the edit distance runs.
 pub fn closest_matches<'a>(
