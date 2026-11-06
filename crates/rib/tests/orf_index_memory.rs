@@ -45,6 +45,13 @@ fn v6(addr: u128, len: u8) -> Prefix {
     Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(addr), len))
 }
 
+/// A distinct IPv6 address per index, spread across the top bits and a
+/// pseudo-random tail, so the keys share almost no trie path.
+fn disjoint_v6(i: u32) -> u128 {
+    (u128::from(i) << 116)
+        | (u128::from(i).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835) >> 12)
+}
+
 fn add(sequence: u32, match_: OrfMatch, max_len: u8, prefix: Prefix) -> AddressPrefixOrf {
     AddressPrefixOrf {
         action: OrfAction::Add,
@@ -92,6 +99,20 @@ fn shapes() -> Vec<(&'static str, Vec<AddressPrefixOrf>, Prefix)> {
                         v6((0x2001_0000_u128 + u128::from(i)) << 96, 32),
                     )
                 })
+                .collect(),
+            v6(0x2a00_u128 << 112, 48),
+        ),
+        (
+            "v6 4096 disjoint /128 exact",
+            (0..4096)
+                .map(|i| add(i, OrfMatch::Permit, 0, v6(disjoint_v6(i), 128)))
+                .collect(),
+            v6(0x2a00_u128 << 112, 48),
+        ),
+        (
+            "v6 4096 disjoint /120 le 128",
+            (0..4096)
+                .map(|i| add(i, OrfMatch::Permit, 128, v6(disjoint_v6(i), 120)))
                 .collect(),
             v6(0x2a00_u128 << 112, 48),
         ),

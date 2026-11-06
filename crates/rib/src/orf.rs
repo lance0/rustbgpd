@@ -274,7 +274,10 @@ impl OrfIndex {
         let len = route.prefix_len();
         self.keys
             .cover(route)
-            .filter_map(|runs| runs.iter().find(|run| run.first <= len && len <= run.last))
+            .filter_map(|runs| {
+                runs.get(runs.partition_point(|run| run.last < len))
+                    .filter(|run| run.first <= len)
+            })
             .min_by_key(|run| run.sequence)
             .map(|run| run.action)
     }
@@ -627,10 +630,24 @@ mod tests {
                 ))
             })
             .collect();
-        let route = v4([10, 0, 0, 0], 24);
-        for (name, keys) in [
-            ("ordinary /32 keys", plain),
-            ("crafted colliding keys", crafted),
+        // Disjoint IPv6 /128 keys: the trie's worst case for size and for
+        // the drop and rebuild after a change.
+        let disjoint: Vec<Prefix> = (0..4096u32)
+            .map(|i| {
+                let tail =
+                    u128::from(i).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835) >> 12;
+                Prefix::V6(Ipv6Prefix::new(
+                    Ipv6Addr::from((u128::from(i) << 116) | tail),
+                    128,
+                ))
+            })
+            .collect();
+        let v4_route = v4([10, 0, 0, 0], 24);
+        let v6_route = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(0x2a00_u128 << 112), 48));
+        for (name, keys, route) in [
+            ("ordinary /32 keys", plain, v4_route),
+            ("crafted colliding keys", crafted, v4_route),
+            ("disjoint IPv6 /128 keys", disjoint, v6_route),
         ] {
             let entries: Vec<_> = (0u32..)
                 .zip(&keys)
