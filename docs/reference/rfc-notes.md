@@ -831,8 +831,10 @@ Interpretation decisions:
   Invalid NEXT_HOP Attribute (3, 8) and are treat-as-withdraw under
   RFC 7606; the session stays Established unless the UPDATE encodes no
   reachable NLRI, which RFC 7606 §5.2 escalates to a session reset.
-- Mandatory for eBGP with NLRI. Not required for iBGP (may be omitted
-  or set by the transport layer).
+- Mandatory for eBGP with NLRI. An iBGP peer over IPv4 transport may omit
+  it, and the session address is used. Over IPv6 transport there is no IPv4
+  address to stand in, so body NLRI without NEXT_HOP is a missing well-known
+  attribute (3/3) and is treat-as-withdraw under RFC 7606.
 
 ### §5.1.4 — MULTI_EXIT_DISC (MED) Attribute
 

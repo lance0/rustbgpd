@@ -2021,11 +2021,15 @@ impl PeerSession {
                 update.map_or(&[][..], |update| &update.path_attributes[..]),
             )
             .and_then(|()| {
+                // An iBGP peer may omit NEXT_HOP for body NLRI only where the
+                // session's IPv4 address can stand in for it; over IPv6
+                // transport it is a missing well-known attribute (RFC 4271
+                // §5.1.3) and the announcement is treated as withdrawn.
                 rustbgpd_wire::validate::validate_update_attributes_with_context(
                     &parsed.attributes,
                     has_nlri,
                     has_body_nlri,
-                    is_ebgp,
+                    is_ebgp || !self.peer_ip.is_ipv4(),
                     validation_options,
                 )
                 .map_err(|context| {
@@ -2289,6 +2293,8 @@ impl PeerSession {
                     None
                 }
             })
+            // Validation already treated body NLRI without NEXT_HOP as
+            // withdrawn unless the session address is IPv4 and can stand in.
             .unwrap_or(match self.peer_ip {
                 IpAddr::V4(v4) => IpAddr::V4(v4),
                 IpAddr::V6(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),

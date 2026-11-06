@@ -1182,6 +1182,53 @@ async fn strict_peer_ipv4_session_rejects_ipv6_mp_replacement() {
     assert_eq!(retained[0].1.next_hop, Some("2001:db8::2".parse().unwrap()));
 }
 
+/// An iBGP peer may omit `NEXT_HOP` for body NLRI because the session's IPv4
+/// address stands in. Over IPv6 transport there is no such address, so the
+/// announcement is missing a well-known attribute and is treated as withdrawn
+/// (RFC 4271 §5.1.3, RFC 7606 §3(d)) instead of installing 0.0.0.0. Over IPv4
+/// transport the session address is still used.
+#[tokio::test]
+async fn ibgp_body_nlri_without_next_hop_over_ipv6_transport_is_withdrawn() {
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::LocalPref(100),
+    ];
+    let update = || {
+        UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 24),
+            }],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        )
+    };
+    let announced = |rib_rx: &mut mpsc::Receiver<RibUpdate>| -> Vec<IpAddr> {
+        let mut next_hops = Vec::new();
+        while let Ok(update) = rib_rx.try_recv() {
+            if let RibUpdate::RoutesReceived { announced, .. } = update {
+                next_hops.extend(announced.iter().map(|route| route.next_hop));
+            }
+        }
+        next_hops
+    };
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.peer_ip = "2001:db8::2".parse().unwrap();
+    install_test_negotiated_session(&mut session, negotiated_session(65001, false));
+    session.process_update(update()).await;
+    assert_eq!(announced(&mut rib_rx), Vec::<IpAddr>::new());
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    install_test_negotiated_session(&mut session, negotiated_session(65001, false));
+    session.process_update(update()).await;
+    assert_eq!(announced(&mut rib_rx), vec![session.peer_ip]);
+}
+
 /// ADR-0107 §2: a global + link-local next-hop pair always fails closed
 /// under the strict pilot — the companion cannot be mapped to the single
 /// session address even when the global component matches, and it is
