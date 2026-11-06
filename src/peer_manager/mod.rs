@@ -27,7 +27,7 @@ use rustbgpd_transport::{
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, raw_config_document_bounded};
 use crate::policy_admin::{
@@ -1219,11 +1219,22 @@ impl PeerManager {
     /// Replace the live configuration, republishing its dataset bindings in
     /// the import roster. Every wholesale replacement goes through here.
     fn replace_current_config(&mut self, config: Config) -> Config {
+        let (previous, bfd) = self.install_current_config(config);
+        if let Err(error) = bfd {
+            warn!(%error, "BFD membership not updated for the configuration change");
+        }
+        previous
+    }
+
+    /// [`Self::replace_current_config`], also returning whether the BFD
+    /// membership followed the new configuration.
+    fn install_current_config(&mut self, config: Config) -> (Config, Result<(), String>) {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
         self.unnumbered_runtime.config_due = true;
-        previous
+        let bfd = self.follow_bfd_membership(&previous);
+        (previous, bfd)
     }
 
     /// Install the bounded operator snapshot lane.
@@ -2315,27 +2326,7 @@ impl PeerManager {
                 // Static delete and both dynamic operations validate
                 // before effect; static add reports cleanup explicitly.
                 let outcome = match mutation {
-                    OwnedNeighborMutation::Add(spec) => {
-                        let mut effect = lifecycle::RuntimeCreatePeerFailureEffect::NoEffect;
-                        match self
-                            .runtime_create_peer_classified(spec, Some(&mut effect))
-                            .await
-                        {
-                            Ok(()) => OwnedNeighborMutationOutcome::Success,
-                            Err(error) => match effect {
-                                lifecycle::RuntimeCreatePeerFailureEffect::NoEffect => {
-                                    OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                        OwnedNeighborMutationError::Peer(error),
-                                    )
-                                }
-                                lifecycle::RuntimeCreatePeerFailureEffect::FullyCompensated => {
-                                    OwnedNeighborMutationOutcome::FullyCompensated(
-                                        OwnedNeighborMutationError::Peer(error),
-                                    )
-                                }
-                            },
-                        }
-                    }
+                    OwnedNeighborMutation::Add(spec) => self.owned_runtime_create_peer(spec).await,
                     OwnedNeighborMutation::Delete(peer) => {
                         match self.delete_peer_runtime(peer, true).await {
                             Ok(_) => OwnedNeighborMutationOutcome::Success,

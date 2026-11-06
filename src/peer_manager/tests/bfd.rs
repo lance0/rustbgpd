@@ -2203,3 +2203,246 @@ async fn a_link_monitor_needs_no_bfd_scope_poll() {
     let mut mgr = mgr.with_link_failover(links);
     assert_eq!(mgr.bfd_scope_deadline(), None);
 }
+
+// ---------------------------------------------------------------------------
+// Runtime neighbor create and delete keep the BFD membership in step with the
+// configuration snapshot, as startup and SIGHUP do.
+// ---------------------------------------------------------------------------
+
+const RUNTIME_PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+
+/// A `strict-bfd` peer group running strict BFD on the `fast` profile, and
+/// no neighbor yet.
+fn strict_bfd_group_config() -> Config {
+    let mut config = make_dynamic_manager_config();
+    config.bfd_profiles.push(crate::config::BfdProfileConfig {
+        name: "fast".to_string(),
+        min_tx_interval: 300,
+        min_rx_interval: 300,
+        multiplier: 3,
+    });
+    config.peer_groups.insert(
+        "strict-bfd".to_string(),
+        crate::config::PeerGroupConfig {
+            families: vec!["ipv4_unicast".to_string()],
+            bfd: Some(crate::config::BfdConfig {
+                profile: "fast".to_string(),
+                enabled: true,
+                strict: true,
+                multihop: false,
+            }),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+/// The `bfd_session_up{peer}` value, or `None` when the series is absent.
+fn bfd_session_up_gauge(metrics: &BgpMetrics, peer: &str) -> Option<i64> {
+    use prometheus::Encoder;
+    let mut text = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&metrics.registry().gather(), &mut text)
+        .unwrap();
+    let needle = format!("bfd_session_up{{peer=\"{peer}\"}}");
+    String::from_utf8(text)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix(needle.as_str()))
+        .map(|value| value.trim().parse().unwrap())
+}
+
+fn runtime_neighbor(
+    peer_group: Option<&str>,
+    remote_asn: u32,
+) -> Box<rustbgpd_api::peer_types::PresenceAwareNeighborCreate> {
+    Box::new(rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+        address: Some(RUNTIME_PEER),
+        interface: None,
+        remote_asn,
+        remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
+        description: None,
+        peer_group: peer_group.map(str::to_string),
+        hold_time: None,
+        min_hold_time: None,
+        send_hold_time: None,
+        max_prefixes: None,
+        max_prefix_restart_seconds: None,
+        remove_private_as: None,
+        discard_path_attributes: None,
+        local_role: None,
+        families: None,
+        required_families: None,
+        route_server_client: None,
+        per_client_best: None,
+        strict_role: None,
+        add_path: None,
+    })
+}
+
+/// A neighbor created at runtime in a strict-BFD peer group runs its BFD
+/// session, opening the socket family no startup neighbor needed, and its
+/// BGP session is withheld until that session reports Up.
+#[tokio::test]
+async fn a_runtime_neighbor_in_a_strict_bfd_group_runs_bfd_and_is_withheld() {
+    let mut lab = super::dynamic_bfd::lab(strict_bfd_group_config());
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
+        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
+
+    lab.mgr
+        .runtime_create_peer(runtime_neighbor(Some("strict-bfd"), 65009))
+        .await
+        .unwrap();
+
+    let member = lab
+        .member(RUNTIME_PEER)
+        .expect("the neighbor runs BFD")
+        .clone();
+    assert!(member.strict, "inherited strict mode");
+    assert_eq!(
+        lab.published(),
+        [(RUNTIME_PEER, RUNTIME_PEER.to_string(), true)]
+    );
+    assert!(
+        lab.applied.try_recv().is_ok(),
+        "the socket family opened through the acknowledged commit"
+    );
+    assert!(
+        lab.mgr.bfd_withholding(&RUNTIME_PEER),
+        "strict BGP is withheld until BFD is Up"
+    );
+    // The family's acknowledgement arrived before the peer was added; it
+    // must not reap the session's seeded Down gauge as a deletion's.
+    assert_eq!(
+        bfd_session_up_gauge(&lab.mgr.metrics, &RUNTIME_PEER.to_string()),
+        Some(0),
+        "a withheld strict neighbor reports its Down BFD session"
+    );
+
+    lab.mgr
+        .handle_bfd_state_change(crate::bfd_runtime::BfdStateChange {
+            revision: member.revision,
+            peer: RUNTIME_PEER,
+            state: rustbgpd_bfd::SessionState::Up,
+            diagnostic: rustbgpd_bfd::Diagnostic::None,
+            remote_admin_down: false,
+            resync: false,
+        })
+        .await;
+    assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER), "BFD Up admits BGP");
+}
+
+/// When the BFD actor does not acknowledge the socket family a runtime-created
+/// neighbor needs, BFD is fenced and the restored snapshot cannot settle its
+/// membership: the owned create settles as ambiguous, so the API fences later
+/// mutations, never as a clean compensation.
+#[tokio::test]
+async fn a_lost_bfd_socket_acknowledgement_makes_a_runtime_create_ambiguous() {
+    let mut lab = super::dynamic_bfd::lab(strict_bfd_group_config());
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
+        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
+    lab.drop_next_reply.store(true, Ordering::SeqCst);
+
+    let outcome = lab
+        .mgr
+        .owned_runtime_create_peer(runtime_neighbor(Some("strict-bfd"), 65009))
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "a lost BFD acknowledgement is not a clean compensation"
+    );
+    assert!(
+        lab.applied.try_recv().is_ok(),
+        "the commit reached the actor"
+    );
+    assert!(
+        lab.mgr.bfd_coupling.as_ref().unwrap().reloading,
+        "BFD is fenced"
+    );
+    assert!(!lab.mgr.peers.contains_key(&key(RUNTIME_PEER)), "not added");
+    assert!(
+        lab.mgr.current_config.neighbors.is_empty(),
+        "snapshot restored"
+    );
+}
+
+/// A runtime create whose BFD session cannot be derived from the installed
+/// snapshot is refused with the snapshot restored, never added ungated. The
+/// seam stands in for an interface scope that vanishes between
+/// `resolve_neighbor` and the membership derivation.
+#[tokio::test]
+async fn a_runtime_create_whose_bfd_session_cannot_be_derived_is_refused() {
+    let mut lab = super::dynamic_bfd::lab(strict_bfd_group_config());
+    lab.mgr.bfd_coupling.as_mut().unwrap().derivation_failure =
+        Some("interface scope no longer resolves".into());
+
+    let error = lab
+        .mgr
+        .runtime_create_peer(runtime_neighbor(Some("strict-bfd"), 65009))
+        .await
+        .expect_err("a strict neighbor without its BFD session is refused");
+
+    assert!(
+        matches!(
+            error,
+            rustbgpd_api::peer_types::PeerLifecycleError::Precondition(_)
+        ),
+        "{error:?}"
+    );
+    assert!(!lab.mgr.peers.contains_key(&key(RUNTIME_PEER)), "not added");
+    assert!(lab.mgr.current_config.neighbors.is_empty());
+    assert!(lab.member(RUNTIME_PEER).is_none());
+}
+
+/// Deleting a strict-BFD neighbor and re-adding it without BFD (how the CLI
+/// changes a neighbor's ASN) removes its BFD session: the re-added neighbor
+/// is not held behind a session nothing configures.
+#[tokio::test]
+async fn re_adding_a_deleted_strict_bfd_neighbor_without_bfd_is_not_withheld() {
+    let mut config = strict_bfd_group_config();
+    apply_config_event(
+        &mut config,
+        &ConfigEvent::PresenceAwareNeighborAdded {
+            spec: runtime_neighbor(Some("strict-bfd"), 65009),
+            ack: None,
+        },
+    )
+    .unwrap();
+    let startup = crate::bfd_runtime::BfdRuntimeConfig::from_config(&config).unwrap();
+    let resolved = config.resolve_neighbor(&config.neighbors[0]).unwrap();
+    let mut lab = super::dynamic_bfd::lab(config);
+    // As startup attaches the coupling: its members and their families.
+    let coupling = lab.mgr.bfd_coupling.as_mut().unwrap();
+    coupling.configured = startup
+        .sessions
+        .iter()
+        .map(|params| (params.peer, params.clone()))
+        .collect();
+    coupling.opened = startup;
+    lab.mgr
+        .add_configured_peers(vec![crate::reload::build_peer_mgr_config(&resolved)])
+        .await
+        .unwrap();
+    assert!(lab.mgr.bfd_withholding(&RUNTIME_PEER), "strict at startup");
+
+    lab.mgr
+        .delete_peer_runtime(key(RUNTIME_PEER), true)
+        .await
+        .unwrap();
+    lab.mgr
+        .runtime_create_peer(runtime_neighbor(None, 65010))
+        .await
+        .unwrap();
+
+    assert!(lab.member(RUNTIME_PEER).is_none(), "no BFD member remains");
+    assert!(lab.published().is_empty(), "no BFD session runs");
+    assert!(
+        !lab.mgr.bfd_should_withhold(&RUNTIME_PEER),
+        "the re-added neighbor is not held behind a stale strict session"
+    );
+    assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER));
+}
