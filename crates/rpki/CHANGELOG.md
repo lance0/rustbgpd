@@ -5,6 +5,15 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.10.0 - Unreleased
 
+- Decode the RTR Router Key PDU (type 9, RFC 8210 §5.10) into the new
+  `RtrPdu::RouterKey` variant, and encode it. The client ignores it, because
+  it does not validate BGPsec paths. Previously the codec rejected type 9 as an
+  Unsupported PDU Type, so a cache serving BGPsec router keys (StayRTR does by
+  default) failed every transaction that carried one, and the client never
+  accepted that cache's VRPs or ASPAs. Framing is checked: the PDU must hold
+  the 20-octet SKI and AS number, and the SubjectPublicKeyInfo's DER length
+  must fill the rest exactly. `RtrPdu` is already `#[non_exhaustive]`, so the
+  new variant is additive.
 - Bound the RPKI records an `RtrClient` holds. `RtrClient::with_record_limits`
   takes a per-cache cap and a shared `RecordBudget`. Records (VRPs plus ASPA
   provider ASNs) are charged while a transaction is decoded. A transaction that
