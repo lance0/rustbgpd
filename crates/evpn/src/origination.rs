@@ -47,8 +47,17 @@
 //! 2. **First advertisement, contender at seq=R.** seq=R+1, emitted
 //!    with the extcomm. Routes lacking the extcomm count as R=0
 //!    per §15.1.
-//! 3. **Already advertising at seq=N, remote announces M ≥ N.** Bump
-//!    to `max(M, N) + 1` and re-emit the Inject. RFC §15.1 step 3.
+//! 3. **Already advertising at seq=N, a contender wins.** RFC 7432 §15:
+//!    a PE receiving a different-segment route "with a higher sequence
+//!    number than that which it had previously advertised withdraws its
+//!    MAC/IP Advertisement route", and on an equal sequence the PE whose
+//!    IP is not the lowest "will withdraw the route". Remote events never
+//!    raise the sequence: only a PE detecting the MAC locally does (rules
+//!    2 and 4), so two PEs cannot ratchet each other. The withdrawn entry
+//!    stays *yielded*; it is advertised again at its retained sequence
+//!    when no contender beats it, because the kernel reports no fresh
+//!    learn while its local FDB entry persists. A sticky (static, §15.2)
+//!    advertisement is not subject to moves and never yields.
 //! 4. **Local-port move on a previously-advertised MAC.** Bump to
 //!    `N + 1` to signal the move to peers — keeps wire-side semantics
 //!    consistent with FRR/Junos local-move handling.
@@ -68,9 +77,8 @@
 //! `u32::MAX`**. A received `u32::MAX` is unbeatable-by-increment; we
 //! originate at `u32::MAX` too and the RFC 7432 §7.7 lowest-VTEP-IP
 //! tiebreaker (implemented in [`crate::projection`]) becomes the
-//! standing resolution. [`LocalMacOriginator::on_remote_changed`] suppresses the
-//! re-Inject when the saturated bump cannot exceed the sequence we
-//! already advertise, so a MAX-vs-MAX tie is quiet, not a churn loop.
+//! standing resolution: [`LocalMacOriginator::on_remote_changed`] withdraws
+//! the loser of a MAX-vs-MAX tie, so it is quiet, not a churn loop.
 //! [`crate::origination_macip`] follows the same policy.
 //!
 //! # Sticky bit (RFC 7432 §15.4)
@@ -114,8 +122,8 @@ pub struct RemoteMacView {
     pub mobility_sequence: Option<u32>,
     /// Sticky bit on the remote route's MAC Mobility extcomm.
     pub sticky: bool,
-    /// Remote VTEP next-hop. Carried for daemon-side telemetry; the
-    /// state machine does not consult it.
+    /// Remote VTEP next-hop: the PE IP for the RFC 7432 §15
+    /// equal-sequence lowest-IP contest.
     pub next_hop: IpAddr,
     /// Ethernet Segment Identifier on the remote route
     /// (`EthernetSegmentIdentifier::ZERO` for a single-homed origin).
@@ -138,6 +146,27 @@ pub fn is_same_segment_peer(
     local_esi: EthernetSegmentIdentifier,
 ) -> bool {
     remote_esi == local_esi && !remote_esi.is_zero()
+}
+
+/// RFC 7432 §15 contest between our advertisement and a different-segment
+/// contender: does the contender win, so that we must withdraw?
+///
+/// The higher sequence wins; on an equal sequence the lower PE IP wins
+/// (the remote's next hop against our `local_vtep_ip`). A sticky (static)
+/// advertisement of ours is not subject to MAC moves (§15.2) and never
+/// loses.
+pub(crate) fn remote_contender_wins(
+    our_seq: u32,
+    our_sticky: bool,
+    remote_seq: Option<u32>,
+    remote_next_hop: IpAddr,
+    local_vtep_ip: IpAddr,
+) -> bool {
+    if our_sticky {
+        return false;
+    }
+    let remote_seq = remote_seq.unwrap_or(0);
+    remote_seq > our_seq || (remote_seq == our_seq && remote_next_hop < local_vtep_ip)
 }
 
 /// Action the daemon-side adapter must execute against the RIB.
@@ -193,6 +222,9 @@ struct LocalMacOriginationState {
     /// Key of the route we currently have outstanding. `Some` ⇒ we are
     /// advertising; `None` ⇒ withdrawn (or never advertised).
     originated_key: Option<EvpnRouteKey>,
+    /// We withdrew because a contender won (RFC 7432 §15) while the MAC
+    /// stays local. Cleared by a local age or a re-advertisement.
+    yielded: bool,
 }
 
 impl LocalMacOriginationState {
@@ -389,6 +421,17 @@ impl LocalMacOriginator {
         // saturation at `u32::MAX`" in the module docs. Never wrap
         // to 0 (a wrapped 0 loses every comparison and flaps forever).
         let is_first_ever = prior.is_none();
+
+        // Yielded to a winning contender and nothing local changed: a
+        // replay or same-port notification is not a newly detected move
+        // (RFC 7432 §15), so stay withdrawn rather than outbid it.
+        if prior.as_ref().is_some_and(|s| s.yielded) && !port_changed && !sticky_changed {
+            if let Some(entry) = self.by_mac.get_mut(&mac) {
+                entry.last_seen_remote_seq = new_last_seen;
+            }
+            return Vec::new();
+        }
+
         let new_seq = match new_last_seen {
             None => {
                 // No contender ever observed for this MAC.
@@ -437,6 +480,7 @@ impl LocalMacOriginator {
             last_seen_remote_seq: new_last_seen,
             sticky,
             originated_key: Some(key),
+            yielded: false,
         };
         let mobility_seq = new_state.rendered_seq();
         self.by_mac.insert(mac, new_state);
@@ -454,6 +498,9 @@ impl LocalMacOriginator {
         let Some(entry) = self.by_mac.get_mut(&mac) else {
             return Vec::new();
         };
+        // The MAC left: a yielded entry must not come back when the
+        // contender goes away.
+        entry.yielded = false;
         let Some(key) = entry.originated_key.take() else {
             return Vec::new();
         };
@@ -463,11 +510,18 @@ impl LocalMacOriginator {
     }
 
     /// React to a RIB best-path change for a tracked MAC.
+    ///
+    /// `local_vtep_ip` is this PE's address for the RFC 7432 §15
+    /// equal-sequence lowest-IP contest. A winning contender makes us
+    /// withdraw; nothing here raises the sequence (see rule 3 in the
+    /// module docs).
     pub fn on_remote_changed(
         &mut self,
         mac: MacAddress,
         view: Option<&RemoteMacView>,
+        local_vtep_ip: IpAddr,
     ) -> Vec<OriginationAction> {
+        let fresh_key = self.key(mac);
         let Some(entry) = self.by_mac.get_mut(&mac) else {
             // We don't track this MAC — nothing to defend.
             return Vec::new();
@@ -482,41 +536,39 @@ impl LocalMacOriginator {
             });
         }
 
-        // If we're not advertising, nothing to bump — the next Learn
-        // will read the updated last_seen and adjust there.
+        let contender_wins = view.is_some_and(|v| {
+            remote_contender_wins(
+                entry.our_seq,
+                entry.sticky,
+                v.mobility_sequence,
+                v.next_hop,
+                local_vtep_ip,
+            )
+        });
+
         let Some(key) = entry.originated_key else {
-            return Vec::new();
+            // Withdrawn. If we yielded and no contender beats us any more,
+            // the MAC is still local: advertise it again at its retained
+            // sequence.
+            if !entry.yielded || contender_wins {
+                return Vec::new();
+            }
+            entry.yielded = false;
+            entry.originated_key = Some(fresh_key);
+            return vec![OriginationAction::Inject {
+                mac,
+                mobility_seq: entry.rendered_seq(),
+                sticky: entry.sticky,
+                key: fresh_key,
+            }];
         };
 
-        // Compute whether to bump. RFC 7432 §15.1 step 3: contender at
-        // M ≥ N triggers bump to max(M, N) + 1.
-        let Some(v) = view else {
-            return Vec::new();
-        };
-        let remote_seq = v.mobility_sequence.unwrap_or(0);
-        if remote_seq < entry.our_seq {
+        if !contender_wins {
             return Vec::new();
         }
-
-        let new_seq = remote_seq.max(entry.our_seq).saturating_add(1);
-        if new_seq == entry.our_seq {
-            // Only reachable via saturation: both sides sit at
-            // u32::MAX. An increment cannot outbid the contender —
-            // the §7.7 lowest-VTEP-IP tiebreak (crate::projection)
-            // is the standing resolution. Re-emitting the same seq
-            // would just churn; stay quiet. See module docs.
-            return Vec::new();
-        }
-        entry.our_seq = new_seq;
-        let mobility_seq = entry.rendered_seq();
-        let sticky = entry.sticky;
-
-        vec![OriginationAction::Inject {
-            mac,
-            mobility_seq,
-            sticky,
-            key,
-        }]
+        entry.originated_key = None;
+        entry.yielded = true;
+        vec![OriginationAction::Withdraw { mac, key }]
     }
 }
 
@@ -537,6 +589,12 @@ mod tests {
 
     fn mac(b: u8) -> MacAddress {
         MacAddress::new([b; 6])
+    }
+
+    /// This PE's VTEP. Test contenders sit at 10.0.0.99, so we hold the
+    /// lower PE IP on an equal sequence (RFC 7432 §15).
+    fn local_ip() -> IpAddr {
+        "10.0.0.1".parse().unwrap()
     }
 
     fn fresh() -> LocalMacOriginator {
@@ -676,30 +734,84 @@ mod tests {
         assert_eq!(actions.len(), 0);
     }
 
+    // RFC 7432 §15: on an equal sequence the lowest PE IP wins, and the
+    // originator that loses "will withdraw the route".
     #[test]
-    fn mobility_race_bumps_when_remote_catches_up() {
+    fn equal_sequence_contest_is_decided_by_lowest_pe_ip() {
         let mut o = fresh();
         // Advertise at seq=6 against remote at 5.
-        let v = remote(Some(5));
-        let _ = o.on_local_learned(mac(0xAA), 10, false, Some(&v));
+        let _ = o.on_local_learned(mac(0xAA), 10, false, Some(&remote(Some(5))));
 
-        // Remote re-announces at 6 — ≥ our 6, must bump to 7.
-        let v6 = remote(Some(6));
-        let actions = o.on_remote_changed(mac(0xAA), Some(&v6));
+        // Remote (10.0.0.99) catches up to 6: we hold the lower IP.
+        let actions = o.on_remote_changed(mac(0xAA), Some(&remote(Some(6))), local_ip());
+        assert!(actions.is_empty(), "got {actions:?}");
+
+        // A lower-IP PE at 6 wins the tie: withdraw, no bump.
+        let lower = RemoteMacView {
+            next_hop: "9.9.9.9".parse().unwrap(),
+            ..remote(Some(6))
+        };
+        let actions = o.on_remote_changed(mac(0xAA), Some(&lower), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(6));
+    }
+
+    // RFC 7432 §15: a different-segment route with a higher sequence makes
+    // us withdraw; only a locally detected move raises the sequence.
+    #[test]
+    fn higher_remote_sequence_withdraws_and_local_move_bumps_above_it() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, None);
+        let actions = o.on_remote_changed(mac(0xAA), Some(&remote(Some(100))), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(0));
+        assert_eq!(o.advertised_count(), 0);
+
+        // Repeated views and a same-port replay are not moves.
+        let v = remote(Some(100));
+        assert_eq!(
+            o.on_remote_changed(mac(0xAA), Some(&v), local_ip()),
+            Vec::new()
+        );
+        assert_eq!(
+            o.on_local_learned(mac(0xAA), 10, false, Some(&v)),
+            Vec::new()
+        );
+
+        // The kernel learns the MAC on another port: a genuine local move.
+        let actions = o.on_local_learned(mac(0xAA), 11, false, Some(&v));
         assert_eq!(actions.len(), 1);
-        assert_inject(&actions[0], Some(7), false);
+        assert_inject(&actions[0], Some(101), false);
     }
 
     #[test]
-    fn step_up_bumps_far_when_remote_jumps() {
+    fn yielded_mac_is_advertised_again_when_contender_leaves() {
         let mut o = fresh();
-        // First learn with no remote: seq=0, no extcomm.
         let _ = o.on_local_learned(mac(0xAA), 10, false, None);
-        // Remote announces at 100 — must jump to 101.
-        let v = remote(Some(100));
-        let actions = o.on_remote_changed(mac(0xAA), Some(&v));
+        let _ = o.on_remote_changed(mac(0xAA), Some(&remote(Some(3))), local_ip());
+
+        // A weaker contender replaces it: we win again at our sequence.
+        let actions = o.on_remote_changed(mac(0xAA), None, local_ip());
         assert_eq!(actions.len(), 1);
-        assert_inject(&actions[0], Some(101), false);
+        assert_inject(&actions[0], Some(0), false);
+        assert_eq!(o.advertised_count(), 1);
+
+        // After a local age the yielded state is gone: no comeback.
+        let _ = o.on_remote_changed(mac(0xAA), Some(&remote(Some(4))), local_ip());
+        assert_eq!(o.on_local_aged(mac(0xAA)), Vec::new());
+        assert_eq!(o.on_remote_changed(mac(0xAA), None, local_ip()), Vec::new());
+        assert_eq!(o.advertised_count(), 0);
+    }
+
+    // RFC 7432 §15.2: a static (sticky) MAC is not subject to MAC moves.
+    #[test]
+    fn sticky_advertisement_never_yields() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, true, None);
+        let actions = o.on_remote_changed(mac(0xAA), Some(&remote(Some(9))), local_ip());
+        assert!(actions.is_empty(), "got {actions:?}");
+        assert_eq!(o.advertised_count(), 1);
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(0));
     }
 
     // --- u32::MAX boundary (sequence saturation policy) ---
@@ -725,12 +837,73 @@ mod tests {
         assert_inject(&actions[0], Some(u32::MAX), false);
     }
 
+    /// The route a PE currently advertises for `mac(0xAA)`, as the other
+    /// PE's best-path view of it. `None` once it is withdrawn.
+    fn advertised_view(
+        current: Option<RemoteMacView>,
+        actions: &[OriginationAction],
+        next_hop: &str,
+    ) -> Option<RemoteMacView> {
+        actions.iter().fold(current, |_, action| match action {
+            OriginationAction::Inject { mobility_seq, .. } => Some(RemoteMacView {
+                mobility_sequence: *mobility_seq,
+                next_hop: next_hop.parse().unwrap(),
+                ..remote(None)
+            }),
+            OriginationAction::Withdraw { .. } => None,
+        })
+    }
+
+    // RFC 7432 §15: the sequence is raised only by a PE "detecting a locally
+    // attached MAC address" previously advertised by another PE; a PE that
+    // receives a higher sequence, or loses the equal-sequence lowest-IP
+    // contest, withdraws. §15.1 exists so that the sequence is not
+    // incremented "to infinity". Two PEs with the same MAC learned locally
+    // must settle after one exchange, with the sequence bounded.
     #[test]
-    fn remote_changed_to_max_minus_one_bumps_to_max() {
+    fn two_pe_contention_converges_without_sequence_ratchet() {
+        let (a_ip, b_ip) = ("10.0.0.1", "10.0.0.2");
+        let mut a = fresh();
+        let mut b = fresh();
+        let a_actions = a.on_local_learned(mac(0xAA), 10, false, None);
+        let mut a_view = advertised_view(None, &a_actions, a_ip);
+        let b_actions = b.on_local_learned(mac(0xAA), 20, false, a_view.as_ref());
+        let mut b_view = advertised_view(None, &b_actions, b_ip);
+
+        let mut quiet_round = None;
+        for round in 0..64 {
+            let a_actions = a.on_remote_changed(mac(0xAA), b_view.as_ref(), a_ip.parse().unwrap());
+            let b_actions = b.on_remote_changed(mac(0xAA), a_view.as_ref(), b_ip.parse().unwrap());
+            if a_actions.is_empty() && b_actions.is_empty() {
+                quiet_round = Some(round);
+                break;
+            }
+            a_view = advertised_view(a_view, &a_actions, a_ip);
+            b_view = advertised_view(b_view, &b_actions, b_ip);
+        }
+        let max_seq = a
+            .sequence_for_mac(mac(0xAA))
+            .max(b.sequence_for_mac(mac(0xAA)))
+            .unwrap();
+        assert!(
+            quiet_round.is_some_and(|round| round <= 2),
+            "contention did not converge: rounds={quiet_round:?}, max seq={max_seq}"
+        );
+        assert!(max_seq <= 1, "sequence ratcheted to {max_seq}");
+        // B detected the move locally (seq 1); A received the higher
+        // sequence and withdrew.
+        assert!(a_view.is_none(), "A must withdraw: {a_view:?}");
+        assert_eq!(b_view.and_then(|v| v.mobility_sequence), Some(1));
+    }
+
+    #[test]
+    fn remote_at_max_minus_one_withdraws_then_local_move_saturates_at_max() {
         let mut o = fresh();
         let _ = o.on_local_learned(mac(0xAA), 10, false, None);
         let v = remote(Some(u32::MAX - 1));
-        let actions = o.on_remote_changed(mac(0xAA), Some(&v));
+        let actions = o.on_remote_changed(mac(0xAA), Some(&v), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+        let actions = o.on_local_learned(mac(0xAA), 11, false, Some(&v));
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(u32::MAX), false);
     }
@@ -745,10 +918,10 @@ mod tests {
         // Remote catches up to MAX. An increment can't outbid it —
         // no wrapped-0 emission, no same-seq re-Inject churn.
         let vmax = remote(Some(u32::MAX));
-        let actions = o.on_remote_changed(mac(0xAA), Some(&vmax));
+        let actions = o.on_remote_changed(mac(0xAA), Some(&vmax), local_ip());
         assert!(actions.is_empty(), "got {actions:?}");
         // Repeat events stay quiet too — no flap loop.
-        let actions = o.on_remote_changed(mac(0xAA), Some(&vmax));
+        let actions = o.on_remote_changed(mac(0xAA), Some(&vmax), local_ip());
         assert!(actions.is_empty(), "got {actions:?}");
     }
 
@@ -824,7 +997,7 @@ mod tests {
     fn remote_changed_for_untracked_mac_no_action() {
         let mut o = fresh();
         let v = remote(Some(7));
-        let actions = o.on_remote_changed(mac(0xCC), Some(&v));
+        let actions = o.on_remote_changed(mac(0xCC), Some(&v), local_ip());
         assert_eq!(actions.len(), 0);
     }
 
@@ -837,7 +1010,7 @@ mod tests {
 
         // Remote drops to 5 — we already win, no bump.
         let v5 = remote(Some(5));
-        let actions = o.on_remote_changed(mac(0xAA), Some(&v5));
+        let actions = o.on_remote_changed(mac(0xAA), Some(&v5), local_ip());
         assert_eq!(actions.len(), 0);
     }
 
@@ -869,22 +1042,23 @@ mod tests {
 
         // Local move on AA.
         let _ = o.on_local_learned(mac(0xAA), 11, false, None);
-        // Remote bump on BB.
+        // Remote outbids BB.
         let v9 = remote(Some(9));
-        let _ = o.on_remote_changed(mac(0xBB), Some(&v9));
+        let _ = o.on_remote_changed(mac(0xBB), Some(&v9), local_ip());
         // Aged on CC.
         let _ = o.on_local_aged(mac(0xCC));
 
         assert_eq!(o.len(), 3);
-        assert_eq!(o.advertised_count(), 2); // AA, BB still up; CC withdrawn
+        assert_eq!(o.advertised_count(), 1); // AA up; BB yielded; CC aged
 
         let aa = o.by_mac.get(&mac(0xAA)).unwrap();
         assert_eq!(aa.our_seq, 1); // bumped from 0 on local move
         assert_eq!(aa.ifindex, 11);
 
         let bb = o.by_mac.get(&mac(0xBB)).unwrap();
-        assert_eq!(bb.our_seq, 10); // 9 + 1
+        assert_eq!(bb.our_seq, 8); // 7 + 1 on learn; the remote 9 wins
         assert_eq!(bb.last_seen_remote_seq, Some(9));
+        assert!(bb.yielded && bb.originated_key.is_none());
 
         let cc = o.by_mac.get(&mac(0xCC)).unwrap();
         assert!(cc.originated_key.is_none());
@@ -986,7 +1160,7 @@ mod tests {
                         next_hop: "10.0.0.99".parse().unwrap(),
                         esi: EthernetSegmentIdentifier::ZERO,
                     });
-                    o.on_remote_changed(*mac, v.as_ref());
+                    o.on_remote_changed(*mac, v.as_ref(), local_ip());
                 }
             }
             for m in &macs {

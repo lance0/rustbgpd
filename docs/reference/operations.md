@@ -4688,7 +4688,12 @@ Two complementary origination paths exist:
   EoR marker. (This was not always the case — see commit history for
   the regression test.)
 - **MAC mobility selection.** Local MAC moves increment the advertised
-  MAC Mobility sequence, saturating at `u32::MAX`. Same-segment peer
+  MAC Mobility sequence, saturating at `u32::MAX`. Remote routes never
+  raise it: a route from another segment with a higher sequence, or with
+  an equal sequence from a lower PE IP, makes the originator withdraw its
+  own Type 2 (RFC 7432 §15). The originator advertises the MAC again when
+  that contender is gone, or bumps above it when the kernel learns the MAC
+  on another local port. A sticky MAC never withdraws. Same-segment peer
   synchronization can adopt a higher sequence without incrementing it.
   EVPN selection also considers freshness, sticky status, and the remaining
   tie-breaks; a higher sequence alone does not guarantee a path change.

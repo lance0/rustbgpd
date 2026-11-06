@@ -154,7 +154,7 @@ pub(super) async fn repoll_rib(
             let Some(orig) = state.mac_originators.get_mut(&vni) else {
                 continue;
             };
-            orig.on_remote_changed(mac, view)
+            orig.on_remote_changed(mac, view, inst.local_vtep_ip)
         };
         if actions.is_empty() {
             continue;
@@ -202,7 +202,7 @@ pub(super) async fn repoll_rib(
             let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
                 continue;
             };
-            orig.on_remote_ip_changed(mac, ip, view)
+            orig.on_remote_ip_changed(mac, ip, view, inst.local_vtep_ip)
         };
         if actions.is_empty() {
             continue;

@@ -5184,7 +5184,14 @@ impl PeerSyncHarness {
         segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
         routes: Vec<EvpnRibRoute>,
     ) -> Self {
-        let instances = instance_table(100);
+        Self::with_instances(instance_table(100), segments, routes)
+    }
+
+    fn with_instances(
+        instances: Arc<EvpnInstanceTable>,
+        segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+        routes: Vec<EvpnRibRoute>,
+    ) -> Self {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let log_clone = log.clone();
@@ -7259,10 +7266,15 @@ async fn peer_sync_latest_sequence_supersedes_unacknowledged_inject() {
 }
 
 /// Control: a remote on a *different* Ethernet Segment is a genuine
-/// mobility contender and behaves exactly as before — bump on learn,
-/// count the move, bump again when it re-advertises higher.
+/// mobility contender. A local learn against it bumps above it and counts
+/// one move (RFC 7432 §15, §15.1). When it later re-advertises higher, we
+/// withdraw rather than bump again (RFC 7432 §15: "A PE receiving a MAC/IP
+/// Advertisement route for a MAC address with a different Ethernet segment
+/// identifier and a higher sequence number than that which it had
+/// previously advertised withdraws its MAC/IP Advertisement route"), and
+/// that remote-driven withdrawal is not a locally detected move.
 #[tokio::test]
-async fn different_segment_remote_mac_still_bumps_and_counts() {
+async fn different_segment_remote_mac_higher_sequence_withdraws_ours() {
     let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
     let other = |seq| {
         with_esi(
@@ -7287,17 +7299,13 @@ async fn different_segment_remote_mac_still_bumps_and_counts() {
     h.repoll().await;
     assert_eq!(
         h.take_log().await,
-        vec![RibActionWithSeq::Inject(
-            macip_key_with(100, 0xAA, None),
-            Some(10)
-        )]
+        vec![RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None))]
     );
-    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 2);
 }
 
 /// Control for the MAC+IP originator on a different segment.
 #[tokio::test]
-async fn different_segment_remote_mac_ip_still_bumps_and_counts() {
+async fn different_segment_remote_mac_ip_higher_sequence_withdraws_ours() {
     let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
     let other = |seq| {
         with_esi(
@@ -7324,12 +7332,54 @@ async fn different_segment_remote_mac_ip_still_bumps_and_counts() {
     h.repoll().await;
     assert_eq!(
         h.take_log().await,
+        vec![RibActionWithSeq::Withdraw(macip_key_with(
+            100,
+            0xAA,
+            Some("192.0.2.10")
+        ))]
+    );
+}
+
+/// RFC 7432 §15: on an equal sequence the lowest PE IP wins, and the
+/// originator whose own route loses "will withdraw the route". Our VTEP is
+/// 10.0.0.1. A higher-IP contender at our sequence leaves us advertising; a
+/// lower-IP one makes us withdraw. Neither bumps. When the winning
+/// contender disappears, the still-local MAC is advertised again at its
+/// retained sequence.
+#[tokio::test]
+async fn equal_sequence_contention_resolves_by_lowest_pe_ip() {
+    let remote = |next_hop, seq| evpn_macip_route(100, 0xAA, next_hop, Some(seq), false);
+    let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![remote("10.0.0.2", 3)]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
         vec![RibActionWithSeq::Inject(
-            macip_key_with(100, 0xAA, Some("192.0.2.10")),
-            Some(10)
+            macip_key_with(100, 0xAA, None),
+            Some(4)
         )]
     );
-    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 3);
+
+    h.routes_tx.send_replace(vec![remote("10.0.0.2", 4)]);
+    h.repoll().await;
+    assert_eq!(h.take_log().await, Vec::new(), "we hold the lower PE IP");
+
+    h.routes_tx.send_replace(vec![remote("9.9.9.9", 4)]);
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None))]
+    );
+
+    h.routes_tx.send_replace(Vec::new());
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(4)
+        )]
+    );
 }
 
 /// The zero ESI never identifies a shared segment: a single-homed

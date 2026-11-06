@@ -127,8 +127,8 @@ pub struct RemoteMacIpView {
     pub mobility_sequence: Option<u32>,
     /// Sticky bit on the remote route's MAC Mobility extcomm.
     pub sticky: bool,
-    /// Remote VTEP next-hop. Carried for daemon-side telemetry; the
-    /// state machine does not consult it.
+    /// Remote VTEP next-hop: the PE IP for the RFC 7432 §15
+    /// equal-sequence lowest-IP contest.
     pub next_hop: IpAddr,
     /// Ethernet Segment Identifier on the remote route
     /// (`EthernetSegmentIdentifier::ZERO` for a single-homed origin).
@@ -153,6 +153,9 @@ struct LocalMacIpOriginationState {
     /// Key of the route we currently have outstanding. `Some` ⇒ we
     /// are advertising; `None` ⇒ withdrawn (or never advertised).
     originated_key: Option<EvpnRouteKey>,
+    /// We withdrew because a contender won (RFC 7432 §15) while the
+    /// binding stays local. Cleared by a local age or a re-advertisement.
+    yielded: bool,
 }
 
 impl LocalMacIpOriginationState {
@@ -347,6 +350,17 @@ impl LocalMacIpOriginator {
         // MAC-only, see "Sequence saturation at `u32::MAX`" in
         // `crate::origination`'s module docs. Never wrap to 0.
         let is_first_ever = prior.is_none();
+
+        // Yielded to a winning contender: a replay or a repeated binding
+        // notification is not a newly detected move (RFC 7432 §15). A
+        // local port move re-advertises through `on_local_mac_moved`.
+        if prior.as_ref().is_some_and(|s| s.yielded) && !sticky_changed {
+            if let Some(entry) = self.by_key.get_mut(&composite) {
+                entry.last_seen_remote_seq = new_last_seen;
+            }
+            return Vec::new();
+        }
+
         let new_seq = match new_last_seen {
             None => {
                 if is_first_ever {
@@ -391,6 +405,7 @@ impl LocalMacIpOriginator {
             last_seen_remote_seq: new_last_seen,
             sticky,
             originated_key: Some(key),
+            yielded: false,
         };
         let mobility_seq = new_state.rendered_seq();
         self.by_key.insert(composite, new_state);
@@ -411,6 +426,7 @@ impl LocalMacIpOriginator {
         let Some(entry) = self.by_key.get_mut(&composite) else {
             return Vec::new();
         };
+        entry.yielded = false;
         let Some(key) = entry.originated_key.take() else {
             return Vec::new();
         };
@@ -433,6 +449,7 @@ impl LocalMacIpOriginator {
             if k.mac != mac {
                 continue;
             }
+            state.yielded = false;
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac, key });
             }
@@ -445,16 +462,31 @@ impl LocalMacIpOriginator {
     /// local MAC route and §6.2 requires each child to inherit the
     /// recomputed sequence, so every advertising `(MAC, *)` entry
     /// re-emits at `max(own, last_seen_remote) + 1` (saturating at
-    /// `u32::MAX`). Withdrawn entries keep their ratchet untouched; a
-    /// MAC with nothing advertising is a no-op.
+    /// `u32::MAX`). A child withdrawn because a contender won (RFC 7432
+    /// §15) re-advertises too: the move is a locally detected mobility
+    /// event. Other withdrawn entries keep their ratchet untouched; a MAC
+    /// with nothing advertising is a no-op.
     pub fn on_local_mac_moved(&mut self, mac: MacAddress) -> Vec<OriginationAction> {
         let mut out = Vec::new();
+        let (rd, ethernet_tag) = (self.rd, self.ethernet_tag);
         for (k, state) in &mut self.by_key {
             if k.mac != mac {
                 continue;
             }
-            let Some(key) = state.originated_key else {
-                continue;
+            let key = match state.originated_key {
+                Some(key) => key,
+                None if state.yielded => {
+                    let key = EvpnRouteKey::MacIp {
+                        rd,
+                        ethernet_tag,
+                        mac,
+                        ip: Some(k.ip),
+                    };
+                    state.yielded = false;
+                    state.originated_key = Some(key);
+                    key
+                }
+                None => continue,
             };
             state.our_seq = state
                 .last_seen_remote_seq
@@ -471,16 +503,20 @@ impl LocalMacIpOriginator {
     }
 
     /// React to a RIB best-path change for a tracked `(MAC, IP)`.
-    /// `view = None` means the remote contender disappeared — we
-    /// keep our ratchet but no longer have a contender to bump
-    /// against.
+    /// Same RFC 7432 §15 rule as
+    /// [`crate::origination::LocalMacOriginator::on_remote_changed`]: a
+    /// winning contender makes us withdraw, nothing here raises the
+    /// sequence, and a yielded binding comes back at its retained
+    /// sequence once no contender beats it.
     pub fn on_remote_ip_changed(
         &mut self,
         mac: MacAddress,
         ip: IpAddr,
         view: Option<&RemoteMacIpView>,
+        local_vtep_ip: IpAddr,
     ) -> Vec<OriginationAction> {
         let composite = MacIpKey::new(mac, ip);
+        let fresh_key = self.key(mac, ip);
         let Some(entry) = self.by_key.get_mut(&composite) else {
             // We don't track this (MAC, IP) — nothing to defend.
             return Vec::new();
@@ -497,39 +533,36 @@ impl LocalMacIpOriginator {
             });
         }
 
-        // If we're not advertising, nothing to bump.
+        let contender_wins = view.is_some_and(|v| {
+            crate::origination::remote_contender_wins(
+                entry.our_seq,
+                entry.sticky,
+                v.mobility_sequence,
+                v.next_hop,
+                local_vtep_ip,
+            )
+        });
+
         let Some(key) = entry.originated_key else {
-            return Vec::new();
+            if !entry.yielded || contender_wins {
+                return Vec::new();
+            }
+            entry.yielded = false;
+            entry.originated_key = Some(fresh_key);
+            return vec![OriginationAction::Inject {
+                mac,
+                mobility_seq: entry.rendered_seq(),
+                sticky: entry.sticky,
+                key: fresh_key,
+            }];
         };
 
-        // Without a current contender, no bump.
-        let Some(v) = view else {
-            return Vec::new();
-        };
-        let remote_seq = v.mobility_sequence.unwrap_or(0);
-        if remote_seq < entry.our_seq {
+        if !contender_wins {
             return Vec::new();
         }
-
-        let new_seq = remote_seq.max(entry.our_seq).saturating_add(1);
-        if new_seq == entry.our_seq {
-            // Only reachable via saturation: both sides sit at
-            // u32::MAX. An increment cannot outbid the contender —
-            // the §7.7 lowest-VTEP-IP tiebreak (crate::projection)
-            // is the standing resolution. Re-emitting the same seq
-            // would just churn; stay quiet.
-            return Vec::new();
-        }
-        entry.our_seq = new_seq;
-        let mobility_seq = entry.rendered_seq();
-        let sticky = entry.sticky;
-
-        vec![OriginationAction::Inject {
-            mac,
-            mobility_seq,
-            sticky,
-            key,
-        }]
+        entry.originated_key = None;
+        entry.yielded = true;
+        vec![OriginationAction::Withdraw { mac, key }]
     }
 }
 
@@ -554,6 +587,12 @@ mod tests {
 
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// This PE's VTEP. Test contenders sit at 10.0.0.99, so we hold the
+    /// lower PE IP on an equal sequence (RFC 7432 §15).
+    fn local_ip() -> IpAddr {
+        "10.0.0.1".parse().unwrap()
     }
 
     fn fresh() -> LocalMacIpOriginator {
@@ -721,14 +760,17 @@ mod tests {
     }
 
     #[test]
-    fn remote_changed_to_max_minus_one_bumps_to_max() {
+    fn remote_at_max_minus_one_withdraws_then_local_move_saturates_at_max() {
         let mut o = fresh();
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
         let actions = o.on_remote_ip_changed(
             mac(0xAA),
             ipa("192.0.2.10"),
             Some(&remote(Some(u32::MAX - 1))),
+            local_ip(),
         );
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+        let actions = o.on_local_mac_moved(mac(0xAA));
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(u32::MAX), false);
     }
@@ -747,10 +789,10 @@ mod tests {
         // Remote catches up to MAX. An increment can't outbid it —
         // no wrapped-0 emission, no same-seq re-Inject churn.
         let vmax = remote(Some(u32::MAX));
-        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&vmax));
+        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&vmax), local_ip());
         assert!(actions.is_empty(), "got {actions:?}");
         // Repeat events stay quiet too — no flap loop.
-        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&vmax));
+        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&vmax), local_ip());
         assert!(actions.is_empty(), "got {actions:?}");
     }
 
@@ -941,14 +983,43 @@ mod tests {
 
     // --- on_remote_ip_changed ---
 
+    // RFC 7432 §15: a higher different-segment sequence makes us withdraw,
+    // a repeated binding notification is not a move, and the binding comes
+    // back at its retained sequence once the contender leaves.
     #[test]
-    fn remote_changed_higher_seq_bumps_our_advertisement() {
-        // We advertise at seq=0, remote announces seq=5 → bump to 6.
+    fn remote_changed_higher_seq_withdraws_our_advertisement() {
         let mut o = fresh();
-        let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
-        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&remote(Some(5))));
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, None);
+        let v = remote(Some(5));
+        let actions = o.on_remote_ip_changed(mac(0xAA), ip, Some(&v), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+        assert_eq!(
+            o.on_local_ip_learned(mac(0xAA), ip, false, Some(&v)),
+            Vec::new()
+        );
+        assert_eq!(o.advertised_count(), 0);
+
+        let actions = o.on_remote_ip_changed(mac(0xAA), ip, None, local_ip());
         assert_eq!(actions.len(), 1);
-        assert_inject(&actions[0], Some(6), false);
+        assert_inject(&actions[0], Some(0), false);
+    }
+
+    #[test]
+    fn equal_sequence_contest_is_decided_by_lowest_pe_ip() {
+        let mut o = fresh();
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, Some(&remote(Some(5))));
+        assert_eq!(
+            o.on_remote_ip_changed(mac(0xAA), ip, Some(&remote(Some(6))), local_ip()),
+            Vec::new()
+        );
+        let lower = RemoteMacIpView {
+            next_hop: ipa("9.9.9.9"),
+            ..remote(Some(6))
+        };
+        let actions = o.on_remote_ip_changed(mac(0xAA), ip, Some(&lower), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
     }
 
     #[test]
@@ -957,7 +1028,12 @@ mod tests {
         let mut o = fresh();
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, Some(&remote(Some(9))));
         // We're now at seq=10. A lower-seq update shouldn't bump us.
-        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&remote(Some(3))));
+        let actions = o.on_remote_ip_changed(
+            mac(0xAA),
+            ipa("192.0.2.10"),
+            Some(&remote(Some(3))),
+            local_ip(),
+        );
         assert!(
             actions.is_empty(),
             "lower-seq remote must not bump our ratchet: {actions:?}"
@@ -971,7 +1047,7 @@ mod tests {
         // us back) but no Inject is needed — we're already winning.
         let mut o = fresh();
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, Some(&remote(Some(5))));
-        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), None);
+        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), None, local_ip());
         assert!(
             actions.is_empty(),
             "remote-disappeared must not re-emit: {actions:?}"
@@ -985,8 +1061,13 @@ mod tests {
         // Stale; no bump.
         let mut o = fresh();
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, Some(&remote(Some(5))));
-        let _ = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), None);
-        let actions = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), Some(&remote(Some(4))));
+        let _ = o.on_remote_ip_changed(mac(0xAA), ipa("192.0.2.10"), None, local_ip());
+        let actions = o.on_remote_ip_changed(
+            mac(0xAA),
+            ipa("192.0.2.10"),
+            Some(&remote(Some(4))),
+            local_ip(),
+        );
         assert!(
             actions.is_empty(),
             "lower-seq comeback after disappearance must not bump: {actions:?}"
@@ -996,7 +1077,12 @@ mod tests {
     #[test]
     fn remote_changed_for_untracked_macip_is_no_op() {
         let mut o = fresh();
-        let actions = o.on_remote_ip_changed(mac(0xCC), ipa("192.0.2.99"), Some(&remote(Some(5))));
+        let actions = o.on_remote_ip_changed(
+            mac(0xCC),
+            ipa("192.0.2.99"),
+            Some(&remote(Some(5))),
+            local_ip(),
+        );
         assert_eq!(actions.len(), 0);
     }
 
@@ -1044,10 +1130,11 @@ mod tests {
                 next_hop: ipa("10.0.0.99"),
                 esi: EthernetSegmentIdentifier::ZERO,
             }),
+            local_ip(),
         );
-        // First key bumped to seq=6.
-        assert_eq!(actions.len(), 1);
-        assert_inject(&actions[0], Some(6), false);
+        // First key yields to the higher sequence.
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+        assert_eq!(o.advertised_count(), 1);
 
         // Second key has no contender, so a re-learn must still
         // return empty (idempotent — sequence unchanged).
