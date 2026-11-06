@@ -2593,8 +2593,10 @@ pub struct AddPathConfig {
     pub send: bool,
     /// Maximum number of paths to advertise per prefix (0 or absent = unlimited).
     pub send_max: Option<u32>,
-    /// Experimental Paths-Limit preference per received Add-Path family.
-    /// Zero or absent disables Paths-Limit advertisement.
+    /// Experimental Paths-Limit preference per received Add-Path family,
+    /// also enforced locally per IPv4/IPv6-unicast prefix. Zero or absent
+    /// disables Paths-Limit advertisement and applies the default local cap
+    /// of 1024 paths per prefix, withholding the excess.
     pub receive_max: Option<u16>,
 }
 

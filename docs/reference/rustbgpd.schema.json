@@ -220,7 +220,7 @@
           "default": false
         },
         "receive_max": {
-          "description": "Experimental Paths-Limit preference per received Add-Path family.\nZero or absent disables Paths-Limit advertisement.",
+          "description": "Experimental Paths-Limit preference per received Add-Path family,\nalso enforced locally per IPv4/IPv6-unicast prefix. Zero or absent\ndisables Paths-Limit advertisement and applies the default local cap\nof 1024 paths per prefix, withholding the excess.",
           "type": [
             "integer",
             "null"

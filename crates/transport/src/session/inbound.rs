@@ -1543,7 +1543,8 @@ impl PeerSession {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
         }
-        let mut path_admission = self.path_receive_admission();
+        let mut path_admission =
+            self.path_receive_admission(rejected_unicast.iter().map(|&(prefix, _)| prefix));
         if let Some(admission) = path_admission.as_mut() {
             rejected_unicast.retain(|&(prefix, path_id)| {
                 admission.permits(self, prefix, path_id, self.tracks_received(prefix))
@@ -3556,7 +3557,14 @@ impl PeerSession {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
         }
-        let mut path_admission = self.path_receive_admission();
+        let mut path_admission = self.path_receive_admission(
+            otc_rejected_unicast
+                .iter()
+                .chain(&ownership_rejected_unicast)
+                .chain(&denied_unicast)
+                .map(|&(prefix, _)| prefix)
+                .chain(announced.iter().map(|route| route.prefix)),
+        );
         if let Some(admission) = path_admission.as_mut() {
             otc_rejected_unicast.retain(|&(prefix, path_id)| {
                 admission.permits(self, prefix, path_id, self.tracks_received(prefix))
