@@ -1815,6 +1815,13 @@ modes transmit with TTL/Hop-Limit 255; there is no BFD receive minimum-TTL
 knob. Set `[global].listen_addresses` when a multihop session must originate
 from a routed loopback. BFD authentication is not supported.
 
+Detection time follows RFC 5880 §6.8.4: the peer's multiplier times the larger
+of our `min_rx_interval` and the peer's advertised Desired Min TX. The peer's
+Desired Min TX can stretch that window to at most five minutes. Our own
+`min_rx_interval` times the peer's multiplier is never cut short. A peer that
+actually transmits more slowly than five minutes divided by its multiplier is
+declared down.
+
 Static neighbors attach BFD through their own or their peer group's `bfd`. A
 `[[dynamic_neighbors]]` range attaches it on the range instead (see
 [Dynamic-range BFD](#dynamic-range-bfd)); a range whose peer group enables BFD

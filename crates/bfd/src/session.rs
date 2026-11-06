@@ -12,6 +12,14 @@ use crate::state::SessionState;
 /// at least one second so idle sessions consume negligible bandwidth.
 pub const SLOW_TX_INTERVAL_US: u32 = 1_000_000;
 
+/// Ceiling on how far the peer's advertised Desired Min TX can stretch our
+/// detection time (five minutes). RFC 5880 §6.8.4 sets no upper bound, so
+/// without one a single unauthenticated packet could push detection to the
+/// `u32` microsecond limit (about 71.6 minutes). Five minutes still covers the
+/// largest multiplier (255) at the §6.8.3 one-second slow rate. A peer that
+/// really transmits more slowly than this allows is declared down.
+const MAX_REMOTE_DETECT_TIME_US: u32 = 300_000_000;
+
 /// Error constructing a [`Session`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SessionError {
@@ -381,16 +389,19 @@ impl Session {
     /// Desired Min TX of 0, so "have we heard from the peer" is tracked
     /// separately (`remote_seen`) rather than inferred from that field; the
     /// negotiated interval is clamped to ≥1 so the timer is never zero-duration.
+    ///
+    /// The peer's Desired Min TX can stretch that window up to
+    /// [`MAX_REMOTE_DETECT_TIME_US`], never further. Our own Required Min RX
+    /// is not clamped: `remote DetectMult × RequiredMinRx` stays reachable.
     fn detect_time_us(&self) -> Option<u32> {
         if !self.remote_seen {
             return None;
         }
-        let rx = max(
-            self.cfg.required_min_rx_interval_us,
-            self.remote_desired_min_tx_us,
-        )
-        .max(1);
-        let detect = u64::from(self.remote_detect_mult) * u64::from(rx);
+        let mult = u64::from(self.remote_detect_mult);
+        let local_rx = u64::from(self.cfg.required_min_rx_interval_us.max(1));
+        let rx = local_rx.max(u64::from(self.remote_desired_min_tx_us));
+        let ceiling = (mult * local_rx).max(u64::from(MAX_REMOTE_DETECT_TIME_US));
+        let detect = (mult * rx).min(ceiling);
         Some(u32::try_from(detect).unwrap_or(u32::MAX))
     }
 
@@ -669,6 +680,45 @@ mod tests {
                 interval_us: 900_000
             }
         )));
+    }
+
+    fn detect_interval(actions: &[Action]) -> Option<u32> {
+        actions.iter().find_map(|a| match a {
+            Action::StartTimer {
+                kind: TimerKind::Detect,
+                interval_us,
+            } => Some(*interval_us),
+            _ => None,
+        })
+    }
+
+    /// The peer's Desired Min TX can stretch detection only up to the
+    /// ceiling; just below it the RFC 5880 §6.8.4 product is used as is.
+    #[test]
+    fn remote_desired_min_tx_cannot_stretch_detection_past_the_ceiling() {
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
+        let mut p = peer(SessionState::Down, 0);
+        p.desired_min_tx_interval = u32::MAX;
+        p.detect_mult = 255;
+        let actions = s.handle(Event::PacketReceived(p));
+        assert_eq!(detect_interval(&actions), Some(MAX_REMOTE_DETECT_TIME_US));
+
+        let mut p = peer(SessionState::Down, 0);
+        p.desired_min_tx_interval = 1_000_000;
+        p.detect_mult = 255;
+        let actions = s.handle(Event::PacketReceived(p));
+        assert_eq!(detect_interval(&actions), Some(255_000_000));
+    }
+
+    /// Our own Required Min RX is local configuration, not peer input: its
+    /// product with the peer's multiplier is never clamped.
+    #[test]
+    fn local_required_min_rx_is_not_clamped() {
+        let mut config = cfg();
+        config.required_min_rx_interval_us = 600_000_000;
+        let (mut s, _) = Session::new(config).expect("non-zero discriminator");
+        let actions = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
+        assert_eq!(detect_interval(&actions), Some(1_800_000_000));
     }
 
     #[test]
