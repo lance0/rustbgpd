@@ -42,6 +42,9 @@ pub(super) struct OwnedStateStore {
     /// Publication attempts, so tests can count receipt writes per pass.
     #[cfg(test)]
     pub(super) writes: AtomicU64,
+    /// Fail this many coming publications at the write step, then succeed.
+    #[cfg(test)]
+    pub(super) fail_next_writes: AtomicU64,
 }
 
 /// The actor's BLACKHOLE ownership: the prefixes this daemon may have
@@ -165,6 +168,22 @@ impl OwnershipState {
                 true
             }
             Err(error) => {
+                // A failed publication leaves the receipt holding either the
+                // set it held or the set being written. Anything else, or an
+                // unreadable receipt, means it changed outside the actor
+                // during publication: ownership can no longer be proven.
+                let intact = store.read().is_ok_and(|on_disk| {
+                    let on_disk = on_disk.unwrap_or_default();
+                    on_disk == self.persisted || on_disk == self.prefixes
+                });
+                if !intact {
+                    warn!(
+                        %error,
+                        "BLACKHOLE ownership receipt changed during publication; kernel mutations disabled"
+                    );
+                    self.available = false;
+                    return false;
+                }
                 warn!(%error, "BLACKHOLE ownership receipt write failed; retrying next pass");
                 self.attempted = Some(self.prefixes.clone());
                 false
@@ -182,6 +201,8 @@ impl OwnedStateStore {
             fault: FaultPoint::None,
             #[cfg(test)]
             writes: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_next_writes: AtomicU64::new(0),
         };
         let prefixes = store.read()?.unwrap_or_default();
         Ok((store, prefixes))
@@ -244,6 +265,14 @@ impl OwnedStateStore {
         let mut renamed = false;
         let result = (|| -> Result<(), String> {
             fault.fail(FaultPoint::Write)?;
+            #[cfg(test)]
+            if self
+                .fail_next_writes
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err("injected one-shot ownership persistence failure".to_string());
+            }
             let fd = openat(
                 &self.directory.file,
                 temp_name,
@@ -264,6 +293,10 @@ impl OwnedStateStore {
             fault.fail(FaultPoint::FileSync)?;
             temp.sync_all().map_err(|error| error.to_string())?;
             drop(temp);
+            #[cfg(test)]
+            if fault == FaultPoint::Tamper {
+                let _ = unlinkat(&self.directory.file, FILE_NAME, UnlinkatFlags::NoRemoveDir);
+            }
             if self.read()? != on_disk {
                 return Err("BLACKHOLE ownership receipt changed during publication".to_string());
             }
@@ -398,6 +431,9 @@ pub(super) enum FaultPoint {
     Rename,
     Unlink,
     DirectorySync,
+    /// Another writer deletes the receipt while this one publishes.
+    #[cfg(test)]
+    Tamper,
 }
 
 impl FaultPoint {

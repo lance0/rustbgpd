@@ -833,15 +833,17 @@ async fn reconcile_once<F>(
             })
             .collect();
         state.ownership.prefixes.clone_from(&retained);
-        if state.ownership.flush() {
-            state.adoption.swept = true;
-            // A row claimed while an earlier sweep could not publish is
-            // already owned; queueing it would reap it after a withdrawal.
-            for prefix in retained
-                .into_iter()
-                .filter(|prefix| !state.owned.contains_key(prefix))
-            {
-                state.adoption.pending.insert(prefix);
+        // A failed prune is retried by the next pass's sweep, but the
+        // retained rows are adopted either way: they still count against
+        // the active cap, show in status and stay reapable. A row claimed
+        // while an earlier sweep could not publish is already owned;
+        // queueing it would reap it after a withdrawal.
+        state.adoption.swept = state.ownership.flush();
+        for prefix in retained
+            .into_iter()
+            .filter(|prefix| !state.owned.contains_key(prefix))
+        {
+            if state.adoption.pending.insert(prefix) {
                 metrics.record_blackhole_discard_adopted();
                 info!(
                     %prefix,
@@ -4700,6 +4702,78 @@ pub(super) mod tests {
             (BlackholeState::Installed, "installed")
         );
         assert_eq!(receipt_on_disk(&mut state), [live].into());
+    }
+
+    /// Ownership with a receipt that already names `prefixes`, as a previous
+    /// daemon lifetime left it.
+    fn ownership_with_receipt(prefixes: &[Prefix]) -> (tempfile::TempDir, OwnershipState) {
+        let (dir, pinned, _) = durable_ownership(owned_state::FaultPoint::None);
+        let (store, empty) = owned_state::OwnedStateStore::load(Arc::clone(&pinned)).unwrap();
+        store
+            .replace(&empty, &prefixes.iter().copied().collect())
+            .unwrap();
+        (dir, OwnershipState::load(Some(pinned)))
+    }
+
+    /// A receipt that another writer changes during publication means
+    /// ownership can no longer be proven. That is not a retryable write
+    /// failure: kernel mutations stop at once, and the adopted leftover is
+    /// not reaped afterwards.
+    #[tokio::test]
+    async fn receipt_changed_during_publication_stops_mutations() {
+        let (leftover, new) = (v4_host(1), v4_host(2));
+        let (_dir, mut ownership) = ownership_with_receipt(&[leftover]);
+        ownership.store.as_mut().unwrap().fault = owned_state::FaultPoint::Tamper;
+        let mut state = ReconcilerState::new(enabled(), reapable_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(leftover);
+
+        pass(&mut state, &mut fib, blackholed(&[new])).await;
+        assert!(!state.ownership.available);
+        assert!(
+            fib.remove_calls.is_empty(),
+            "a row was deleted after receipt authority was lost"
+        );
+        assert!(
+            fib.install_calls.is_empty(),
+            "a row was installed after receipt authority was lost"
+        );
+    }
+
+    /// A startup prune that fails still adopts the live receipted rows, so
+    /// they count against the active cap. Here the prune write fails and
+    /// the write-ahead in the same pass would succeed; with `max_active = 1`
+    /// the leftover row must keep the new candidate out.
+    #[tokio::test]
+    async fn failed_prune_still_counts_adopted_rows_against_the_cap() {
+        let (live, absent, new) = (v4_host(1), v4_host(2), v4_host(3));
+        let (_dir, ownership) = ownership_with_receipt(&[live, absent]);
+        ownership
+            .store
+            .as_ref()
+            .unwrap()
+            .fail_next_writes
+            .store(1, Ordering::Relaxed);
+        let config = capped(1);
+        let mut state = ReconcilerState::new(config, deferred_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(live);
+
+        let statuses = pass_with(config, &mut state, &mut fib, blackholed(&[new])).await;
+        assert!(!state.adoption.swept);
+        assert_eq!(
+            fib.installed,
+            [live].into(),
+            "a second row was installed past max_active"
+        );
+        assert_eq!(
+            reason_of(&statuses, new),
+            (BlackholeState::Rejected, "active_limit_exceeded")
+        );
+        assert_eq!(
+            reason_of(&statuses, live),
+            (BlackholeState::Installed, "adopted_pending_reap")
+        );
     }
 
     async fn pass_with(
