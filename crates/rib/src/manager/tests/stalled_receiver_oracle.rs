@@ -49,11 +49,18 @@
 //!   resync still owes a withdrawal may remain, as that withdrawal is an
 //!   ordinary later UPDATE.
 //! - P4, per-key sequence: per (receiver, session, key), the collapsed value
-//!   sequence equals the reference's, or is a prefix of it for a key a flap
-//!   discarded queued envelopes of. Only keys the reference changed while the
-//!   subject receiver was dirty (the deferral and its resync operation)
-//!   relax to a subsequence. A key a graceful end carried into the session
-//!   with a different value has no common starting point; P1-P3 still apply
+//!   sequence, each value stamped with the operation that produced it,
+//!   equals the reference's, or is a prefix of it for a key a flap discarded
+//!   queued envelopes of. The key relaxes only inside a deferral: the
+//!   operations in which the subject receiver was dirty, owed a
+//!   refresh answer in the key's family, or owed the key or its whole family
+//!   (ADR-0145 slice 1b's logged deferral, read through the product's test
+//!   hook once per operation and session), through the settling operation.
+//!   Inside an interval the subject's values are a
+//!   subsequence of the reference's and match its state at the interval's
+//!   close; outside every interval they match exactly. A key a graceful end
+//!   carried into the session with a different value has no common starting
+//!   point; P1-P3 still apply
 //!   to it.
 //! - P5, bounded retention: the peak queued envelopes per receiver stay
 //!   within [`retention_bound`]. Peak queued rows are recorded too, so a
@@ -88,7 +95,7 @@ use rustbgpd_wire::{EvpnRouteKey, RouteRefreshSubtype};
 
 use super::update_groups_oracle::{NormMsg, normalize, permit_all_with};
 use super::*;
-use crate::update::OutboundRouteUpdate;
+use crate::update::{OutboundOwed, OutboundRouteUpdate};
 
 const PEERS: usize = 4;
 const PREFIXES: u8 = 4;
@@ -387,6 +394,8 @@ type Nlri = ((u16, u8), String);
 /// Each prefix's sorted path values. RFC 7911 path IDs are opaque, so arms
 /// compare the paths a prefix carries, not the IDs that carry them.
 type PathSets = BTreeMap<Nlri, Vec<Value>>;
+/// An envelope's producing operation and resulting path set.
+type HistoryEvent = (usize, Vec<Value>);
 
 fn nlri(key: &Key) -> Nlri {
     (key.family, key.nlri.clone())
@@ -415,6 +424,10 @@ fn path_sets(table: &Table, family: Option<(u16, u8)>) -> PathSets {
     sets
 }
 
+/// One owed key, or a family owed whole (`None`), as the product's test hook
+/// reports it: the family, then the key rendered like [`Nlri`]'s.
+type Owed = ((u16, u8), Option<String>);
+
 /// A barrier and the family state the receiver held when it arrived.
 #[derive(Debug)]
 struct Barrier {
@@ -439,14 +452,16 @@ struct Wire {
     refresh_stale: BTreeMap<(u16, u8), BTreeSet<Key>>,
     eor: BTreeSet<(u16, u8)>,
     /// Collapsed per-(session, prefix) path-set sequence, one entry per
-    /// envelope that changed it; the empty set is "not held".
-    history: BTreeMap<(u64, Nlri), Vec<Vec<Value>>>,
+    /// envelope that changed it, with the operation that produced the
+    /// envelope; the empty set is "not held".
+    history: BTreeMap<(u64, Nlri), Vec<HistoryEvent>>,
+    /// Equal GR-retained paths are the starting value of a new session.
+    initial: BTreeMap<(u64, Nlri), Vec<Value>>,
     /// Each prefix's set when its envelope began, until [`Self::commit`].
     before: BTreeMap<Nlri, Vec<Value>>,
-    /// Prefixes a flap discarded queued envelopes for, by session.
-    lost: BTreeSet<(u64, Nlri)>,
-    /// Prefixes whose path set changed in each operation.
-    touched: BTreeMap<usize, BTreeSet<(u64, Nlri)>>,
+    /// First producing operation a flap discarded an envelope for, by
+    /// (session, prefix). Earlier clean operations still compare exactly.
+    discarded_from: BTreeMap<(u64, Nlri), usize>,
     /// Known-defect signatures this wire tolerated.
     tolerated: BTreeSet<&'static str>,
 }
@@ -513,6 +528,11 @@ impl Wire {
             self.held.clear();
             self.gr_stale.clear();
         }
+        self.initial.extend(
+            path_sets(&self.held, None)
+                .into_iter()
+                .map(|(key, values)| ((session, key), values)),
+        );
     }
 
     fn purge(&mut self, keys: impl IntoIterator<Item = Key>) {
@@ -529,13 +549,9 @@ impl Wire {
             let after = paths(&self.held, &prefix);
             if after != before {
                 self.history
-                    .entry((self.session, prefix.clone()))
+                    .entry((self.session, prefix))
                     .or_default()
-                    .push(after);
-                self.touched
-                    .entry(op)
-                    .or_default()
-                    .insert((self.session, prefix));
+                    .push((op, after));
             }
         }
     }
@@ -767,7 +783,7 @@ struct Arm {
 }
 
 impl Arm {
-    fn spawn(arm: usize) -> Self {
+    fn spawn(arm: usize, subject_credit: Option<usize>) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, Some(CLUSTER), BgpMetrics::new());
@@ -777,6 +793,8 @@ impl Arm {
         // default credit, which no case reaches.
         if arm == REFERENCE {
             manager.outbound_row_credit_override = None;
+        } else if let Some(credit) = subject_credit {
+            manager.outbound_row_credit_override = Some(credit);
         }
         Self {
             tx,
@@ -811,17 +829,19 @@ impl Arm {
         response.await.expect("RIB actor alive");
     }
 
-    /// The refresh answers `peer` is owed, deferred behind a live
-    /// whole-table operation or a full channel (not a dirty resync).
-    async fn refresh_owed(&self, peer: usize) -> BTreeSet<(u16, u8)> {
+    /// What `peer` is owed, read once (the read consumes the product's log
+    /// of keys marked since the previous one): the refresh answers deferred
+    /// behind a live whole-table operation or a full channel (not a dirty
+    /// resync), and the private-family keys and whole families owed now or
+    /// since the previous read.
+    async fn owed_state(&self, peer: usize) -> OutboundOwed {
         let (reply, response) = oneshot::channel();
         self.send(RibUpdate::TestQueryPeerOutboundOwed {
             peer: peer_id(peer),
             reply,
         })
         .await;
-        let owed = response.await.expect("RIB actor alive");
-        owed.refresh.into_iter().map(wire_family).collect()
+        response.await.expect("RIB actor alive")
     }
 
     async fn dirty(&self, peer: usize) -> bool {
@@ -930,11 +950,15 @@ impl Arm {
                         }),
                 );
             for key in prefixes {
-                wire.lost.insert((wire.session, nlri(&key)));
+                wire.discarded_from
+                    .entry((wire.session, nlri(&key)))
+                    .or_insert(produced);
             }
             for prefix in shadow.discarded_changes(peer, produced, message, update.replay.is_some())
             {
-                wire.lost.insert((wire.session, prefix));
+                wire.discarded_from
+                    .entry((wire.session, prefix))
+                    .or_insert(produced);
             }
         }
     }
@@ -961,15 +985,26 @@ struct Harness {
     /// Subject refresh-answer debt after each operation: the families each
     /// peer is owed an answer in.
     refresh_owed: Vec<[BTreeSet<(u16, u8)>; PEERS]>,
+    /// Subject owed keys after each operation (and marked during it).
+    owed: Vec<[BTreeSet<Owed>; PEERS]>,
+    /// Owed keys still pending at the end of each operation, excluding
+    /// marks already settled in that operation.
+    owed_pending: Vec<[BTreeSet<Owed>; PEERS]>,
     tolerated: BTreeSet<&'static str>,
     coverage: Coverage,
 }
 
 impl Harness {
-    async fn new(config: [PeerConfig; PEERS]) -> Result<Self, String> {
+    async fn new(
+        config: [PeerConfig; PEERS],
+        subject_credit: Option<usize>,
+    ) -> Result<Self, String> {
         let mut harness = Self {
             config,
-            arms: [Arm::spawn(REFERENCE), Arm::spawn(SUBJECT)],
+            arms: [
+                Arm::spawn(REFERENCE, subject_credit),
+                Arm::spawn(SUBJECT, subject_credit),
+            ],
             session: [1; PEERS],
             restarting: [false; PEERS],
             op: 0,
@@ -980,6 +1015,8 @@ impl Harness {
             peak_envelopes: [0; PEERS],
             depths: [0; PEERS],
             refresh_owed: Vec::new(),
+            owed: Vec::new(),
+            owed_pending: Vec::new(),
             tolerated: BTreeSet::new(),
             coverage: Coverage::default(),
         };
@@ -1104,6 +1141,8 @@ impl Harness {
         let depths = self.arms[SUBJECT].stamp(op);
         let mut dirty = [false; PEERS];
         let mut refresh_owed: [BTreeSet<(u16, u8)>; PEERS] = Default::default();
+        let mut owed: [BTreeSet<Owed>; PEERS] = Default::default();
+        let mut owed_pending: [BTreeSet<Owed>; PEERS] = Default::default();
         let was_dirty = self.dirty.last().copied().unwrap_or_default();
         for peer in 0..PEERS {
             self.peak_envelopes[peer] = self.peak_envelopes[peer].max(depths[peer]);
@@ -1120,11 +1159,24 @@ impl Harness {
             if dirty[peer] && !was_dirty[peer] {
                 self.coverage.dirty_episodes += 1;
             }
-            refresh_owed[peer] = self.arms[SUBJECT].refresh_owed(peer).await;
+            let debt = self.arms[SUBJECT].owed_state(peer).await;
+            refresh_owed[peer] = debt.refresh.into_iter().map(wire_family).collect();
+            owed[peer] = debt.owed.into_iter().collect();
+            owed_pending[peer] = debt.owed_pending.into_iter().collect();
+            if !owed[peer].is_empty() {
+                self.coverage.owing_ops += 1;
+            }
+            if !self.arms[REFERENCE].owed_state(peer).await.owed.is_empty() {
+                return Err(format!(
+                    "INVALID: the reference arm owed keys to peer {peer} at op {op}"
+                ));
+            }
         }
         self.depths = depths.try_into().expect("one depth per peer");
         self.dirty.push(dirty);
         self.refresh_owed.push(refresh_owed);
+        self.owed.push(owed);
+        self.owed_pending.push(owed_pending);
         Ok(())
     }
 
@@ -1330,6 +1382,8 @@ impl Harness {
             arm.round_trip().await;
             arm.stamp(op);
             arm.discard(peer, op);
+            // The test log is peer-keyed; old-session marks end at this fence.
+            let _ = arm.owed_state(peer).await;
         }
         self.session[peer] += 1;
         self.establish(peer, graceful, graceful && self.config[peer].gr)
@@ -1364,6 +1418,7 @@ impl Harness {
                     .unwrap()
                     .iter()
                     .all(BTreeSet::is_empty)
+                && self.owed.last().unwrap().iter().all(BTreeSet::is_empty)
                 && self.arms[SUBJECT].stamps.iter().all(VecDeque::is_empty);
             quiet = if clean && delivered == 0 {
                 quiet + 1
@@ -1376,25 +1431,32 @@ impl Harness {
         }
         let dirty = *self.dirty.last().unwrap();
         let refresh_owed = self.refresh_owed.last().unwrap();
+        let owed = self.owed.last().unwrap();
         Err(format!(
             "liveness: subject not clean after {QUIESCE_ROUNDS} drain rounds (dirty \
-             {dirty:?}, refresh answers owed {refresh_owed:?})"
+             {dirty:?}, refresh answers owed {refresh_owed:?}, keys owed {owed:?})"
         ))
     }
 
-    /// The families of the ops in which `peer` owed a refresh answer, or
-    /// sent the answer it owed: from the deferral to the answer.
-    fn refresh_deferred(&self, peer: usize) -> BTreeMap<usize, BTreeSet<(u16, u8)>> {
-        (0..self.refresh_owed.len())
-            .map(|op| {
-                let mut families = self.refresh_owed[op][peer].clone();
-                if op > 0 {
-                    families.extend(self.refresh_owed[op - 1][peer].iter().copied());
-                }
-                (op, families)
-            })
-            .filter(|(_, families)| !families.is_empty())
-            .collect()
+    /// Deferrals of one (peer, session, key), closed at the operation that
+    /// settled its last debt. A same-op mark and settlement never relaxes
+    /// the following clean operation.
+    fn deferrals(&self, peer: usize, key: &(u64, Nlri)) -> Vec<Deferral> {
+        let (_, (family, nlri)) = key;
+        let names_key = |owed: &BTreeSet<Owed>| {
+            owed.contains(&(*family, None)) || owed.contains(&(*family, Some(nlri.clone())))
+        };
+        deferral_intervals(
+            self.snapshots.len(),
+            key.0,
+            |op| self.snapshots[op][peer].0,
+            |op| {
+                self.dirty[op][peer]
+                    || self.refresh_owed[op][peer].contains(family)
+                    || names_key(&self.owed_pending[op][peer])
+            },
+            |op| names_key(&self.owed[op][peer]),
+        )
     }
 
     /// Ops in which `peer` was dirty or ran the resync that cleaned it.
@@ -1456,7 +1518,7 @@ impl Harness {
                 ));
             }
         }
-        for (peer, deferred) in deferred.iter().enumerate() {
+        for peer in 0..PEERS {
             let reference = &self.arms[REFERENCE].wire[peer];
             let subject = &self.arms[SUBJECT].wire[peer];
             // A prefix a graceful end carried in with different stale paths
@@ -1487,24 +1549,6 @@ impl Harness {
                     subject.held
                 ));
             }
-            // A dirty peer's keys, and a refresh-owed peer's keys of the
-            // owed family, may skip the reference's transients between the
-            // deferral and the resync or answer that settles them.
-            let mut covered: BTreeSet<&(u64, Nlri)> = deferred
-                .iter()
-                .filter_map(|op| reference.touched.get(op))
-                .flatten()
-                .collect();
-            for (op, families) in self.refresh_deferred(peer) {
-                covered.extend(
-                    reference
-                        .touched
-                        .get(&op)
-                        .into_iter()
-                        .flatten()
-                        .filter(|(_, (family, _))| families.contains(family)),
-                );
-            }
             let keys: BTreeSet<&(u64, Nlri)> = reference
                 .history
                 .keys()
@@ -1519,17 +1563,19 @@ impl Harness {
                 if self.carried.contains(&(peer, key.0, key.1.clone())) {
                     continue;
                 }
-                let relaxed = covered.contains(key);
-                let ok = if relaxed {
-                    is_subsequence(actual, expected)
-                } else if subject.lost.contains(key) {
-                    expected.starts_with(actual)
-                } else {
-                    actual == expected
-                };
-                if !ok {
+                // Only envelopes the queue actually discarded bound this suffix.
+                let discarded_from = subject.discarded_from.get(key).copied();
+                let initial = reference.initial.get(key).map_or(&[][..], Vec::as_slice);
+                let verdict = compare_in_deferrals(
+                    expected,
+                    actual,
+                    initial,
+                    &self.deferrals(peer, key),
+                    discarded_from,
+                );
+                if let Err(reason) = verdict {
                     return Err(format!(
-                        "P4: peer {peer} session {} key {:?} (relaxed: {relaxed})\n reference: \
+                        "P4: peer {peer} session {} key {:?}: {reason}\n reference: \
                          {expected:?}\n subject: {actual:?}",
                         key.0, key.1
                     ));
@@ -1574,6 +1620,135 @@ impl Harness {
     }
 }
 
+/// One key's deferral on one session. A flap interrupts an interval;
+/// otherwise its final operation must settle on the reference state.
+#[derive(Debug, PartialEq, Eq)]
+struct Deferral {
+    start: usize,
+    end: usize,
+    settled: bool,
+}
+
+fn deferral_intervals(
+    ops: usize,
+    session: u64,
+    session_at: impl Fn(usize) -> u64,
+    pending: impl Fn(usize) -> bool,
+    marked: impl Fn(usize) -> bool,
+) -> Vec<Deferral> {
+    let mut intervals = Vec::new();
+    let mut start = None;
+    for op in 0..ops {
+        if session_at(op) != session {
+            if let Some(start) = start.take() {
+                intervals.push(Deferral {
+                    start,
+                    end: op - 1,
+                    settled: false,
+                });
+            }
+            continue;
+        }
+        let pending = pending(op);
+        if pending || marked(op) {
+            start.get_or_insert(op);
+        }
+        if !pending && let Some(start) = start.take() {
+            intervals.push(Deferral {
+                start,
+                end: op,
+                settled: true,
+            });
+        }
+    }
+    if let Some(start) = start {
+        intervals.push(Deferral {
+            start,
+            end: ops - 1,
+            settled: false,
+        });
+    }
+    intervals
+}
+
+/// Exact event values outside deferrals, an ordered subsequence inside,
+/// and equal state at every settled close. `discarded_from` is the first
+/// producing operation whose envelope the queue actually discarded.
+/// At that operation only, a delivered prefix is valid: one operation can
+/// enqueue several envelopes and a flap can discard a suffix of them.
+fn compare_in_deferrals(
+    expected: &[HistoryEvent],
+    actual: &[HistoryEvent],
+    initial: &[Value],
+    intervals: &[Deferral],
+    discarded_from: Option<usize>,
+) -> Result<(), String> {
+    let within = |events: &[HistoryEvent], start: usize, end: usize| {
+        events
+            .iter()
+            .filter(|(op, _)| (start..=end).contains(op))
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>()
+    };
+    let state_at = |events: &[HistoryEvent], end: usize| {
+        events
+            .iter()
+            .take_while(|(op, _)| *op <= end)
+            .last()
+            .map_or_else(|| initial.to_vec(), |(_, value)| value.clone())
+    };
+    let last = discarded_from.unwrap_or(usize::MAX);
+    let mut start = 0;
+    for interval in intervals
+        .iter()
+        .take_while(|interval| interval.start <= last)
+    {
+        if start < interval.start
+            && within(actual, start, interval.start - 1)
+                != within(expected, start, interval.start - 1)
+        {
+            return Err(format!(
+                "outside any deferral, ops {start}..{} differ",
+                interval.start
+            ));
+        }
+        let end = interval.end.min(last);
+        if !is_subsequence(
+            &within(actual, interval.start, end),
+            &within(expected, interval.start, end),
+        ) {
+            return Err(format!(
+                "inside the deferral at ops {}..={end}, not a subsequence",
+                interval.start
+            ));
+        }
+        if interval.settled
+            && discarded_from.is_none_or(|last| interval.end < last)
+            && state_at(actual, end) != state_at(expected, end)
+        {
+            return Err(format!(
+                "the deferral at ops {}..={end} closed on a different state",
+                interval.start
+            ));
+        }
+        if end == last {
+            return Ok(());
+        }
+        start = end + 1;
+    }
+    if discarded_from.is_some() {
+        if start < last && within(actual, start, last - 1) != within(expected, start, last - 1) {
+            return Err(format!("outside any deferral, ops {start}..{last} differ"));
+        }
+        if !within(expected, last, last).starts_with(&within(actual, last, last)) {
+            return Err(format!("outside any deferral, op {last} is not a prefix"));
+        }
+    } else if within(actual, start, last) != within(expected, start, last) {
+        return Err(format!("outside any deferral, ops {start}..={last} differ"));
+    }
+    Ok(())
+}
+
 fn is_subsequence<T: PartialEq>(needle: &[T], haystack: &[T]) -> bool {
     let mut rest = haystack.iter();
     needle
@@ -1605,6 +1780,9 @@ struct Coverage {
     gr_sweeps: usize,
     /// An ORF push lifted a gate that still held the initial IPv4 `EoR`.
     orf_holds: usize,
+    /// Operations after which a subject receiver owed keys. Reported, not a
+    /// floor: only a small row credit makes receivers owe.
+    owing_ops: usize,
 }
 
 impl Coverage {
@@ -1615,6 +1793,7 @@ impl Coverage {
         self.refreshes_during_backlog += other.refreshes_during_backlog;
         self.gr_sweeps += other.gr_sweeps;
         self.orf_holds += other.orf_holds;
+        self.owing_ops += other.owing_ops;
     }
 
     fn missing(&self) -> Vec<&'static str> {
@@ -1679,7 +1858,7 @@ fn run_seeded(
         .build()
         .expect("a paused runtime");
     runtime.block_on(async {
-        let mut harness = Harness::new(config).await?;
+        let mut harness = Harness::new(config, None).await?;
         for op in ops {
             harness.apply(op).await?;
         }
@@ -2008,9 +2187,334 @@ fn purge_ops() -> Vec<Op> {
     ]
 }
 
+fn events(values: &[(usize, &str)]) -> Vec<HistoryEvent> {
+    values
+        .iter()
+        .map(|(op, value)| (*op, vec![(*value).to_string()]))
+        .collect()
+}
+
+/// A deferral settles on B, then a defect loses clean C and delivers D.
+/// A whole-session subsequence comparison incorrectly accepts this history.
+#[test]
+fn a_clean_event_lost_after_a_deferral_fails_p4() {
+    let reference = events(&[(1, "A"), (2, "B"), (3, "C"), (4, "D")]);
+    let intervals = deferral_intervals(5, 1, |_| 1, |op| op == 1, |_| false);
+    let subject = events(&[(2, "B"), (4, "D")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_err());
+    let subject = events(&[(2, "B"), (3, "C"), (4, "D")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_ok());
+    // Reaching D later cannot excuse a stale state at the deferral's close.
+    let subject = events(&[(1, "A"), (3, "C"), (4, "D")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_err());
+}
+
+/// Session 1 owes work at op 3; a flap creates session 2 at op 4. The new
+/// session's first events stay exact even though the old session never settled.
+#[test]
+fn a_flap_ends_the_sessions_deferrals() {
+    let session_at = |op: usize| if op < 4 { 1 } else { 2 };
+    let intervals = deferral_intervals(7, 2, session_at, |op| op == 3, |_| false);
+    assert_eq!(intervals, []);
+    let reference = events(&[(4, "A"), (4, "B"), (5, "C")]);
+    let subject = events(&[(4, "B"), (5, "C")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_err());
+    assert!(compare_in_deferrals(&reference, &reference, &[], &intervals, None).is_ok());
+    assert_eq!(
+        deferral_intervals(7, 1, session_at, |op| op == 3, |_| false),
+        [Deferral {
+            start: 3,
+            end: 3,
+            settled: false
+        }],
+    );
+}
+
+#[test]
+fn adjacent_deferrals_each_check_their_close() {
+    let intervals = deferral_intervals(5, 1, |_| 1, |op| op == 1 || op == 3, |_| false);
+    assert_eq!(
+        intervals,
+        [
+            Deferral {
+                start: 1,
+                end: 2,
+                settled: true
+            },
+            Deferral {
+                start: 3,
+                end: 4,
+                settled: true
+            },
+        ],
+    );
+    let reference = events(&[(1, "A"), (2, "B"), (3, "C"), (4, "D")]);
+    let subject = events(&[(1, "A"), (4, "D")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_err());
+    let subject = events(&[(2, "B"), (4, "D")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_ok());
+}
+
+#[test]
+fn a_same_op_settlement_does_not_relax_the_next_op() {
+    let intervals = deferral_intervals(4, 1, |_| 1, |_| false, |op| op == 1);
+    assert_eq!(
+        intervals,
+        [Deferral {
+            start: 1,
+            end: 1,
+            settled: true
+        }]
+    );
+    let reference = events(&[(1, "A"), (2, "B"), (2, "C"), (3, "D")]);
+    let subject = events(&[(1, "A"), (2, "C"), (3, "D")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_err());
+}
+
+#[test]
+fn a_final_settlement_checks_state_without_a_later_operation() {
+    let intervals = deferral_intervals(3, 1, |_| 1, |op| op == 1, |_| false);
+    let reference = events(&[(1, "A"), (2, "B")]);
+    let subject = events(&[(1, "A")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, None).is_err());
+}
+
+#[test]
+fn a_retained_starting_value_can_survive_a_coalesced_cycle() {
+    let intervals = deferral_intervals(3, 1, |_| 1, |op| op == 1, |_| false);
+    let reference = events(&[(1, "B"), (2, "A")]);
+    let initial = vec!["A".to_string()];
+    assert!(compare_in_deferrals(&reference, &[], &initial, &intervals, None).is_ok());
+    assert!(compare_in_deferrals(&reference, &[], &[], &intervals, None).is_err());
+}
+
+#[test]
+fn a_flap_can_discard_a_suffix_but_not_a_clean_event_before_it() {
+    let reference = events(&[(1, "A"), (2, "B"), (3, "C"), (4, "D")]);
+    let subject = events(&[(1, "A"), (3, "C")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &[], Some(3)).is_err());
+    let subject = events(&[(1, "A"), (2, "B")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &[], Some(2)).is_ok());
+    let intervals = deferral_intervals(4, 1, |_| 1, |op| op == 1 || op == 2, |_| false);
+    let subject = events(&[(2, "B")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &intervals, Some(2)).is_ok());
+}
+
+/// Peer 0's queue fills before B. The first drain/tick settles on B, or a
+/// flap interrupts the old session's debt.
+/// C and D are then admitted on an empty channel at ops 6 and 8.
+fn deferred_history_case(flap: bool) -> ([PeerConfig; PEERS], Vec<Op>) {
+    let mut config = [PeerConfig {
+        capacity: 4096,
+        add_path: 1,
+        enhanced: false,
+        gr: false,
+        orf: false,
+        v6: false,
+        evpn: false,
+    }; PEERS];
+    // A replacement dump and its EoR must fit so its first route is clean.
+    config[0].capacity = if flap { 2 } else { 1 };
+    let announce = |variant| Op::Announce {
+        src: 1,
+        family: Fam::V4,
+        index: 0,
+        variant,
+    };
+    (
+        config,
+        vec![
+            announce(0),
+            announce(1),
+            if flap {
+                Op::Flap { peer: 0 }
+            } else {
+                Op::Drain { peer: 0, k: None }
+            },
+            Op::Tick,
+            Op::Drain { peer: 0, k: None },
+            announce(2),
+            Op::Drain { peer: 0, k: None },
+            announce(3),
+            Op::Drain { peer: 0, k: None },
+        ],
+    )
+}
+
+/// A spent row charge makes a new key owed, then its withdrawal cancels
+/// that debt before the harness observes the operation. The first query
+/// consumes the only record of this transient mark: reading refresh debt
+/// and key debt separately would lose it and make P4 reject the valid cycle.
+#[tokio::test(start_paused = true)]
+async fn end_op_keeps_a_key_marked_and_canceled_in_the_same_operation() {
+    let (mut config, _) = deferred_history_case(false);
+    config[0].capacity = 4096;
+    let mut harness = Harness::new(config, Some(1)).await.unwrap();
+    for peer in 0..PEERS {
+        harness.apply(&Op::Drain { peer, k: None }).await.unwrap();
+    }
+    harness
+        .apply(&Op::Announce {
+            src: 1,
+            family: Fam::V4,
+            index: 1,
+            variant: 0,
+        })
+        .await
+        .unwrap();
+    let before = harness.arms[SUBJECT].owed_state(0).await;
+    assert_eq!(
+        before.credit_rows, 1,
+        "the queued route must spend the credit"
+    );
+    assert!(!before.resync);
+    assert_eq!(before.owed, []);
+
+    harness.op += 1;
+    let observed_op = harness.op;
+    for withdraw in [false, true] {
+        harness
+            .both(|| RibUpdate::RoutesReceived {
+                peer: peer_id(1),
+                session_id: 1,
+                announced: if withdraw {
+                    vec![]
+                } else {
+                    vec![unicast_route(1, Fam::V4, 0, 0)]
+                },
+                withdrawn: if withdraw {
+                    vec![(Prefix::V4(v4_prefix(0)), 0)]
+                } else {
+                    vec![]
+                },
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await;
+        // Order the mark before its cancellation without consuming the log.
+        for arm in &harness.arms {
+            arm.round_trip().await;
+        }
+    }
+    harness.end_op().await.unwrap();
+    let key = (V4, v4_prefix(0).to_string());
+    assert!(harness.owed[observed_op][0].contains(&(V4, Some(key.1.clone()))));
+    assert!(harness.owed_pending[observed_op][0].is_empty());
+    assert!(harness.refresh_owed[observed_op][0].is_empty());
+    assert!(!harness.dirty[observed_op][0]);
+    assert_eq!(
+        harness.deferrals(0, &(1, key)),
+        [Deferral {
+            start: observed_op,
+            end: observed_op,
+            settled: true,
+        }],
+    );
+    harness.drain_until_quiet().await.unwrap();
+    harness.check().unwrap();
+    harness.finish().await;
+}
+
+#[test]
+fn p4_rejects_a_dropped_clean_event_after_real_debt() {
+    let (config, ops) = deferred_history_case(false);
+    assert_clean(&config, &ops);
+    let reason = run_seeded(config, &ops, |harness| {
+        let key = (1, (V4, v4_prefix(0).to_string()));
+        assert!(
+            harness
+                .deferrals(0, &key)
+                .iter()
+                .any(|interval| { interval.start <= 2 && interval.end < 6 && interval.settled })
+        );
+        let history = harness.arms[SUBJECT].wire[0].history.get_mut(&key).unwrap();
+        assert_eq!(history.iter().filter(|(op, _)| *op == 6).count(), 1);
+        history.retain(|(op, _)| *op != 6);
+    })
+    .err()
+    .expect("P4 must reject the missing clean event despite equal final tables");
+    assert!(reason.starts_with("P4: peer 0 session 1"), "{reason}");
+    assert!(reason.contains("outside any deferral"), "{reason}");
+}
+
+#[test]
+fn p4_rejects_a_dropped_clean_event_across_a_real_flap() {
+    let (config, ops) = deferred_history_case(true);
+    assert_clean(&config, &ops);
+    let reason = run_seeded(config, &ops, |harness| {
+        let prefix = (V4, v4_prefix(0).to_string());
+        assert!(
+            harness
+                .deferrals(0, &(1, prefix.clone()))
+                .iter()
+                .any(|interval| { interval.start == 2 && interval.end == 2 && !interval.settled })
+        );
+        let key = (2, prefix);
+        assert!(
+            !harness
+                .deferrals(0, &key)
+                .iter()
+                .any(|interval| { (interval.start..=interval.end).contains(&3) })
+        );
+        let history = harness.arms[SUBJECT].wire[0].history.get_mut(&key).unwrap();
+        assert_eq!(history.iter().filter(|(op, _)| *op == 3).count(), 1);
+        history.retain(|(op, _)| *op != 3);
+    })
+    .err()
+    .expect("P4 must fence old debt off from the replacement session's first event");
+    assert!(reason.starts_with("P4: peer 0 session 2"), "{reason}");
+    assert!(reason.contains("outside any deferral"), "{reason}");
+}
+
+#[test]
+fn only_the_actual_discard_operation_allows_a_partial_prefix() {
+    let reference = events(&[(1, "A"), (2, "B"), (2, "C"), (2, "D"), (3, "E")]);
+    let subject = events(&[(1, "A"), (2, "B"), (2, "C")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &[], Some(2)).is_ok());
+    let subject = events(&[(1, "A"), (2, "C")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &[], Some(2)).is_err());
+    let subject = events(&[(2, "B"), (2, "C")]);
+    assert!(compare_in_deferrals(&reference, &subject, &[], &[], Some(2)).is_err());
+    assert!(compare_in_deferrals(&reference, &[], &[], &[], Some(2)).is_err());
+    assert!(compare_in_deferrals(&reference, &[], &[], &[], Some(1)).is_ok());
+}
+
+/// D is queued at op 8 and actually discarded by the final flap. Losing
+/// delivered C at op 6 must still fail, even though B at op 4 is now the
+/// subject history's last surviving entry.
+#[test]
+fn p4_rejects_a_dropped_clean_event_before_a_later_discard() {
+    let (config, mut ops) = deferred_history_case(false);
+    *ops.last_mut().unwrap() = Op::Flap { peer: 0 };
+    assert_clean(&config, &ops);
+    let reason = run_seeded(config, &ops, |harness| {
+        let key = (1, (V4, v4_prefix(0).to_string()));
+        assert_eq!(
+            harness.arms[SUBJECT].wire[0].discarded_from.get(&key),
+            Some(&8)
+        );
+        let history = harness.arms[SUBJECT].wire[0].history.get_mut(&key).unwrap();
+        assert_eq!(history.iter().filter(|(op, _)| *op == 6).count(), 1);
+        history.retain(|(op, _)| *op != 6);
+        assert_eq!(history.last().unwrap().0, 4);
+    })
+    .err()
+    .expect("an actual discard at op 8 cannot excuse a missing clean event at op 6");
+    assert!(reason.starts_with("P4: peer 0 session 1"), "{reason}");
+    assert!(reason.contains("outside any deferral"), "{reason}");
+}
+
 /// A flap may discard the marker that would purge a GR-retained route.
 #[test]
 fn discarded_orf_eor_can_end_a_gr_session() {
+    let (config, ops) = discarded_orf_eor_case();
+    assert_clean(&config, &ops);
+}
+
+fn discarded_orf_eor_case() -> ([PeerConfig; PEERS], [Op; 6]) {
     let mut config = livelock_config();
     config[2] = PeerConfig {
         capacity: 2,
@@ -2018,9 +2522,9 @@ fn discarded_orf_eor_can_end_a_gr_session() {
         orf: true,
         ..config[2]
     };
-    assert_clean(
-        &config,
-        &[
+    (
+        config,
+        [
             Op::Announce {
                 src: 0,
                 family: Fam::V4,
@@ -2033,7 +2537,51 @@ fn discarded_orf_eor_can_end_a_gr_session() {
             Op::Orf { peer: 2, deny: 4 },
             Op::Flap { peer: 2 },
         ],
-    );
+    )
+}
+
+#[test]
+fn discarded_orf_eor_keeps_first_producing_operation() {
+    let (config, ops) = discarded_orf_eor_case();
+    let mut ops = ops.to_vec();
+    ops.insert(5, Op::Orf { peer: 2, deny: 0 });
+    run_seeded(config, &ops, |harness| {
+        let key = (2, (V4, v4_prefix(2).to_string()));
+        assert_eq!(
+            harness.arms[SUBJECT].wire[2].discarded_from.get(&key),
+            Some(&5)
+        );
+        let history = &harness.arms[REFERENCE].wire[2].history[&key];
+        assert_eq!(
+            history.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            [5, 6]
+        );
+    })
+    .unwrap();
+}
+
+/// A later discarded marker cannot excuse an earlier missing clean event.
+#[test]
+fn discarded_orf_eor_preserves_the_clean_event_boundary() {
+    let (config, ops) = discarded_orf_eor_case();
+    let reason = run_seeded(config, &ops, |harness| {
+        let key = (2, (V4, v4_prefix(2).to_string()));
+        assert_eq!(
+            harness.arms[SUBJECT].wire[2].discarded_from.get(&key),
+            Some(&5)
+        );
+        let history = harness.arms[REFERENCE].wire[2]
+            .history
+            .get_mut(&key)
+            .unwrap();
+        assert_eq!(history.as_slice(), &[(5, Vec::<Value>::new())]);
+        // Seed a lost clean observation before the real discarded EoR.
+        history.insert(0, (4, vec!["missing clean event".into()]));
+    })
+    .err()
+    .expect("a discarded EoR at op 5 cannot excuse a missing clean event at op 4");
+    assert!(reason.starts_with("P4: peer 2 session 2"), "{reason}");
+    assert!(reason.contains("outside any deferral"), "{reason}");
 }
 
 fn stale_marker_wire(enhanced: bool) -> (Wire, [Key; 3]) {

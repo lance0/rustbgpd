@@ -1081,10 +1081,11 @@ fn a_full_writer_helper_flush_is_not_a_route_drop() {
 fn skipped_dirty_receiver_rechecks_its_settled_key() {
     let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
     let occupied = occupy(&tx);
-    // A new live RTBH queues behind the full writer and leaves the
-    // receiver dirty.
+    // A new live RTBH waits behind the full writer. Explicitly require
+    // dirty recovery so this fixture exercises the skipped helper flush.
     let fresh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 4), 32);
     inject_rtbh(&mut manager, fresh);
+    manager.mark_outbound_dirty(peer_v4(OBSERVER));
     assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
     withdraw_received(&mut manager, rtbh);
     drop(occupied);
@@ -3161,4 +3162,75 @@ fn grouped_helper_keeps_a_later_sessions_ordinary_row_after_peer_down() {
 #[test]
 fn grouped_helper_keeps_a_later_sessions_ordinary_row_after_a_collision() {
     assert_later_sessions_ordinary_row_stays(true, SessionEnd::Collision);
+}
+
+/// A carried set larger than the receiver's ordinary credit is withdrawn in
+/// row chunks admitted and retired one at a time: each flush admits chunks
+/// while the receiver holds less than its credit, the admitted keys leave
+/// the set, and the rest wait for the credit the receiver returns. Red when
+/// the flush admits the set whole: one admission queues every row past the
+/// credit, and a refused flush would retire nothing.
+#[test]
+fn oversized_carried_set_retires_chunk_by_chunk() {
+    use crate::outbound_credit::CHUNK_ROWS;
+    let credit = 2 * CHUNK_ROWS;
+    let mut manager = manager_with_dormant_waiter();
+    manager.outbound_row_credit_override = Some(credit);
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let keys = 3 * CHUNK_ROWS + 100;
+    let mut peer_rib = PeerRib::new();
+    for index in 0..keys {
+        inject_rtbh(&mut manager, host(1, index));
+        apply(&mut old_rx, &mut peer_rib, None);
+    }
+    assert_eq!(peer_rib.len(), keys);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for index in 0..keys {
+        delete(&mut manager, host(1, index));
+    }
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
+    let observer = peer_v4(OBSERVER);
+    let carried = |manager: &RibManager| {
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .map_or(0, |carried| carried.keys.len())
+    };
+    let mut withdrawn = 0;
+    for round in 0..4 {
+        // The stalled receiver holds every envelope of this round.
+        manager.resync_dirty_peers_bounded();
+        let mut held = Vec::new();
+        while let Ok(update) = new_rx.try_recv() {
+            held.push(update);
+        }
+        let rows: usize = held
+            .iter()
+            .map(|update| update.unicast_withdrawals().count())
+            .sum();
+        assert!(
+            held.iter()
+                .all(|update| update.unicast_withdrawals().count() <= CHUNK_ROWS),
+            "round {round}: every envelope is one chunk"
+        );
+        assert!(
+            rows <= credit,
+            "round {round}: {rows} rows admitted against a credit of {credit}"
+        );
+        withdrawn += rows;
+        assert_eq!(
+            carried(&manager),
+            keys - withdrawn,
+            "round {round}: exactly the admitted keys retire"
+        );
+        assert!(!manager.dirty_peers.contains(&observer));
+        // The receiver reads them: their credit returns.
+        drop(held);
+    }
+    assert_eq!(withdrawn, keys, "every carried key is withdrawn");
+    assert_eq!(carried(&manager), 0);
 }

@@ -782,7 +782,20 @@ impl RibManager {
         false
     }
 
+    /// Whether a pending marker of `family` may go out as a plain marker: a
+    /// family that still owes keys or the whole family waits for the barrier
+    /// retry that absorbs them first (`outbound_owing`), so no marker leaves
+    /// ahead of an owed key.
     fn pending_marker_family_ready(
+        &self,
+        peer: PeerId,
+        family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+    ) -> bool {
+        self.pending_marker_family_ready_unowed(peer, family) && !self.owes(peer, family)
+    }
+
+    /// [`Self::pending_marker_family_ready`] apart from owed keys.
+    pub(in crate::manager) fn pending_marker_family_ready_unowed(
         &self,
         peer: PeerId,
         family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),

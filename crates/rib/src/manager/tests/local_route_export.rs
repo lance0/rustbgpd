@@ -2154,8 +2154,8 @@ fn injected_unicast_is_exported_during_selection_deferral() {
         let late = PeerId::from_addr(v4(3));
         let mut late_rx = deferred_unicast_peer(&mut manager, late, mode, false);
         assert_deferred_unicast_replay(&deferred_unicast_drain(&mut late_rx), mode, &hosts, true);
-        // Hold every channel permit so a real local replacement fails
-        // admission. Resync must deliver that change, not just inspect an
+        // Hold every channel permit so a real local replacement waits for
+        // admission. The retry must deliver that change, not just inspect an
         // already-current private Adj-RIB-Out and legitimately emit nothing.
         let mut permits = Vec::new();
         while let Ok(permit) = manager.outbound_peers[&late].clone().try_reserve_owned() {
@@ -2173,14 +2173,20 @@ fn injected_unicast_is_exported_during_selection_deferral() {
             &[hosts[0]],
             false,
         );
-        assert!(manager.dirty_peers.contains(&late));
+        let grouped = manager.grouped_member_of(late).is_some();
+        assert_eq!(manager.dirty_peers.contains(&late), grouped);
+        assert_eq!(manager.owing(late).is_some(), !grouped);
         assert_eq!(
             row(&query(&mut manager, hosts[0], 17, None, 10).unwrap(), late).reason,
-            "outbound_resync"
+            if grouped {
+                "outbound_resync"
+            } else {
+                "not_yet_committed"
+            }
         );
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
         drop(permits);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.resync_dirty_peers_bounded();
         let resync = deferred_unicast_drain(&mut late_rx);
         let replayed = if manager.grouped_member_of(late).is_some() {
             hosts.as_slice()
@@ -2385,8 +2391,8 @@ fn unicast_deferral_exempts_only_local_rtbh_candidates() {
             &immediate,
             false,
         );
-        // A real failed admission makes dirty recovery restage the exact tagged
-        // aggregate, including when its untagged sibling has a better rank.
+        // A full writer makes the retry restage the exact tagged aggregate,
+        // including when its untagged sibling has a better rank.
         let mut permits = Vec::new();
         while let Ok(permit) = manager.outbound_peers[&late].clone().try_reserve_owned() {
             permits.push(permit);
@@ -2396,11 +2402,13 @@ fn unicast_deferral_exempts_only_local_rtbh_candidates() {
             attrs.push(PathAttribute::Med(99));
         });
         inject(&mut manager, changed);
-        assert!(manager.dirty_peers.contains(&late));
+        let grouped = manager.grouped_member_of(late).is_some();
+        assert_eq!(manager.dirty_peers.contains(&late), grouped);
+        assert_eq!(manager.owing(late).is_some(), !grouped);
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
         let _ = deferred_unicast_drain(&mut rx);
         drop(permits);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.resync_dirty_peers_bounded();
         let recovery = deferred_unicast_drain(&mut late_rx);
         assert!(
             recovery
@@ -4143,7 +4151,7 @@ fn exempt_admitted_row_awaiting_withdrawal_is_not_reported_frozen() {
         assert!(!explanation.already_advertised, "{mode:?}");
 
         drop(occupied);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.resync_dirty_peers_bounded();
         let withdrawn: Vec<_> = deferred_unicast_drain(&mut rx)
             .iter()
             .flat_map(|update| update.unicast_withdrawals().copied().collect::<Vec<_>>())

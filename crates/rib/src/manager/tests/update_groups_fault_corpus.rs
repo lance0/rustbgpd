@@ -1157,7 +1157,7 @@ async fn run_path(
         if let Op::DrainOne(peer) = op {
             // The drained pre-failure admission is still normal. Only a peer
             // with an actual deferred update enters the named recovery path.
-            if oracle.peer_outbound_dirty(*peer).await {
+            if oracle.peer_outbound_deferred(*peer).await {
                 if recovering.insert(*peer) {
                     oracle.begin_recovery(*peer, RecoveryPath::QueueDeferral);
                 }
@@ -1166,7 +1166,7 @@ async fn run_path(
             }
         } else if matches!(op, Op::DrainAvailable) {
             for peer in recovering.iter().copied().collect::<Vec<_>>() {
-                if !oracle.peer_outbound_dirty(peer).await {
+                if !oracle.peer_outbound_deferred(peer).await {
                     oracle.close_recovery(peer);
                     recovering.remove(&peer);
                 }
@@ -1186,7 +1186,7 @@ async fn run_path(
     oracle.drain_available();
     for peer in recovering {
         assert!(
-            !oracle.peer_outbound_dirty(peer).await,
+            !oracle.peer_outbound_deferred(peer).await,
             "scheduled recovery did not finish for {peer}"
         );
         oracle.close_recovery(peer);

@@ -733,15 +733,17 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
         while out.try_recv().map(delivered).is_ok() {}
         receivers.push(out);
     }
-    let closed_rx = receivers.remove(0);
-    let _full_rx = receivers.remove(0);
+    let mut closed_rx = receivers.remove(0);
+    let mut full_rx = receivers.remove(0);
 
-    // The announce fills both one-slot channels. Forget it in each
-    // Adj-RIB-Out so every later pass stages it again.
+    // Deliver the announce, then forget it in each Adj-RIB-Out so every
+    // later pass stages it again with capacity at its preflight.
     let route = make_evpn_imet("192.0.2.10".parse().unwrap(), 100);
     let key = route.key();
     manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
     manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    closed_rx.try_recv().map(delivered).unwrap();
+    full_rx.try_recv().map(delivered).unwrap();
     for peer in [closed, full] {
         assert!(
             manager
@@ -752,6 +754,7 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
         );
     }
     let keys = HashSet::from([key]);
+    let saturation = FillChannelOnSnapshot::install(&mut manager, full);
 
     let captured = StdArc::new(Mutex::new(Vec::new()));
     let subscriber = CaptureSubscriber {
@@ -769,7 +772,9 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
     tracing::subscriber::with_default(subscriber, || {
         // Sibling tests reach this callsite through `manager.run()` with no
         // subscriber; warm it here and refresh its cached interest first.
+        saturation.arm();
         manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
+        saturation.release();
         tracing::callsite::rebuild_interest_cache();
         messages();
         // The warm-up started a dirty episode; only a clean peer warns.
@@ -787,7 +792,9 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
         );
         assert!(!manager.dirty_peers.contains(&closed));
 
+        saturation.arm();
         manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
+        saturation.assert_full();
         assert_eq!(messages(), vec![DEFERRED.to_string()]);
         assert!(manager.dirty_peers.contains(&full));
     });
@@ -830,12 +837,13 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
     });
     while out.try_recv().map(delivered).is_ok() {}
 
-    // The announce fills the one-slot channel. Forget it in the
-    // Adj-RIB-Out so every later pass stages it again.
+    // Deliver the announce, then forget it in Adj-RIB-Out. Saturation
+    // after staging makes the first send really refuse despite preflight.
     let route = make_evpn_imet("192.0.2.10".parse().unwrap(), 100);
     let key = route.key();
     manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
     manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    out.try_recv().map(delivered).unwrap();
     let keys = HashSet::from([key]);
     let forget = |manager: &mut RibManager| {
         assert!(
@@ -847,7 +855,8 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
         );
     };
     forget(&mut manager);
-    assert!(manager.outbound_channel_full(peer));
+    let fill = FillChannelOnSnapshot::install(&mut manager, peer);
+    fill.arm();
     let drops = |manager: &RibManager| {
         counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[])
     };
@@ -856,6 +865,7 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
     for _ in 0..PASSES {
         manager.distribute_evpn_keys_to_peer(peer, &keys, &mut || {});
     }
+    fill.assert_full();
     assert!(manager.dirty_peers.contains(&peer));
     assert_eq!(
         manager.per_peer_deferral_warnings, 1,
@@ -869,15 +879,19 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
     );
 
     // The receiver drains; the dirty resync commits and ends the episode.
+    fill.release();
     while out.try_recv().map(delivered).is_ok() {}
     while manager.resync_dirty_peers_bounded() {}
     assert!(!manager.dirty_peers.contains(&peer));
     assert_eq!(manager.dirty_resync_commits, 1);
 
-    // The resync refilled the channel: a new block is a new episode.
+    // Deliver the resync, then make a new late refusal start a new episode.
+    out.try_recv().map(delivered).unwrap();
     forget(&mut manager);
+    fill.arm();
     manager.distribute_evpn_keys_to_peer(peer, &keys, &mut || {});
     manager.distribute_evpn_keys_to_peer(peer, &keys, &mut || {});
+    fill.assert_full();
     assert!(manager.dirty_peers.contains(&peer));
     assert_eq!(manager.per_peer_deferral_warnings, 2);
 }
@@ -4391,13 +4405,25 @@ fn evpn_refresh_answer_settles_the_owed_withdrawal() {
         pass(&mut manager, Some(tag), None);
     }
     assert!(manager.outbound_channel_full(stuck));
+    // Deliver one queued announcement, then reserve its slot after preflight.
+    // The route inventory and refresh transcript retain every announced key.
+    let first = stuck_rx.try_recv().unwrap();
+    assert_eq!(first.evpn_announce.len(), 1);
+    assert_eq!(first.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    held.insert(first.evpn_announce[0].key(), false);
+    drop(first);
+    assert_eq!(manager.outbound_peers[&stuck].capacity(), 1);
+    let fill = FillChannelOnSnapshot::install(&mut manager, stuck);
+    fill.arm();
     assert!(!manager.dirty_peers.contains(&stuck));
     pass(&mut manager, None, Some(0));
+    fill.assert_full();
     assert!(
         manager.dirty_peers.contains(&stuck),
         "the refused withdrawal"
     );
 
+    fill.release();
     apply(&mut stuck_rx, &mut held);
     manager.handle_update(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),

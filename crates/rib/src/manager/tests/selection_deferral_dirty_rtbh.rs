@@ -143,9 +143,12 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert_eq!(manager.outbound_peers[&observer].capacity(), 0);
     assert!(!manager.dirty_peers.contains(&observer));
     inject_host(&mut manager, second);
+    // Private full-channel admission records owed keys; this fixture
+    // specifically exercises the dirty recovery path.
+    manager.mark_outbound_dirty(observer);
     assert!(
         manager.dirty_peers.contains(&observer),
-        "second RTBH admission really failed"
+        "dirty recovery is required for the missed RTBH admission"
     );
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(second)).unwrap().peer,
@@ -217,6 +220,84 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         "a caught-up partial recovery must park frozen work instead of replaying admitted RTBH"
     );
     assert!(manager.dirty_peers.contains(&observer));
+    if grouped {
+        assert!(manager.selection_partial_caught_up(observer));
+        assert!(!manager.peer_otc_blocked.contains_key(&observer));
+        assert!(!manager.pending_otc_blocked.contains_key(&observer));
+        let admitted = manager
+            .pending_group_admitted
+            .get(&observer)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        assert!(admitted.contains(&crate::update::ExactExportKey::Unicast(
+            Prefix::V4(ordinary),
+            0,
+        )));
+        let frozen_attributes = wire[&(Prefix::V4(ordinary), 0)].attributes.clone();
+        let before = manager.adj_rib_out_commit_stats;
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: u64::from(SOURCE.octets()[3]),
+            announced: vec![make_route_with_lp(ordinary, SOURCE, 200)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        assert_eq!(
+            manager.ribs[&peer_v4(SOURCE)]
+                .get(&Prefix::V4(ordinary), 0)
+                .unwrap()
+                .local_pref(),
+            200
+        );
+        assert_eq!(
+            manager
+                .loc_rib
+                .get(&Prefix::V4(ordinary))
+                .unwrap()
+                .local_pref(),
+            100
+        );
+        assert!(
+            apply_wire(&mut observer_rx, &mut wire).is_empty(),
+            "a held received update must not replay the caught-up member's frozen view"
+        );
+        assert_eq!(
+            wire[&(Prefix::V4(ordinary), 0)].attributes,
+            frozen_attributes
+        );
+        assert_eq!(
+            manager
+                .adj_rib_out_commit_stats
+                .pristine_otc_reconcile_candidates,
+            before.pristine_otc_reconcile_candidates,
+            "an unchanged group view must not enter member reconciliation for retained recovery proof"
+        );
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.successful_enqueues,
+            before.successful_enqueues
+        );
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.successful_commits,
+            before.successful_commits
+        );
+        assert!(manager.selection_partial_caught_up(observer));
+        assert!(manager.dirty_peers.contains(&observer));
+        assert_eq!(
+            manager
+                .pending_group_admitted
+                .get(&observer)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            admitted
+        );
+    }
     let (reply, mut count) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryAdvertisedCount {
         peer: observer,
@@ -329,6 +410,14 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
     assert_eq!(wire.len(), 3);
+    for prefix in [Prefix::V4(ordinary), Prefix::V4(first), Prefix::V4(second)] {
+        assert!(wire.contains_key(&(prefix, 0)));
+    }
+    assert_eq!(
+        wire[&(Prefix::V4(ordinary), 0)].local_pref(),
+        if grouped { 200 } else { 100 },
+        "release must advertise the latest received ordinary route"
+    );
     assert_eq!(manager.ribs.values().map(AdjRibIn::len).sum::<usize>(), 3);
     assert!(
         manager
@@ -511,6 +600,9 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
             let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
             inject_host(&mut manager, first);
             inject_host(&mut manager, second);
+            // Keep this a dirty-resync fixture even when the private
+            // admission gate records the miss as owed keys.
+            manager.mark_outbound_dirty(peer_v4(OBSERVER));
             assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
             apply_wire(&mut rx, &mut wire);
             manager.distribute_changes(&HashSet::new(), &HashSet::new());
@@ -2899,19 +2991,36 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     let writer = manager.outbound_peers[&observer].clone();
-    // A new RTBH waits behind a full writer, so the retry must reserve proof.
+    // A new RTBH waits behind a full writer; explicitly require dirty
+    // recovery so the retry must reserve proof.
     let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32));
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
     inject_host(
         &mut manager,
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
     );
+    manager.mark_outbound_dirty(observer);
+    assert!(manager.dirty_peers.contains(&observer));
     drop(occupied);
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    let refusals = counter_metric_value(
+        &manager.metrics,
+        "bgp_update_group_recovery_fallback_total",
+        &[("cause", "allocation_failure")],
+    );
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert_eq!(
+        counter_metric_value(
+            &manager.metrics,
+            "bgp_update_group_recovery_fallback_total",
+            &[("cause", "allocation_failure")],
+        ),
+        refusals + 1.0,
+        "the dirty retry must refuse an admission-proof allocation"
+    );
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
     // The private Add-Path receiver's complete bodies still prove the new
@@ -3215,7 +3324,9 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
                 peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
-        });
+        })
+        .with_outbound_row_credit(4);
+    manager.test_force_ungrouped = true;
     let (outbound_tx, mut observer_rx) = mpsc::channel(1);
     outbound_tx
         .try_send(OutboundRouteUpdate::default())
@@ -3242,6 +3353,52 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
         .expect("the IPv6 End-of-RIB");
     assert_eq!(flushed.end_of_rib, vec![IPV6]);
     assert!(observer_rx.try_recv().is_err(), "IPv4 waits for the hold");
+
+    assert!(manager.selection_partial_caught_up(observer));
+    let empty_stagings = manager.outbound_stagings(observer);
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert_eq!(
+        manager.outbound_stagings(observer),
+        empty_stagings,
+        "an empty follow-up pass does not repeat staging for a caught-up held peer"
+    );
+    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(observer), 4);
+    let stagings = manager.outbound_stagings(observer);
+    let mut route = make_v6_route(
+        Ipv6Prefix::new("2001:db8:30::".parse().unwrap(), 64),
+        "2001:db8::81".parse().unwrap(),
+    );
+    set_peer(&mut route, LOCAL_PEER);
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ]);
+    let prefix = route.prefix;
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    result.try_recv().unwrap().unwrap();
+    assert_eq!(
+        manager.outbound_stagings(observer),
+        stagings,
+        "a partially caught-up dirty peer still checks credit before staging an unheld family"
+    );
+    assert!(observer_rx.try_recv().is_err());
+    drop(spent);
+    manager.resync_dirty_peers_bounded();
+    let update = observer_rx
+        .try_recv()
+        .map(delivered)
+        .expect("IPv6 recovers while IPv4 stays held");
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(|route| route.prefix)
+            .collect::<Vec<_>>(),
+        [prefix]
+    );
+    assert_eq!(update.end_of_rib, []);
 
     manager.handle_update(RibUpdate::EndOfRib {
         peer: peer_v4(WAITER),

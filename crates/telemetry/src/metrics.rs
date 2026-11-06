@@ -730,6 +730,8 @@ struct BgpMetricsInner {
     rib_stale_session_message_ignored: IntCounterVec,
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
+    rib_outbound_owing_fallback: IntCounter,
+    rib_outbound_owing_flips: IntCounter,
     rib_outbound_dirty_peers: IntGauge,
     rib_outbound_credit_rows: IntGauge,
     rib_outbound_operations_live: IntGauge,
@@ -1842,18 +1844,35 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_rib_dirty_resync_total",
                 "Dirty-peer resync timer outcomes: 'still_dirty' (a tick left \
-                 at least one peer dirty and the 1s timer re-arms) or 'cleared' \
+                 at least one peer dirty, or another retry, and the timer \
+                 re-arms), 'owing' (a tick left only owed private-family keys \
+                 and the timer re-arms) or 'cleared' \
                  (a tick drained the work, or the loop saw a message handler drain \
                  it; drains on early-continue loop paths may go uncounted).",
             ),
             &["outcome"],
         )
         .expect("valid metric definition");
-        // Both outcomes exist at 0 from startup, so the first increment of
-        // either one is a visible `increase()` rather than a new series.
-        for outcome in ["cleared", "still_dirty"] {
+        // Every outcome exists at 0 from startup, so the first increment of
+        // each one is a visible `increase()` rather than a new series.
+        for outcome in ["cleared", "still_dirty", "owing"] {
             rib_dirty_resync.with_label_values(&[outcome]);
         }
+
+        let rib_outbound_owing_fallback = IntCounter::new(
+            "bgp_rib_outbound_owing_fallback_total",
+            "Peers that owed private-family keys and fell back to a whole-peer \
+             resync instead: a drain refused for a reason other than capacity \
+             or credit, or a gated batch refused for credit.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_owing_flips = IntCounter::new(
+            "bgp_rib_outbound_owing_flips_total",
+            "Private families a peer began to owe whole: its owed-key set \
+             outgrew its byte cap, or a FlowSpec, BGP-LS or RT-Constrain \
+             pass found the peer without credit.",
+        )
+        .expect("valid metric definition");
 
         let rib_outbound_dirty_peers = IntGauge::new(
             "bgp_rib_outbound_dirty_peers",
@@ -3472,6 +3491,12 @@ impl BgpMetrics {
             .register(Box::new(rib_dirty_resync.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_owing_fallback.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_outbound_owing_flips.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_ingest_channel_depth.clone()))
             .expect("metric not already registered");
         registry
@@ -4025,6 +4050,8 @@ impl BgpMetrics {
             rib_stale_session_message_ignored,
             rib_outbound_registration_failover,
             rib_dirty_resync,
+            rib_outbound_owing_fallback,
+            rib_outbound_owing_flips,
             rib_outbound_dirty_peers,
             rib_outbound_credit_rows,
             rib_outbound_operations_live,
@@ -5998,13 +6025,24 @@ impl BgpMetrics {
 
     /// Record a dirty-peer resync timer fire.
     ///
-    /// `outcome` is bounded: `"cleared"` or `"still_dirty"`.
+    /// `outcome` is bounded: `"cleared"`, `"still_dirty"` or `"owing"`.
     pub fn record_rib_dirty_resync(&self, outcome: &str) {
         debug_assert!(
-            matches!(outcome, "cleared" | "still_dirty"),
+            matches!(outcome, "cleared" | "still_dirty" | "owing"),
             "unbounded dirty-resync outcome label: {outcome:?}"
         );
         self.0.rib_dirty_resync.with_label_values(&[outcome]).inc();
+    }
+
+    /// Record a peer that owed private-family keys falling back to a
+    /// whole-peer resync.
+    pub fn record_rib_outbound_owing_fallback(&self) {
+        self.0.rib_outbound_owing_fallback.inc();
+    }
+
+    /// Record a private family a peer began to owe whole.
+    pub fn record_rib_outbound_owing_flip(&self) {
+        self.0.rib_outbound_owing_flips.inc();
     }
 
     /// Record one terminal actor-owned RIB export-policy transition.
@@ -10687,7 +10725,7 @@ mod tests {
     #[test]
     fn dirty_resync_outcomes_are_exported_at_zero_before_any_tick() {
         let text = gather_text(&BgpMetrics::new());
-        for outcome in ["cleared", "still_dirty"] {
+        for outcome in ["cleared", "still_dirty", "owing"] {
             let series = format!("bgp_rib_dirty_resync_total{{outcome=\"{outcome}\"}} 0");
             assert!(text.lines().any(|line| line == series), "missing {series}");
         }

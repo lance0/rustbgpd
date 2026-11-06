@@ -378,7 +378,8 @@ struct StallOutcome {
     retained: Vec<usize>,
     /// Unique route-vector bytes queued across the stalled receivers.
     bytes: usize,
-    dirty: bool,
+    /// Every stalled receiver owes keys and none is dirty.
+    owing: bool,
 }
 
 /// `rounds` churn rounds of `T1_KEYS` private EVPN keys toward `T1_STALLED`
@@ -422,14 +423,14 @@ fn stalled_private_evpn(rounds: u32, fresh: bool) -> StallOutcome {
         charged: Vec::new(),
         retained: Vec::new(),
         bytes: 0,
-        dirty: true,
+        owing: true,
     };
     let mut all = Vec::new();
     for (peer, rx) in &mut stalled {
         outcome.charged.push(manager.outbound_credit_rows(*peer));
         let queued = held(rx);
         outcome.retained.push(rows(&queued));
-        outcome.dirty &= manager.dirty_peers.contains(peer);
+        outcome.owing &= manager.owing(*peer).is_some() && !manager.dirty_peers.contains(peer);
         all.extend(queued);
     }
     outcome.bytes = pinned_bytes(&all);
@@ -460,8 +461,8 @@ fn stalled_private_receivers_pin_bytes_flat_in_churn_rounds() {
         );
         for outcome in [&short, &long] {
             assert!(
-                outcome.dirty,
-                "fresh={fresh}: credit refusals leave the peers dirty"
+                outcome.owing,
+                "fresh={fresh}: spent credit leaves the peers owing keys, not dirty"
             );
             for (&charged, &retained) in outcome.charged.iter().zip(&outcome.retained) {
                 assert!(
@@ -531,7 +532,7 @@ fn stalled_receiver_otc_diagnostics_are_charged_and_bounded() {
         "{} rows retained against {CREDIT}",
         rows(&queued)
     );
-    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.owing(peer).is_some() && !manager.dirty_peers.contains(&peer));
 }
 
 fn latches(updates: &[OutboundRouteUpdate]) -> std::collections::BTreeSet<usize> {
@@ -1034,31 +1035,28 @@ fn whole_table_operations_and_markers_ignore_exhausted_credit() {
         send_all(&mut rx).is_empty(),
         "an ordinary update needs credit"
     );
-    assert!(manager.dirty_peers.contains(&peer));
+    assert!(
+        manager.owes(peer, (Afi::Ipv4, Safi::Unicast)) && !manager.dirty_peers.contains(&peer),
+        "it is owed, without a resync"
+    );
 }
 
-/// `bgp_outbound_commit_refusals_total{reason="outbound_credit"}`, summed.
-fn credit_refusals(manager: &RibManager) -> f64 {
-    manager
-        .metrics
-        .registry()
-        .gather()
-        .into_iter()
-        .filter(|family| family.name() == "bgp_outbound_commit_refusals_total")
-        .flat_map(|family| family.get_metric().to_vec())
-        .filter(|metric| {
-            metric
-                .get_label()
-                .iter()
-                .any(|label| label.name() == "reason" && label.value() == "outbound_credit")
-        })
-        .map(|metric| metric.get_counter().get_value())
-        .sum()
+/// The family `drive_producers` names `family`.
+fn producer_family(family: &str) -> (Afi, Safi) {
+    match family {
+        "unicast" => (Afi::Ipv4, Safi::Unicast),
+        "evpn" => (Afi::L2Vpn, Safi::Evpn),
+        "flowspec" => (Afi::Ipv4, Safi::FlowSpec),
+        "bgp-ls" => (Afi::BgpLs, Safi::BgpLs),
+        "vpn" => (Afi::Ipv4, Safi::MplsVpn),
+        "labeled" => (Afi::Ipv4, Safi::LabeledUnicast),
+        _ => (Afi::Ipv4, Safi::RtConstrain),
+    }
 }
 
 /// Drive each private-family producer toward one peer; per family, the
-/// peer's staging entries, whether it ended dirty, and whether anything was
-/// queued for it.
+/// peer's staging entries, whether it now owes that family (keys or the
+/// whole family), and whether anything was queued for it.
 fn drive_producers(credit: usize, rtc: bool) -> Vec<(&'static str, usize, bool, bool)> {
     // RT-Constrain filters VPN and EVPN export, so it runs on its own peer.
     let families = if rtc {
@@ -1142,7 +1140,6 @@ fn drive_producers(credit: usize, rtc: bool) -> Vec<(&'static str, usize, bool, 
             continue;
         }
         let before = manager.outbound_stagings(peer);
-        let refusals = credit_refusals(&manager);
         manager.handle_update(update);
         drain_route_chunks(&mut manager);
         send_all(&mut source);
@@ -1150,35 +1147,36 @@ fn drive_producers(credit: usize, rtc: bool) -> Vec<(&'static str, usize, bool, 
         outcome.push((
             family,
             manager.outbound_stagings(peer) - before,
-            credit_refusals(&manager) > refusals,
+            manager.owes(peer, producer_family(family)),
             sent,
         ));
+        assert!(
+            !manager.dirty_peers.contains(&peer),
+            "{family}: spent credit owes the family; the peer stays clean"
+        );
     }
     outcome
 }
 
 /// T5. A private peer with no credit stages nothing in any family's
 /// ordinary producer: unicast, EVPN, `FlowSpec`, BGP-LS, VPN, labeled unicast
-/// and RT-Constrain each refuse before building an envelope, counted as a
-/// credit refusal, where a peer with credit stages and receives each. Red
-/// without the preflight: every producer stages first and is refused at
-/// the send.
+/// and RT-Constrain each stop before building an envelope and owe the pass
+/// instead (keys, or the whole family for `FlowSpec`, BGP-LS and
+/// RT-Constrain), leaving the peer clean, where a peer with credit stages
+/// and receives each. Red without the gate: every producer stages first.
 #[test]
 fn producers_stage_nothing_for_a_peer_without_credit() {
     for rtc in [false, true] {
-        for (family, stagings, dirty, sent) in drive_producers(1 << 20, rtc) {
+        for (family, stagings, owed, sent) in drive_producers(1 << 20, rtc) {
             assert!(stagings > 0, "{family}: the control peer stages");
-            assert!(
-                sent && !dirty,
-                "{family}: the control peer receives, unrefused"
-            );
+            assert!(sent && !owed, "{family}: the control peer receives it");
         }
-        for (family, stagings, dirty, _) in drive_producers(0, rtc) {
+        for (family, stagings, owed, _) in drive_producers(0, rtc) {
             assert_eq!(
                 stagings, 0,
                 "{family}: a peer without credit stages nothing"
             );
-            assert!(dirty, "{family}: the pass is refused for credit");
+            assert!(owed, "{family}: the pass is owed");
         }
     }
 }
@@ -1256,8 +1254,9 @@ fn fresh_passes(manager: &mut RibManager, first: u32, passes: u32, evpn: bool) {
 /// T6. Receivers that lag but drain never go dirty: three cycles of a stall
 /// for `k` 1,024-row passes with `k · 1,024` below the credit, each then
 /// drained, for private unicast and EVPN. A stall past twice the credit
-/// does go dirty. Red without the credit check: the long stall stays under
-/// the 4,096-envelope bound and never goes dirty.
+/// is bounded by it: the receiver owes the rest of the passes (and never
+/// goes dirty). Red without the credit check: the long stall stays under
+/// the 4,096-envelope bound and owes nothing.
 #[test]
 fn lagging_receivers_within_credit_never_go_dirty() {
     const CREDIT: usize = 8_192;
@@ -1280,6 +1279,7 @@ fn lagging_receivers_within_credit_never_go_dirty() {
                 })
                 .collect();
             let mut dirty = 0;
+            let mut owing = 0;
             let mut next = 0;
             for _ in 0..cycles {
                 for _ in 0..stall {
@@ -1290,24 +1290,30 @@ fn lagging_receivers_within_credit_never_go_dirty() {
                         .iter()
                         .filter(|(peer, _)| manager.dirty_peers.contains(peer))
                         .count();
+                    owing += receivers
+                        .iter()
+                        .filter(|(peer, _)| manager.owing(*peer).is_some())
+                        .count();
                 }
                 for (_, rx) in &mut receivers {
                     send_all(rx);
                 }
             }
-            dirty
+            (dirty, owing)
         };
         let within = u32::try_from(CREDIT / 1024).unwrap() - 1;
         assert_eq!(
             run(within, 3),
-            0,
-            "evpn={evpn}: a {within}-pass stall stays clean"
+            (0, 0),
+            "evpn={evpn}: a {within}-pass stall stays clean and owes nothing"
         );
         let past = 2 * u32::try_from(CREDIT / 1024).unwrap() + 1;
-        assert!(
-            run(past, 1) > 0,
-            "evpn={evpn}: a {past}-pass stall goes dirty"
+        let (dirty, owing) = run(past, 1);
+        assert_eq!(
+            dirty, 0,
+            "evpn={evpn}: a {past}-pass stall never goes dirty"
         );
+        assert!(owing > 0, "evpn={evpn}: a {past}-pass stall owes keys");
     }
 }
 
@@ -1356,17 +1362,20 @@ fn shutdown_withdrawals_bypass_spent_credit_after_begin_close() {
         (
             evpn_withdrawals(&queued),
             manager.dirty_peers.contains(&peer),
+            manager.owed_key_count(peer, super::super::outbound_owing::OwedFamily::EVPN),
         )
     };
     assert_eq!(
         run(true, false),
-        (20, false),
+        (20, false, 0),
         "all 20 queued ahead of the close"
     );
-    let (queued, dirty) = run(false, false);
-    assert_eq!(queued, 0, "spent credit refuses them without BeginClose");
-    assert!(dirty);
-    let (queued, dirty) = run(true, true);
+    assert_eq!(
+        run(false, false),
+        (0, false, 20),
+        "without BeginClose spent credit leaves them owed, not sent"
+    );
+    let (queued, dirty, _) = run(true, true);
     assert_eq!(queued, 0, "a full channel still refuses them");
     assert!(dirty);
 }
@@ -1698,7 +1707,10 @@ fn row_credit_follows_the_registered_peer_count() {
         send_all(&mut rx).is_empty(),
         "the retained excess refuses it"
     );
-    assert!(manager.dirty_peers.contains(&peer));
+    assert!(
+        manager.owing(peer).is_some() && !manager.dirty_peers.contains(&peer),
+        "it is owed"
+    );
 
     // Deregistered with the charge retained: it still counts on return.
     manager.handle_update(RibUpdate::PeerDown {
@@ -1714,6 +1726,11 @@ fn row_credit_follows_the_registered_peer_count() {
     assert!(send_all(&mut rx).is_empty(), "still over the credit");
     drop(filled);
     assert_eq!(manager.outbound_credit_rows(peer), 0);
+    manager.resync_dirty_peers_bounded();
+    assert!(
+        !send_all(&mut rx).is_empty(),
+        "the owed key is sent once the excess drops"
+    );
     routes_received(&mut manager, vec![source_route(2)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert!(
@@ -1783,7 +1800,7 @@ fn peers_that_become_private_are_held_to_the_fleet_credit() {
             send_all(&mut peers[index].1).is_empty(),
             "{peer} refused at the fleet credit"
         );
-        assert!(manager.dirty_peers.contains(&peer));
+        assert!(manager.owing(peer).is_some(), "{peer} owes the key");
     }
     assert!(
         !send_all(&mut peers[2].1).is_empty(),
@@ -2078,18 +2095,14 @@ fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
         kept.extend(held(&mut rx));
         *round += 1;
     };
-    for _ in 0..CREDIT {
-        if manager.outbound_credit_rows(peer) >= CREDIT {
-            break;
-        }
-        pass(&mut manager, &mut kept, &mut round);
-    }
-    assert!(
-        manager.outbound_credit_rows(peer) >= CREDIT,
-        "the credit fills"
-    );
+    // The stalled envelopes hold the whole credit, and the peer is dirty
+    // (spent credit alone now owes keys instead; any other refusal still
+    // takes the resync path).
     pass(&mut manager, &mut kept, &mut round);
-    assert!(manager.dirty_peers.contains(&peer), "refused for credit");
+    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), CREDIT);
+    manager.mark_outbound_dirty(peer);
+    // A pass the dirty peer misses gives its resync a diff to send.
+    pass(&mut manager, &mut kept, &mut round);
     manager.resync_dirty_peers_bounded();
     assert!(
         manager.outbound_operation_live(peer),
@@ -2098,14 +2111,15 @@ fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
     let before = manager.outbound_stagings(peer);
     for _ in 0..5 {
         pass(&mut manager, &mut kept, &mut round);
-        assert!(manager.dirty_peers.contains(&peer));
+        // Still dirty behind its resync, or, once it commits, owing.
+        assert!(manager.dirty_peers.contains(&peer) || manager.owing(peer).is_some());
     }
     assert!(
         manager.outbound_stagings(peer) - before <= 1,
         "{} stagings over five passes",
         manager.outbound_stagings(peer) - before
     );
-    drop(kept);
+    drop((kept, spent));
 }
 
 /// Commit refusals counted with `reason`, summed over peers.
@@ -2275,6 +2289,10 @@ async fn deferred_work_runs_soon_after_the_latch_drops_under_ingest() {
 /// VPN, and the per-family producers stage nothing for it. Red with the preflight ahead
 /// of the family check: the unrelated change schedules a resync.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript checks all four unrelated-family producers under spent credit"
+)]
 fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
     let v6_flowspec = || {
         let mut route = make_flowspec_route(SOURCE);
@@ -2364,6 +2382,12 @@ fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
         assert!(
             !manager.dirty_peers.contains(&peer),
             "{name}: no resync owed"
+        );
+        assert!(manager.owing(peer).is_none(), "{name}: no key debt");
+        assert_eq!(
+            manager.take_owing_log(peer),
+            [],
+            "{name}: no transient debt"
         );
         // The unicast pass walks its changed prefixes for every peer and
         // finds none the peer negotiated; the other producers skip it.
@@ -3053,22 +3077,24 @@ fn received(peer: PeerId, announced: Vec<Route>, evpn_announced: Vec<EvpnRibRout
 /// End-of-RIB from another source are still applied, in order. `evpn` runs
 /// the batches through the private EVPN path; `credit` caps every peer's
 /// row credit, so the other source, which never reads its own channel,
-/// spends its credit and is refused while the rest goes on. Red with any
-/// wait on a stalled peer in the actor, such as reserving a slot on every
-/// peer's channel before each turn.
-async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>) -> BgpMetrics {
+/// spends its credit (and owes the rest) while the rest goes on; `None`
+/// sizes the credit as production does, whatever the suite's override.
+/// Returns what the other source owes at the end. Red with any wait on a
+/// stalled peer in the actor, such as reserving a slot on every peer's
+/// channel before each turn.
+async fn assert_held_peer_never_holds_the_rib(
+    evpn: bool,
+    credit: Option<usize>,
+) -> crate::update::OutboundOwed {
     let (tx, rx) = mpsc::channel(64);
-    let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(
         rx,
         dummy_query_rx(),
         None,
         Some(Ipv4Addr::new(10, 0, 0, 100)),
-        metrics.clone(),
+        BgpMetrics::new(),
     );
-    if let Some(credit) = credit {
-        manager = manager.with_outbound_row_credit(credit);
-    }
+    manager.outbound_row_credit_override = credit;
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let families = if evpn {
@@ -3149,37 +3175,60 @@ async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>)
         receive_wanted(&mut healthy_rx, wanted, announced_prefixes).await,
         "input after the other source's End-of-RIB was not applied"
     );
+    let (reply, owed) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPeerOutboundOwed {
+        peer: peer_v4(other),
+        reply,
+    })
+    .await
+    .unwrap();
+    let other_owed = owed.await.unwrap();
     drop(tx);
     let _ = handle.await;
-    metrics
+    other_owed
 }
 
-/// The other source of [`assert_held_peer_never_holds_the_rib`] reads none
-/// of its updates, so with a small credit it is refused.
-fn assert_other_source_refused(metrics: &BgpMetrics) {
-    let refused = counter_metric_value(
-        metrics,
-        "bgp_outbound_commit_refusals_total",
-        &[
-            ("peer", &peer_v4(Ipv4Addr::new(10, 0, 0, 2)).label()),
-            ("reason", "outbound_credit"),
-        ],
+/// The small-credit arms: the unread other source holds at least its whole
+/// credit in queued rows and owes the rest, without a resync.
+fn assert_other_source_credit_spent(owed: &crate::update::OutboundOwed, credit: usize) {
+    assert!(
+        owed.credit_rows >= credit,
+        "the other source's credit was spent: {} rows held against {credit}",
+        owed.credit_rows
     );
-    assert!(refused > 0.0, "the other source's credit was spent");
+    assert!(!owed.owed.is_empty(), "the other source owes the rest");
+    assert!(!owed.resync, "spent credit owes routes, not a resync");
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
-    assert_held_peer_never_holds_the_rib(false, None).await;
+    assert!(
+        assert_held_peer_never_holds_the_rib(false, None)
+            .await
+            .owed
+            .is_empty(),
+        "the production credit holds the other source's routes"
+    );
 }
 
+/// The other source of [`assert_held_peer_never_holds_the_rib`] reads none
+/// of its updates, so with a small credit it is owed routes.
 #[tokio::test(start_paused = true)]
 async fn a_held_peer_with_spent_credit_never_holds_the_rib() {
-    assert_other_source_refused(&assert_held_peer_never_holds_the_rib(false, Some(4)).await);
+    assert_other_source_credit_spent(
+        &assert_held_peer_never_holds_the_rib(false, Some(4)).await,
+        4,
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_held_private_evpn_peer_never_holds_the_rib() {
-    assert_held_peer_never_holds_the_rib(true, None).await;
-    assert_other_source_refused(&assert_held_peer_never_holds_the_rib(true, Some(4)).await);
+    assert_eq!(
+        assert_held_peer_never_holds_the_rib(true, None).await.owed,
+        []
+    );
+    assert_other_source_credit_spent(
+        &assert_held_peer_never_holds_the_rib(true, Some(4)).await,
+        4,
+    );
 }

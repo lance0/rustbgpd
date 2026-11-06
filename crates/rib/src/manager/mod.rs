@@ -25,6 +25,7 @@ mod graceful_restart;
 mod helpers;
 mod lease_expiry;
 mod outbound_credit;
+mod outbound_owing;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
@@ -677,6 +678,17 @@ pub struct RibManager {
     /// a peer without credit stages nothing.
     #[cfg(test)]
     outbound_stagings: HashMap<PeerId, usize>,
+    /// Peers owing private-family keys or whole families
+    /// (`outbound_owing`), drained round-robin by the resync tick.
+    owing_peers: BTreeSet<PeerId>,
+    /// Ring position of the owed-key drain: the last peer it visited.
+    owing_cursor: Option<PeerId>,
+    /// Fixed floor of every owed set's byte cap, for tests and bench builds.
+    owing_theta_floor: Option<usize>,
+    /// Owed keys and whole families recorded since the last read, so the
+    /// oracles can scope their relaxation to logged deferrals.
+    #[cfg(test)]
+    owing_log: HashMap<PeerId, outbound_owing::OwingLog>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
     /// `handle_peer_graceful_restart` discard a teardown whose stamped id
@@ -2803,6 +2815,11 @@ impl RibManager {
             outbound_latch_released: Arc::default(),
             #[cfg(test)]
             outbound_stagings: HashMap::new(),
+            owing_peers: BTreeSet::new(),
+            owing_cursor: None,
+            owing_theta_floor: None,
+            #[cfg(test)]
+            owing_log: HashMap::new(),
             flush_poll_budget: initial_flush_poll_budget(),
             actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),
@@ -4046,6 +4063,12 @@ impl RibManager {
     /// message makes it runnable and the next event loop turn arms this timer
     /// again.
     fn resync_tick_pending(&self) -> bool {
+        self.resync_tick_pending_unowed() || self.owing_runnable() || self.owing_latch_pending()
+    }
+
+    /// [`Self::resync_tick_pending`] apart from owed keys: dirty peers and
+    /// every other retry.
+    fn resync_tick_pending_unowed(&self) -> bool {
         self.dirty_peers.iter().any(|&peer| {
             self.replacement_checkpoint(false);
             !self.selection_partial_caught_up(peer)
@@ -4068,6 +4091,16 @@ impl RibManager {
             || self.deferred_refresh_pending()
     }
 
+    /// The outcome label of a resync tick that re-arms: `still_dirty` while
+    /// a dirty peer or another retry waits, `owing` when only owed keys do.
+    fn resync_rearm_outcome(&self) -> &'static str {
+        if self.resync_tick_pending_unowed() {
+            "still_dirty"
+        } else {
+            "owing"
+        }
+    }
+
     /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
     /// one peer/family; dirty peers are handed to `distribute_changes` in
     /// one-peer slices until the poll's wall-clock budget elapses.
@@ -4087,6 +4120,18 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a successful
     /// send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // Owing peers keep the tick at the backlog cadence to see returned
+        // credit; while none of them can progress and nothing else waits, a
+        // tick is a cheap scan with no executor handoff.
+        if !self.owing_peers.is_empty()
+            && !self.resync_tick_pending_unowed()
+            && !self.owing_tick_due()
+        {
+            // Polling for returned credit at the backlog cadence; owed work
+            // that waits only on a latch keeps the ordinary interval, and
+            // the latch release wakes the tick.
+            return self.owing_runnable();
+        }
         // A whole member replay can outlive the tick's peer-stride budget.
         // Activate its existing interior checkpoints on every timer arm.
         with_executor_handoff(|| {
@@ -4106,8 +4151,15 @@ impl RibManager {
         self.retry_pending_inbound_refresh_bounded();
         self.flush_helper_stale_exempt(&HashSet::new());
         self.retry_evpn_feed_markers_bounded();
-        // Refresh-only retries and the dirty slices share one poll budget.
+        // Owed-key drains, refresh-only retries and the dirty slices share
+        // one poll budget. Owing peers keep the tick at the backlog
+        // cadence, polling for returned credit.
         let poll_start = std::time::Instant::now();
+        // Each lane takes at least one unit of work per tick before it
+        // checks the shared budget, so owed keys never starve the dirty
+        // ring or the refresh retries behind them.
+        let recovered = self.drain_owing_bounded(poll_start) || recovered;
+        let recovered = self.owing_runnable() || recovered;
         let recovered = self.retry_deferred_refreshes(poll_start) || recovered;
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
@@ -5230,6 +5282,10 @@ impl RibManager {
                     end_of_rib: sorted(self.pending_eor.get(&peer)),
                     live_operation: self.outbound_operation_live(peer),
                     credit_rows: self.outbound_credit_rows(peer),
+                    owed_pending: self
+                        .owing(peer)
+                        .map_or_else(Vec::new, outbound_owing::PeerOwing::rendered),
+                    owed: self.take_owing_log(peer),
                 });
             }
             #[cfg(test)]
@@ -7078,11 +7134,24 @@ impl RibManager {
             }
 
             // Arm the resync timer when resync work transitions none → some.
-            if self.resync_tick_pending() && !resync_armed {
+            // Owed keys drain at the backlog cadence, including when other
+            // work already armed the ordinary interval: credit returns
+            // without telling the RIB, so the tick is what notices it.
+            if !resync_armed && self.resync_tick_pending() {
+                let interval = if self.owing_runnable() {
+                    DIRTY_RESYNC_BACKLOG_INTERVAL
+                } else {
+                    DIRTY_RESYNC_INTERVAL
+                };
                 resync_sleep
                     .as_mut()
-                    .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
+                    .reset(tokio::time::Instant::now() + interval);
                 resync_armed = true;
+            } else if resync_armed && self.owing_runnable() {
+                let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                if resync_sleep.deadline() > soon {
+                    resync_sleep.as_mut().reset(soon);
+                }
             }
 
             // Arm the GR timer to the nearest stale deadline.
@@ -7250,7 +7319,8 @@ impl RibManager {
                 let backlog =
                     self.traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
                 if self.resync_tick_pending() {
-                    self.metrics.record_rib_dirty_resync("still_dirty");
+                    self.metrics
+                        .record_rib_dirty_resync(self.resync_rearm_outcome());
                     let interval = if backlog {
                         DIRTY_RESYNC_BACKLOG_INTERVAL
                     } else {
@@ -7443,7 +7513,7 @@ impl RibManager {
 
                         // Reset for next tick if work remains, otherwise disarm.
                         if self.resync_tick_pending() {
-                            self.metrics.record_rib_dirty_resync("still_dirty");
+                            self.metrics.record_rib_dirty_resync(self.resync_rearm_outcome());
                             let interval = if backlog {
                                 DIRTY_RESYNC_BACKLOG_INTERVAL
                             } else {

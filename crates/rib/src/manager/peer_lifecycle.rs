@@ -1204,6 +1204,47 @@ impl RibManager {
         }
     }
 
+    /// Send `rows` (each wire row with the carried keys it withdraws) as
+    /// chunks admitted and retired one at a time, adding each admitted
+    /// chunk's keys to `done`: a set larger than the peer's credit drains a
+    /// chunk per credit window instead of waiting for room for all of it.
+    /// Returns `false` at the first refused chunk (a full writer or spent
+    /// credit), which keeps it and the rest for the next tick.
+    fn send_helper_stale_chunks(
+        &mut self,
+        peer: PeerId,
+        snapshot: &Arc<dyn crate::update::ExactExportSnapshot>,
+        rows: std::collections::BTreeMap<(Prefix, u32), Vec<(Prefix, u32)>>,
+        done: &mut Vec<(Prefix, u32)>,
+    ) -> bool {
+        let mut rows = rows.into_iter().peekable();
+        while rows.peek().is_some() {
+            let chunk: Vec<_> = rows
+                .by_ref()
+                .take(crate::outbound_credit::CHUNK_ROWS)
+                .collect();
+            let update = OutboundRouteUpdate {
+                exact_export_snapshot: Some(Arc::clone(snapshot)),
+                withdraw: chunk.iter().map(|(row, _)| *row).collect(),
+                ..OutboundRouteUpdate::default()
+            };
+            if !self.send_helper_stale_withdrawals(peer, update) {
+                return false;
+            }
+            // Queued, or the channel already closed: either way the session
+            // may end before the peer reads it, so the hold's ledger keeps
+            // the keys for the next carry.
+            let withdrawn: Vec<_> = chunk.into_iter().flat_map(|(_, keys)| keys).collect();
+            done.extend(withdrawn.iter().copied());
+            self.record_hold_exempt_withdrawn(
+                super::HoldWithdrawOwner::Peer(peer),
+                withdrawn,
+                "helper_stale_exempt",
+            );
+        }
+        true
+    }
+
     /// Credit preflight for a helper flush toward `peer`: spent ordinary
     /// credit would refuse the withdrawals, so count the refusal, walk
     /// nothing and keep the whole set, re-checked once credit is back,
@@ -1267,8 +1308,10 @@ impl RibManager {
             // every path of the ended session is the prefix's one key. A key
             // the session advertises is its own now. One whose prefix still
             // has a route, or whose family an ORF gate holds, waits.
-            let mut withdraw = std::collections::BTreeSet::new();
-            let mut withdrawn = Vec::new();
+            // Each wire row with the carried keys it withdraws: without
+            // Add-Path, every path of a prefix is its one row.
+            let mut withdraw =
+                std::collections::BTreeMap::<(Prefix, u32), Vec<(Prefix, u32)>>::new();
             let mut done = Vec::new();
             // Whether each family's keys retire depends only on the family.
             let mut retired_families: Vec<((Afi, Safi), bool)> = Vec::new();
@@ -1309,34 +1352,11 @@ impl RibManager {
                         orf_blocked.push(family);
                     }
                 } else if !self.desires_unicast_prefix(peer, prefix) {
-                    withdraw.insert((prefix, path_id));
-                    withdrawn.push(key);
-                    done.push(key);
+                    withdraw.entry((prefix, path_id)).or_default().push(key);
                 }
             }
-            let update = OutboundRouteUpdate {
-                exact_export_snapshot: Some(encoder.snapshot()),
-                withdraw: withdraw.into_iter().collect(),
-                ..OutboundRouteUpdate::default()
-            };
-            // A full writer or exhausted credit keeps the whole set for the
-            // next tick, which re-walks it.
-            if !update.withdraw.is_empty() && !self.send_helper_stale_withdrawals(peer, update) {
-                if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
-                    carried.settled = false;
-                }
-                continue;
-            }
-            // Queued, or the channel already closed: either way the session
-            // may end before the peer reads it, so the hold's ledger keeps
-            // the keys for the next carry.
-            if !withdrawn.is_empty() {
-                self.record_hold_exempt_withdrawn(
-                    super::HoldWithdrawOwner::Peer(peer),
-                    withdrawn,
-                    "helper_stale_exempt",
-                );
-            }
+            let snapshot = encoder.snapshot();
+            let refused = !self.send_helper_stale_chunks(peer, &snapshot, withdraw, &mut done);
             let Some(carried) = self.helper_stale_exempt.get_mut(&peer) else {
                 continue;
             };
@@ -1345,6 +1365,8 @@ impl RibManager {
             }
             if carried.keys.is_empty() {
                 self.helper_stale_exempt.remove(&peer);
+            } else if refused {
+                carried.settled = false;
             } else {
                 carried.settled = true;
                 carried.orf_blocked = orf_blocked;
@@ -1590,6 +1612,9 @@ impl RibManager {
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
+        // Owed keys belong to the ended session; a new one's initial table
+        // owns its state.
+        self.drop_peer_owing(peer);
         self.pending_inbound_refresh.remove(&peer);
         if self.pending_inbound_refresh.is_empty() {
             self.pending_inbound_refresh_cursor = None;
@@ -2437,6 +2462,9 @@ impl RibManager {
         self.initialize_outbound_registration_gauges(peer);
         self.outbound_peers.insert(peer, outbound_tx);
         self.register_outbound_credit(peer);
+        // A registration starts from its initial table: nothing owed to an
+        // earlier session carries over, even under a reused session id.
+        self.drop_peer_owing(peer);
         self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),

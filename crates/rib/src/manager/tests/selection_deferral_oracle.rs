@@ -178,13 +178,16 @@ enum Op {
         received: bool,
         exclusive: bool,
     },
-    /// Free the writer and run the receiver's dirty resync now, so every
-    /// change held behind backpressure lands in one pass.
+    /// Free the writer and run the resync timer to retry changes held
+    /// behind backpressure.
     Resync,
     Backpressure(bool),
-    /// Free the writer; the receiver's dirty retry then fails its
-    /// admission-proof allocation.
-    RefuseProof,
+    /// Free the writer and require dirty recovery with a refused
+    /// admission-proof allocation. Random traces may need no allocation;
+    /// dedicated refusal cases require one to fail.
+    RefuseProof {
+        required: bool,
+    },
     Drain,
     /// The receiver's session ends and re-establishes on a new channel and
     /// session id, as the transport does. The dying session decides what
@@ -434,7 +437,7 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         8 => intent_strategy(),
         2 => any::<bool>().prop_map(Op::Backpressure),
-        2 => Just(Op::RefuseProof),
+        2 => Just(Op::RefuseProof { required: false }),
         2 => Just(Op::Drain),
         1 => Just(Op::Resync),
         2 => (
@@ -972,19 +975,37 @@ impl Harness {
                 }
             }
             Op::Backpressure(false) => self.occupied.clear(),
-            Op::RefuseProof => {
-                // Freeing the writer starts the dirty retry that is refused.
+            Op::RefuseProof { required } => {
                 self.occupied.clear();
+                let refusals = |manager: &RibManager| {
+                    counter_metric_value(
+                        &manager.metrics,
+                        "bgp_update_group_recovery_fallback_total",
+                        &[("cause", "allocation_failure")],
+                    )
+                };
+                let before = refusals(&self.manager);
+                // Dirty marking can itself capture grouped OLD, so arm
+                // the refusal before entering the dirty recovery path.
                 self.manager
                     .pending_group_admitted
                     .fail_next_allocation_for_test();
+                self.manager.mark_outbound_dirty(peer_v4(OBSERVER));
                 self.manager.distribute_changes_to_targets(
                     &HashSet::new(),
                     &HashSet::from([peer_v4(OBSERVER)]),
                 );
+                let refused = refusals(&self.manager) > before;
                 self.manager
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
+                if required {
+                    assert!(refused, "the transcript must refuse admission proof");
+                } else if !refused {
+                    eprintln!(
+                        "RefuseProof: no proof allocation was refused; disarmed the optional injection"
+                    );
+                }
             }
             Op::Tag {
                 prefix: index,
@@ -994,10 +1015,9 @@ impl Harness {
             } => self.tag(index, path, received, exclusive),
             Op::Resync => {
                 self.occupied.clear();
-                self.manager.distribute_changes_to_targets(
-                    &HashSet::new(),
-                    &HashSet::from([peer_v4(OBSERVER)]),
-                );
+                if self.manager.resync_tick_pending() {
+                    self.manager.resync_dirty_peers_bounded();
+                }
             }
             Op::Reconnect { .. } if self.registered => self.reconnect(op),
             // A receiver whose first session is still to come has none to
@@ -1596,12 +1616,16 @@ impl Harness {
 
     fn drain(&mut self) -> Checked {
         for _ in 0..DRAIN_ROUNDS {
-            self.manager
-                .distribute_changes(&HashSet::new(), &HashSet::new());
-            if self.observe()? == 0 {
+            self.observe()?;
+            if !self.manager.resync_tick_pending() {
                 break;
             }
+            // An empty dirty replay can make carried helper withdrawals
+            // runnable only on the next tick. The actor re-arms for that
+            // work even when this tick emitted no envelope.
+            self.manager.resync_dirty_peers_bounded();
         }
+        self.observe()?;
         Ok(())
     }
 
@@ -2335,7 +2359,7 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
             preference: 0,
             blackhole: false,
         },
-        Op::RefuseProof,
+        Op::RefuseProof { required: true },
         delete.clone(),
         Op::Drain,
     ];
@@ -2635,6 +2659,8 @@ fn pre_hold_flap_leaves_a_deleted_rtbh_stale() {
 /// that route is deleted too, the next flush withdraws the stale RTBH
 /// inside the hold. Red proof: dropping the waiting keys after the first
 /// flush leaves it until release.
+/// This fresh private session needs no common admission-proof allocation:
+/// the control exercises carried-key coverage without injecting a failure.
 #[test]
 fn waiting_stale_rtbh_leaves_once_its_prefix_has_no_route() {
     let reconnect = Op::Reconnect {
@@ -2668,7 +2694,10 @@ fn waiting_stale_rtbh_leaves_once_its_prefix_has_no_route() {
                 },
                 reconnect.clone(),
                 Op::Delete { prefix: 2, path: 0 },
-                Op::RefuseProof,
+                // Catch up the session, then run the re-armed helper flush
+                // while the sibling still covers the carried key.
+                Op::Resync,
+                Op::Resync,
                 Op::Delete { prefix: 2, path: 1 },
                 Op::Drain,
             ],
@@ -2697,7 +2726,8 @@ fn waiting_stale_rtbh_leaves_once_its_prefix_has_no_route() {
                 },
                 reconnect,
                 Op::Delete { prefix: 1, path: 1 },
-                Op::RefuseProof,
+                Op::Resync,
+                Op::Resync,
                 Op::Delete { prefix: 1, path: 0 },
                 Op::Drain,
             ],
@@ -2824,7 +2854,7 @@ fn refused_retry_admitted_rtbh_leaves_the_wire_inside_the_hold() {
             vec![
                 Op::Backpressure(true),
                 host(2, 0),
-                Op::RefuseProof,
+                Op::RefuseProof { required: true },
                 Op::Delete { prefix: 1, path: 2 },
                 Op::Drain,
             ],
@@ -2839,7 +2869,7 @@ fn refused_retry_admitted_rtbh_leaves_the_wire_inside_the_hold() {
                 host(0, 0),
                 Op::Backpressure(true),
                 host(2, 0),
-                Op::RefuseProof,
+                Op::RefuseProof { required: true },
                 host(1, 0),
                 Op::Delete { prefix: 1, path: 0 },
                 Op::Drain,
@@ -3459,7 +3489,7 @@ fn otc_blocked_path_never_takes_the_departing_rtbh_key() {
         }
     }
     assert_eq!(wire, HashMap::from([(1, false), (2, true)]));
-    // A full writer holds every change for one dirty resync.
+    // A full writer owes every change until the resync timer retries it.
     let writer = manager.outbound_peers[&observer].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
     delete(&mut manager, 17);
@@ -3467,7 +3497,7 @@ fn otc_blocked_path_never_takes_the_departing_rtbh_key() {
     inject(&mut manager, local(29, 500, true, true));
     inject(&mut manager, local(31, 400, true, false));
     drop(occupied);
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.resync_dirty_peers_bounded();
     let mut announced = 0;
     while let Ok(update) = rx.try_recv() {
         for key in update.unicast_withdrawals() {

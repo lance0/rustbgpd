@@ -150,12 +150,12 @@ test-integration:
 # The RIB actor bounds a poll by a 25 ms wall-clock budget, so on a fast host
 # its unit tests rarely see a paced resync or a yield between updates, and a
 # barrier that only holds there passes until a loaded host reorders it. This
-# runs the update-group, oracle, outbound-commit and timer modules again with
-# the budget forced to 5 µs, so every update paces.
+# runs the update-group, oracle, outbound-commit, outbound-credit, owed-key and
+# timer modules again with the budget forced to 5 µs, so every update paces.
 
-# Rerun the RIB update-group, oracle, outbound-commit, timer and collision-failback tests with the actor's flush budget forced to 5 µs (seconds, after the rib build).
+# Rerun the RIB update-group, oracle, outbound-commit, outbound-credit, owed-key, timer and collision-failback tests with the actor's flush budget forced to 5 µs (seconds, after the rib build).
 test-rib-paced:
-    RUSTBGPD_TEST_FLUSH_BUDGET_US=5 cargo test --locked -p rustbgpd-rib --lib -- manager::tests::update_groups:: manager::tests::update_groups_oracle:: manager::tests::outbound_commit_accounting:: manager::tests::timer_cutoffs:: manager::tests::selection_deferral::collision_failback_withholds_eor_until_survivor_refresh_converges
+    RUSTBGPD_TEST_FLUSH_BUDGET_US=5 cargo test --locked -p rustbgpd-rib --lib -- manager::tests::update_groups:: manager::tests::update_groups_oracle:: manager::tests::outbound_commit_accounting:: manager::tests::outbound_credit:: manager::tests::outbound_owing:: manager::tests::timer_cutoffs:: manager::tests::selection_deferral::collision_failback_withholds_eor_until_survivor_refresh_converges
 
 # The library and binary docs are selected together so the binary docs reuse
 # the same private library docs.

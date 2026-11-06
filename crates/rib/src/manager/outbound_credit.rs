@@ -16,8 +16,11 @@ use crate::outbound_credit::{
 /// across session generations.
 #[derive(Default)]
 pub(super) struct PeerCredit {
-    credit: Arc<OutboundCredit>,
+    pub(super) credit: Arc<OutboundCredit>,
     latch: Weak<OperationLatch>,
+    /// Keys and families owed to the peer's current session
+    /// (`super::outbound_owing`).
+    pub(super) owing: Option<Box<super::outbound_owing::PeerOwing>>,
 }
 
 impl PeerCredit {
@@ -196,6 +199,7 @@ impl RibManager {
     /// the shutdown drains reach the sessions before their Cease.
     pub(super) fn begin_outbound_close(&mut self) {
         self.outbound_closing = true;
+        self.owing_close_flush();
     }
 
     /// Forget idle credit of peers no longer registered (a deleted

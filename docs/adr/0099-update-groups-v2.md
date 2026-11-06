@@ -498,6 +498,40 @@ parity instead of identical per-key event sequences:
 | Regroup interrupted by an already dirty member or failed admission | The retained old baseline and exact pending duties must converge to the new group view despite incomplete earlier delivery |
 | Ordinary announce fallback after partial shared-encoder failure/cancellation | Previously sent identical announcements may repeat when the announce inventory restarts; completed withdrawals/markers must not restart |
 
+**Amendment (ADR-0145 slice 1b): private-family owed keys.**
+
+When a receiver's outbound credit is exhausted, the RIB records an owed key for
+a private (per-peer Adj-RIB-Out) family instead of staging it. It later stages
+that key once, from current state. The owed key is the prefix or NLRI identity,
+never a path ID.
+
+Each owed key carries a *logged deferral*: a test-build record of (session,
+receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the
+key is drained, absorbed or cancelled, or when a resync covers it.
+
+Inside a logged deferral, for that (receiver, key) pair only:
+
+- The receiver's per-key event sequence must be an ordered **subsequence** of
+  the sequence an unbounded receiver sees over the same interval, and must end in
+  the reference's state at the interval's close.
+- An event is the key's announced row set, compared by NLRI and attributes,
+  ignoring Add-Path path IDs.
+- Intermediate values may be skipped, and a v1→v2→v1 change may produce no
+  event.
+- An event absent from the reference at that position fails. So does a repeat
+  of the previous event.
+
+Every other pair keeps this section's exact per-key equality and its "no
+additional event" rule. That includes keys of the same receiver outside a
+deferral, and every grouped member.
+
+Withdrawals must name a path ID that this receiver currently holds, from its own
+admitted stream, with the exact family. EoR, BoRR/EoRR and the replay terminal
+follow every route of their operation, including the owed keys it absorbed.
+
+The comparison is black-box, against an unbounded-receiver reference arm.
+Staging stamps checked against the product itself are not evidence.
+
 Even these paths forbid spurious withdrawals: withdraw only a key known to have
 been admitted to that receiver and no longer retained, preserving its exact
 family identity. A clean join/regroup, normal RTC change, source promotion, GR

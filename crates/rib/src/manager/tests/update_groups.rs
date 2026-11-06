@@ -5954,7 +5954,8 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     tokio::time::pause();
 
     let metrics = BgpMetrics::new();
-    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let grouped = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
@@ -5966,12 +5967,12 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
-    // Capacity-1 channels so the second announce can't fit and drives the
-    // dirty-resync path.
+    // The private peer has one free slot at its second preflight. Reserve
+    // it at the snapshot so both peers stage and really refuse that send.
     let (g_tx, mut g_rx) = mpsc::channel(1);
-    let (u_tx, mut u_rx) = mpsc::channel(1);
+    let (u_tx, mut u_rx) = mpsc::channel(2);
     for (peer, out_tx, vantage) in [(grouped, g_tx, None), (ungrouped, u_tx, Some(vantage))] {
-        tx.send(RibUpdate::PeerUp {
+        manager.handle_update(RibUpdate::PeerUp {
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
@@ -5988,10 +5989,10 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
             negotiated_llgr_families: Vec::new(),
-        })
-        .await
-        .unwrap();
+        });
     }
+    let fill = FillChannelOnSnapshot::install(&mut manager, ungrouped);
+    let handle = tokio::spawn(manager.run());
     drain_eor(&mut g_rx).await;
     drain_eor(&mut u_rx).await;
     assert_eq!(query_update_group(&tx, grouped).await, "group:0");
@@ -6000,6 +6001,9 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     // First route fits both channels; the second can't, marking both
     // peers dirty. Neither is drained yet.
     for prefix in [prefix1, prefix2] {
+        if prefix == prefix2 {
+            fill.arm();
+        }
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: source,
@@ -6017,6 +6021,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
         // otherwise coalesce into one window that fits both channels.
         let _ = query_best_routes(&tx).await;
     }
+    fill.assert_full();
 
     let pre_grouped = query_neighbor_policy_stats(&tx, grouped).await;
     let pre_ungrouped = query_neighbor_policy_stats(&tx, ungrouped).await;
@@ -6028,6 +6033,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
 
     // Drain the stuck first announce so the resync has room, then fire
     // the dirty-resync timer.
+    fill.release();
     let _ = g_rx.recv().await.map(delivered).unwrap();
     let _ = u_rx.recv().await.map(delivered).unwrap();
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -7397,8 +7403,8 @@ fn full_channel_pass(manager: &mut RibManager, announce: &[u8], withdraw: &[u8])
 }
 
 /// Two members (`stuck`, `live`) holding prefixes 0-2. Four further
-/// announces fill `stuck`'s outbound channel while `live` drains, then a
-/// withdraw of prefix 0 fails to send to `stuck` and marks it dirty.
+/// announces fill `stuck`'s outbound channel while `live` drains. Mark the
+/// blocked member dirty before withdrawing prefix 0 to exercise dirty replay.
 fn full_channel_manager(
     ungrouped: bool,
 ) -> (
@@ -7449,11 +7455,11 @@ fn full_channel_manager(
     }
     assert!(manager.outbound_channel_full(stuck));
     assert!(!manager.dirty_peers.contains(&stuck));
+    // These controls test retry construction and interior readiness once
+    // dirty; clean full-channel owed-key handling has separate coverage.
+    assert!(manager.mark_outbound_dirty(stuck));
     full_channel_pass(&mut manager, &[], &[0]);
-    assert!(
-        manager.dirty_peers.contains(&stuck),
-        "failed send marks dirty"
-    );
+    assert!(manager.dirty_peers.contains(&stuck));
     assert!(!manager.dirty_peers.contains(&live));
     let live_withdraw = live_rx.try_recv().map(delivered).unwrap();
     assert!(
@@ -7678,8 +7684,27 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
         while live_rx.try_recv().is_ok() {}
     }
     assert!(manager.outbound_channel_full(stuck));
+    let fill = if ungrouped {
+        // Deliver one queued row without changing the final route inventory,
+        // then refill its slot only after the withdrawal's preflight.
+        let first = stuck_rx.try_recv().unwrap();
+        assert_eq!(first.announce.len(), 1);
+        assert_eq!(first.unicast_withdrawals().count(), 0);
+        let route = &first.announce[0];
+        held.insert((route.prefix, route.path_id), false);
+        drop(first);
+        assert_eq!(manager.outbound_peers[&stuck].capacity(), 1);
+        let fill = FillChannelOnSnapshot::install(&mut manager, stuck);
+        fill.arm();
+        Some(fill)
+    } else {
+        None
+    };
     assert!(!manager.dirty_peers.contains(&stuck));
     pass(&mut manager, None, Some(0));
+    if let Some(fill) = &fill {
+        fill.assert_full();
+    }
     assert!(
         manager.dirty_peers.contains(&stuck),
         "the refused withdrawal"
@@ -7699,6 +7724,9 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
         );
     }
 
+    if let Some(fill) = &fill {
+        fill.release();
+    }
     apply_enhanced_refresh(&mut stuck_rx, &mut held);
     manager.handle_update(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),
@@ -8247,7 +8275,18 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
 #[test]
 fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
     for (afi, safi, ungrouped) in family_distribution_cases() {
-        let (mut manager, peer, mut receiver, permits) = full_family_receiver(afi, safi, ungrouped);
+        let (mut manager, peer, mut receiver, mut permits) =
+            full_family_receiver(afi, safi, ungrouped);
+        let owned = (safi == Safi::MplsVpn && manager.vpn_grouped_member_of(peer).is_some())
+            || (safi == Safi::Evpn && manager.evpn_grouped_member_of(peer).is_some());
+        let fill = if owned {
+            None
+        } else {
+            drop(permits.pop().unwrap());
+            let fill = FillChannelOnSnapshot::install(&mut manager, peer);
+            fill.arm();
+            Some(fill)
+        };
         let family = vec![(afi, safi)];
         let source = Ipv4Addr::new(192, 0, 2, 42);
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -8262,12 +8301,18 @@ fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
                 announce_family_route(&mut manager, source, safi, 1);
             },
         );
+        if let Some(fill) = &fill {
+            fill.assert_full();
+        }
         assert_eq!(
             captured.lock().unwrap().len(),
             1,
             "{safi:?}: full receiver keeps WARN"
         );
         assert!(manager.dirty_peers.contains(&peer));
+        if let Some(fill) = &fill {
+            fill.release();
+        }
         drop(permits);
         manager.resync_dirty_peers_bounded();
         assert_eq!(
@@ -8326,8 +8371,21 @@ fn full_family_receiver(
 /// it as disabled first and leave a WARN assertion blind.
 fn warm_family_full_warnings(afi: Afi, safi: Safi, ungrouped: bool) {
     warm_full_outbound_warning();
-    let (mut warm, _, _receiver, _permits) = full_family_receiver(afi, safi, ungrouped);
+    let (mut warm, peer, _receiver, mut permits) = full_family_receiver(afi, safi, ungrouped);
+    let owned = (safi == Safi::MplsVpn && warm.vpn_grouped_member_of(peer).is_some())
+        || (safi == Safi::Evpn && warm.evpn_grouped_member_of(peer).is_some());
+    let fill = if owned {
+        None
+    } else {
+        drop(permits.pop().unwrap());
+        let fill = FillChannelOnSnapshot::install(&mut warm, peer);
+        fill.arm();
+        Some(fill)
+    };
     announce_family_route(&mut warm, Ipv4Addr::new(192, 0, 2, 42), safi, 1);
+    if let Some(fill) = &fill {
+        fill.assert_full();
+    }
     tracing::callsite::rebuild_interest_cache();
 }
 
@@ -18043,12 +18101,13 @@ fn vpn_dirty_resync_case(
     while outbound.try_recv().map(delivered).is_ok() {}
     assert_eq!(manager.vpn_grouped_member_of(peer).is_some(), grouped);
     if withdraw_while_dirty {
-        // Hold every free slot so the withdrawal send fails and the peer
-        // goes dirty on the production path, leaving only residue.
+        // Preserve admitted OLD before deleting the whole table. This
+        // control measures dirty replay's key enumeration, not refusal.
         let sender = manager.outbound_peers[&peer].clone();
         let held: Vec<_> = (0..sender.capacity())
             .map(|_| sender.clone().try_reserve_owned().unwrap())
             .collect();
+        assert!(manager.mark_outbound_dirty(peer));
         manager.handle_update(RibUpdate::VpnRoutesReceived {
             peer: peer_v4(Ipv4Addr::new(192, 0, 2, 7)),
             session_id: 0,
