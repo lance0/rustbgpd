@@ -246,6 +246,12 @@ pub fn parse_family(family: &str) -> Option<i32> {
         "ipv6_unicast" | "ipv6-unicast" | "ipv6" => Some(proto::AddressFamily::Ipv6Unicast as i32),
         "ipv4_flowspec" | "ipv4-flowspec" => Some(proto::AddressFamily::Ipv4Flowspec as i32),
         "ipv6_flowspec" | "ipv6-flowspec" => Some(proto::AddressFamily::Ipv6Flowspec as i32),
+        "l3vpn_ipv4_flowspec" | "l3vpn-ipv4-flowspec" => {
+            Some(proto::AddressFamily::L3vpnIpv4Flowspec as i32)
+        }
+        "l3vpn_ipv6_flowspec" | "l3vpn-ipv6-flowspec" => {
+            Some(proto::AddressFamily::L3vpnIpv6Flowspec as i32)
+        }
         "bgpls" | "bgp_ls" | "bgp-ls" | "linkstate" => Some(proto::AddressFamily::BgpLs as i32),
         "bgpls_vpn" | "bgpls-vpn" | "bgp_ls_vpn" | "bgp-ls-vpn" | "linkstate_vpn"
         | "linkstate-vpn" => Some(proto::AddressFamily::BgpLsVpn as i32),
@@ -264,6 +270,8 @@ pub fn format_family(afi_safi: i32) -> &'static str {
         Ok(Family::Ipv6Unicast) => "ipv6_unicast",
         Ok(Family::Ipv4Flowspec) => "ipv4_flowspec",
         Ok(Family::Ipv6Flowspec) => "ipv6_flowspec",
+        Ok(Family::L3vpnIpv4Flowspec) => "l3vpn_ipv4_flowspec",
+        Ok(Family::L3vpnIpv6Flowspec) => "l3vpn_ipv6_flowspec",
         Ok(Family::L2vpnEvpn) => "l2vpn_evpn",
         Ok(Family::BgpLs) => "linkstate",
         Ok(Family::BgpLsVpn) => "linkstate_vpn",
@@ -1635,15 +1643,9 @@ mod tests {
             );
             assert!(labels.insert(label), "{family:?} reuses label {label:?}");
         }
-        // ADR-0146: `l3vpn_ipv4_flowspec` is a configuration family before it
-        // has an `AddressFamily` value; the controller API adds one later.
-        // That value cannot compile without a `format_family` arm, and once
-        // it prints this label the assertion below fails until this filter
-        // is removed.
         let canonical: std::collections::BTreeSet<_> = rustbgpd_wire::CONFIGURED_FAMILIES
             .iter()
             .map(|(label, _, _)| *label)
-            .filter(|label| *label != "l3vpn_ipv4_flowspec")
             .collect();
         assert_eq!(labels, canonical);
     }

@@ -38,6 +38,7 @@ policy by-family {
     term ls { if route.family == bgp-ls { set med 9; accept } }
     term lsvpn { if route.family == bgp-ls-vpn { set med 10; accept } }
     term v4vpnfs { if route.family == vpnv4-flowspec { set med 11; accept } }
+    term v6vpnfs { if route.family == vpnv6-flowspec { set med 12; accept } }
     term rest { accept }
 }
 
@@ -135,6 +136,11 @@ test family-ipv4-flowspec {
 test family-vpnv4-flowspec {
     route { prefix 192.0.2.0/24; family vpnv4-flowspec }
     expect by-family == accept with only med 11
+}
+
+test family-vpnv6-flowspec {
+    route { prefix 2001:db8::/32; family vpnv6-flowspec }
+    expect by-family == accept with only med 12
 }
 
 test family-rtc {

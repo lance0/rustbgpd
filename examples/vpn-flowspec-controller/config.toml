@@ -1,0 +1,35 @@
+# IPv4 and IPv6 VPN FlowSpec controller backend.
+#
+# The controller injects a VPN family, RD 44407:40 and scope RT 44407:777
+# through the existing FlowSpec RPCs. Configure the receiving PE to import
+# that RT into TRANSIT. RD and RT are supplied per rule; rustbgpd has no VRF objects.
+# Re-inject desired rules after a daemon restart and reconcile their scoped
+# read-back. Receiving a BGP rule is not proof of VRF installation or enforcement.
+# See docs/reference/api.md and docs/reference/configuration.md.
+
+[global]
+asn = 44407
+router_id = "192.0.2.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Local gRPC uses the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock, with operator authority for its owner.
+
+[policy]
+rpol_files = ["transit.rpol"]
+
+[[neighbors]]
+address = "192.0.2.21"
+remote_asn = 44407
+description = "pe-transit"
+families = ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]
+required_families = ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]
+export_policy_chain = ["transit-vpn-flowspec"]
+
+# Neither VPN family is enabled by default. Received VPN FlowSpec is decoded
+# and discarded; there is no receive max-prefix setting for these families.

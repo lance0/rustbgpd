@@ -815,7 +815,7 @@ impl AdjRibOut {
         FamilyLens {
             unicast: split(self.routes.len(), second.unicast),
             flowspec: split(
-                self.flowspec_routes.len() - second.flowspec_vpn,
+                self.flowspec_routes.len() - second.flowspec_vpn[0] - second.flowspec_vpn[1],
                 second.flowspec,
             ),
             flowspec_vpn: second.flowspec_vpn,
@@ -911,8 +911,13 @@ impl AdjRibOut {
             .flowspec_routes
             .insert(route.selection_key(), route)
             .is_none();
-        track(&mut self.second_family.flowspec, v6, added, false);
-        track(&mut self.second_family.flowspec_vpn, vpn, added, false);
+        track(&mut self.second_family.flowspec, v6 && !vpn, added, false);
+        track(
+            &mut self.second_family.flowspec_vpn[usize::from(v6)],
+            vpn,
+            added,
+            false,
+        );
     }
 
     /// Remove a `FlowSpec` route by rule. Returns `true` if it existed.
@@ -920,12 +925,12 @@ impl AdjRibOut {
         let removed = self.flowspec_routes.remove(key).is_some();
         track(
             &mut self.second_family.flowspec,
-            key.afi == Afi::Ipv6,
+            key.afi == Afi::Ipv6 && key.rd.is_none(),
             false,
             removed,
         );
         track(
-            &mut self.second_family.flowspec_vpn,
+            &mut self.second_family.flowspec_vpn[usize::from(key.afi == Afi::Ipv6)],
             key.rd.is_some(),
             false,
             removed,

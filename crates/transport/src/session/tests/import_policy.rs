@@ -266,7 +266,7 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
                 24,
             ))),
             deny(Prefix::V6(Ipv6Prefix::new(
-                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                Ipv6Addr::new(0, 0xdb8, 0, 0, 0, 0, 0, 0),
                 32,
             ))),
         ],
@@ -279,12 +279,12 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
     let destless_v4 = destless_rule(6);
     let destless_v6 = destless_rule(17);
     // RFC 8956 §3.1: a non-zero offset shifts the pattern, so this rule
-    // names no destination prefix and the exact 2001:db8::/32 deny above
+    // names no destination prefix and the exact 0:db8::/32 deny above
     // must not match it.
     let offset_v6 = FlowSpecRule {
         components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
             Ipv6PrefixOffset {
-                prefix: Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
+                prefix: Ipv6Prefix::new(Ipv6Addr::new(0, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
                 offset: 16,
             },
         ))],

@@ -1909,16 +1909,26 @@ the peer via MP-BGP capabilities. Supported values:
   RTC interest receives nothing, with RFC-faithful 96-bit prefix matching.
   EVPN routes are filtered by their Route Targets (RFC 7432 §7.10), and
   Type 4 Ethernet Segment routes by their ES-Import RT (§7.6).
-- `"l3vpn_ipv4_flowspec"` — IPv4 VPN FlowSpec (AFI 1, SAFI 134, RFC 8955
-  §8), for originating FlowSpec rules into a PE's VRFs. This release
-  negotiates the family only: received rules are decoded, then discarded and
-  counted in `bgp_vpn_flowspec_nlri_discarded_total`, and are never stored,
-  reflected or validated. The family needs no per-family `max_prefixes` key
-  and is never refreshed. Rule origination follows in a later release
-  ([ADR-0146](../adr/0146-vpn-flowspec.md)). An export policy that matches
-  `route.family == ipv4-flowspec` matches SAFI 133 only, never these VPN
-  rules; use `route.family == vpnv4-flowspec` for VPN rules. IPv6 VPN
-  FlowSpec (AFI 2, SAFI 134) is not supported.
+- `"l3vpn_ipv4_flowspec"` — IPv4 VPN FlowSpec (AFI 1, SAFI 134, RFC 8955 §8)
+- `"l3vpn_ipv6_flowspec"` — IPv6 VPN FlowSpec (AFI 2, SAFI 134, RFC 8956)
+
+  Both families originate controller-injected rules with an explicit RD and
+  scope RTs for a PE's VRF import policy. They share the
+  [ADR-0146 contract](../adr/0146-vpn-flowspec.md); the IPv6 family extends
+  its original IPv4 scope. The daemon has no VRF objects or local VPN
+  dataplane. Received rules are decoded, then discarded and counted in
+  `bgp_vpn_flowspec_nlri_discarded_total`; they are never stored, reflected or
+  validated. Neither family has a per-family `max_prefixes` key. The daemon
+  never requests their routes through route refresh; it does replay its
+  advertised rules when a peer requests a refresh.
+
+  Export-policy `ipv4-flowspec` and `ipv6-flowspec` predicates match SAFI 133
+  only. Use `route.family == vpnv4-flowspec` or
+  `route.family == vpnv6-flowspec` for VPN rules. Neither VPN family is enabled
+  by default, and neither is gated by RT-Constrain. The
+  [VPN controller example](../../examples/vpn-flowspec-controller/config.toml)
+  enables both families with an explicit export policy for TRANSIT's scope RT.
+  Peer receipt does not establish VRF installation or traffic enforcement.
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:
@@ -6183,7 +6193,7 @@ quoting it:
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `min_hold_time` must be 3..=65535 and no greater than a non-zero effective `hold_time` | `invalid min_hold_time` |
 | `send_hold_time` must be 0 (disabled) or greater than the effective `hold_time` (RFC 9687 §4.4) | `invalid send_hold_time` |
-| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, `"rtc"`, or `"l3vpn_ipv4_flowspec"` | `unknown address family` |
+| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, `"rtc"`, `"l3vpn_ipv4_flowspec"`, or `"l3vpn_ipv6_flowspec"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time <value> exceeds 4095 (12-bit max)` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_peer_restart_time_max` must be > 0 | `gr_peer_restart_time_max must be > 0` |

@@ -35,6 +35,8 @@ enum AddressFamily {
   ADDRESS_FAMILY_IPV4_LABELED_UNICAST = 10;
   ADDRESS_FAMILY_IPV6_LABELED_UNICAST = 11;
   ADDRESS_FAMILY_IPV4_RT_CONSTRAIN = 12;
+  ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC = 13;
+  ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC = 14;
 }
 
 enum SessionState {
@@ -4250,6 +4252,8 @@ message ListFlowSpecExportDispositionsRequest {
   uint32 page_size = 3;
   string page_token = 4;
   bool include_configured = 5;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec.
+  string rd = 6;
 }
 
 // The export dispositions of one requested key on one page.
@@ -4378,12 +4382,17 @@ message FlowSpecRouteEntry {
   // The admission revision of a rule added with AddGuardedFlowSpec, set
   // with injection_owner.
   optional uint64 admission_revision = 12;
+  // Lossless Route Distinguisher for VPN FlowSpec; empty for global rules.
+  string rd = 13;
+  // VPN scope RTs, also present raw in extended_communities. Re-inject one
+  // representation only. Small-ASN four-octet RTs use the asdot+ form.
+  repeated string route_targets = 14;
 }
 
 message AddFlowSpecRequest {
-  // Address family: IPV4_FLOWSPEC or IPV6_FLOWSPEC.
+  // IPV4_FLOWSPEC, IPV6_FLOWSPEC, L3VPN_IPV4_FLOWSPEC or L3VPN_IPV6_FLOWSPEC.
   AddressFamily afi_safi = 1;
-  // Match components, the rule's identity together with afi_safi. They must
+  // Match components, the rule's identity together with afi_safi and rd. They must
   // be non-empty and in strictly ascending RFC 8955 type order, with no type
   // repeated; the daemon does not reorder them. Out-of-order or duplicate
   // types, and a rule encoding to more than 4095 NLRI bytes, return
@@ -4399,6 +4408,14 @@ message AddFlowSpecRequest {
   // A typed redirect_ip must not also be supplied as a raw target-IP action
   // in either community list. Other raw communities retain their bytes.
   repeated bytes ipv6_extended_communities = 6;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec. Types 0, 1
+  // and 2 are accepted. Identity is (afi_safi, rd, components). VPN rules
+  // use their AFI component grammar; the eight-byte RD counts toward the 4095 limit.
+  string rd = 7;
+  // VPN-only scope RTs in the FlowSpecRedirect.route_target grammar. At
+  // least one supported transitive RT is required, typed here or raw in
+  // extended_communities. Repeated typed RTs or typed/raw duplicates fail.
+  repeated string route_targets = 8;
 }
 
 message AddFlowSpecResponse {
@@ -4433,6 +4450,8 @@ message DeleteFlowSpecRequest {
   string owner = 4;
   // Same as DeletePathRequest.override_owner.
   bool override_owner = 5;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec.
+  string rd = 6;
 }
 
 // An owner's lease (ADR-0141).
@@ -4534,6 +4553,8 @@ message LeasedPathKey {
 message LeasedFlowSpecKey {
   AddressFamily afi_safi = 1;
   repeated FlowSpecComponent components = 2;
+  // Required when echoing a VPN key into DeleteFlowSpec.
+  string rd = 3;
 }
 
 message LeasedKey {
@@ -4603,6 +4624,8 @@ message DeleteGuardedFlowSpecRequest {
   string owner = 3;
   // Required, nonzero: the revision the rule was added with.
   uint64 revision = 4;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec.
+  string rd = 5;
 }
 
 message DeleteGuardedFlowSpecResponse {
@@ -4670,6 +4693,8 @@ enum FlowSpecDeleteOutcome {
 }
 
 message ListFlowSpecRequest {
+  // UNSPECIFIED selects global IPv4/IPv6 FlowSpec (SAFI 133) only, in every
+  // view. VPN rows require explicit L3VPN_IPV4_FLOWSPEC or L3VPN_IPV6_FLOWSPEC.
   AddressFamily afi_safi = 1;
   // When both peer selectors are empty, select the Loc-RIB. An IP address here
   // selects retained received candidates from that peer, including

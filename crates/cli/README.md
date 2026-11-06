@@ -324,6 +324,31 @@ its formatted summaries. `components` retains its legacy formatted component sum
 `component_details` preserves each component's API type, prefix, value, and
 offset, including zero offsets and unknown types.
 
+VPN FlowSpec uses `--family l3vpn_ipv4_flowspec` or
+`--family l3vpn_ipv6_flowspec`. Adds require `--rd` and at least one
+`--route-target`; repeat `--route-target` for multiple import targets.
+Deletes take the same family, RD and match components. RTs are attributes,
+so an RT-only add replaces the existing rule; a different RD creates a
+different rule that must be retired separately.
+
+```bash
+rbgp flowspec add -a l3vpn_ipv4_flowspec --rd 44407:40 --route-target 44407:777 --match "dest=192.0.2.0/24 port==80" --action drop
+rbgp flowspec add -a l3vpn_ipv6_flowspec --rd 44407:40 --route-target 44407:777 --match "dest=2001:db8::/48 port==80" --action drop
+rbgp flowspec received 0.0.0.0 -a l3vpn_ipv6_flowspec
+rbgp flowspec advertised 192.0.2.1 -a l3vpn_ipv6_flowspec
+rbgp flowspec delete -a l3vpn_ipv6_flowspec --rd 44407:40 --match "dest=2001:db8::/48 port==80"
+```
+
+Without a family filter, listings contain only the two global SAFI-133
+families. VPN rows include nonempty `rd` and `route_targets` in JSON and
+text; JSON also retains raw RT communities. The scoped API and CLI remain
+outside v1. VPN is origination only: remote VPN announcements are decoded
+and discarded. Enable each family on the peer as in the
+[controller configuration](../../examples/vpn-flowspec-controller/config.toml),
+and use the [API capability probe](../../docs/reference/api.md#vpn-flowspec-controller-api)
+before mutation. Local acceptance and advertised rows do not prove router
+installation or enforcement.
+
 `rbgp flowspec received PEER` inspects retained candidates from one peer,
 including infeasible and nonselected rules. JSON rows wrap the ordinary
 `route` object with `path_id`, `selected`, `validation`, `reason`, and

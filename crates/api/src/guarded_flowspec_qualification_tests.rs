@@ -93,6 +93,7 @@ fn rule(destination: &str) -> proto::AddFlowSpecRequest {
         communities: vec![],
         extended_communities: vec![],
         ipv6_extended_communities: vec![],
+        ..Default::default()
     }
 }
 
@@ -139,6 +140,7 @@ fn guarded_delete(
         components: rule(destination).components,
         owner: owner.into(),
         revision,
+        ..Default::default()
     }
 }
 
@@ -149,6 +151,7 @@ fn leased_delete(destination: &str, owner: &str) -> proto::DeleteFlowSpecRequest
         allow_missing: false,
         owner: owner.into(),
         override_owner: false,
+        ..Default::default()
     }
 }
 
@@ -789,3 +792,5 @@ async fn the_window_cap_is_resource_exhausted_and_changes_nothing() {
     assert_eq!(outcome(&issue("ctl").await), ok());
     rig.stop().await;
 }
+
+mod vpn_flowspec;

@@ -62,6 +62,7 @@ pub(super) fn gauge_val(n: usize) -> i64 {
 /// Canonical family pairs, `[IPv4, IPv6]`, for tables that hold both AFIs.
 pub(super) const UNICAST_FAMILIES: [&str; 2] = ["ipv4_unicast", "ipv6_unicast"];
 pub(super) const FLOWSPEC_FAMILIES: [&str; 2] = ["ipv4_flowspec", "ipv6_flowspec"];
+pub(super) const VPN_FLOWSPEC_FAMILIES: [&str; 2] = ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"];
 pub(super) const L3VPN_FAMILIES: [&str; 2] = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"];
 pub(super) const LABELED_FAMILIES: [&str; 2] = ["ipv4_labeled_unicast", "ipv6_labeled_unicast"];
 /// BGP-LS pair, `[linkstate, linkstate_vpn]`.
@@ -81,14 +82,10 @@ pub(super) fn set_rib_prefixes(
 
 /// Publish local global and VPN `FlowSpec` counts without another table walk.
 pub(super) fn set_local_flowspec_prefixes(metrics: &BgpMetrics, rib: &crate::adj_rib_in::AdjRibIn) {
-    let counts = rib.flowspec_lens();
+    let [global, vpn] = rib.flowspec_family_lens_with_checkpoint(&mut || {});
     let peer = LOCAL_PEER.to_string();
-    set_rib_prefixes(metrics, &peer, FLOWSPEC_FAMILIES, counts);
-    metrics.set_rib_prefixes(
-        &peer,
-        "l3vpn_ipv4_flowspec",
-        gauge_val(rib.flowspec_len() - counts[0] - counts[1]),
-    );
+    set_rib_prefixes(metrics, &peer, FLOWSPEC_FAMILIES, global);
+    set_rib_prefixes(metrics, &peer, VPN_FLOWSPEC_FAMILIES, vpn);
 }
 
 /// Publish one `bgp_rib_adj_out_prefixes` family pair for a peer.

@@ -1760,9 +1760,9 @@ impl PeerSession {
             type GlobalGroup = Option<(Afi, Ipv4UnicastMode, Vec<FlowSpecRule>)>;
             type VpnGroup = Option<(Afi, Ipv4UnicastMode, Vec<VpnFlowSpecRule>)>;
             // Preserve the established deterministic wire order: IPv4, then
-            // IPv6, then IPv4 VPN (SAFI 134).
+            // IPv6, then IPv4/IPv6 VPN (SAFI 134).
             let mut global: [GlobalGroup; 2] = [None, None];
-            let mut vpn: VpnGroup = None;
+            let mut vpn: [VpnGroup; 2] = [None, None];
             for key in &update.flowspec_withdraw {
                 let PreparedWithdrawal::FlowSpec(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::FlowSpec(key))
@@ -1785,10 +1785,19 @@ impl PeerSession {
                             .2
                             .push(rule);
                     }
-                    FlowSpecNlri::Vpn(rule) => vpn
-                        .get_or_insert_with(|| (prepared.afi, prepared.ipv4_mode, Vec::new()))
-                        .2
-                        .push(rule),
+                    FlowSpecNlri::Vpn(rule) => {
+                        let slot = match prepared.afi {
+                            Afi::Ipv4 => &mut vpn[0],
+                            Afi::Ipv6 => &mut vpn[1],
+                            _ => {
+                                warn!(afi = ?prepared.afi, "ignoring VPN FlowSpec withdrawal with non-IP AFI");
+                                continue;
+                            }
+                        };
+                        slot.get_or_insert_with(|| (prepared.afi, prepared.ipv4_mode, Vec::new()))
+                            .2
+                            .push(rule);
+                    }
                 }
             }
             let max_len = export.max_message_len();
@@ -1804,17 +1813,17 @@ impl PeerSession {
                     return;
                 }
             }
-            if let Some((afi, ipv4_mode, rules)) = vpn
-                && !self.send_mp_chunked(&rules, max_len, "VPN FlowSpec", "withdrawal", |chunk| {
+            for (afi, ipv4_mode, rules) in vpn.into_iter().flatten() {
+                if !self.send_mp_chunked(&rules, max_len, "VPN FlowSpec", "withdrawal", |chunk| {
                     export.build_mp_unreach(
                         afi,
                         Safi::FlowSpecVpn,
                         UnreachNlri::VpnFlowSpec(chunk),
                         ipv4_mode,
                     )
-                })
-            {
-                return;
+                }) {
+                    return;
+                }
             }
         }
         // Send EVPN withdrawals via MP_UNREACH_NLRI, chunked so each UPDATE

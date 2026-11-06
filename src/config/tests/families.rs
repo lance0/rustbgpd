@@ -310,6 +310,79 @@ fn l3vpn_families_parse_to_mpls_vpn_afi_safis() {
 }
 
 #[test]
+fn vpn_flowspec_families_require_explicit_enablement() {
+    for (families, expected) in [
+        (
+            r#"["l3vpn_ipv4_flowspec"]"#,
+            vec![(Afi::Ipv4, Safi::FlowSpecVpn)],
+        ),
+        (
+            r#"["l3vpn_ipv6_flowspec"]"#,
+            vec![(Afi::Ipv6, Safi::FlowSpecVpn)],
+        ),
+        (
+            r#"["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]"#,
+            vec![
+                (Afi::Ipv4, Safi::FlowSpecVpn),
+                (Afi::Ipv6, Safi::FlowSpecVpn),
+            ],
+        ),
+    ] {
+        let config = parse(&gr_toml(&format!(
+            "families = {families}\nrequired_families = {families}"
+        )))
+        .unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert_eq!(peers[0].0.peer.families, expected);
+        assert_eq!(peers[0].0.peer.required_families, expected);
+    }
+
+    let config = parse(&gr_toml("")).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(peers[0].0.peer.families, [(Afi::Ipv4, Safi::Unicast)]);
+    assert_eq!(peers[0].0.peer.required_families.len(), 0);
+}
+
+#[test]
+fn vpn_flowspec_required_family_is_checked_after_group_inheritance() {
+    let source = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.vpn]
+families = ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]
+required_families = ["l3vpn_ipv6_flowspec"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+peer_group = "vpn"
+"#;
+    let config = parse(source).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.peer.families,
+        [
+            (Afi::Ipv4, Safi::FlowSpecVpn),
+            (Afi::Ipv6, Safi::FlowSpecVpn)
+        ]
+    );
+    assert_eq!(
+        peers[0].0.peer.required_families,
+        [(Afi::Ipv6, Safi::FlowSpecVpn)]
+    );
+
+    let missing = format!("{source}families = [\"l3vpn_ipv4_flowspec\"]\n");
+    let err = parse(&missing).unwrap_err();
+    assert!(err.to_string().contains("required_families"), "{err}");
+}
+
+#[test]
 fn labeled_families_parse_to_labeled_unicast_afi_safis() {
     let toml = gr_toml(r#"families = ["ipv4_labeled_unicast", "ipv6_labeled_unicast"]"#);
     let config = parse(&toml).unwrap();

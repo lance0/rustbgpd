@@ -43,8 +43,13 @@ out of alpha.
   late-committing adds and deletes with mutation windows and rule revisions.
   Both pin the API shape only, with no forwarding guarantee. RFC 9117 feasibility validation of received rules remains alpha and
   is opt-in (`[flowspec] validation = "rfc9117"`; the default is `"off"`); see
-  [ADR-0135](../adr/0135-flowspec-feasibility.md). VPN FlowSpec (SAFI 134) is
-  not implemented.
+  [ADR-0135](../adr/0135-flowspec-feasibility.md). IPv4/IPv6 VPN FlowSpec
+  (SAFI 134) supports opt-in controller origination with explicit RD/RT
+  scope, outside v1; see the [VPN API contract](api.md#vpn-flowspec-controller-api).
+  Received VPN rules are decoded and discarded, with no default-unicast
+  feasibility lookup or RT-Constrain filtering. rustbgpd creates no local
+  VRF, and local acceptance does not prove router installation or traffic
+  enforcement.
 - Confederations are not implemented.
 - Conditional advertisement ([ADR-0137](../adr/0137-conditional-advertisement.md))
   is alpha and outside the v1 inventory. It covers IPv4 and IPv6 unicast only,

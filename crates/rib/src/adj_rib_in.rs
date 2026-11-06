@@ -3083,12 +3083,18 @@ impl AdjRibIn {
         &self,
         checkpoint: &mut impl FnMut(),
     ) -> [usize; 2] {
-        let mut lens = [0, 0];
+        self.flowspec_family_lens_with_checkpoint(checkpoint)[0]
+    }
+
+    /// Global and VPN `FlowSpec` counts, each ordered as `[IPv4, IPv6]`.
+    pub(crate) fn flowspec_family_lens_with_checkpoint(
+        &self,
+        checkpoint: &mut impl FnMut(),
+    ) -> [[usize; 2]; 2] {
+        let mut lens = [[0, 0]; 2];
         for route in self.flowspec_routes.values() {
             checkpoint();
-            if route.rd.is_none() {
-                lens[usize::from(route.afi == Afi::Ipv6)] += 1;
-            }
+            lens[usize::from(route.rd.is_some())][usize::from(route.afi == Afi::Ipv6)] += 1;
         }
         lens
     }

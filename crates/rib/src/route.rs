@@ -668,11 +668,11 @@ pub fn flowspec_family(afi: Afi, rd: Option<&RouteDistinguisher>) -> (Afi, Safi)
 }
 
 /// Whether the daemon ever asks a peer to refresh `family`. Received VPN
-/// `FlowSpec` (AFI 1 / SAFI 134) is discarded (ADR-0146), so a refresh of it
+/// `FlowSpec` (SAFI 134) is discarded, so a refresh of it
 /// would replay rules that are thrown away, and no `BoRR`/`EoRR` pair follows.
 #[must_use]
 pub fn requests_route_refresh(family: (Afi, Safi)) -> bool {
-    family != (Afi::Ipv4, Safi::FlowSpecVpn)
+    family.1 != Safi::FlowSpecVpn
 }
 
 /// Family-complete Adj-RIB-In `FlowSpec` identity including Add-Path ID.

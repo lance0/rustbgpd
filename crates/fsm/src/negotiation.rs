@@ -2256,13 +2256,10 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    fn vpn_flowspec_peer_open() -> OpenMessage {
-        let mp = |safi| Capability::MultiProtocol {
-            afi: Afi::Ipv4,
-            safi,
-        };
-        let add_path = |safi| AddPathFamily {
-            afi: Afi::Ipv4,
+    fn vpn_flowspec_peer_open(afi: Afi) -> OpenMessage {
+        let mp = |afi, safi| Capability::MultiProtocol { afi, safi };
+        let add_path = |afi, safi| AddPathFamily {
+            afi,
             safi,
             send_receive: AddPathMode::Both,
         };
@@ -2272,10 +2269,13 @@ mod tests {
             hold_time: 180,
             bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
             capabilities: vec![
-                mp(Safi::Unicast),
-                mp(Safi::FlowSpec),
-                mp(Safi::FlowSpecVpn),
-                Capability::AddPath(vec![add_path(Safi::Unicast), add_path(Safi::FlowSpecVpn)]),
+                mp(Afi::Ipv4, Safi::Unicast),
+                mp(afi, Safi::FlowSpec),
+                mp(afi, Safi::FlowSpecVpn),
+                Capability::AddPath(vec![
+                    add_path(Afi::Ipv4, Safi::Unicast),
+                    add_path(afi, Safi::FlowSpecVpn),
+                ]),
                 Capability::FourOctetAs { asn: 65002 },
             ],
         }
@@ -2283,42 +2283,43 @@ mod tests {
 
     #[test]
     fn vpn_flowspec_is_advertised_and_negotiated_only_when_configured() {
-        let vpn = Capability::MultiProtocol {
-            afi: Afi::Ipv4,
-            safi: Safi::FlowSpecVpn,
-        };
-        let mut cfg = test_config();
-        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::FlowSpec)];
-        assert!(!cfg.local_capabilities().contains(&vpn));
-        let neg = validate_open(&vpn_flowspec_peer_open(), &cfg).unwrap();
-        assert_eq!(neg.negotiated_families, cfg.families);
+        for afi in [Afi::Ipv4, Afi::Ipv6] {
+            let vpn = Capability::MultiProtocol {
+                afi,
+                safi: Safi::FlowSpecVpn,
+            };
+            let mut cfg = test_config();
+            cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (afi, Safi::FlowSpec)];
+            assert!(!cfg.local_capabilities().contains(&vpn));
+            let neg = validate_open(&vpn_flowspec_peer_open(afi), &cfg).unwrap();
+            assert_eq!(neg.negotiated_families, cfg.families);
 
-        cfg.families.push((Afi::Ipv4, Safi::FlowSpecVpn));
-        assert!(cfg.local_capabilities().contains(&vpn));
-        let neg = validate_open(&vpn_flowspec_peer_open(), &cfg).unwrap();
-        assert_eq!(neg.negotiated_families, cfg.families);
+            cfg.families.push((afi, Safi::FlowSpecVpn));
+            assert!(cfg.local_capabilities().contains(&vpn));
+            let neg = validate_open(&vpn_flowspec_peer_open(afi), &cfg).unwrap();
+            assert_eq!(neg.negotiated_families, cfg.families);
+        }
     }
 
     #[test]
     fn vpn_flowspec_never_advertises_or_negotiates_add_path() {
-        let mut cfg = test_config();
-        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::FlowSpecVpn)];
-        cfg.add_path_receive = true;
-        cfg.add_path_send = true;
-        let advertised: Vec<_> = cfg
-            .add_path_capabilities()
-            .iter()
-            .map(|family| (family.afi, family.safi))
-            .collect();
-        assert_eq!(advertised, vec![(Afi::Ipv4, Safi::Unicast)]);
-        let neg = validate_open(&vpn_flowspec_peer_open(), &cfg).unwrap();
-        assert!(
-            neg.negotiated_families
-                .contains(&(Afi::Ipv4, Safi::FlowSpecVpn))
-        );
-        assert_eq!(
-            neg.add_path_families.keys().copied().collect::<Vec<_>>(),
-            vec![(Afi::Ipv4, Safi::Unicast)]
-        );
+        for afi in [Afi::Ipv4, Afi::Ipv6] {
+            let mut cfg = test_config();
+            cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (afi, Safi::FlowSpecVpn)];
+            cfg.add_path_receive = true;
+            cfg.add_path_send = true;
+            let advertised: Vec<_> = cfg
+                .add_path_capabilities()
+                .iter()
+                .map(|family| (family.afi, family.safi))
+                .collect();
+            assert_eq!(advertised, vec![(Afi::Ipv4, Safi::Unicast)]);
+            let neg = validate_open(&vpn_flowspec_peer_open(afi), &cfg).unwrap();
+            assert!(neg.negotiated_families.contains(&(afi, Safi::FlowSpecVpn)));
+            assert_eq!(
+                neg.add_path_families.keys().copied().collect::<Vec<_>>(),
+                vec![(Afi::Ipv4, Safi::Unicast)]
+            );
+        }
     }
 }

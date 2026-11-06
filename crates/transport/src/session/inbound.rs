@@ -2442,7 +2442,7 @@ impl PeerSession {
             .await;
             return;
         }
-        // ADR-0146: received VPN FlowSpec (AFI 1 / SAFI 134) is decoded so
+        // ADR-0146: received VPN FlowSpec (AFI 1/2 / SAFI 134) is decoded so
         // framing and malformed input are exact, then discarded before the
         // Adj-RIB-In: no later stage reads its NLRI vectors. Counted only
         // here, once every UPDATE-level gate (RFC 7606 disposition,
@@ -2450,28 +2450,31 @@ impl PeerSession {
         // or treat-as-withdraw UPDATE is not also reported as discarded.
         if self
             .negotiated_families()
-            .contains(&(Afi::Ipv4, Safi::FlowSpecVpn))
+            .iter()
+            .any(|(_, safi)| *safi == Safi::FlowSpecVpn)
         {
-            let discarded: usize = parsed
-                .attributes
-                .iter()
-                .map(|attr| match attr {
-                    PathAttribute::MpReachNlri(mp) => mp.vpn_flowspec_announced.len(),
-                    PathAttribute::MpUnreachNlri(mp) => mp.vpn_flowspec_withdrawn.len(),
-                    _ => 0,
-                })
-                .sum();
-            if discarded > 0 {
-                debug!(
-                    peer = %self.peer_label,
-                    family = "l3vpn_ipv4_flowspec",
-                    discarded,
-                    "discarded received VPN FlowSpec NLRIs; only local origination is supported"
-                );
-                self.metrics.record_vpn_flowspec_nlri_discarded(
-                    &self.peer_label,
-                    u64::try_from(discarded).unwrap_or(u64::MAX),
-                );
+            for attr in &parsed.attributes {
+                let (afi, safi, discarded) = match attr {
+                    PathAttribute::MpReachNlri(mp) => {
+                        (mp.afi, mp.safi, mp.vpn_flowspec_announced.len())
+                    }
+                    PathAttribute::MpUnreachNlri(mp) => {
+                        (mp.afi, mp.safi, mp.vpn_flowspec_withdrawn.len())
+                    }
+                    _ => continue,
+                };
+                if discarded > 0 && self.negotiated_families().contains(&(afi, safi)) {
+                    debug!(
+                        peer = %self.peer_label,
+                        family = rustbgpd_wire::family_label(afi, safi),
+                        discarded,
+                        "discarded received VPN FlowSpec NLRIs; only local origination is supported"
+                    );
+                    self.metrics.record_vpn_flowspec_nlri_discarded(
+                        &self.peer_label,
+                        u64::try_from(discarded).unwrap_or(u64::MAX),
+                    );
+                }
             }
         }
         // Normalize the attributes that policy and the RIB are allowed to

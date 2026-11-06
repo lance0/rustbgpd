@@ -1,10 +1,10 @@
-# rpol decision corpus: 270 programs, 1903 cases. Regenerate with
+# rpol decision corpus: 271 programs, 1918 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 35
-ast.stmt.if 617
+ast.stmt.if 620
 ast.stmt.else-if 31
 ast.stmt.else 76
 ast.stmt.nested-if 13
@@ -12,10 +12,10 @@ ast.stmt.for 75
 ast.stmt.call 48
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1329
-ast.action.reject 461
+ast.action.accept 1332
+ast.action.reject 473
 ast.action.set-local-pref 128
-ast.action.set-med 273
+ast.action.set-med 274
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
@@ -33,7 +33,7 @@ ast.community.kind.extended 59
 ast.community.kind.any 2
 ast.literal.standard 483
 ast.literal.large 29
-ast.literal.route-target 11
+ast.literal.route-target 13
 ast.literal.route-origin 2
 ast.literal.route-target-ipv4 2
 ast.literal.route-origin-ipv4 2
@@ -43,12 +43,12 @@ ast.action.let 63
 ast.action.break 33
 ast.action.continue 22
 ast.expr.or 11
-ast.expr.and 36
+ast.expr.and 38
 ast.expr.not 5
-ast.expr.cmp 310
+ast.expr.cmp 313
 ast.expr.in 119
 ast.expr.ident-in 42
-ast.expr.has 7
+ast.expr.has 9
 ast.expr.has-parameter 1
 ast.expr.exists 4
 ast.expr.matches 37
@@ -57,11 +57,11 @@ ast.contains.literal 5
 ast.contains.parameter 1
 ast.expr.value-cmp 120
 ast.expr.apply 1
-ast.call-arg.integer 278
-ast.call-arg.name 178
+ast.call-arg.integer 279
+ast.call-arg.name 179
 ast.call-arg.community 71
 ast.call-arg.ip 71
-ast.value.literal 402
+ast.value.literal 403
 ast.value.community 22
 ast.value.identifier 106
 ast.value.field 139
@@ -72,12 +72,12 @@ ast.arith.sub 35
 ast.arith.mul 28
 ast.arith.div 11
 ast.arith.rem 11
-ast.cmp.eq 215
+ast.cmp.eq 218
 ast.cmp.ne 40
 ast.cmp.ge 206
 ast.cmp.le 4
 ast.rhs.integer 143
-ast.rhs.identifier 89
+ast.rhs.identifier 92
 ast.rhs.ip 9
 ast.rhs.prefix 57
 ast.rhs.string 9
@@ -85,7 +85,7 @@ ast.rhs.field 9
 ast.field.route.prefix 148
 ast.field.route.communities 66
 ast.field.route.large-communities 1
-ast.field.route.ext-communities 7
+ast.field.route.ext-communities 9
 ast.field.route.any-community 5
 ast.field.route.as-path 74
 ast.field.route.as-path.len 52
@@ -100,23 +100,24 @@ ast.field.route.rpki 39
 ast.field.route.aspa 12
 ast.field.route.route-type 5
 ast.field.route.evpn-route-type 7
-ast.field.route.family 33
+ast.field.route.family 36
 ast.field.peer.address 9
 ast.field.peer.asn 2
 ast.field.peer.group 9
 ast.family.ipv4-unicast 40
 ast.family.ipv6-unicast 46
-ast.family.ipv4-labeled-unicast 21
-ast.family.ipv6-labeled-unicast 20
-ast.family.vpnv4 19
-ast.family.vpnv6 18
-ast.family.ipv4-flowspec 17
-ast.family.ipv6-flowspec 16
-ast.family.vpnv4-flowspec 10
-ast.family.evpn 30
-ast.family.rtc 13
-ast.family.bgp-ls 12
-ast.family.bgp-ls-vpn 11
+ast.family.ipv4-labeled-unicast 22
+ast.family.ipv6-labeled-unicast 21
+ast.family.vpnv4 20
+ast.family.vpnv6 19
+ast.family.ipv4-flowspec 18
+ast.family.ipv6-flowspec 17
+ast.family.vpnv4-flowspec 25
+ast.family.vpnv6-flowspec 23
+ast.family.evpn 31
+ast.family.rtc 14
+ast.family.bgp-ls 13
+ast.family.bgp-ls-vpn 12
 ast.prepend.self 11
 ast.prepend.peer 11
 ast.prepend.origin 11
@@ -132,70 +133,70 @@ ast.param.asn-set 2
 ast.param.community 2
 ast.param.ip 2
 ast.decl.import 20
-ast.decl.prefix-set 608
+ast.decl.prefix-set 609
 ast.decl.prefix-set.ge-le 337
-ast.decl.community-set 623
-ast.decl.asn-set 324
+ast.decl.community-set 624
+ast.decl.asn-set 325
 ast.decl.dataset.prefix-set 4
 ast.decl.dataset.asn-set 5
-ast.decl.dataset.community-set 118
+ast.decl.dataset.community-set 119
 ast.decl.fn 31
 ast.decl.fn.let 21
-ast.decl.test 1223
-ast.set.community.standard 623
+ast.decl.test 1238
+ast.set.community.standard 624
 ast.set.community.large 149
-ast.set.community.route-target 118
-ast.set.community.route-origin 118
-ast.set.community.well-known-ext 118
+ast.set.community.route-target 119
+ast.set.community.route-origin 119
+ast.set.community.well-known-ext 119
 ast.set.pattern.standard 11
 ast.set.pattern.large 71
-ast.set.pattern.route-target 178
-ast.set.pattern.route-origin 118
-ast.set.pattern-field.range 189
-ast.set.pattern-field.private-as 118
-ast.test.dataset-override 123
-ast.test.route.prefix 1133
-ast.test.route.communities 841
-ast.test.route.large-communities 469
-ast.test.route.ext-communities 178
-ast.test.route.as-path 830
-ast.test.route.next-hop 255
+ast.set.pattern.route-target 179
+ast.set.pattern.route-origin 119
+ast.set.pattern-field.range 190
+ast.set.pattern-field.private-as 119
+ast.test.dataset-override 124
+ast.test.route.prefix 1148
+ast.test.route.communities 842
+ast.test.route.large-communities 470
+ast.test.route.ext-communities 193
+ast.test.route.as-path 831
+ast.test.route.next-hop 256
 ast.test.route.local-pref 197
 ast.test.route.med 418
 ast.test.route.rpki 108
 ast.test.route.aspa 144
 ast.test.route.route-type 137
-ast.test.route.evpn-route-type 255
-ast.test.route.family 329
-ast.test.peer.address 255
-ast.test.peer.asn 178
-ast.test.peer.local-as 118
+ast.test.route.evpn-route-type 256
+ast.test.route.family 344
+ast.test.peer.address 256
+ast.test.peer.asn 179
+ast.test.peer.local-as 119
 ast.test.peer.group 162
 ast.test.expect.chain 161
-ast.test.expect.with-only 514
-ast.test.expect.accept 1212
-ast.test.expect.reject 998
+ast.test.expect.with-only 515
+ast.test.expect.accept 1227
+ast.test.expect.reject 1013
 ast.test.expect.error 23
-ast.test.with.local-pref 644
-ast.test.with.med 662
-ast.test.with.next-hop 178
-ast.test.with.community 615
-ast.test.with.prepend 178
-ast.test.with.prepend-path 150
-ast.test.with.removes 418
-ast.test.with.removes-large-admin 118
-ast.test.with.removes-all 221
+ast.test.with.local-pref 645
+ast.test.with.med 663
+ast.test.with.next-hop 179
+ast.test.with.community 616
+ast.test.with.prepend 179
+ast.test.with.prepend-path 151
+ast.test.with.removes 419
+ast.test.with.removes-large-admin 119
+ast.test.with.removes-all 222
 ast.test.with.not-removed 200
 ast.test.with.without-community 56
 ast.test.with.without.local-pref 232
-ast.test.with.without.med 118
-ast.test.with.without.next-hop 118
-ast.test.with.without.prepend 118
-ir.guard.true 1369
+ast.test.with.without.med 119
+ast.test.with.without.next-hop 119
+ast.test.with.without.prepend 119
+ir.guard.true 1381
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
-ir.guard.community-contains 49
+ir.guard.community-contains 52
 ir.guard.community-in-set 25
 ir.guard.community-kind-in-set 63
 ir.guard.as-path-matches 150
@@ -216,7 +217,7 @@ ir.guard.route-type-is 13
 ir.guard.route-type-ne 10
 ir.guard.evpn-route-type-is 18
 ir.guard.evpn-route-type-ne 13
-ir.guard.family-is 86
+ir.guard.family-is 101
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
@@ -225,7 +226,7 @@ ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 10
-ir.guard.and 203
+ir.guard.and 217
 ir.guard.or 15
 ir.guard.not 91
 ir.value.const 223
@@ -236,8 +237,8 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1287
-ir.action.deny 405
+ir.action.permit 1290
+ir.action.deny 417
 ir.action.continue 272
 ir.action.bind 132
 ir.action.for-each 75
@@ -249,7 +250,7 @@ ir.action.remove-all-communities 77
 ir.action.remove-communities-in-set 46
 ir.mod.set-local-pref 121
 ir.mod.set-local-pref-computed 19
-ir.mod.set-med 150
+ir.mod.set-med 151
 ir.mod.set-med-computed 87
 ir.mod.set-next-hop 24
 ir.mod.prepend 34
@@ -612,7 +613,7 @@ crates/policy/tests/decision_corpus/surface.rpol | avoid(64501) | row avoid(6450
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family evpn => #7 accept with set med 7
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family ls => #9 accept with set med 9
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family lsvpn => #10 accept with set med 10
-crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family rest => #12 accept
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family rest => #13 accept
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family rtc => #8 accept with set med 8
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v4fs => #5 accept with set med 5
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v4lu => #1 accept with set med 1
@@ -621,6 +622,7 @@ crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v4v
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6fs => #6 accept with set med 6
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6lu => #2 accept with set med 2
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6vpn => #4 accept with set med 4
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6vpnfs => #12 accept with set med 12
 crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind ext => #2 accept with set med 2
 crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind fed => #3 reject
 crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind large => #1 accept with set med 1
@@ -870,6 +872,9 @@ examples/manrs-action1/member-a-irr.rpol | member-a-irr | row member-a-irr rejec
 examples/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => #1 reject
 examples/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose preserve-active-parent-exception => #1 accept
 examples/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose reject-non-global => #2 reject
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | row transit-vpn-flowspec ipv4 => #1 accept
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | row transit-vpn-flowspec ipv6 => #2 accept
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | row transit-vpn-flowspec rest => #3 reject
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-as-set => #1 reject
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => #2 reject
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-invalid => #5 continue with add ext-community OV_INVALID (0x4300000000000002)
@@ -1452,6 +1457,7 @@ crates/policy/tests/decision_corpus/surface.rpol | test family-vpnv4 | by-family
 crates/policy/tests/decision_corpus/surface.rpol | test family-vpnv6 | by-family => permit with set med 4
 crates/policy/tests/decision_corpus/surface.rpol | test family-ipv4-flowspec | by-family => permit with set med 5
 crates/policy/tests/decision_corpus/surface.rpol | test family-vpnv4-flowspec | by-family => permit with set med 11
+crates/policy/tests/decision_corpus/surface.rpol | test family-vpnv6-flowspec | by-family => permit with set med 12
 crates/policy/tests/decision_corpus/surface.rpol | test family-rtc | by-family => permit with set med 8
 crates/policy/tests/decision_corpus/surface.rpol | test family-bgp-ls | by-family => permit with set med 9
 crates/policy/tests/decision_corpus/surface.rpol | test fed-tag | communities-by-kind => deny
@@ -2642,6 +2648,20 @@ examples/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit
 examples/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit
 examples/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit
 examples/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit
+examples/vpn-flowspec-controller/transit.rpol | test transit-ipv4 | transit-vpn-flowspec => permit
+examples/vpn-flowspec-controller/transit.rpol | test transit-ipv6 | transit-vpn-flowspec => permit
+examples/vpn-flowspec-controller/transit.rpol | test unrelated-vpn | transit-vpn-flowspec => deny
+examples/vpn-flowspec-controller/transit.rpol | test global-ipv6-is-not-vpn | transit-vpn-flowspec => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m01-v4-transit => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m02-v4-invalid-long => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m03-v6-tagged => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m04-bare => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m05-internal => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m06-local-as-set => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m07-default => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m08-host-routes => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m09-evpn => deny
+examples/vpn-flowspec-controller/transit.rpol | transit-vpn-flowspec | m10-v6-bogon => deny
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test as-set-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test aspa-invalid-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)

@@ -1,17 +1,17 @@
-//! RFC 8955 §8 VPN `FlowSpec` (AFI 1 / SAFI 134) wire vectors.
+//! RFC 8955 §8 / RFC 8956 VPN `FlowSpec` (AFI 1/2 / SAFI 134) wire vectors.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use proptest::prelude::*;
 use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
 use rustbgpd_wire::flowspec::{
-    decode_flowspec_nlri, decode_vpn_flowspec_nlri, try_encode_flowspec_nlri,
-    try_encode_vpn_flowspec_nlri,
+    decode_flowspec_nlri, decode_vpn_flowspec_nlri, decode_vpn_flowspec_nlri_for_afi,
+    try_encode_flowspec_nlri, try_encode_vpn_flowspec_nlri, try_encode_vpn_flowspec_nlri_for_afi,
 };
 use rustbgpd_wire::{
     Afi, BitmaskMatch, DecodeError, EncodeError, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
-    Ipv4Prefix, MpReachNlri, MpUnreachNlri, NumericMatch, PathAttribute, RouteDistinguisher, Safi,
-    VpnFlowSpecRule, family_label, parse_family,
+    Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, MpReachNlri, MpUnreachNlri, NumericMatch,
+    PathAttribute, RouteDistinguisher, Safi, VpnFlowSpecRule, family_label, parse_family,
 };
 
 /// `01 20 cb00710a 03 81 11`: destination 203.0.113.10/32, protocol = 17.
@@ -345,19 +345,14 @@ fn non_zero_next_hop_length_is_refused() {
 }
 
 #[test]
-fn ipv6_vpn_flowspec_stays_unsupported() {
-    let mut reach = vec![0x00, 0x02, 0x86, 0x00, 0x00];
-    reach.extend(nlri([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]));
-    let detail = malformed_detail(decode(&attr(14, &reach)).unwrap_err());
-    assert!(detail.contains("unsupported AFI/SAFI 2/134"), "{detail}");
-    let detail = malformed_detail(decode(&attr(15, &[0x00, 0x02, 0x86])).unwrap_err());
-    assert!(detail.contains("unsupported AFI/SAFI 2/134"), "{detail}");
-
-    assert_eq!(
-        parse_family("l3vpn_ipv4_flowspec"),
-        Some((Afi::Ipv4, Safi::FlowSpecVpn))
-    );
-    assert_eq!(family_label(Afi::Ipv6, Safi::FlowSpecVpn), None);
+fn vpn_flowspec_family_registry_covers_both_ip_families() {
+    for (name, afi) in [
+        ("l3vpn_ipv4_flowspec", Afi::Ipv4),
+        ("l3vpn_ipv6_flowspec", Afi::Ipv6),
+    ] {
+        assert_eq!(parse_family(name), Some((afi, Safi::FlowSpecVpn)));
+        assert_eq!(family_label(afi, Safi::FlowSpecVpn), Some(name));
+    }
     assert_eq!(Safi::from_u8(134), Some(Safi::FlowSpecVpn));
 }
 
@@ -377,12 +372,12 @@ fn ipv6_flow_label_is_malformed_in_ipv4_vpn_flowspec() {
 }
 
 #[test]
-fn vpn_flowspec_is_never_encoded_outside_afi_1() {
+fn vpn_flowspec_is_never_encoded_outside_ip_afis() {
     let rule = VpnFlowSpecRule {
         rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
         rule: rule(),
     };
-    for afi in [Afi::Ipv6, Afi::L2Vpn, Afi::BgpLs] {
+    for afi in [Afi::L2Vpn, Afi::BgpLs] {
         let mut reach = mp_reach(vec![rule.clone()]);
         reach.afi = afi;
         let mut unreach = mp_unreach(vec![rule.clone()]);
@@ -507,5 +502,366 @@ proptest! {
             decode(&wire).unwrap(),
             [PathAttribute::MpUnreachNlri(Box::new(mp_unreach(rules)))]
         );
+    }
+}
+
+fn ipv6_prefix(address: &str, len: u8, offset: u8) -> FlowSpecPrefix {
+    FlowSpecPrefix::V6(Ipv6PrefixOffset {
+        prefix: Ipv6Prefix::new(address.parse().unwrap(), len),
+        offset,
+    })
+}
+
+// Destination 2001:db8::/32, source ::1234:5678:9a00:0/64-104,
+// upper-layer TCP, fragment bits LF/FF/IsF, Flow Label = 0xabcde.
+const IPV6_RULE: [u8; 27] = [
+    1, 32, 0, 0x20, 1, 0x0d, 0xb8, 2, 104, 64, 0x12, 0x34, 0x56, 0x78, 0x9a, 3, 0x81, 6, 12, 0x81,
+    0x0e, 13, 0xa1, 0, 0x0a, 0xbc, 0xde,
+];
+
+fn ipv6_rule() -> FlowSpecRule {
+    FlowSpecRule {
+        components: vec![
+            FlowSpecComponent::DestinationPrefix(ipv6_prefix("2001:db8::", 32, 0)),
+            FlowSpecComponent::SourcePrefix(ipv6_prefix("::1234:5678:9a00:0", 104, 64)),
+            FlowSpecComponent::IpProtocol(vec![eq(6, true)]),
+            FlowSpecComponent::Fragment(vec![BitmaskMatch {
+                end_of_list: true,
+                and_bit: false,
+                not_bit: false,
+                match_bit: true,
+                value: 0x0e,
+            }]),
+            FlowSpecComponent::FlowLabel(vec![eq(0x000a_bcde, true)]),
+        ],
+    }
+}
+
+fn ipv6_nlri(rd: [u8; 8], components: &[u8]) -> Vec<u8> {
+    let mut wire = vec![u8::try_from(8 + components.len()).unwrap()];
+    wire.extend(rd);
+    wire.extend(components);
+    wire
+}
+
+#[test]
+fn ipv6_vpn_golden_vectors_cover_offsets_flow_label_and_each_rd_type() {
+    for rd in [
+        [0, 0, 0xad, 0x77, 0, 0, 0, 40],
+        [0, 1, 192, 0, 2, 1, 0, 100],
+        [0, 2, 0, 1, 0, 0, 0, 10],
+        [0, 3, 1, 2, 3, 4, 5, 6],
+    ] {
+        let expected = VpnFlowSpecRule {
+            rd: RouteDistinguisher(rd),
+            rule: ipv6_rule(),
+        };
+        let nlri = ipv6_nlri(rd, &IPV6_RULE);
+        assert_eq!(
+            decode_vpn_flowspec_nlri_for_afi(&nlri, Afi::Ipv6).unwrap(),
+            std::slice::from_ref(&expected)
+        );
+        let mut encoded = Vec::new();
+        try_encode_vpn_flowspec_nlri_for_afi(
+            std::slice::from_ref(&expected),
+            &mut encoded,
+            Afi::Ipv6,
+        )
+        .unwrap();
+        assert_eq!(encoded, nlri);
+        for (code, header) in [(14, vec![0, 2, 134, 0, 0]), (15, vec![0, 2, 134])] {
+            let wire = attr(code, &[header, nlri.clone()].concat());
+            let mut reach = mp_reach(vec![expected.clone()]);
+            reach.afi = Afi::Ipv6;
+            let mut unreach = mp_unreach(vec![expected.clone()]);
+            unreach.afi = Afi::Ipv6;
+            let expected_attr = if code == 14 {
+                PathAttribute::MpReachNlri(Box::new(reach))
+            } else {
+                PathAttribute::MpUnreachNlri(Box::new(unreach))
+            };
+            assert_eq!(decode(&wire).unwrap(), std::slice::from_ref(&expected_attr));
+            assert_eq!(encode(expected_attr), wire);
+        }
+    }
+    let wire = attr(15, &[0, 2, 134]);
+    let mut expected = mp_unreach(vec![]);
+    expected.afi = Afi::Ipv6;
+    assert_eq!(
+        decode(&wire).unwrap(),
+        [PathAttribute::MpUnreachNlri(Box::new(expected))]
+    );
+}
+
+#[test]
+fn ipv6_prefix_offsets_use_only_matching_bits_and_clear_padding() {
+    for (len, offset, pattern, address, canonical) in [
+        (0, 0, vec![], "::", vec![]),
+        (71, 65, vec![0xff], "::7e00:0:0:0", vec![0xfc]),
+        (128, 127, vec![0xff], "::1", vec![0x80]),
+        (
+            128,
+            0,
+            vec![0xff; 16],
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            vec![0xff; 16],
+        ),
+    ] {
+        for kind in [1, 2] {
+            let components = [vec![kind, len, offset], pattern.clone()].concat();
+            let canonical = [vec![kind, len, offset], canonical.clone()].concat();
+            let prefix = ipv6_prefix(address, len, offset);
+            let rule = FlowSpecRule {
+                components: vec![if kind == 1 {
+                    FlowSpecComponent::DestinationPrefix(prefix)
+                } else {
+                    FlowSpecComponent::SourcePrefix(prefix)
+                }],
+            };
+            let vpn = VpnFlowSpecRule {
+                rd: RouteDistinguisher([0; 8]),
+                rule: rule.clone(),
+            };
+            assert_eq!(
+                decode_vpn_flowspec_nlri_for_afi(&ipv6_nlri([0; 8], &components), Afi::Ipv6)
+                    .unwrap(),
+                std::slice::from_ref(&vpn)
+            );
+            let mut wire = Vec::new();
+            try_encode_vpn_flowspec_nlri_for_afi(&[vpn], &mut wire, Afi::Ipv6).unwrap();
+            assert_eq!(wire, ipv6_nlri([0; 8], &canonical));
+            let global = [vec![u8::try_from(components.len()).unwrap()], components].concat();
+            assert_eq!(
+                decode_flowspec_nlri(&global, Afi::Ipv6).unwrap(),
+                std::slice::from_ref(&rule)
+            );
+            let mut wire = Vec::new();
+            try_encode_flowspec_nlri(&[rule], &mut wire, Afi::Ipv6).unwrap();
+            assert_eq!(&wire[1..], canonical);
+        }
+    }
+}
+
+#[test]
+fn ipv6_malformed_prefixes_and_fragments_fail_the_whole_nlri_list() {
+    let good = ipv6_nlri([0; 8], &IPV6_RULE);
+    for components in [
+        vec![1, 0, 1],
+        vec![1, 128, 128],
+        vec![2, 32, 32],
+        vec![1, 129, 0],
+        vec![2, 64, 65],
+        vec![1, 32],
+        vec![1, 64, 32, 1, 2, 3],
+        vec![12, 0x91, 0, 2],
+        vec![12, 0xa1, 0, 0, 0, 2],
+        vec![12, 0x01, 2, 0x91, 0, 4],
+    ] {
+        let bad = ipv6_nlri([0; 8], &components);
+        for wire in [bad.clone(), [good.clone(), bad].concat()] {
+            assert!(
+                decode_vpn_flowspec_nlri_for_afi(&wire, Afi::Ipv6).is_err(),
+                "{wire:02x?}"
+            );
+        }
+        let global = [vec![u8::try_from(components.len()).unwrap()], components].concat();
+        assert!(decode_flowspec_nlri(&global, Afi::Ipv6).is_err());
+    }
+    for cut in 1..good.len() {
+        assert!(
+            decode_vpn_flowspec_nlri_for_afi(&good[..cut], Afi::Ipv6).is_err(),
+            "{cut}"
+        );
+    }
+    for bad in [
+        vec![3, 0, 0, 1],
+        vec![8, 0, 0, 0, 0, 0, 0, 0, 0],
+        vec![0xf1, 0, 0],
+    ] {
+        assert!(decode_vpn_flowspec_nlri_for_afi(&bad, Afi::Ipv6).is_err());
+    }
+    let reach = [vec![0, 2, 134, 4, 192, 0, 2, 1, 0], good].concat();
+    assert!(malformed_detail(decode(&attr(14, &reach)).unwrap_err()).contains("expected 0"));
+}
+
+#[test]
+fn ipv6_fragment_reserved_bits_and_flow_label_widths_are_canonical() {
+    for value in [0, 1, 0x000f_ffff, u64::MAX] {
+        let rule = FlowSpecRule {
+            components: vec![
+                FlowSpecComponent::Fragment(vec![BitmaskMatch {
+                    end_of_list: true,
+                    and_bit: false,
+                    not_bit: false,
+                    match_bit: true,
+                    value: 0x0e,
+                }]),
+                FlowSpecComponent::FlowLabel(vec![eq(value, true)]),
+            ],
+        };
+        let mut global = Vec::new();
+        try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut global, Afi::Ipv6).unwrap();
+        assert_eq!(
+            decode_flowspec_nlri(&global, Afi::Ipv6).unwrap(),
+            std::slice::from_ref(&rule)
+        );
+        if value == 0x000f_ffff {
+            assert_eq!(&global[4..], &[13, 0xa1, 0, 0x0f, 0xff, 0xff]);
+        }
+        global[3] = 0xff; // Received reserved fragment bits MUST be ignored.
+        assert_eq!(
+            decode_flowspec_nlri(&global, Afi::Ipv6).unwrap(),
+            std::slice::from_ref(&rule)
+        );
+        let vpn = VpnFlowSpecRule {
+            rd: RouteDistinguisher([0; 8]),
+            rule,
+        };
+        let mut wire = Vec::new();
+        try_encode_vpn_flowspec_nlri_for_afi(std::slice::from_ref(&vpn), &mut wire, Afi::Ipv6)
+            .unwrap();
+        wire[11] = 0xff;
+        assert_eq!(
+            decode_vpn_flowspec_nlri_for_afi(&wire, Afi::Ipv6).unwrap(),
+            [vpn]
+        );
+    }
+    let mut rule = FlowSpecRule {
+        components: vec![FlowSpecComponent::Fragment(vec![BitmaskMatch {
+            end_of_list: true,
+            and_bit: false,
+            not_bit: false,
+            match_bit: true,
+            value: u16::MAX,
+        }])],
+    };
+    let mut wire = Vec::new();
+    try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut wire, Afi::Ipv6).unwrap();
+    assert_eq!(wire, [3, 12, 0x81, 0x0e]);
+    rule.components = vec![FlowSpecComponent::FlowLabel(vec![eq(1, true); 2047])];
+    let mut wire = Vec::new();
+    try_encode_flowspec_nlri(&[rule], &mut wire, Afi::Ipv6).unwrap();
+    assert_eq!(
+        wire.len(),
+        4097,
+        "minimal numeric widths preserve the 4095-octet bound"
+    );
+    let decoded = decode_flowspec_nlri(&wire, Afi::Ipv6).unwrap();
+    let mut roundtrip = Vec::new();
+    try_encode_flowspec_nlri(&decoded, &mut roundtrip, Afi::Ipv6).unwrap();
+    assert_eq!(roundtrip, wire);
+}
+
+#[test]
+fn ipv6_vpn_rd_inclusive_length_boundaries() {
+    let rd = RouteDistinguisher([0; 8]);
+    let mut rule_240 = port_rule(229);
+    rule_240.components.insert(
+        0,
+        FlowSpecComponent::DestinationPrefix(ipv6_prefix("::", 0, 0)),
+    );
+    let mut too_large = port_rule(4085);
+    too_large.components.insert(
+        0,
+        FlowSpecComponent::DestinationPrefix(ipv6_prefix("::", 0, 0)),
+    );
+    for (rule, header, payload) in [
+        (
+            port_rule(231),
+            vec![0xef],
+            [vec![0; 8], port_bytes(115)].concat(),
+        ),
+        (
+            rule_240,
+            vec![0xf0, 0xf0],
+            [vec![0; 8], vec![1, 0, 0], port_bytes(114)].concat(),
+        ),
+        (
+            port_rule(4087),
+            vec![0xff, 0xff],
+            [vec![0; 8], port_bytes(2043)].concat(),
+        ),
+    ] {
+        let vpn = VpnFlowSpecRule { rd, rule };
+        let golden = [header, payload].concat();
+        let mut encoded = Vec::new();
+        try_encode_vpn_flowspec_nlri_for_afi(std::slice::from_ref(&vpn), &mut encoded, Afi::Ipv6)
+            .unwrap();
+        assert_eq!(encoded, golden);
+        assert_eq!(
+            decode_vpn_flowspec_nlri_for_afi(&golden, Afi::Ipv6).unwrap(),
+            [vpn]
+        );
+    }
+    let mut buf = vec![0xaa];
+    let error = try_encode_vpn_flowspec_nlri_for_afi(
+        &[
+            VpnFlowSpecRule {
+                rd,
+                rule: ipv6_rule(),
+            },
+            VpnFlowSpecRule {
+                rd,
+                rule: too_large,
+            },
+        ],
+        &mut buf,
+        Afi::Ipv6,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        EncodeError::ValueOutOfRange {
+            field: "FlowSpec NLRI rule length",
+            value: "4096".into()
+        }
+    );
+    assert_eq!(buf, [0xaa]);
+    try_encode_flowspec_nlri(&[port_rule(4095)], &mut buf, Afi::Ipv6).unwrap();
+}
+
+#[test]
+fn invalid_typed_prefixes_refuse_encoding_without_partial_output() {
+    for (afi, prefix) in [
+        (Afi::Ipv4, ipv6_prefix("2001:db8::", 32, 0)),
+        (
+            Afi::Ipv6,
+            FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)),
+        ),
+        (Afi::Ipv6, ipv6_prefix("::", 64, 64)),
+        (Afi::Ipv6, ipv6_prefix("::", 0, 1)),
+    ] {
+        let invalid = FlowSpecRule {
+            components: vec![FlowSpecComponent::DestinationPrefix(prefix)],
+        };
+        let mut buf = vec![0xaa];
+        assert!(try_encode_flowspec_nlri(std::slice::from_ref(&invalid), &mut buf, afi).is_err());
+        assert_eq!(buf, [0xaa]);
+        assert!(
+            try_encode_vpn_flowspec_nlri_for_afi(
+                &[VpnFlowSpecRule {
+                    rd: RouteDistinguisher([0; 8]),
+                    rule: invalid,
+                }],
+                &mut buf,
+                afi
+            )
+            .is_err()
+        );
+        assert_eq!(buf, [0xaa]);
+    }
+}
+
+proptest! {
+    #[test]
+    fn ipv6_vpn_prefix_offsets_round_trip(length in 1_u8..=128, offset in any::<u8>(), address in any::<u128>()) {
+        let offset = offset % length;
+        let prefix = Ipv6PrefixOffset { prefix: Ipv6Prefix::new(Ipv6Addr::from(address & (u128::MAX >> offset)), length), offset };
+        let vpn = VpnFlowSpecRule { rd: RouteDistinguisher([0; 8]), rule: FlowSpecRule {
+            components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(prefix))],
+        } };
+        let mut wire = Vec::new();
+        try_encode_vpn_flowspec_nlri_for_afi(std::slice::from_ref(&vpn), &mut wire, Afi::Ipv6).unwrap();
+        prop_assert_eq!(decode_vpn_flowspec_nlri_for_afi(&wire, Afi::Ipv6).unwrap(), [vpn]);
     }
 }

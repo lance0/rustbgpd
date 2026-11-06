@@ -5,22 +5,30 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.28.0 - Unreleased
 
-- Add IPv4 VPN FlowSpec (AFI 1 / SAFI 134, RFC 8955 §8): `Safi::FlowSpecVpn`,
-  the `l3vpn_ipv4_flowspec` entry in `CONFIGURED_FAMILIES`, and the
-  `VpnFlowSpecRule` NLRI type (an 8-octet Route Distinguisher plus a
-  `FlowSpecRule`) with `flowspec::decode_vpn_flowspec_nlri` and
-  `flowspec::try_encode_vpn_flowspec_nlri`. The RFC 8955 §4.1 length covers
-  the RD, so a rule's components are limited to 4087 octets; RD types outside
-  RFC 4364 §4.2 stay raw.
+- Add IPv4/IPv6 VPN FlowSpec (AFI 1/2 / SAFI 134, RFC 8955 §8 and
+  RFC 8956): `Safi::FlowSpecVpn`, both `l3vpn_ipv4_flowspec` and
+  `l3vpn_ipv6_flowspec` in `CONFIGURED_FAMILIES`, and `VpnFlowSpecRule`
+  (an 8-octet Route Distinguisher plus a `FlowSpecRule`). The existing
+  `flowspec::decode_vpn_flowspec_nlri` and
+  `flowspec::try_encode_vpn_flowspec_nlri` retain their IPv4 signatures;
+  the additive `_for_afi` variants select IPv4 or IPv6. The length covers
+  the RD, limiting components to 4087 octets; unknown RD types stay raw.
 - `MpReachNlri` and `MpUnreachNlri` gain `vpn_flowspec_announced` and
-  `vpn_flowspec_withdrawn`. `MP_REACH_NLRI` for (1, 134) requires NH-Len 0,
-  as SAFI 133 does, and an empty `MP_UNREACH_NLRI` is its End-of-RIB.
-  (1, 134) attributes that failed as an unsupported SAFI now decode; (2, 134)
-  stays unsupported in both directions: the VPN codec takes no AFI, and an
-  `MpReachNlri`/`MpUnreachNlri` with SAFI 134 and any AFI but 1 fails to
-  encode with `EncodeError::ValueOutOfRange` before writing a byte. The new
-  public fields break struct literals, so this is a new minor compatibility
-  line.
+  `vpn_flowspec_withdrawn`. Both IP AFIs require NH-Len 0 and accept an
+  empty `MP_UNREACH_NLRI` as End-of-RIB. Other AFIs fail encoding before
+  writing bytes. The new public fields break struct literals, so this is
+  a new minor compatibility line.
+- Correct IPv6 prefix-offset framing in global and VPN FlowSpec: the
+  pattern contains `length - offset` bits, padding is ignored on decode
+  and cleared on encode, and malformed offset bounds are refused. The
+  encoders also refuse prefix/AFI mismatches rather than emitting an
+  incorrectly framed rule. Offset-zero IPv6 and valid IPv4 encoding stay
+  unchanged.
+- IPv6 Fragment components require a one-octet operand; reserved bits are
+  ignored on decode and cleared on encode (RFC 8956 §3.6). IPv4 Fragment
+  encoding is unchanged. Flow Label retains minimal numeric widths so a
+  legal 4095-octet rule with short operands remains re-encodable; four
+  octets are recommended, not required, by RFC 8956 §3.7.
 - Component type 13 (Flow Label) now decodes only for IPv6 FlowSpec, as
   RFC 8956 defines it. In an IPv4 rule, global (SAFI 133) or VPN (SAFI 134),
   it is an unknown component type and the NLRI is malformed (RFC 8955 §4.2);
