@@ -27,6 +27,13 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   (10000000) budget. Previously the only limit was the per-transaction record
   budget, which reset with every serial update.
 - The new API is additive, and `RtrError` was already `#[non_exhaustive]`.
+- A v1 session that the client fell back to from v2 now reconnects to probe
+  v2 again at its first refresh at least an hour after the fallback (8210bis
+  §7: each session opens at the highest version, and the version changes only
+  on a new connection). Previously any failure before the first End of Data,
+  such as one connection reset, kept the cache at v1, without ASPA, for the
+  life of the process. A probe the cache refuses falls back to v1 at once and
+  keeps the held v1 data and serial.
 - Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
   new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
   or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These
