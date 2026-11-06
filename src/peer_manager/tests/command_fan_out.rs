@@ -23,11 +23,11 @@ const WEDGED: [IpAddr; 4] = [
 ];
 
 /// `PEER_LIFECYCLE_COMMAND_TIMEOUT` and `PEER_POLICY_UPDATE_TIMEOUT`.
-const WINDOW: Duration = Duration::from_millis(500);
+pub(super) const WINDOW: Duration = Duration::from_millis(500);
 
 /// A session parked on a full RIB mailbox: its only command slot is taken
 /// and it never reads its channel again.
-fn wedged_session() -> PeerHandle {
+pub(super) fn wedged_session() -> PeerHandle {
     let (commands, receiver) = mpsc::channel(1);
     commands
         .try_send(PeerCommand::Start)
@@ -61,7 +61,7 @@ async fn advance_settled(by: Duration) {
 /// ends and finished when it does. A sequential sweep takes one window per
 /// wedged peer, and one that does not serve readiness while it waits leaves
 /// the second probe waiting for all of them.
-async fn one_readiness_serving_window<T: Send + 'static>(
+pub(super) async fn one_readiness_serving_window<T: Send + 'static>(
     readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
     window: Duration,
     sweep: impl Future<Output = T> + Send + 'static,
