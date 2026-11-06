@@ -312,6 +312,9 @@ pub(crate) struct AcceptedConfigSnapshot {
     manifest: SourceManifest,
     sha256: [u8; 32],
     source_sha256: [u8; 32],
+    /// Unix-seconds mtime of the config file as it was read, for snapshots
+    /// loaded from the file. `None` for snapshots derived in memory.
+    read_mtime_unix: Option<u64>,
 }
 
 impl AcceptedConfigSnapshot {
@@ -360,6 +363,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             source_sha256,
+            read_mtime_unix: None,
         }))
     }
 
@@ -404,7 +408,21 @@ impl AcceptedConfigSnapshot {
         live_bindings: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         after_capture: impl FnOnce(),
     ) -> Result<Self, String> {
-        let bytes = std::fs::read(path)
+        // Stat the open file before reading it, so the mtime describes these
+        // bytes even if the operator saves again (in place or by rename)
+        // while the load or the reload that follows is still running.
+        let (bytes, read_mtime_unix) = std::fs::File::open(path)
+            .and_then(|mut file| {
+                let mtime = file
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| since.as_secs());
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut bytes)?;
+                Ok((bytes, mtime))
+            })
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
         let content = String::from_utf8(bytes)
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
@@ -443,6 +461,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             source_sha256,
+            read_mtime_unix,
         })
     }
 
@@ -463,6 +482,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             source_sha256,
+            read_mtime_unix: None,
         }))
     }
 
@@ -557,6 +577,7 @@ impl AcceptedConfigSnapshot {
             source_sha256: manifest.source_sha256(),
             manifest,
             sha256,
+            read_mtime_unix: None,
         })
     }
 
@@ -580,6 +601,11 @@ impl AcceptedConfigSnapshot {
 
     pub(crate) fn source_sha256(&self) -> [u8; 32] {
         self.source_sha256
+    }
+
+    /// The config file's mtime when this snapshot's bytes were read from it.
+    pub(crate) fn read_mtime_unix(&self) -> Option<u64> {
+        self.read_mtime_unix
     }
 }
 
