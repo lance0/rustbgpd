@@ -455,6 +455,7 @@ pub(super) async fn handle_learned(
                 apply_actions_with_duplicate_policy(
                     actions,
                     view_present,
+                    true,
                     preexisting_keys,
                     vni,
                     mac,
@@ -493,6 +494,7 @@ pub(super) async fn handle_learned(
         apply_actions_with_duplicate_policy(
             actions,
             view.is_some(),
+            prior_ifindex.is_some_and(|prior| prior != ifindex),
             preexisting_keys,
             vni,
             mac,
@@ -565,6 +567,7 @@ pub(super) async fn handle_learned(
         apply_actions_with_duplicate_policy(
             actions,
             view_present,
+            false,
             preexisting_keys,
             vni,
             mac,
@@ -728,6 +731,7 @@ pub(super) async fn handle_ip_added(
     apply_actions_with_duplicate_policy(
         actions,
         view_present,
+        false,
         preexisting_keys,
         vni,
         mac,
@@ -850,6 +854,7 @@ pub(super) async fn handle_ip_removed(
         apply_actions_with_duplicate_policy(
             actions,
             view_present,
+            false,
             preexisting_keys,
             vni,
             mac,

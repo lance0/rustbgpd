@@ -5499,6 +5499,43 @@ async fn repeated_local_notification_while_holding_a_tie_is_not_a_move() {
     }
 }
 
+/// RFC 7432 §15 / §15.1 at the `u32::MAX` ceiling: we yielded to a
+/// lower-IP PE at `u32::MAX`. A local port move is a locally detected move
+/// and counts toward duplicate-MAC detection, but the saturated sequence
+/// still loses the tie, so no route is advertised. Both route shapes.
+#[tokio::test]
+async fn port_move_that_still_loses_at_max_counts_but_does_not_advertise() {
+    for ip in [None, Some("192.0.2.10")] {
+        let contender = evpn_macip_route_with_ip(100, 0xAA, ip, "9.9.9.9", Some(u32::MAX), false);
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        h.routes_tx.send_replace(vec![contender]);
+        h.repoll().await;
+        assert!(
+            h.advertised.lock().await.is_empty(),
+            "{ip:?}: must yield first"
+        );
+        let _ = h.take_log().await;
+
+        h.observe(LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 11,
+        })
+        .await;
+        assert_eq!(
+            h.take_log().await,
+            Vec::new(),
+            "{ip:?}: a still-losing route was advertised"
+        );
+        assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
+    }
+}
+
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
     with_esi(
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),

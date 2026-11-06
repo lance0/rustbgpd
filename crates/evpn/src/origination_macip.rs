@@ -499,9 +499,21 @@ impl LocalMacIpOriginator {
             if k.mac != mac {
                 continue;
             }
-            let key = match state.originated_key {
-                Some(key) => key,
-                None if state.yielded_to.is_some() => {
+            if state.originated_key.is_none() && state.yielded_to.is_none() {
+                continue;
+            }
+            state.our_seq = state
+                .last_seen_remote_seq
+                .map_or(state.our_seq, |remote| remote.max(state.our_seq))
+                .saturating_add(1);
+            let key = match (state.originated_key, state.yielded_to) {
+                (Some(key), _) => key,
+                // At the u32::MAX ceiling the bump saturates and a
+                // lower-IP contender still wins: stay withdrawn.
+                (None, Some(contender)) if contender.still_wins(state.our_seq, state.sticky) => {
+                    continue;
+                }
+                (None, _) => {
                     let key = EvpnRouteKey::MacIp {
                         rd,
                         ethernet_tag,
@@ -512,12 +524,7 @@ impl LocalMacIpOriginator {
                     state.originated_key = Some(key);
                     key
                 }
-                None => continue,
             };
-            state.our_seq = state
-                .last_seen_remote_seq
-                .map_or(state.our_seq, |remote| remote.max(state.our_seq))
-                .saturating_add(1);
             out.push(OriginationAction::Inject {
                 mac,
                 mobility_seq: state.rendered_seq(),
@@ -1096,6 +1103,27 @@ mod tests {
         assert_eq!(
             o.on_local_ip_learned(mac(0xAA), ip, false, None),
             Vec::new()
+        );
+    }
+
+    #[test]
+    fn port_move_cascade_that_still_loses_at_max_stays_withdrawn() {
+        let mut o = fresh();
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, None);
+        let lower_at_max = RemoteMacIpView {
+            next_hop: ipa("9.9.9.9"),
+            ..remote(Some(u32::MAX))
+        };
+        let actions = o.on_remote_ip_changed(mac(0xAA), ip, Some(&lower_at_max), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+
+        assert_eq!(o.on_local_mac_moved(mac(0xAA)), Vec::new());
+        assert_eq!(o.advertised_count(), 0);
+        assert_eq!(
+            o.on_remote_ip_changed(mac(0xAA), ip, None, local_ip())
+                .len(),
+            1
         );
     }
 

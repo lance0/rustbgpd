@@ -199,6 +199,7 @@ pub(super) fn record_duplicate_mac_move(
 pub(super) async fn apply_actions_with_duplicate_policy(
     actions: Vec<OriginationAction>,
     view_present: bool,
+    local_port_move: bool,
     preexisting_keys: Vec<EvpnRouteKey>,
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -209,8 +210,11 @@ pub(super) async fn apply_actions_with_duplicate_policy(
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
+    // A local learn against a remote advertisement is a move (RFC 7432
+    // §15.1) when it changes what we advertise, or when the MAC moved to
+    // another local port even if the route still loses at u32::MAX.
     if view_present
-        && !actions.is_empty()
+        && (local_port_move || !actions.is_empty())
         && record_duplicate_mac_move(metrics, state, inst, vni, mac)
     {
         suppress_local_originations_for_mac(
