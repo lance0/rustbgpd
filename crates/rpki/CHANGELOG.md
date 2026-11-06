@@ -5,6 +5,15 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.10.0 - Unreleased
 
+- Decode the RTR Router Key PDU (type 9, RFC 8210 §5.10) into the new
+  `RtrPdu::RouterKey` variant, and encode it. The client ignores it, because
+  it does not validate BGPsec paths. Previously the codec rejected type 9 as an
+  Unsupported PDU Type, so a cache serving BGPsec router keys (StayRTR does by
+  default) failed every transaction that carried one, and the client never
+  accepted that cache's VRPs or ASPAs. Framing is checked: the PDU must hold
+  the 20-octet SKI and AS number, and the SubjectPublicKeyInfo's DER length
+  must fill the rest exactly. `RtrPdu` is already `#[non_exhaustive]`, so the
+  new variant is additive.
 - Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
   new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
   or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These

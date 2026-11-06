@@ -1399,6 +1399,16 @@ impl RtrClient {
                             }
                             return Err(RtrError::ServerError { code, text });
                         }
+                        // A BGPsec router key (RFC 8210 §5.10). The codec has
+                        // checked its framing; this router does not validate
+                        // BGPsec paths, so it carries nothing to apply.
+                        RtrPdu::RouterKey { asn, .. } => {
+                            debug!(
+                                server = %self.config.server_addr,
+                                asn,
+                                "RTR Router Key PDU received (ignored: no BGPsec validation)"
+                            );
+                        }
                         _ => {
                             debug!(
                                 server = %self.config.server_addr,
@@ -3254,6 +3264,105 @@ mod tests {
                 server: addr,
                 entries: vec![entry(Ipv4Addr::new(203, 0, 115, 0), 24, 24, 65003)],
                 aspa_records: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// A cache that serves `BGPsec` router keys interleaves Router Key PDUs
+    /// with prefixes and ASPAs. The client applies everything else, ignores
+    /// the keys, and keeps the session: the next Serial Notify draws a
+    /// Serial Query on the same connection.
+    #[tokio::test]
+    async fn router_key_pdus_are_ignored_and_the_session_stays_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        let v2 = crate::rtr_codec::RTR_VERSION_2;
+        // A Router Key frame: header, 20-octet SKI, AS number, DER SPKI.
+        let router_key = {
+            let spki = [0x30, 0x03, 0x02, 0x01, 0x00];
+            let mut frame = vec![v2, 9, 1, 0];
+            frame.extend_from_slice(&u32::try_from(32 + spki.len()).unwrap().to_be_bytes());
+            frame.extend_from_slice(&[0xab; 20]);
+            frame.extend_from_slice(&65_003u32.to_be_bytes());
+            frame.extend_from_slice(&spki);
+            frame
+        };
+        let prefix = RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: Ipv4Addr::new(198, 51, 100, 0),
+            asn: 65003,
+        };
+        let aspa = AspaRecord {
+            customer_asn: 65_003,
+            provider_asns: vec![65_001],
+        };
+        let mut buf = Vec::new();
+        for (pdu, key_after) in [
+            (RtrPdu::CacheResponse { session_id: 7 }, false),
+            (prefix, true),
+            (
+                RtrPdu::Aspa {
+                    flags: 1,
+                    customer_asn: aspa.customer_asn,
+                    provider_asns: aspa.provider_asns.clone(),
+                },
+                true,
+            ),
+            (
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+                false,
+            ),
+        ] {
+            pdu.encode_with_version(&mut buf, v2).unwrap();
+            if key_after {
+                buf.extend_from_slice(&router_key);
+            }
+        }
+        stream.write_all(&buf).await.unwrap();
+
+        assert_eq!(
+            timeout(Duration::from_secs(5), vrp_rx.recv())
+                .await
+                .expect("the response carrying Router Keys was not applied")
+                .unwrap(),
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(198, 51, 100, 0), 24, 24, 65003)],
+                aspa_records: vec![aspa],
+            }
+        );
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 2,
+            },
+        )
+        .await;
+        assert_eq!(
+            timeout(Duration::from_secs(5), read_pdu(&mut stream))
+                .await
+                .expect("the session did not stay up"),
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 1,
             }
         );
 
