@@ -1817,10 +1817,11 @@ from a routed loopback. BFD authentication is not supported.
 
 Detection time follows RFC 5880 §6.8.4: the peer's multiplier times the larger
 of our `min_rx_interval` and the peer's advertised Desired Min TX. The peer's
-Desired Min TX can stretch that window to at most five minutes. Our own
-`min_rx_interval` times the peer's multiplier is never cut short. A peer that
-actually transmits more slowly than five minutes divided by its multiplier is
-declared down.
+Desired Min TX can stretch that window only up to the larger of five minutes
+and our `min_rx_interval` times the peer's multiplier. A peer that really
+transmits more slowly than that ceiling allows keeps the session up while its
+packets arrive inside the window, but tolerates fewer missed packets than its
+multiplier promises, and is declared down once a gap exceeds the window.
 
 Static neighbors attach BFD through their own or their peer group's `bfd`. A
 `[[dynamic_neighbors]]` range attaches it on the range instead (see
