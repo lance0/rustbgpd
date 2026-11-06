@@ -45,8 +45,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   `orf::decode_capability_value` returns the modeled blocks instead of `None`
   for an unrecognized AFI/SAFI.
 - `BgpHeader::decode` and `peek_message_length` enforce the RFC 4271 §6.1
-  per-type lengths: OPEN at least 29, UPDATE 23, NOTIFICATION 21,
-  ROUTE-REFRESH 23 (new `MIN_ROUTE_REFRESH_LEN`), and KEEPALIVE exactly 19.
+  per-type lengths: OPEN at least 29, UPDATE 23, NOTIFICATION 21, and
+  KEEPALIVE exactly 19. ROUTE-REFRESH is left to the body decoder, so a
+  session with Enhanced Route Refresh can answer RFC 7313 §5.
   A violation is `DecodeError::InvalidLength`, which maps to Bad Message
   Length (1/2) carrying the Length field. Earlier releases passed a short
   OPEN or NOTIFICATION to the body decoder, which reported OPEN Message

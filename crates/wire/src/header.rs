@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut};
 
 use crate::constants::{
     self, HEADER_LEN, MARKER, MARKER_LEN, MAX_MESSAGE_LEN, MIN_MESSAGE_LEN, MIN_NOTIFICATION_LEN,
-    MIN_OPEN_LEN, MIN_ROUTE_REFRESH_LEN, MIN_UPDATE_LEN,
+    MIN_OPEN_LEN, MIN_UPDATE_LEN,
 };
 use crate::error::DecodeError;
 
@@ -160,14 +160,17 @@ pub fn peek_message_length(buf: &[u8], max_message_len: u16) -> Result<Option<u1
 /// RFC 4271 §6.1 per-type length bounds: a message shorter than its type's
 /// minimum, a KEEPALIVE that is not exactly 19 octets, or an OPEN longer than
 /// 4096 (RFC 8654 excludes OPEN and KEEPALIVE from Extended Messages) is a Bad
-/// Message Length carrying the erroneous Length field.
+/// Message Length carrying the erroneous Length field. ROUTE-REFRESH is not
+/// bounded here: with Enhanced Route Refresh a bad length is a ROUTE-REFRESH
+/// Message Error (RFC 7313 §5), which the session decides; without it the
+/// body decoder reports Bad Message Length.
 fn check_type_length(message_type: MessageType, length: u16) -> Result<(), DecodeError> {
     let (min, max) = match message_type {
         MessageType::Open => (MIN_OPEN_LEN, MAX_MESSAGE_LEN),
         MessageType::Update => (MIN_UPDATE_LEN, u16::MAX),
         MessageType::Notification => (MIN_NOTIFICATION_LEN, u16::MAX),
         MessageType::Keepalive => (MIN_MESSAGE_LEN, MIN_MESSAGE_LEN),
-        MessageType::RouteRefresh => (MIN_ROUTE_REFRESH_LEN, u16::MAX),
+        MessageType::RouteRefresh => (MIN_MESSAGE_LEN, u16::MAX),
     };
     if (min..=max).contains(&length) {
         Ok(())
@@ -227,7 +230,6 @@ mod tests {
             (2, 23, 4096),
             (3, 21, 4096),
             (4, 19, 19),
-            (5, 23, 4096),
         ] {
             assert_eq!(
                 peek_message_length(&make_header(min, msg_type), MAX_MESSAGE_LEN),

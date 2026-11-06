@@ -37,10 +37,6 @@ pub const MIN_UPDATE_LEN: u16 = 23;
 /// Minimum NOTIFICATION message length (header + code + subcode).
 pub const MIN_NOTIFICATION_LEN: u16 = 21;
 
-/// Minimum ROUTE-REFRESH message length (header + AFI + reserved + SAFI,
-/// RFC 2918 §3).
-pub const MIN_ROUTE_REFRESH_LEN: u16 = 23;
-
 /// Message type codes.
 pub mod message_type {
     /// OPEN message (type 1).
