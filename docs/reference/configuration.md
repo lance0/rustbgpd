@@ -1809,6 +1809,14 @@ BGP.) Genuine failures — a detection timeout or a remote-signaled
 operator disable/delete of the neighbor stops BGP through the normal lifecycle,
 not this path.
 
+A control packet selects its session by Your Discriminator (RFC 5880 §6.8.6),
+whatever its source address. Local discriminators are random, unique and
+non-zero, so a configured peer cannot guess another session's discriminator
+from its own. Link-local and interface-only sessions also drop packets that
+arrive on any interface other than their own. This is not authentication:
+an unauthenticated sender that can observe a session's packets on the same
+segment can still forge that session's state (RFC 5880 §9).
+
 Single-hop sessions use UDP/3784 and require received TTL/Hop-Limit 255.
 Multihop sessions use UDP/4784 and do not enforce a receive minimum TTL. Both
 modes transmit with TTL/Hop-Limit 255; there is no BFD receive minimum-TTL
