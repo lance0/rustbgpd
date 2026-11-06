@@ -1034,7 +1034,7 @@ async fn route_event_carries_best_path_id() {
 // --- Prometheus gauge tests ---
 
 /// Every canonical family, in `CONFIGURED_FAMILIES` order.
-const ADJ_RIB_OUT_FAMILIES: [&str; 13] = [
+const ADJ_RIB_OUT_FAMILIES: [&str; 14] = [
     "ipv4_unicast",
     "ipv6_unicast",
     "ipv4_flowspec",
@@ -1048,6 +1048,7 @@ const ADJ_RIB_OUT_FAMILIES: [&str; 13] = [
     "ipv6_labeled_unicast",
     "rtc",
     "l3vpn_ipv4_flowspec",
+    "l3vpn_ipv6_flowspec",
 ];
 
 #[test]
