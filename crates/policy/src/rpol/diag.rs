@@ -184,17 +184,20 @@ impl Diagnostics {
         self.render_sources(&[(filename.to_string(), source.to_string())], color)
     }
 
-    /// Render every diagnostic against a multi-module compile
-    /// (LAN-300): `sources[i]` is the `(display path, text)` of module
-    /// `i`, matching each span's `file` index, so an error in an
-    /// imported file renders an excerpt of — and names — that file.
+    /// Render the diagnostics against a multi-module compile (LAN-300):
+    /// `sources[i]` is the `(display path, text)` of module `i`, matching
+    /// each span's `file` index, so an error in an imported file renders
+    /// an excerpt of — and names — that file.
     ///
-    /// # Panics
-    ///
-    /// Never in practice: writing to an in-memory buffer is infallible.
+    /// The output is bounded: at most [`MAX_RENDERED_DIAGNOSTICS`]
+    /// reports and about [`MAX_RENDERED_BYTES`] bytes, with a closing
+    /// line counting what was left out. The sources are indexed once for
+    /// all reports, so the cost is linear in source size plus the
+    /// reports rendered.
     #[must_use]
     pub fn render_sources(&self, sources: &[(String, String)], color: bool) -> String {
         use ariadne::{Config, Label, Report, ReportKind};
+        use std::fmt::Write as _;
 
         let name_of = |span: &Span| -> String {
             sources
@@ -203,8 +206,16 @@ impl Diagnostics {
                 .map(|(name, _)| name.clone())
                 .unwrap_or_default()
         };
-        let mut out = Vec::new();
-        for diag in &self.0 {
+        // One line index per source for every report; building it per
+        // report made rendering quadratic in the diagnostic count.
+        let mut cache = ariadne::sources(
+            sources
+                .iter()
+                .map(|(name, text)| (name.clone(), text.as_str())),
+        );
+        let mut out = CappedBuffer::default();
+        let mut rendered = 0;
+        for diag in self.0.iter().take(MAX_RENDERED_DIAGNOSTICS) {
             let primary = diag.labels.first().map_or_else(
                 || (name_of(&Span::new(0..0)), 0..0),
                 |(span, _)| (name_of(span), span.range()),
@@ -222,12 +233,54 @@ impl Diagnostics {
             for note in &diag.notes {
                 report = report.with_note(note);
             }
-            report
-                .finish()
-                .write(ariadne::sources(sources.to_vec()), &mut out)
-                .expect("writing a diagnostic to an in-memory buffer cannot fail");
+            if report.finish().write(&mut cache, &mut out).is_err() {
+                break; // the byte cap: the partial report stays, marked below
+            }
+            rendered += 1;
         }
-        String::from_utf8_lossy(&out).into_owned()
+        let truncated = out.full;
+        let mut text = String::from_utf8_lossy(&out.bytes).into_owned();
+        let omitted = self.0.len() - rendered;
+        if truncated {
+            let _ = writeln!(
+                text,
+                "\n... output truncated at {MAX_RENDERED_BYTES} bytes; {omitted} more \
+                 diagnostic(s) not shown"
+            );
+        } else if omitted > 0 {
+            let _ = writeln!(text, "... {omitted} more diagnostic(s) not shown");
+        }
+        text
+    }
+}
+
+/// Reports rendered by [`Diagnostics::render_sources`]; the rest are counted.
+pub const MAX_RENDERED_DIAGNOSTICS: usize = 50;
+
+/// Rendered bytes kept by [`Diagnostics::render_sources`].
+pub const MAX_RENDERED_BYTES: usize = 256 * 1024;
+
+/// An in-memory writer that accepts [`MAX_RENDERED_BYTES`], then fails.
+#[derive(Default)]
+struct CappedBuffer {
+    bytes: Vec<u8>,
+    full: bool,
+}
+
+impl std::io::Write for CappedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = MAX_RENDERED_BYTES - self.bytes.len();
+        if buf.len() > room {
+            self.bytes.extend_from_slice(&buf[..room]);
+            self.full = true;
+            return Err(std::io::Error::other("diagnostic output cap reached"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -301,6 +354,67 @@ mod tests {
             Some("customers")
         );
         assert_eq!(closest("zzz", ["customers", "bogons"]), None);
+    }
+
+    /// Thousands of diagnostics against a large source render within a fixed
+    /// bound: the sources are indexed once and the output is capped.
+    #[test]
+    fn render_is_bounded_for_many_diagnostics() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..4000 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.nosuch == 1 {{ reject }} }} }}"
+            );
+        }
+        let Err(diagnostics) = crate::rpol::RpolFile::parse(&source) else {
+            panic!("unknown route fields fail to compile");
+        };
+        let count = diagnostics.len();
+        assert!(count >= 4000, "{count}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(diagnostics.render("candidate.rpol", &source, false));
+        });
+        let rendered = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("rendering 4000 diagnostics against 280 KB finishes within 10 s");
+        assert!(
+            rendered.len() <= MAX_RENDERED_BYTES + 256,
+            "{}",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains(&format!(
+                "{} more diagnostic(s) not shown",
+                count - MAX_RENDERED_DIAGNOSTICS
+            )),
+            "{}",
+            &rendered[rendered.len().saturating_sub(300)..]
+        );
+    }
+
+    /// One oversized report still stops at the byte cap.
+    #[test]
+    fn render_stops_at_the_byte_cap() {
+        let source = format!("{}\n", "x".repeat(MAX_RENDERED_BYTES * 2));
+        let diags = Diagnostics(vec![
+            Diagnostic::new(Span::new(0..source.len() - 1), "long", "here"),
+            Diagnostic::new(Span::new(0..1), "second", "here"),
+        ]);
+        let rendered = diags.render("long.rpol", &source, false);
+        assert!(
+            rendered.len() <= MAX_RENDERED_BYTES + 256,
+            "{}",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("output truncated"),
+            "{}",
+            &rendered[rendered.len() - 200..]
+        );
     }
 
     #[test]

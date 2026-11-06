@@ -390,7 +390,18 @@ pub struct PolicyService {
     /// The daemon's `[global] asn` (restart-only), which config resolution
     /// stamps into `.rpol` chain members for `prepend as self`.
     local_asn: Option<u32>,
+    /// `TestPolicy` / `ComparePolicy` candidate compiles in flight on the
+    /// blocking pool ([`POLICY_COMPILE_SLOTS`]).
+    compile_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
+
+/// Candidate compiles one service runs at once. A request past this is
+/// refused, not queued, so a burst cannot exhaust the blocking pool.
+const POLICY_COMPILE_SLOTS: usize = 2;
+
+/// Wall-clock bound on one candidate compile and diagnostic render. A
+/// compile that misses it keeps its slot until it finishes.
+const POLICY_COMPILE_DEADLINE: Duration = Duration::from_secs(30);
 
 impl PolicyService {
     /// Create a new policy service with the given channels and a private
@@ -436,6 +447,37 @@ impl PolicyService {
             settlement: None,
             owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
             local_asn: None,
+            compile_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(POLICY_COMPILE_SLOTS)),
+        }
+    }
+
+    /// Run a candidate compile, and the render of its diagnostics, on the
+    /// blocking pool under [`POLICY_COMPILE_DEADLINE`], so a large or
+    /// error-dense source never holds an async worker.
+    async fn compile_off_worker<T: Send + 'static>(
+        &self,
+        compile: impl FnOnce() -> Result<T, Status> + Send + 'static,
+    ) -> Result<T, Status> {
+        let permit = std::sync::Arc::clone(&self.compile_slots)
+            .try_acquire_owned()
+            .map_err(|_| {
+                Status::resource_exhausted(format!(
+                    "{POLICY_COMPILE_SLOTS} policy candidate compiles are already running; retry"
+                ))
+            })?;
+        let compile = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            compile()
+        });
+        match tokio::time::timeout(POLICY_COMPILE_DEADLINE, compile).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(Status::internal(format!(
+                "policy candidate compile failed: {error}"
+            ))),
+            Err(_) => Err(Status::deadline_exceeded(format!(
+                "policy candidate compile exceeded {} s",
+                POLICY_COMPILE_DEADLINE.as_secs()
+            ))),
         }
     }
 
@@ -1416,7 +1458,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use rustbgpd_policy::sets::SetStore;
         use rustbgpd_rib::{RouteQueryScope, route_query_key_in};
 
-        let req = request.into_inner();
+        let mut req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
             return Err(Status::invalid_argument(
                 "TestPolicy candidate input exceeds the request size limit",
@@ -1456,21 +1498,36 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             self.import_roster.as_ref(),
         )?;
 
-        // Compile the candidate source server-side. Diagnostics are a
-        // successful RPC with compiled=false — the dry run's answer.
-        let file = match RpolFile::parse(&req.rpol_source) {
-            Ok(file) => file,
+        // Compile the candidate source server-side, off the async workers.
+        // Diagnostics are a successful RPC with compiled=false — the dry
+        // run's answer.
+        let source = std::mem::take(&mut req.rpol_source);
+        let datasets = std::mem::take(&mut req.datasets);
+        let policy = req.policy.clone();
+        let compiled = self
+            .compile_off_worker(move || {
+                let file = match RpolFile::parse(&source) {
+                    Ok(file) => file,
+                    Err(diagnostics) => {
+                        return Ok(Err(diagnostics.render("candidate.rpol", &source, false)));
+                    }
+                };
+                let (base, args) = candidate_call(&file, &policy)?;
+                let bindings = bind_candidate_datasets(&file, &datasets)?;
+                compile_candidate(&file, base, &args, &mut SetStore::new(), &bindings, false)
+                    .map(Ok)
+            })
+            .await?;
+        let chain = match compiled {
+            Ok(chain) => chain,
             Err(diagnostics) => {
                 return Ok(Response::new(proto::TestPolicyResponse {
                     compiled: false,
-                    diagnostics: diagnostics.render("candidate.rpol", &req.rpol_source, false),
+                    diagnostics,
                     ..Default::default()
                 }));
             }
         };
-        let (base, args) = candidate_call(&file, &req.policy)?;
-        let bindings = bind_candidate_datasets(&file, &req.datasets)?;
-        let chain = compile_candidate(&file, base, &args, &mut SetStore::new(), &bindings, false)?;
 
         // Start the version-fenced route walk before reading peer context.
         // Import evaluates Adj-RIB-In (optionally one peer's); export
@@ -1560,7 +1617,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use rustbgpd_policy::sets::SetStore;
         use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key_in};
 
-        let req = request.into_inner();
+        let mut req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
             return Err(Status::invalid_argument(
                 "ComparePolicy candidate input exceeds the request size limit",
@@ -1606,33 +1663,49 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             target_key.interface.as_deref(),
         );
 
-        let file = match RpolFile::parse(&req.rpol_source) {
-            Ok(file) => file,
+        // Compile off the async workers, as TestPolicy does.
+        let source = std::mem::take(&mut req.rpol_source);
+        let datasets = std::mem::take(&mut req.datasets);
+        let policies = req.policies.clone();
+        let compiled = self
+            .compile_off_worker(move || {
+                let file = match RpolFile::parse(&source) {
+                    Ok(file) => file,
+                    Err(diagnostics) => {
+                        return Ok(Err(diagnostics.render("candidate.rpol", &source, false)));
+                    }
+                };
+                let calls = policies
+                    .iter()
+                    .map(|call| candidate_call(&file, call))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let bindings = bind_candidate_datasets(&file, &datasets)?;
+                // The structural bound configuration resolution enforces,
+                // charged as each member is retained (installed members join
+                // it below).
+                let mut budget = rustbgpd_policy::compile::ChainNodeBudget::default();
+                let compiled = compile_compare_candidates(
+                    &file,
+                    &calls,
+                    &bindings,
+                    &mut SetStore::new(),
+                    &mut |policy| charge_chain_budget(&mut budget, policy),
+                )?;
+                Ok(Ok((compiled, budget)))
+            })
+            .await?;
+        let (mut compiled, mut budget) = match compiled {
+            Ok(compiled) => compiled,
             Err(diagnostics) => {
                 return Ok(Response::new(proto::ComparePolicyResponse {
                     compiled: false,
-                    diagnostics: diagnostics.render("candidate.rpol", &req.rpol_source, false),
+                    diagnostics,
                     ..Default::default()
                 }));
             }
         };
-        let calls = req
-            .policies
-            .iter()
-            .map(|call| candidate_call(&file, call))
-            .collect::<Result<Vec<_>, _>>()?;
-        let bindings = bind_candidate_datasets(&file, &req.datasets)?;
-        let mut store = SetStore::new();
-        // The structural bound configuration resolution enforces, charged as
-        // each member is retained (installed members join it below).
-        let mut budget = rustbgpd_policy::compile::ChainNodeBudget::default();
-        let mut charge = |policy: &rustbgpd_policy::ir::CompiledPolicy| {
-            budget
-                .add_policy(policy)
-                .map_err(|reason| Status::invalid_argument(format!("candidate chain: {reason}")))
-        };
-        let mut compiled =
-            compile_compare_candidates(&file, &calls, &bindings, &mut store, &mut charge)?;
+        let mut charge =
+            |policy: &rustbgpd_policy::ir::CompiledPolicy| charge_chain_budget(&mut budget, policy);
 
         // The baseline is the chain the live distribution path evaluates
         // for this peer, read before the walk starts.
@@ -2141,6 +2214,16 @@ const TEST_POLICY_PAGE_SIZE: usize = 1000;
 
 /// Resolve a candidate policy reference (`name` or `name(arg, ...)`)
 /// against the submitted source, checking each argument's type.
+/// Charge one retained chain member to the structural bound.
+fn charge_chain_budget(
+    budget: &mut rustbgpd_policy::compile::ChainNodeBudget,
+    policy: &rustbgpd_policy::ir::CompiledPolicy,
+) -> Result<(), Status> {
+    budget
+        .add_policy(policy)
+        .map_err(|reason| Status::invalid_argument(format!("candidate chain: {reason}")))
+}
+
 fn candidate_call<'a>(
     file: &rustbgpd_policy::rpol::RpolFile,
     call: &'a str,
@@ -4587,6 +4670,121 @@ policy customer-in(peer_lp: u32) {
                 ("203.0.114.0", numbered.as_str(), "")
             ]
         );
+    }
+
+    /// `rpol` source with one typecheck error per policy.
+    fn error_dense_rpol(policies: usize) -> String {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..policies {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.nosuch == 1 {{ reject }} }} }}"
+            );
+        }
+        source
+    }
+
+    /// An error-dense `TestPolicy` candidate compiles and renders off the async
+    /// workers: on this single-threaded runtime, `GetHealth` answers while the
+    /// candidate is still compiling.
+    #[tokio::test]
+    async fn health_answers_while_a_large_test_policy_compiles() {
+        use crate::proto::control_service_server::ControlService as _;
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (rib_tx, mut rib_rx) = mpsc::channel(4);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let health = crate::control_service::ControlService::new(
+            AccessMode::ReadOnly,
+            tokio::time::Instant::now(),
+            rustbgpd_telemetry::BgpMetrics::new(),
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            None,
+        );
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                if let PeerManagerCommand::ActivePeers { reply } = command {
+                    let _ = reply.send(0);
+                }
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let rustbgpd_rib::RibUpdate::QueryLocRibCount { reply } = update {
+                    let _ = reply.send(0);
+                }
+            }
+        });
+
+        let svc = test_policy_service(Vec::new());
+        let started = std::time::Instant::now();
+        let dry_run = tokio::spawn(async move {
+            PolicyServiceRpc::test_policy(
+                &svc,
+                Request::new(proto::TestPolicyRequest {
+                    rpol_source: error_dense_rpol(3000),
+                    policy: "p0".to_string(),
+                    direction: "import".to_string(),
+                    ..Default::default()
+                }),
+            )
+            .await
+        });
+        // Let the dry run start before asking for health.
+        tokio::task::yield_now().await;
+        let health = health
+            .get_health(Request::new(proto::HealthRequest {}))
+            .await
+            .expect("health answers");
+        let health_latency = started.elapsed();
+        assert!(health.into_inner().healthy);
+        assert!(
+            !dry_run.is_finished(),
+            "the candidate must still be compiling when health answers (it answered after \
+             {health_latency:?})"
+        );
+        let response = tokio::time::timeout(Duration::from_secs(60), dry_run)
+            .await
+            .expect("the dry run finishes")
+            .unwrap()
+            .expect("compile failure is a successful RPC")
+            .into_inner();
+        assert!(!response.compiled);
+        assert!(
+            response.diagnostics.contains("diagnostic(s) not shown"),
+            "{}",
+            response.diagnostics
+        );
+    }
+
+    /// Candidate compiles past the slot count are refused, not queued.
+    #[tokio::test]
+    async fn test_policy_refuses_compiles_past_the_slot_count() {
+        let svc = test_policy_service(Vec::new());
+        let held: Vec<_> = (0..POLICY_COMPILE_SLOTS)
+            .map(|_| {
+                std::sync::Arc::clone(&svc.compile_slots)
+                    .try_acquire_owned()
+                    .unwrap()
+            })
+            .collect();
+        let status = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: TEST_RPOL.to_string(),
+                policy: "customer-in(200)".to_string(),
+                direction: "import".to_string(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        drop(held);
     }
 
     #[tokio::test]
