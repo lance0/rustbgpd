@@ -93,10 +93,17 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
         || connect_failure_log_metadata(metadata)
         || writer_failure_log_metadata(metadata)
         || malformed_attribute_warn_metadata(metadata)
+        || validation_warn_metadata(metadata)
         || (*metadata.level() == tracing::Level::WARN
             && ["peer", "family", "route_type", "discarded"]
                 .into_iter()
                 .all(|field| metadata.fields().field(field).is_some()))
+}
+
+/// The ungated `UPDATE validation error` WARN.
+fn validation_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::WARN
+        && metadata.fields().field("max_as_path_length").is_some()
 }
 
 /// Any per-attribute or per-UPDATE RFC 7606 malformed-attribute WARN.
@@ -2008,6 +2015,103 @@ fn malformed_attribute_warning_names_the_cause_of_the_applied_disposition() {
     assert_eq!(events[0]["disposition"], "treat-as-withdraw");
     assert_eq!(events[0]["attr_type"], "2", "{events:?}");
     assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 1);
+}
+
+/// An Established session, its runtime and RIB receiver, and a valid
+/// body-NLRI UPDATE (ORIGIN, `AS_PATH`, `NEXT_HOP`) for one prefix.
+fn malformed_update_fixture() -> (
+    tokio::runtime::Runtime,
+    PeerSession,
+    tokio::net::TcpStream,
+    UpdateMessage,
+) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let server = runtime.block_on(async {
+        let (client, server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        server
+    });
+    rfc7606_drain(&mut rib_rx);
+    std::mem::forget(rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let update = aspa_first_as_update(prefix, 65002, true);
+    assert_eq!(
+        &update.path_attributes[..4],
+        &[0x40, 1, 1, 0],
+        "ORIGIN first"
+    );
+    (runtime, session, server, update)
+}
+
+/// Load-bearing: the summary reports the action finally applied. Duplicate
+/// MEDs alone are attribute-discard, but a missing ORIGIN makes validation
+/// withdraw the routes; reporting the decoder's discard would misstate it.
+#[test]
+fn malformed_attribute_warning_reports_the_disposition_validation_applied() {
+    let (runtime, mut session, _server, mut update) = malformed_update_fixture();
+    let mut attributes = update.path_attributes[4..].to_vec(); // drop ORIGIN
+    attributes.extend([0x80, 4, 4, 0, 0, 0, 1, 0x80, 4, 4, 0, 0, 0, 2]); // MED twice
+    update.path_attributes = Bytes::from(attributes);
+
+    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    let summary: Vec<_> = events
+        .iter()
+        .filter(|event| event.contains_key("decoder_disposition"))
+        .collect();
+    assert_eq!(summary.len(), 1, "{events:?}");
+    assert_eq!(summary[0]["disposition"], "treat-as-withdraw", "{events:?}");
+    assert_eq!(summary[0]["decoder_disposition"], "attribute-discard");
+    assert_eq!(summary[0]["attr_type"], "4");
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 1);
+}
+
+/// Load-bearing: a decoder treat-as-withdraw on an UPDATE with no reachable
+/// NLRI escalates to a session reset (RFC 7606 §5.2), and the summary says
+/// so rather than treat-as-withdraw.
+#[test]
+fn malformed_attribute_warning_reports_the_section_5_2_session_reset() {
+    let (runtime, mut session, _server, mut update) = malformed_update_fixture();
+    update.nlri = Bytes::new();
+    let mut attributes = update.path_attributes.to_vec();
+    attributes.extend([0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA]); // AS_PATH again, AS_SET
+    update.path_attributes = Bytes::from(attributes);
+
+    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    let summary: Vec<_> = events
+        .iter()
+        .filter(|event| event.contains_key("decoder_disposition"))
+        .collect();
+    assert_eq!(summary.len(), 1, "{events:?}");
+    assert_eq!(summary[0]["disposition"], "session-reset", "{events:?}");
+    assert_eq!(summary[0]["decoder_disposition"], "treat-as-withdraw");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.get("direction").map(String::as_str) == Some("sent")),
+        "the reset sends a NOTIFICATION: {events:?}"
+    );
+    assert_eq!(update_malformed_count(&session, "session_reset"), 1);
+}
+
+/// Load-bearing: when the decoder removed a malformed ORIGIN, the
+/// validator's missing-ORIGIN finding is the same cause; only the summary
+/// reports it.
+#[test]
+fn decoder_removed_attribute_is_not_reported_again_by_validation() {
+    let (runtime, mut session, _server, mut update) = malformed_update_fixture();
+    let mut attributes = update.path_attributes.to_vec();
+    attributes[3] = 9; // ORIGIN value out of range
+    update.path_attributes = Bytes::from(attributes);
+
+    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["attr_type"], "1");
+    assert!(events[0].contains_key("decoder_disposition"), "{events:?}");
 }
 
 #[test]

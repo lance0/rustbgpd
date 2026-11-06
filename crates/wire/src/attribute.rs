@@ -1264,6 +1264,11 @@ pub(crate) fn decode_path_attributes_revised_observed(
         let as_path_zero = type_code == attr_type::AS_PATH
             && as_path_contains_zero(value, if four_octet_as { 4 } else { 2 });
         let duplicate = !first_report(&mut seen, type_code, SEEN);
+        // The first AS_PATH's own decode records its AS 0 cause; a repeat
+        // must not record a second one. Its other causes are unaffected.
+        if as_path_zero && !duplicate {
+            first_report(&mut seen, type_code, REPORTED_AS_ZERO);
+        }
         if duplicate {
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal.
             // A duplicate Community Container is treat-as-withdraw; other
@@ -9139,6 +9144,35 @@ mod tests {
 
     fn rfc7607_revised(value: &[u8], four_octet_as: bool) -> RevisedAttributeDecode {
         decode_path_attributes_revised(value, four_octet_as, false, &[]).unwrap()
+    }
+
+    /// Load-bearing: an AS 0 path repeated after a first AS 0 path records
+    /// the AS 0 cause once, from the first occurrence's decode.
+    #[test]
+    fn rfc7607_as_path_zero_counts_once_with_identical_repeats() {
+        let zero = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, &[2, 1, 0, 0]);
+        let mut buf = zero.clone();
+        for _ in 0..5 {
+            buf.extend(&zero);
+        }
+        let revised = rfc7607_revised(&buf, false);
+        let zero_causes = revised
+            .malformed
+            .iter()
+            .filter(|m| {
+                matches!(&m.error, DecodeError::UpdateAttributeError { detail, .. }
+                    if detail.contains("RFC 7607"))
+            })
+            .count();
+        assert_eq!(zero_causes, 1, "{:?}", revised.malformed);
+        assert_eq!(revised.malformed.len(), 2, "{:?}", revised.malformed);
+        assert_eq!(revised.coalesced_duplicates, 4);
+        assert!(
+            revised
+                .malformed
+                .iter()
+                .all(|m| m.type_code == attr_type::AS_PATH)
+        );
     }
 
     #[test]

@@ -7,7 +7,8 @@
   produced its own decode record and WARN line, so a single UPDATE could emit
   thousands of log lines while the session stayed up. Repeats of one type now
   share one record per cause. The malformed-attribute WARN is now one summary
-  line per UPDATE, naming the cause behind the applied disposition, and is
+  line per UPDATE, logged with the action finally applied and the decoder
+  cause behind it, and is
   emitted at power-of-two counts per TCP connection; every cause is still
   logged at DEBUG. The treat-as-withdraw, validation, and ASPA warnings are
   unchanged at one line per UPDATE. `bgp_update_malformed_total` still counts

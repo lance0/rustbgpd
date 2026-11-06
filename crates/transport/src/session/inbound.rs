@@ -826,17 +826,26 @@ impl PeerSession {
     /// hundreds of malformed records, and a peer can repeat it at will, so
     /// neither may set the WARN volume. `bgp_update_malformed_total` counts
     /// every UPDATE.
+    ///
+    /// Called once the UPDATE's final action is known: `applied` is that
+    /// action, which validation, ASPA, or the RFC 7606 §5.2 escalation may
+    /// have made stronger than the decoder's own `decoder_disposition`.
     fn log_malformed_attributes(
         &mut self,
         malformed: &[rustbgpd_wire::MalformedAttribute],
         coalesced_duplicates: u32,
+        applied: &'static str,
     ) {
-        let Some(disposition) = malformed.iter().map(|m| m.disposition).max() else {
+        let Some(decoder_disposition) = malformed.iter().map(|m| m.disposition).max() else {
             return;
         };
-        // Name the cause that set the applied disposition, e.g. the AS_SET
-        // behind a treat-as-withdraw rather than an earlier discard.
-        let Some(cause) = malformed.iter().find(|m| m.disposition == disposition) else {
+        // Name the decoder cause behind the strongest decoder disposition,
+        // e.g. the AS_SET behind a treat-as-withdraw rather than an earlier
+        // discard.
+        let Some(cause) = malformed
+            .iter()
+            .find(|m| m.disposition == decoder_disposition)
+        else {
             return;
         };
         self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
@@ -846,10 +855,11 @@ impl PeerSession {
                 malformed_updates = self.malformed_attribute_updates,
                 malformed_attributes = malformed.len(),
                 coalesced_duplicates,
-                disposition = disposition.as_str(),
+                disposition = applied,
+                decoder_disposition = decoder_disposition.as_str(),
                 attr_type = cause.type_code,
                 error = %cause.error,
-                "malformed path attributes (RFC 7606 revised error handling); the first cause with the applied disposition is shown, all causes at DEBUG"
+                "malformed path attributes (RFC 7606 revised error handling); disposition is the action applied to the UPDATE, the cause shown is the decoder's strongest, all causes at DEBUG"
             );
         }
         for m in malformed {
@@ -1965,7 +1975,7 @@ impl PeerSession {
         for (route_type, discarded) in evpn_discarded {
             self.record_evpn_discard(route_type, discarded);
         }
-        self.log_malformed_attributes(&malformed, revised.coalesced_duplicates);
+        let coalesced_duplicates = revised.coalesced_duplicates;
         if !malformed.is_empty()
             && let Some(update) = update
         {
@@ -2084,23 +2094,26 @@ impl PeerSession {
             // A decoder-removed mandatory attribute already has its primary
             // cause. Do not label the resulting absence as a second independent
             // failure; retain the validator's protocol disposition below.
+            // The summary WARN already names a decoder cause that removed
+            // this attribute; do not report the same cause twice.
             if reason != MalformedUpdateReason::MissingWellKnown
                 || !malformed.iter().any(|m| m.type_code == type_code)
             {
                 causes.push((Some(type_code), reason));
+                warn!(
+                    peer = %self.peer_label,
+                    attr_type = type_code,
+                    subcode = update_err.subcode,
+                    disposition = update_err.disposition.as_str(),
+                    max_as_path_length = self.config.max_as_path_length,
+                    "UPDATE validation error"
+                );
             }
-            warn!(
-                peer = %self.peer_label,
-                attr_type = type_code,
-                subcode = update_err.subcode,
-                disposition = update_err.disposition.as_str(),
-                max_as_path_length = self.config.max_as_path_length,
-                "UPDATE validation error"
-            );
             if let Some(update) = update {
                 self.debug_dump_malformed_update(update, &parsed);
             }
             if update_err.disposition == ErrorDisposition::SessionReset {
+                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2135,6 +2148,7 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
                 );
+                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2170,6 +2184,7 @@ impl PeerSession {
                 prefixes = ?summary.prefixes,
                 "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
@@ -2212,6 +2227,7 @@ impl PeerSession {
                 neighbor_asn,
                 "ASPA first-AS precondition failed; treating UPDATE as withdraw"
             );
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
             causes.push((
                 Some(rustbgpd_wire::constants::attr_type::AS_PATH),
                 MalformedUpdateReason::AspaFirstAsMismatch,
@@ -2235,6 +2251,7 @@ impl PeerSession {
         // disposition is attribute-discard — the offending attributes were
         // dropped and the UPDATE proceeds without them.
         if let Some(applied) = disposition {
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, applied.as_str());
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
