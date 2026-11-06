@@ -422,7 +422,8 @@ impl PeerManager {
     }
 
     /// Follow a configuration snapshot change outside a generation (runtime
-    /// neighbor create and delete, config transactions) with the static BFD
+    /// neighbor create and delete; config transactions that would change BFD
+    /// membership are rejected at plan time) with the static BFD
     /// membership it implies; a generation stages its own. A neighbor that
     /// now resolves BFD gets a session under a fresh revision, published
     /// level-triggered as at startup: adding the peer withholds a strict one
@@ -495,52 +496,6 @@ impl PeerManager {
         params.revision = coupling.next_revision;
         coupling.next_revision = coupling.next_revision.saturating_add(1);
         coupling.configured.insert(params.peer, params);
-    }
-
-    /// The strict members, each with its revision.
-    pub(super) fn strict_bfd_members(&self) -> HashSet<(IpAddr, u64)> {
-        self.bfd_coupling
-            .iter()
-            .flat_map(|coupling| coupling.configured.values())
-            .filter(|params| params.strict)
-            .map(|params| (params.peer, params.revision))
-            .collect()
-    }
-
-    /// Hold each enabled peer whose member became strict, or was replaced
-    /// while strict, since `before`, as a generation holds a newly strict
-    /// member: no session that is not Up yet may carry BGP. The actor's
-    /// reconcile of the new membership releases a member already Up.
-    pub(super) async fn hold_newly_strict_bfd_peers(&mut self, before: &HashSet<(IpAddr, u64)>) {
-        let Some(coupling) = self
-            .bfd_coupling
-            .as_ref()
-            .filter(|coupling| !coupling.reloading)
-        else {
-            return;
-        };
-        let due: Vec<IpAddr> = coupling
-            .configured
-            .values()
-            .filter(|params| {
-                params.strict
-                    && !before.contains(&(params.peer, params.revision))
-                    && !coupling.held_down.contains(&params.peer)
-            })
-            .map(|params| params.peer)
-            .filter(|peer| {
-                self.unique_peer_key_for_address(*peer)
-                    .and_then(|key| self.peers.get(&key))
-                    .is_some_and(|managed| managed.enabled)
-            })
-            .collect();
-        for peer in due {
-            if let Err(error) = self.hold_bgp_for_bfd(peer).await {
-                warn!(%peer, %error, "strict BFD member: failed to stop BGP session");
-            }
-            self.mark_bfd_withheld(peer);
-            info!(%peer, "strict BFD — withholding BGP establishment until BFD is Up");
-        }
     }
 
     /// Remove a dynamic session's BFD session once no dynamic peer at `peer`

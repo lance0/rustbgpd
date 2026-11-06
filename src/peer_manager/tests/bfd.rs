@@ -2310,9 +2310,11 @@ async fn a_runtime_neighbor_in_a_strict_bfd_group_runs_bfd_and_is_withheld() {
     assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER), "BFD Up admits BGP");
 }
 
-/// A strict-BFD group with the runtime peer in it, as a config transaction
-/// candidate would carry it.
-fn strict_bfd_member_config() -> Config {
+/// Deleting a strict-BFD neighbor and re-adding it without BFD (how the CLI
+/// changes a neighbor's ASN) removes its BFD session: the re-added neighbor
+/// is not held behind a session nothing configures.
+#[tokio::test]
+async fn re_adding_a_deleted_strict_bfd_neighbor_without_bfd_is_not_withheld() {
     let mut config = strict_bfd_group_config();
     apply_config_event(
         &mut config,
@@ -2322,19 +2324,8 @@ fn strict_bfd_member_config() -> Config {
         },
     )
     .unwrap();
-    config
-}
-
-fn neighbor_config(config: &Config) -> rustbgpd_api::peer_types::PeerManagerNeighborConfig {
-    crate::reload::build_peer_mgr_config(&config.resolve_neighbor(&config.neighbors[0]).unwrap())
-}
-
-/// A manager started with the runtime peer as a configured strict-BFD
-/// neighbor, attached and added as startup does.
-async fn started_strict_member_lab() -> super::dynamic_bfd::Lab {
-    let config = strict_bfd_member_config();
     let startup = crate::bfd_runtime::BfdRuntimeConfig::from_config(&config).unwrap();
-    let added = neighbor_config(&config);
+    let resolved = config.resolve_neighbor(&config.neighbors[0]).unwrap();
     let mut lab = super::dynamic_bfd::lab(config);
     // As startup attaches the coupling: its members and their families.
     let coupling = lab.mgr.bfd_coupling.as_mut().unwrap();
@@ -2344,28 +2335,11 @@ async fn started_strict_member_lab() -> super::dynamic_bfd::Lab {
         .map(|params| (params.peer, params.clone()))
         .collect();
     coupling.opened = startup;
-    lab.mgr.add_configured_peers(vec![added]).await.unwrap();
+    lab.mgr
+        .add_configured_peers(vec![crate::reload::build_peer_mgr_config(&resolved)])
+        .await
+        .unwrap();
     assert!(lab.mgr.bfd_withholding(&RUNTIME_PEER), "strict at startup");
-    lab
-}
-
-fn bfd_up(peer: IpAddr, revision: u64) -> crate::bfd_runtime::BfdStateChange {
-    crate::bfd_runtime::BfdStateChange {
-        revision,
-        peer,
-        state: rustbgpd_bfd::SessionState::Up,
-        diagnostic: rustbgpd_bfd::Diagnostic::None,
-        remote_admin_down: false,
-        resync: false,
-    }
-}
-
-/// Deleting a strict-BFD neighbor and re-adding it without BFD (how the CLI
-/// changes a neighbor's ASN) removes its BFD session: the re-added neighbor
-/// is not held behind a session nothing configures.
-#[tokio::test]
-async fn re_adding_a_deleted_strict_bfd_neighbor_without_bfd_is_not_withheld() {
-    let mut lab = Box::pin(started_strict_member_lab()).await;
 
     lab.mgr
         .delete_peer_runtime(key(RUNTIME_PEER), true)
@@ -2383,84 +2357,4 @@ async fn re_adding_a_deleted_strict_bfd_neighbor_without_bfd_is_not_withheld() {
         "the re-added neighbor is not held behind a stale strict session"
     );
     assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER));
-}
-
-/// A config transaction that adds a neighbor to a strict-BFD group stages
-/// its candidate, then adds the peer: the neighbor runs its BFD session and
-/// is withheld until that session is Up.
-#[tokio::test]
-async fn a_transaction_added_neighbor_in_a_strict_bfd_group_runs_bfd_and_is_withheld() {
-    let candidate = strict_bfd_member_config();
-    let added = neighbor_config(&candidate);
-    let mut lab = super::dynamic_bfd::lab(strict_bfd_group_config());
-    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
-        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
-
-    lab.mgr
-        .stage_transaction_config(Box::new(candidate), TransactionConfigScope::Full)
-        .unwrap();
-    lab.mgr.add_peer(added, false).await.unwrap();
-
-    let member = lab
-        .member(RUNTIME_PEER)
-        .expect("the neighbor runs BFD")
-        .clone();
-    assert!(member.strict, "inherited strict mode");
-    assert_eq!(
-        lab.published(),
-        [(RUNTIME_PEER, RUNTIME_PEER.to_string(), true)]
-    );
-    assert!(
-        lab.applied.try_recv().is_ok(),
-        "the socket family opened through the acknowledged commit"
-    );
-    assert!(lab.mgr.bfd_withholding(&RUNTIME_PEER), "withheld until Up");
-    lab.mgr
-        .handle_bfd_state_change(bfd_up(RUNTIME_PEER, member.revision))
-        .await;
-    assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER), "BFD Up admits BGP");
-}
-
-/// A failed transaction that deleted a strict-BFD neighbor re-adds it under
-/// the candidate, which has no BFD member for it, and only then restores the
-/// snapshot. The restored strict member must hold the already re-added peer
-/// until its session is Up, as at startup.
-#[tokio::test]
-async fn a_rolled_back_transaction_delete_withholds_the_restored_strict_neighbor() {
-    let mut lab = Box::pin(started_strict_member_lab()).await;
-    let rollback = lab
-        .mgr
-        .stage_transaction_config(
-            Box::new(strict_bfd_group_config()),
-            TransactionConfigScope::Full,
-        )
-        .unwrap();
-    let removed = lab
-        .mgr
-        .delete_peer_runtime(key(RUNTIME_PEER), false)
-        .await
-        .unwrap();
-    // The static rollback runs before the snapshot is restored.
-    lab.mgr.add_peer(removed, false).await.unwrap();
-    assert!(lab.member(RUNTIME_PEER).is_none(), "the candidate has none");
-
-    lab.mgr.restore_transaction_config(rollback).await;
-
-    let member = lab
-        .member(RUNTIME_PEER)
-        .expect("the restored neighbor runs BFD")
-        .clone();
-    assert!(member.strict);
-    assert_eq!(
-        lab.published(),
-        [(RUNTIME_PEER, RUNTIME_PEER.to_string(), true)]
-    );
-    assert!(
-        lab.mgr.bfd_withholding(&RUNTIME_PEER),
-        "the restored strict member holds BGP until its session is Up"
-    );
-    lab.mgr
-        .handle_bfd_state_change(bfd_up(RUNTIME_PEER, member.revision))
-        .await;
-    assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER), "BFD Up admits BGP");
 }

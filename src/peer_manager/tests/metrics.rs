@@ -1688,14 +1688,14 @@ fn policy_route_retirement_actor_fences_are_definitive_and_staged() {
     assert!(commit.contains("staged_policy_routes_prior.take()"));
     assert_eq!(commit.matches("reap_retired_policy_routes").count(), 1);
     let stage = arm(
-        "fn stage_transaction_config(",
-        "async fn restore_transaction_config(",
+        "Some(InternalCommand::StageTransactionConfig {",
+        "Some(InternalCommand::RestoreTransactionConfig",
     );
     assert!(stage.contains("self.staged_policy_routes_prior = None"));
     assert!(stage.contains("self.staged_policy_routes_prior = Some(policy_routes_prior)"));
     let restore = arm(
-        "async fn restore_transaction_config(",
-        "fn replace_current_config(",
+        "Some(InternalCommand::RestoreTransactionConfig {",
+        "None => {}",
     );
     assert!(restore.contains("self.staged_policy_routes_prior = None"));
     assert!(!restore.contains("reap_retired_policy_routes"));
