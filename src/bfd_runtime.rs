@@ -665,6 +665,14 @@ fn demux_target(
     }
 }
 
+/// One draw from the OS CSPRNG for a local discriminator. A v4 UUID carries
+/// 122 bits from `getrandom`; its first four bytes are all random.
+#[cfg(any(test, target_os = "linux"))]
+fn random_discriminator() -> u32 {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
 /// Whether a received packet changed the operator-visible BFD snapshot.
 ///
 /// Remote `AdminDown` assertion and clear can both be cause-only Down→Down
@@ -705,7 +713,7 @@ mod linux {
 
     use super::{
         BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStateChangeSender,
-        BfdStatus, demux_target, operator_status_changed,
+        BfdStatus, demux_target, operator_status_changed, random_discriminator,
     };
 
     /// BFD single-hop control port (RFC 5881 §4).
@@ -1198,10 +1206,9 @@ mod linux {
 
     impl Actor {
         async fn start_session(&mut self, params: &BfdSessionParams, metrics: &BgpMetrics) {
-            // A unique non-zero local discriminator (RFC 5880 §6.8.1) from the
-            // allocator — guaranteed distinct across peers, unlike an address
-            // hash which can collide.
-            let discr = match self.discriminators.allocate() {
+            // A unique, non-zero, random local discriminator (RFC 5880
+            // §6.8.1), so a peer cannot guess another session's from its own.
+            let discr = match self.discriminators.allocate(random_discriminator) {
                 Ok(discr) => discr,
                 Err(error) => {
                     warn!(
@@ -2624,6 +2631,77 @@ mod linux {
             );
         }
 
+        /// RFC 5880 §6.8.6 selects a session by Your Discriminator alone, so a
+        /// packet naming another session's discriminator drives that session.
+        /// A configured peer learns its own session's discriminator from our
+        /// packets; it must not be able to guess a neighbor's from it.
+        #[tokio::test]
+        async fn a_peer_cannot_guess_another_sessions_discriminator() {
+            use super::*;
+            let metrics = BgpMetrics::new();
+            let (status_tx, _) = watch::channel(Vec::new());
+            let (event_tx, _) = broadcast::channel(8);
+            let (state_change_tx, _state_rx) = super::super::state_change_channel();
+            let mut actor = Actor {
+                configured_peers: HashSet::new(),
+                sessions: BTreeMap::new(),
+                discriminators: DiscriminatorAllocator::new(),
+                by_discriminator: HashMap::new(),
+                timers: BinaryHeap::new(),
+                tx_v4: None,
+                tx_v6: None,
+                multihop_tx_v4: None,
+                multihop_tx_v6: None,
+                event_tx,
+                state_change_tx,
+                jitter_state: 1,
+            };
+            let sender = reload_params("127.0.0.2", 1);
+            let victim = reload_params("127.0.0.3", 1);
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![sender.clone(), victim.clone()],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            let known = actor.sessions[&sender.peer].local_discriminator;
+            for guess in (1..=64).flat_map(|d| [known.wrapping_add(d), known.wrapping_sub(d)]) {
+                let packet = ReceivedPacket {
+                    src: sender.peer,
+                    ifindex: None,
+                    multihop: false,
+                    ttl: Some(255),
+                    packet: ControlPacket {
+                        diagnostic: Diagnostic::None,
+                        state: SessionState::Down,
+                        poll: false,
+                        final_bit: false,
+                        control_plane_independent: false,
+                        auth_present: false,
+                        demand: false,
+                        multipoint: false,
+                        detect_mult: 3,
+                        my_discriminator: 0xbad,
+                        your_discriminator: guess,
+                        desired_min_tx_interval: 300_000,
+                        required_min_rx_interval: 300_000,
+                        required_min_echo_rx_interval: 0,
+                    },
+                };
+                actor.on_packet(packet, &metrics, &status_tx).await;
+            }
+            let victim_session = &actor.sessions[&victim.peer].session;
+            assert_eq!(
+                victim_session.state(),
+                SessionState::Down,
+                "a guessed discriminator drove another session"
+            );
+            assert_eq!(victim_session.remote_discriminator(), 0);
+        }
+
         #[test]
         fn ipv6_receive_socket_enables_packet_info() {
             let socket = rx_socket_with(true, 0, enable_recv_ttl).expect("IPv6 receive socket");
@@ -3603,6 +3681,29 @@ bfd = {{ profile = "p" }}
             assert_eq!(first.peer, ip("10.0.0.2"));
             assert_eq!(second.peer, ip("10.0.0.3"));
         }
+    }
+
+    /// The runtime's discriminators come from the CSPRNG, not a counter:
+    /// across many allocations they are unique, non-zero, and almost never
+    /// one apart (about 1,000 / 2^32 expected adjacent pairs).
+    #[test]
+    fn runtime_discriminators_are_unique_nonzero_and_not_sequential() {
+        let mut alloc = rustbgpd_bfd::DiscriminatorAllocator::new();
+        let drawn: Vec<u32> = (0..1000)
+            .map(|_| {
+                alloc
+                    .allocate(super::random_discriminator)
+                    .expect("allocation succeeds")
+            })
+            .collect();
+        let unique: std::collections::HashSet<_> = drawn.iter().copied().collect();
+        assert_eq!(unique.len(), drawn.len());
+        assert!(drawn.iter().all(|&d| d != 0));
+        let adjacent = drawn
+            .windows(2)
+            .filter(|pair| pair[1].abs_diff(pair[0]) <= 1)
+            .count();
+        assert!(adjacent <= 1, "{adjacent} consecutive draws are one apart");
     }
 
     #[test]
