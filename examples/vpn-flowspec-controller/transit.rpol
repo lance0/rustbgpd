@@ -1,0 +1,36 @@
+# Only VPN FlowSpec carrying TRANSIT's scope RT may leave this speaker.
+# An RT controls PE import; it is distinct from a redirect-to-VRF action.
+
+policy transit-vpn-flowspec {
+    term ipv4 {
+        if route.family == vpnv4-flowspec && route.ext-communities has RT:44407:777 {
+            accept
+        }
+    }
+    term ipv6 {
+        if route.family == vpnv6-flowspec && route.ext-communities has RT:44407:777 {
+            accept
+        }
+    }
+    term rest { reject }
+}
+
+test transit-ipv4 {
+    route { prefix 192.0.2.0/24; family vpnv4-flowspec; ext-communities [RT:44407:777] }
+    expect transit-vpn-flowspec == accept
+}
+
+test transit-ipv6 {
+    route { prefix 2001:db8::/32; family vpnv6-flowspec; ext-communities [RT:44407:777] }
+    expect transit-vpn-flowspec == accept
+}
+
+test unrelated-vpn {
+    route { prefix 2001:db8::/32; family vpnv6-flowspec; ext-communities [RT:44407:778] }
+    expect transit-vpn-flowspec == reject
+}
+
+test global-ipv6-is-not-vpn {
+    route { prefix 2001:db8::/32; family ipv6-flowspec; ext-communities [RT:44407:777] }
+    expect transit-vpn-flowspec == reject
+}

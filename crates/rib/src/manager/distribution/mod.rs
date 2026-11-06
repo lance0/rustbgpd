@@ -5493,10 +5493,11 @@ impl RibManager {
                     crate::manager::helpers::FLOWSPEC_FAMILIES,
                     lens.flowspec,
                 );
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "l3vpn_ipv4_flowspec",
-                    gauge_val(lens.flowspec_vpn),
+                    crate::manager::helpers::VPN_FLOWSPEC_FAMILIES,
+                    lens.flowspec_vpn,
                 );
             }
             if evpn_changed {

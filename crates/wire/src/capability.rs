@@ -57,7 +57,7 @@ pub enum Safi {
     RtConstrain = 132,
     /// RFC 8955 `FlowSpec`.
     FlowSpec = 133,
-    /// RFC 8955 §8 VPN `FlowSpec` — only [`Afi::Ipv4`] is supported.
+    /// RFC 8955 §8 / RFC 8956 VPN `FlowSpec` for [`Afi::Ipv4`] / [`Afi::Ipv6`].
     FlowSpecVpn = 134,
 }
 
@@ -100,6 +100,7 @@ pub const CONFIGURED_FAMILIES: &[(&str, Afi, Safi)] = &[
     ("ipv6_labeled_unicast", Afi::Ipv6, Safi::LabeledUnicast),
     ("rtc", Afi::Ipv4, Safi::RtConstrain),
     ("l3vpn_ipv4_flowspec", Afi::Ipv4, Safi::FlowSpecVpn),
+    ("l3vpn_ipv6_flowspec", Afi::Ipv6, Safi::FlowSpecVpn),
 ];
 
 /// Parse a canonical configuration or control-plane family label.

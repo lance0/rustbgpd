@@ -96,7 +96,7 @@ pub struct BitmaskMatch {
 /// IPv6 prefix with an additional bit offset for `FlowSpec` source/destination.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ipv6PrefixOffset {
-    /// The IPv6 prefix.
+    /// The IPv6 pattern in its address position; bits before `offset` are zero.
     pub prefix: Ipv6Prefix,
     /// Bit offset within the prefix (RFC 8956 §3.1).
     pub offset: u8,
@@ -229,8 +229,10 @@ impl FlowSpecRule {
     ///
     /// # Errors
     ///
-    /// Returns `EncodeError` if the encoded rule exceeds 4095 bytes.
+    /// Returns `EncodeError` for an invalid prefix or if the encoded rule
+    /// exceeds 4095 bytes.
     pub fn validate_encoded_len(&self, afi: Afi) -> Result<(), EncodeError> {
+        validate_prefixes_for_afi(self, afi)?;
         let len = self.encoded_len(afi);
         if len > MAX_FLOWSPEC_NLRI_RULE_LEN {
             return Err(EncodeError::ValueOutOfRange {
@@ -277,8 +279,8 @@ impl fmt::Display for FlowSpecRule {
     }
 }
 
-/// One RFC 8955 §8 VPN `FlowSpec` NLRI (AFI 1 / SAFI 134): an 8-octet Route
-/// Distinguisher followed by a `FlowSpec` rule.
+/// One RFC 8955 §8 / RFC 8956 VPN `FlowSpec` NLRI (SAFI 134): an 8-octet
+/// Route Distinguisher followed by an IPv4 or IPv6 `FlowSpec` rule.
 ///
 /// The NLRI length prefix covers the RD, so the rule's components are limited
 /// to 4087 octets. The RD is kept as raw octets, so RD types outside RFC 4364
@@ -573,8 +575,8 @@ pub fn decode_flowspec_nlri(buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule>, D
 }
 
 /// Decode one or more RFC 8955 §8 VPN `FlowSpec` NLRIs (AFI 1 / SAFI 134)
-/// from wire bytes. Only IPv4 VPN `FlowSpec` is supported, so the rules use
-/// the IPv4 component grammar.
+/// from wire bytes, using the IPv4 component grammar.
+/// See [`decode_vpn_flowspec_nlri_for_afi`] for IPv6.
 ///
 /// Each NLRI uses the `FlowSpec` length prefix, whose value covers the
 /// 8-octet Route Distinguisher and the rule that follows it.
@@ -586,6 +588,28 @@ pub fn decode_flowspec_nlri(buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule>, D
 /// one malformed NLRI fails the whole attribute rather than shifting the
 /// boundaries of the others.
 pub fn decode_vpn_flowspec_nlri(buf: &[u8]) -> Result<Vec<VpnFlowSpecRule>, DecodeError> {
+    decode_vpn_flowspec_nlri_for_afi(buf, Afi::Ipv4)
+}
+
+/// Decode VPN `FlowSpec` NLRIs with the IPv4 or IPv6 component grammar.
+///
+/// The RFC 8955 §8 length includes the eight-octet Route Distinguisher.
+/// IPv6 components follow RFC 8956.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for an unsupported AFI or malformed NLRI, including
+/// a truncated RD, empty rule, invalid component order or IPv6 prefix offset.
+pub fn decode_vpn_flowspec_nlri_for_afi(
+    buf: &[u8],
+    afi: Afi,
+) -> Result<Vec<VpnFlowSpecRule>, DecodeError> {
+    if !matches!(afi, Afi::Ipv4 | Afi::Ipv6) {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!("VPN FlowSpec unsupported AFI {}", afi as u16),
+        });
+    }
     let mut rules = Vec::new();
     for_each_flowspec_nlri(buf, |value| {
         let Some((rd, rule)) = value.split_first_chunk::<8>() else {
@@ -599,7 +623,7 @@ pub fn decode_vpn_flowspec_nlri(buf: &[u8]) -> Result<Vec<VpnFlowSpecRule>, Deco
         };
         rules.push(VpnFlowSpecRule {
             rd: RouteDistinguisher(*rd),
-            rule: decode_validated_rule(rule, Afi::Ipv4)?,
+            rule: decode_validated_rule(rule, afi)?,
         });
         Ok(())
     })?;
@@ -640,13 +664,16 @@ fn decode_validated_rule(value: &[u8], afi: Afi) -> Result<FlowSpecRule, DecodeE
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError`] if any rule exceeds the 4095-byte `FlowSpec` NLRI
-/// rule payload limit. On error, `buf` is restored to its original length.
+/// Returns [`EncodeError`] for an invalid prefix or if any rule exceeds the
+/// 4095-byte payload limit. On error, `buf` retains its original contents.
 pub fn try_encode_flowspec_nlri(
     rules: &[FlowSpecRule],
     buf: &mut Vec<u8>,
     afi: Afi,
 ) -> Result<(), EncodeError> {
+    for rule in rules {
+        validate_prefixes_for_afi(rule, afi)?;
+    }
     try_encode_framed(rules, buf, |rule, value| {
         encode_flowspec_rule(rule, value, afi);
     })
@@ -657,16 +684,65 @@ pub fn try_encode_flowspec_nlri(
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError`] if the Route Distinguisher plus rule of any NLRI
-/// exceeds 4095 bytes. On error, `buf` is restored to its original length.
+/// Returns [`EncodeError`] for an invalid prefix or if the RD plus rule of
+/// any NLRI exceeds 4095 bytes. On error, `buf` retains its original contents.
 pub fn try_encode_vpn_flowspec_nlri(
     rules: &[VpnFlowSpecRule],
     buf: &mut Vec<u8>,
 ) -> Result<(), EncodeError> {
+    try_encode_vpn_flowspec_nlri_for_afi(rules, buf, Afi::Ipv4)
+}
+
+/// Encode VPN `FlowSpec` NLRIs with the IPv4 or IPv6 component grammar.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] for an unsupported AFI, an invalid prefix, or if
+/// the RD plus rule exceeds 4095 bytes. On error, `buf` retains its contents.
+pub fn try_encode_vpn_flowspec_nlri_for_afi(
+    rules: &[VpnFlowSpecRule],
+    buf: &mut Vec<u8>,
+    afi: Afi,
+) -> Result<(), EncodeError> {
+    if !matches!(afi, Afi::Ipv4 | Afi::Ipv6) {
+        return Err(EncodeError::ValueOutOfRange {
+            field: "VPN FlowSpec AFI",
+            value: (afi as u16).to_string(),
+        });
+    }
+    for vpn in rules {
+        validate_prefixes_for_afi(&vpn.rule, afi)?;
+    }
     try_encode_framed(rules, buf, |vpn, value| {
         value.extend_from_slice(&vpn.rd.0);
-        encode_flowspec_rule(&vpn.rule, value, Afi::Ipv4);
+        encode_flowspec_rule(&vpn.rule, value, afi);
     })
+}
+
+fn validate_prefixes_for_afi(rule: &FlowSpecRule, afi: Afi) -> Result<(), EncodeError> {
+    for component in &rule.components {
+        let (FlowSpecComponent::DestinationPrefix(prefix)
+        | FlowSpecComponent::SourcePrefix(prefix)) = component
+        else {
+            continue;
+        };
+        let valid = match (afi, prefix) {
+            (Afi::Ipv4, FlowSpecPrefix::V4(prefix)) => prefix.len <= 32,
+            (Afi::Ipv6, FlowSpecPrefix::V6(prefix)) => {
+                prefix.prefix.len <= 128
+                    && ((prefix.prefix.len == 0 && prefix.offset == 0)
+                        || prefix.offset < prefix.prefix.len)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(EncodeError::ValueOutOfRange {
+                field: "FlowSpec prefix",
+                value: format!("{} for AFI {}", format_prefix(prefix), afi as u16),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Encode each item's NLRI value behind its RFC 8955 §4.1 length prefix.
@@ -794,7 +870,7 @@ fn decode_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecComponent, usize), 
             Ok((FlowSpecComponent::IcmpCode(ops), 1 + consumed))
         }
         9 => {
-            let (ops, consumed) = decode_bitmask_ops(rest)?;
+            let (ops, consumed) = decode_bitmask_ops(rest, false)?;
             Ok((FlowSpecComponent::TcpFlags(ops), 1 + consumed))
         }
         10 => {
@@ -806,7 +882,7 @@ fn decode_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecComponent, usize), 
             Ok((FlowSpecComponent::Dscp(ops), 1 + consumed))
         }
         12 => {
-            let (ops, consumed) = decode_bitmask_ops(rest)?;
+            let (ops, consumed) = decode_bitmask_ops(rest, afi == Afi::Ipv6)?;
             Ok((FlowSpecComponent::Fragment(ops), 1 + consumed))
         }
         // RFC 8956 §3.7 defines the Flow Label only for IPv6. RFC 8955 §4.2
@@ -879,13 +955,18 @@ fn decode_prefix_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecPrefix, usiz
             }
             let prefix_len = buf[0];
             let offset = buf[1];
-            if prefix_len > 128 {
+            if prefix_len > 128
+                || (prefix_len != 0 && offset >= prefix_len)
+                || (prefix_len == 0 && offset != 0)
+            {
                 return Err(DecodeError::MalformedField {
                     message_type: "UPDATE",
-                    detail: format!("FlowSpec IPv6 prefix length {prefix_len} > 128"),
+                    detail: format!(
+                        "FlowSpec IPv6 prefix length {prefix_len} and offset {offset}: expected 0/0 or offset < length <= 128"
+                    ),
                 });
             }
-            let byte_count = (prefix_len as usize).div_ceil(8);
+            let byte_count = usize::from(prefix_len - offset).div_ceil(8);
             if buf.len() < 2 + byte_count {
                 return Err(DecodeError::MalformedField {
                     message_type: "UPDATE",
@@ -894,7 +975,8 @@ fn decode_prefix_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecPrefix, usiz
             }
             let mut octets = [0u8; 16];
             octets[..byte_count].copy_from_slice(&buf[2..2 + byte_count]);
-            let addr = std::net::Ipv6Addr::from(octets);
+            // RFC 8956 §3.1 transmits only the pattern, starting at bit zero.
+            let addr = std::net::Ipv6Addr::from(u128::from_be_bytes(octets) >> offset);
             Ok((
                 FlowSpecPrefix::V6(Ipv6PrefixOffset {
                     prefix: Ipv6Prefix::new(addr, prefix_len),
@@ -966,7 +1048,10 @@ fn decode_numeric_ops(mut buf: &[u8]) -> Result<(Vec<NumericMatch>, usize), Deco
 }
 
 /// Decode bitmask operator+value pairs until end-of-list.
-fn decode_bitmask_ops(mut buf: &[u8]) -> Result<(Vec<BitmaskMatch>, usize), DecodeError> {
+fn decode_bitmask_ops(
+    mut buf: &[u8],
+    ipv6_fragment: bool,
+) -> Result<(Vec<BitmaskMatch>, usize), DecodeError> {
     let mut ops = Vec::new();
     let start_len = buf.len();
     loop {
@@ -983,6 +1068,12 @@ fn decode_bitmask_ops(mut buf: &[u8]) -> Result<(Vec<BitmaskMatch>, usize), Deco
         let and_bit = op_byte & 0x40 != 0;
         let value_len_code = (op_byte >> 4) & 0x03;
         let value_len = 1usize << value_len_code; // 1 or 2 for bitmask
+        if ipv6_fragment && value_len != 1 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "FlowSpec IPv6 fragment bitmask must use one octet".to_string(),
+            });
+        }
         let not_bit = op_byte & 0x02 != 0;
         let match_bit = op_byte & 0x01 != 0;
 
@@ -1013,7 +1104,7 @@ fn decode_bitmask_ops(mut buf: &[u8]) -> Result<(Vec<BitmaskMatch>, usize), Deco
             and_bit,
             not_bit,
             match_bit,
-            value,
+            value: if ipv6_fragment { value & 0x0e } else { value },
         });
 
         if end_of_list {
@@ -1044,10 +1135,17 @@ fn encode_flowspec_rule(rule: &FlowSpecRule, buf: &mut Vec<u8>, afi: Afi) {
             | FlowSpecComponent::PacketLength(ops)
             | FlowSpecComponent::Dscp(ops)
             | FlowSpecComponent::FlowLabel(ops) => {
+                // Minimal widths keep large received Flow Label rules re-encodable.
                 encode_numeric_ops(ops, buf);
             }
             FlowSpecComponent::TcpFlags(ops) | FlowSpecComponent::Fragment(ops) => {
-                encode_bitmask_ops(ops, buf);
+                let mask =
+                    if afi == Afi::Ipv6 && matches!(component, FlowSpecComponent::Fragment(_)) {
+                        0x0e // RFC 8956 §3.6 reserves every bit except LF, FF and IsF.
+                    } else {
+                        u16::MAX
+                    };
+                encode_bitmask_ops(ops, buf, mask);
             }
         }
     }
@@ -1058,14 +1156,18 @@ fn encode_prefix_component(prefix: &FlowSpecPrefix, buf: &mut Vec<u8>, _afi: Afi
     match prefix {
         FlowSpecPrefix::V4(p) => {
             buf.push(p.len);
-            let byte_count = (p.len as usize).div_ceil(8);
+            let byte_count = usize::from(p.len.min(32)).div_ceil(8);
             buf.extend_from_slice(&p.addr.octets()[..byte_count]);
         }
         FlowSpecPrefix::V6(p) => {
             buf.push(p.prefix.len);
             buf.push(p.offset);
-            let byte_count = (p.prefix.len as usize).div_ceil(8);
-            buf.extend_from_slice(&p.prefix.addr.octets()[..byte_count]);
+            let byte_count =
+                usize::from(p.prefix.len.min(128).saturating_sub(p.offset)).div_ceil(8);
+            let pattern = u128::from(Ipv6Prefix::new(p.prefix.addr, p.prefix.len).addr)
+                .checked_shl(u32::from(p.offset))
+                .unwrap_or(0);
+            buf.extend_from_slice(&pattern.to_be_bytes()[..byte_count]);
         }
     }
 }
@@ -1141,10 +1243,11 @@ fn bitmask_value_len_code(value: u16) -> u8 {
 }
 
 /// Encode bitmask operator+value pairs.
-fn encode_bitmask_ops(ops: &[BitmaskMatch], buf: &mut Vec<u8>) {
+fn encode_bitmask_ops(ops: &[BitmaskMatch], buf: &mut Vec<u8>, mask: u16) {
     for (i, op) in ops.iter().enumerate() {
         let is_last = i == ops.len() - 1;
-        let len_code = bitmask_value_len_code(op.value);
+        let value = op.value & mask;
+        let len_code = bitmask_value_len_code(value);
         let mut op_byte: u8 = 0;
         if is_last {
             op_byte |= 0x80; // end-of-list
@@ -1166,9 +1269,9 @@ fn encode_bitmask_ops(ops: &[BitmaskMatch], buf: &mut Vec<u8>) {
                     clippy::cast_possible_truncation,
                     reason = "codec bounds or masks the value before narrowing to the protocol field width"
                 )]
-                buf.push(op.value as u8);
+                buf.push(value as u8);
             }
-            2 => buf.extend_from_slice(&op.value.to_be_bytes()),
+            2 => buf.extend_from_slice(&value.to_be_bytes()),
             _ => unreachable!(),
         }
     }
@@ -1321,8 +1424,8 @@ mod tests {
             value: 0x02, // SYN
         }];
         let mut buf = Vec::new();
-        encode_bitmask_ops(&ops, &mut buf);
-        let (decoded, consumed) = decode_bitmask_ops(&buf).unwrap();
+        encode_bitmask_ops(&ops, &mut buf, u16::MAX);
+        let (decoded, consumed) = decode_bitmask_ops(&buf, false).unwrap();
         assert_eq!(consumed, buf.len());
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].value, 0x02);
@@ -1666,8 +1769,8 @@ mod tests {
             value: 0x0FFF,
         }];
         let mut buf = Vec::new();
-        encode_bitmask_ops(&ops, &mut buf);
-        let (decoded, _) = decode_bitmask_ops(&buf).unwrap();
+        encode_bitmask_ops(&ops, &mut buf, u16::MAX);
+        let (decoded, _) = decode_bitmask_ops(&buf, false).unwrap();
         assert_eq!(decoded[0].value, 0x0FFF);
     }
 
@@ -2065,14 +2168,11 @@ mod tests {
         assert!(rule.destination_prefix().is_none());
     }
 
-    fn ipv6_destination_rule(offset: u8) -> FlowSpecRule {
+    fn ipv6_destination_rule(address: &str, offset: u8) -> FlowSpecRule {
         FlowSpecRule {
             components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
                 Ipv6PrefixOffset {
-                    prefix: Ipv6Prefix::new(
-                        std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
-                        32,
-                    ),
+                    prefix: Ipv6Prefix::new(address.parse().unwrap(), 32),
                     offset,
                 },
             ))],
@@ -2081,7 +2181,9 @@ mod tests {
 
     #[test]
     fn ipv6_destination_prefix_offset_zero_extracts() {
-        let prefix = ipv6_destination_rule(0).destination_prefix().unwrap();
+        let prefix = ipv6_destination_rule("2001:db8::", 0)
+            .destination_prefix()
+            .unwrap();
         let crate::nlri::Prefix::V6(p) = prefix else {
             panic!("expected V6 prefix");
         };
@@ -2098,11 +2200,12 @@ mod tests {
     /// the extracted destination prefix is absent.
     #[test]
     fn ipv6_destination_prefix_with_offset_is_no_destination_prefix() {
-        let rule = ipv6_destination_rule(16);
+        let rule = ipv6_destination_rule("0:db8::", 16);
         assert_eq!(rule.destination_prefix(), None);
 
         let mut buf = Vec::new();
         try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv6).unwrap();
+        assert_eq!(buf, [5, 1, 32, 16, 0x0d, 0xb8]);
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv6).unwrap();
         assert_eq!(decoded, vec![rule]);
         assert_eq!(decoded[0].destination_prefix(), None);

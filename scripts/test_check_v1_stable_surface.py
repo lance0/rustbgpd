@@ -107,6 +107,73 @@ class CapabilitySectionTests(unittest.TestCase):
             self.assertIn("duplicate keys ['a']", stderr.getvalue())
 
 
+class VpnFlowSpecExclusionTests(unittest.TestCase):
+    """VPN scope is additive without changing the pinned global contract."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.inventory = checker.load_json(checker.INVENTORY_PATH)
+        proto = checker.strip_proto_comments((checker.ROOT / "proto/rustbgpd.proto").read_text())
+        cls.services = checker.parse_services(proto)
+        cls.definitions = checker.parse_proto_definitions(proto)
+
+    def check(self, definitions):
+        checker.check_method_sets(self.inventory, self.services, definitions)
+
+    def rejected(self, definitions):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self.check(definitions)
+        self.assertIn("stable protobuf message graph changed", stderr.getvalue())
+
+    def test_vpn_declarations_leave_stable_hashes_unchanged(self):
+        self.check(self.definitions)
+        paths = [
+            "AddFlowSpecRequest.rd",
+            "AddFlowSpecRequest.route_targets",
+            "AddressFamily.ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC",
+            "AddressFamily.ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC",
+            "DeleteFlowSpecRequest.rd",
+            "DeleteGuardedFlowSpecRequest.rd",
+            "FlowSpecRouteEntry.rd",
+            "FlowSpecRouteEntry.route_targets",
+            "LeasedFlowSpecKey.rd",
+            "ListFlowSpecExportDispositionsRequest.rd",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                message, field = path.split(".")
+                definitions = dict(self.definitions)
+                definitions[message], count = re.subn(
+                    checker.proto_field_re(field), f"{field} = 1000", definitions[message]
+                )
+                self.assertEqual(count, 1)
+                self.check(definitions)
+
+    def test_global_fields_and_family_values_remain_pinned(self):
+        changes = [
+            ("AddFlowSpecRequest", "repeated uint32 communities = 4;",
+             "repeated uint64 communities = 4;"),
+            ("FlowSpecRouteEntry", "repeated FlowSpecAction actions = 2;",
+             "repeated FlowSpecAction actions = 20;"),
+            ("AddressFamily", "ADDRESS_FAMILY_IPV4_FLOWSPEC = 3;",
+             "ADDRESS_FAMILY_IPV4_FLOWSPEC = 103;"),
+        ]
+        for message, old, new in changes:
+            with self.subTest(message=message):
+                definitions = dict(self.definitions)
+                self.assertIn(old, definitions[message])
+                definitions[message] = definitions[message].replace(old, new)
+                self.rejected(definitions)
+
+    def test_undeclared_additive_scope_field_still_fails(self):
+        definitions = dict(self.definitions)
+        definitions["AddFlowSpecRequest"] = definitions["AddFlowSpecRequest"].removesuffix("}") + (
+            "string unchecked_scope = 127; }"
+        )
+        self.rejected(definitions)
+
+
 class EvpnReflectorRoleTests(unittest.TestCase):
     """The scoped EVPN reflector set pins Types 1-5 fields, not Type 6/SRv6 views."""
 

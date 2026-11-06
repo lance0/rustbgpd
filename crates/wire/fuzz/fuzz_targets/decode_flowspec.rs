@@ -2,7 +2,7 @@
 use libfuzzer_sys::fuzz_target;
 use rustbgpd_wire::capability::Afi;
 use rustbgpd_wire::flowspec::{
-    decode_flowspec_nlri, decode_vpn_flowspec_nlri, try_encode_vpn_flowspec_nlri,
+    decode_flowspec_nlri, decode_vpn_flowspec_nlri_for_afi, try_encode_vpn_flowspec_nlri_for_afi,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -10,10 +10,15 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_flowspec_nlri(data, Afi::Ipv6);
     // VPN FlowSpec (SAFI 134): a decoded NLRI list re-encodes canonically
     // and decodes back to the same rules.
-    if let Ok(rules) = decode_vpn_flowspec_nlri(data) {
-        let mut wire = Vec::new();
-        try_encode_vpn_flowspec_nlri(&rules, &mut wire)
-            .expect("a decoded VPN FlowSpec NLRI fits the length field");
-        assert_eq!(decode_vpn_flowspec_nlri(&wire).as_ref(), Ok(&rules));
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        if let Ok(rules) = decode_vpn_flowspec_nlri_for_afi(data, afi) {
+            let mut wire = Vec::new();
+            try_encode_vpn_flowspec_nlri_for_afi(&rules, &mut wire, afi)
+                .expect("a decoded VPN FlowSpec NLRI fits the length field");
+            assert_eq!(
+                decode_vpn_flowspec_nlri_for_afi(&wire, afi).as_ref(),
+                Ok(&rules)
+            );
+        }
     }
 });

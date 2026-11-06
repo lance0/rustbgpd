@@ -43,8 +43,24 @@ out of alpha.
   late-committing adds and deletes with mutation windows and rule revisions.
   Both pin the API shape only, with no forwarding guarantee. RFC 9117 feasibility validation of received rules remains alpha and
   is opt-in (`[flowspec] validation = "rfc9117"`; the default is `"off"`); see
-  [ADR-0135](../adr/0135-flowspec-feasibility.md). VPN FlowSpec (SAFI 134) is
-  not implemented.
+  [ADR-0135](../adr/0135-flowspec-feasibility.md). IPv4/IPv6 VPN FlowSpec
+  (SAFI 134) supports opt-in controller origination with explicit RD/RT
+  scope, outside v1; see the [VPN API contract](api.md#vpn-flowspec-controller-api).
+  Received VPN rules are decoded and discarded, with no default-unicast
+  feasibility lookup or RT-Constrain filtering. rustbgpd creates no local
+  VRF, and local acceptance does not prove router installation or traffic
+  enforcement. Nonzero IPv6 prefix offsets use RFC 8956 pattern framing and
+  do not interoperate with peers that use the older full-prefix framing,
+  including GoBGP 4.11.0 and earlier rustbgpd releases. Depending on the
+  length and offset, a nonzero-offset rule from such a peer either fails to
+  decode and resets the whole session with NOTIFICATION 3/9 every time it is
+  sent, or decodes cleanly with a different, bit-shifted match (for example
+  length 32, offset 1). An established session does not prove compatibility.
+  Keep IPv6 FlowSpec rules with a nonzero prefix offset (global or VPN)
+  withdrawn on both sides until every peer uses RFC 8956 framing; offset-zero
+  IPv6 and IPv4 rules are unaffected.
+  The [qualification receipt](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
+  separates that comparator failure from the passing core checks.
 - Confederations are not implemented.
 - Conditional advertisement ([ADR-0137](../adr/0137-conditional-advertisement.md))
   is alpha and outside the v1 inventory. It covers IPv4 and IPv6 unicast only,

@@ -249,6 +249,7 @@ pub(super) const FAMILY_MEMBERS: &[&str] = &[
     "ipv4-flowspec",
     "ipv6-flowspec",
     "vpnv4-flowspec",
+    "vpnv6-flowspec",
     "evpn",
     "rtc",
     "bgp-ls",

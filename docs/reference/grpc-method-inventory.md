@@ -185,7 +185,7 @@ shape itself does not raise the tier.
 | `DeleteFibTable` | `mutating` | Remove a `[[fib_tables]]` entry by name; withdraws its kernel rows. |
 | `ListFibTables` | `sensitive_read` | Configured FIB table set + runtime availability. |
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
-| `ListFlowSpecRoutes` | `sensitive_read` | RFC 8955 flow-spec routes — discloses traffic filter installations. |
+| `ListFlowSpecRoutes` | `sensitive_read` | Selected, retained or committed FlowSpec rules. `UNSPECIFIED` selects global SAFI 133 only; explicit families 13/14 return RD/RT-bearing IPv4/IPv6 VPN rows outside v1. Discloses traffic-filter intent and export state, not remote installation. |
 | `ListEvpnRoutes` | `sensitive_read` | Deprecated whole-table selected EVPN view, outside v1; use `ListBestEvpnRoutes` for bounded best pages. |
 | `ListReceivedEvpnRoutes` | `sensitive_read` | Bounded accepted post-policy EVPN routes from one source neighbor. |
 | `ListAdvertisedEvpnRoutes` | `sensitive_read` | Bounded committed EVPN routes to one destination neighbor, retaining route source identity. |
@@ -237,18 +237,18 @@ shape itself does not raise the tier.
 | `DeletePath` | `operator_only` | Withdraws an originated route. Lower-impact than Add, but classifying the inverse separately gives a misleading defense surface — treat as the same risk class. |
 | `ListPathExportDispositions` | `sensitive_read` | Per-peer export disposition of one injected unicast route: committed, withheld with a bounded reason, or pending. Discloses per-peer export policy outcomes like `ExplainAdvertisedRoute`; mutates nothing. |
 | `BatchListPathExportDispositions` | `sensitive_read` | `ListPathExportDispositions` for up to 1000 injected unicast route keys in one paged walk; the same disclosure. |
-| `ListFlowSpecExportDispositions` | `sensitive_read` | `ListPathExportDispositions` for one injected FlowSpec rule; the same disclosure. |
-| `AddFlowSpec` | `operator_only` | Installs RFC 8955 traffic-filter rules. Dataplane impact at line rate; one rule can drop or rate-limit arbitrary traffic. |
-| `DeleteFlowSpec` | `operator_only` | Same risk class as Add. |
+| `ListFlowSpecExportDispositions` | `sensitive_read` | Per-peer export disposition of one injected `(family, RD, components)` key; RD is required for VPN families 13/14. Same disclosure as `ListPathExportDispositions`; outside v1. |
+| `AddFlowSpec` | `operator_only` | Originates traffic-filter rules that receiving routers may enforce. Global families use an empty RD; outside-v1 VPN families 13/14 require an RD and scope RTs. Local acceptance does not establish remote enforcement. |
+| `DeleteFlowSpec` | `operator_only` | Withdraws one scoped local key; VPN families 13/14 require its RD. Same risk class as Add. |
 | `AddLeasedPath` | `operator_only` | `AddPath` under an owner's lease (ADR-0141); same risk class as `AddPath`. |
-| `AddLeasedFlowSpec` | `operator_only` | `AddFlowSpec` under an owner's lease (ADR-0141); same risk class as `AddFlowSpec`. |
+| `AddLeasedFlowSpec` | `operator_only` | `AddFlowSpec` under an owner's lease (ADR-0141); one lease spans all that owner's families and RDs. Same risk class as `AddFlowSpec`. |
 | `RenewLease` | `operator_only` | Keeps an owner's injected routes and rules alive. Delaying a dead controller's withdrawal has the blast radius of the injection itself, so it shares the adds' tier; a successful renewal is audited at INFO instead of WARN (ADR-0141). |
 | `IssueMutationWindow` | `operator_only` | Issues the mutation window a guarded FlowSpec add or renewal must commit within (ADR-0144). A window authorizes diversion and lease extension, so it shares the adds' tier; a successful issue is audited at INFO instead of WARN. |
-| `AddGuardedFlowSpec` | `operator_only` | `AddFlowSpec` under a guarded owner's lease, fenced by a mutation window and an admission revision (ADR-0144); same risk class as `AddFlowSpec`. |
-| `DeleteGuardedFlowSpec` | `operator_only` | Removes a guarded owner's FlowSpec rule at one admission revision (ADR-0144); same risk class as `DeleteFlowSpec`. |
+| `AddGuardedFlowSpec` | `operator_only` | `AddFlowSpec` under a guarded owner's lease, fenced by a mutation window and an admission revision for the scoped key (ADR-0144). Changing RT payload requires delete/re-add under a new revision. Same risk class as `AddFlowSpec`. |
+| `DeleteGuardedFlowSpec` | `operator_only` | Removes a guarded owner's scoped FlowSpec rule at one admission revision (ADR-0144); VPN families 13/14 require its RD. Same risk class as `DeleteFlowSpec`. |
 | `RenewGuardedLease` | `operator_only` | `RenewLease` for a guarded owner, capped by a mutation window (ADR-0144); same tier and the same INFO audit for a successful renewal. |
 | `ListInjectionLeases` | `sensitive_read` | Lease owners, generations and remaining time; discloses controller identities. |
-| `ListLeasedKeys` | `sensitive_read` | The injected keys one owner holds, with each key's generation and remaining lease, paged. Same disclosure as `ListInjectionLeases` plus the owner's route and rule keys. |
+| `ListLeasedKeys` | `sensitive_read` | The injected keys one owner holds, with each key's generation and remaining lease, paged. VPN keys and cursors retain family and RD; the owner has one lease across RDs. Same disclosure as `ListInjectionLeases` plus the owner's route and rule keys. |
 | `MarkReplayComplete` | `operator_only` | A controller's replay-complete signal after a planned restart. The last listed controller's signal releases the held End-of-RIB, and helpers then remove every stale route the controllers did not re-add, so an early or forged signal has the blast radius of deleting those routes. Rare; audited at WARN like the adds. |
 | `AddEvpnRoute` | `operator_only` | Originates EVPN Type 2/3/5; can blackhole an L2 segment by hijacking a MAC, or steer Type 5 traffic. |
 | `DeleteEvpnRoute` | `operator_only` | Same risk class. |

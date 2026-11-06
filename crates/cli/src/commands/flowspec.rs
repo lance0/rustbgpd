@@ -94,6 +94,12 @@ fn route_to_json(route: &crate::proto::FlowSpecRouteEntry) -> serde_json::Value 
     if !route.ipv6_extended_communities.is_empty() {
         value["ipv6_extended_communities"] = serde_json::json!(route.ipv6_extended_communities);
     }
+    if !route.rd.is_empty() {
+        value["rd"] = serde_json::json!(route.rd);
+    }
+    if !route.route_targets.is_empty() {
+        value["route_targets"] = serde_json::json!(route.route_targets);
+    }
     if !route.injection_owner.is_empty() {
         value["lease"] = output::lease_json(
             &route.injection_owner,
@@ -130,6 +136,11 @@ fn received_route_to_json(row: &crate::proto::ReceivedFlowSpecRouteEntry) -> ser
 fn print_route(route: &crate::proto::FlowSpecRouteEntry) -> Result<(), CliError> {
     let components: Vec<String> = route.components.iter().map(format_component).collect();
     let actions: Vec<String> = route.actions.iter().map(format_action).collect();
+    let scope = if route.rd.is_empty() {
+        String::new()
+    } else {
+        format!(" rd {} rt [{}]", route.rd, route.route_targets.join(", "))
+    };
     let lease = if route.injection_owner.is_empty() {
         String::new()
     } else {
@@ -139,7 +150,7 @@ fn print_route(route: &crate::proto::FlowSpecRouteEntry) -> Result<(), CliError>
         )
     };
     outln!(
-        "  match [{}] action [{}] from {} ({}){lease}",
+        "  match [{}] action [{}] from {} ({}){scope}{lease}",
         components.join(", "),
         actions.join(", "),
         route.peer_address,
@@ -331,13 +342,32 @@ fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
     Err(format!("unknown action: {s}"))
 }
 
+fn validate_vpn_scope(family: i32, rd: &str, route_targets: &[String]) -> Result<(), CliError> {
+    use crate::proto::AddressFamily::{L3vpnIpv4Flowspec, L3vpnIpv6Flowspec};
+
+    // Older daemons ignore scope fields on otherwise valid global requests.
+    if !matches!(
+        crate::proto::AddressFamily::try_from(family),
+        Ok(L3vpnIpv4Flowspec | L3vpnIpv6Flowspec)
+    ) && (!rd.is_empty() || !route_targets.is_empty())
+    {
+        return Err(CliError::Argument(
+            "--rd and --route-target require l3vpn_ipv4_flowspec or l3vpn_ipv6_flowspec".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn add(
     connection: Connection,
     family: i32,
+    rd: String,
+    route_targets: Vec<String>,
     components: &[String],
     actions: &[String],
     json: bool,
 ) -> Result<(), CliError> {
+    validate_vpn_scope(family, &rd, &route_targets)?;
     let parsed_components: Vec<FlowSpecComponent> = components
         .iter()
         .map(|s| parse_component(s))
@@ -362,6 +392,8 @@ pub async fn add(
             communities: vec![],
             extended_communities: vec![],
             ipv6_extended_communities: vec![],
+            rd,
+            route_targets,
         }),
     )
     .await?
@@ -384,11 +416,13 @@ pub async fn add(
 pub async fn delete(
     connection: Connection,
     family: i32,
+    rd: String,
     components: &[String],
     allow_missing: bool,
     owner: super::InjectedOwner,
     json: bool,
 ) -> Result<(), CliError> {
+    validate_vpn_scope(family, &rd, &[])?;
     let parsed_components: Vec<FlowSpecComponent> = components
         .iter()
         .map(|s| parse_component(s))
@@ -407,6 +441,7 @@ pub async fn delete(
             allow_missing,
             owner: owner.owner,
             override_owner: owner.override_owner,
+            rd,
         }),
     )
     .await

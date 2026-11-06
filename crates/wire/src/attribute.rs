@@ -214,8 +214,8 @@ pub struct MpReachNlri {
     pub labeled_announced: Vec<crate::labeled::LabeledNlriEntry>,
     /// RT-Constrain NLRI entries (RFC 4684). Populated only for SAFI 132.
     pub rtc_announced: Vec<crate::rtc::RtcNlri>,
-    /// VPN `FlowSpec` NLRI rules (RFC 8955 §8). Populated only for AFI 1 /
-    /// SAFI 134.
+    /// VPN `FlowSpec` NLRI rules (RFC 8955 §8 / RFC 8956). Populated only
+    /// for AFI 1/2 / SAFI 134.
     pub vpn_flowspec_announced: Vec<crate::flowspec::VpnFlowSpecRule>,
 }
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
@@ -247,7 +247,7 @@ pub struct MpUnreachNlri {
     /// RT-Constrain NLRI entries withdrawn (RFC 4684). Populated only for SAFI 132.
     pub rtc_withdrawn: Vec<crate::rtc::RtcNlri>,
     /// VPN `FlowSpec` NLRI rules withdrawn (RFC 8955 §8). Populated only for
-    /// AFI 1 / SAFI 134.
+    /// AFI 1/2 / SAFI 134.
     pub vpn_flowspec_withdrawn: Vec<crate::flowspec::VpnFlowSpecRule>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,8 +269,7 @@ fn classify_mp_nlri_family(
     match (afi, safi) {
         (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => Ok(MpNlriFamily::Unicast),
         (Afi::Ipv4 | Afi::Ipv6, Safi::FlowSpec) => Ok(MpNlriFamily::FlowSpec),
-        // RFC 8955 §8 defines AFI 1 only; (Ipv6, FlowSpecVpn) stays rejected.
-        (Afi::Ipv4, Safi::FlowSpecVpn) => Ok(MpNlriFamily::VpnFlowSpec),
+        (Afi::Ipv4 | Afi::Ipv6, Safi::FlowSpecVpn) => Ok(MpNlriFamily::VpnFlowSpec),
         (Afi::L2Vpn, Safi::Evpn) => Ok(MpNlriFamily::Evpn),
         (Afi::BgpLs, Safi::BgpLs | Safi::BgpLsVpn) => Ok(MpNlriFamily::BgpLs),
         (Afi::Ipv4 | Afi::Ipv6, Safi::MplsVpn) => Ok(MpNlriFamily::Vpn),
@@ -290,7 +289,8 @@ fn classify_mp_nlri_family(
             | Safi::MplsVpn
             | Safi::LabeledUnicast,
         )
-        | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain | Safi::FlowSpecVpn) => {
+        | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain)
+        | (Afi::L2Vpn | Afi::BgpLs, Safi::FlowSpecVpn) => {
             Err(unsupported_mp_nlri_family(attribute, afi, safi))
         }
     }
@@ -299,7 +299,7 @@ fn unsupported_mp_nlri_family(attribute: &'static str, afi: Afi, safi: Safi) -> 
     DecodeError::MalformedField {
         message_type: "UPDATE",
         detail: format!(
-            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, L2VPN EVPN, BGP-LS/BGP-LS VPN, VPNv4/VPNv6, IPv4/IPv6 labeled-unicast, IPv4 RT-Constrain, and IPv4 VPN FlowSpec",
+            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, L2VPN EVPN, BGP-LS/BGP-LS VPN, VPNv4/VPNv6, IPv4/IPv6 labeled-unicast, IPv4 RT-Constrain, and IPv4/IPv6 VPN FlowSpec",
             afi as u16, safi as u8
         ),
     }
@@ -2457,7 +2457,7 @@ fn decode_mp_reach_nlri(
         })));
     }
     if family == MpNlriFamily::VpnFlowSpec {
-        let rules = crate::flowspec::decode_vpn_flowspec_nlri(nlri_bytes)?;
+        let rules = crate::flowspec::decode_vpn_flowspec_nlri_for_afi(nlri_bytes, afi)?;
         return Ok(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi,
             safi,
@@ -2704,7 +2704,7 @@ fn decode_mp_unreach_nlri(
         })));
     }
     if family == MpNlriFamily::VpnFlowSpec {
-        let rules = crate::flowspec::decode_vpn_flowspec_nlri(withdrawn_bytes)?;
+        let rules = crate::flowspec::decode_vpn_flowspec_nlri_for_afi(withdrawn_bytes, afi)?;
         return Ok(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi,
             safi,
@@ -3550,11 +3550,9 @@ fn encode_attribute_triplet(flags: u8, type_code: u8, value: &[u8], buf: &mut Ve
     }
     buf.extend_from_slice(value);
 }
-/// RFC 8955 §8 defines VPN `FlowSpec` for AFI 1 only; the decoder refuses
-/// (2, 134), so the encoder never emits it. Checked before any byte is
-/// written.
+/// Reject unsupported VPN `FlowSpec` AFIs before writing any bytes.
 fn check_vpn_flowspec_afi(afi: Afi) -> Result<(), EncodeError> {
-    if afi == Afi::Ipv4 {
+    if matches!(afi, Afi::Ipv4 | Afi::Ipv6) {
         Ok(())
     } else {
         Err(EncodeError::ValueOutOfRange {
@@ -3587,7 +3585,11 @@ fn encode_mp_reach_nlri(
     if mp.safi == Safi::FlowSpecVpn {
         buf.push(0); // NH-Len = 0
         buf.push(0); // Reserved
-        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_announced, buf)?;
+        crate::flowspec::try_encode_vpn_flowspec_nlri_for_afi(
+            &mp.vpn_flowspec_announced,
+            buf,
+            mp.afi,
+        )?;
         return Ok(());
     }
     // EVPN: next-hop is the VTEP loopback IP (4 or 16 bytes), then EVPN NLRI
@@ -3727,7 +3729,11 @@ fn encode_mp_unreach_nlri(
         return Ok(());
     }
     if mp.safi == Safi::FlowSpecVpn {
-        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_withdrawn, buf)?;
+        crate::flowspec::try_encode_vpn_flowspec_nlri_for_afi(
+            &mp.vpn_flowspec_withdrawn,
+            buf,
+            mp.afi,
+        )?;
         return Ok(());
     }
     // EVPN: encode EVPN NLRI routes
@@ -5701,7 +5707,7 @@ mod tests {
         assert_eq!(decoded[0], PathAttribute::MpUnreachNlri(Box::new(mp)));
     }
     #[test]
-    fn mp_vpn_flowspec_encodes_only_for_afi_1() {
+    fn mp_vpn_flowspec_encodes_only_for_ip_afis() {
         let reach = |afi| {
             PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi,
@@ -5738,14 +5744,14 @@ mod tests {
         let mut buf = Vec::new();
         encode_path_attributes(&[unreach(Afi::Ipv4)], &mut buf, true, false).unwrap();
         assert_eq!(buf, [0x80, 15, 3, 0, 1, 134]);
-        for attr in [reach(Afi::Ipv6), unreach(Afi::Ipv6)] {
+        for attr in [reach(Afi::L2Vpn), unreach(Afi::L2Vpn)] {
             let mut buf = vec![0xaa];
             let err = encode_path_attributes(&[attr], &mut buf, true, false).unwrap_err();
             assert_eq!(
                 err,
                 EncodeError::ValueOutOfRange {
                     field: "VPN FlowSpec AFI",
-                    value: "2".to_string(),
+                    value: "25".to_string(),
                 }
             );
             assert_eq!(buf, [0xaa]);

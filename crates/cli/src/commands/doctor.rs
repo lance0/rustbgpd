@@ -1385,7 +1385,12 @@ fn inbound_prefix_bound_check(
             .iter()
             // Received VPN FlowSpec is discarded before the Adj-RIB-In
             // (ADR-0146 §5): no route accumulates, so nothing needs a bound.
-            .filter(|family| family.as_str() != "l3vpn_ipv4_flowspec")
+            .filter(|family| {
+                !matches!(
+                    family.as_str(),
+                    "l3vpn_ipv4_flowspec" | "l3vpn_ipv6_flowspec"
+                )
+            })
             .filter(|family| !family_bounded(neighbor, family))
             .map(|family| format!("{family} ({})", family_bound_keys(family)))
             .collect();
@@ -5925,11 +5930,23 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn inbound_prefix_bound_ignores_discard_only_vpn_flowspec() {
         // Received VPN FlowSpec is discarded (ADR-0146): no bound applies.
-        let peer = bound_peer(
-            &["ipv4_unicast", "ipv4_flowspec", "l3vpn_ipv4_flowspec"],
-            &[("ipv4_unicast", "accepted"), ("ipv4_flowspec", "accepted")],
-        );
-        assert_eq!(bound_warning(&peer), None);
+        for (vpn, global) in [
+            ("l3vpn_ipv4_flowspec", "ipv4_flowspec"),
+            ("l3vpn_ipv6_flowspec", "ipv6_flowspec"),
+        ] {
+            let mut peer = bound_peer(
+                &["ipv4_unicast", global, vpn],
+                &[("ipv4_unicast", "accepted"), (global, "accepted")],
+            );
+            assert_eq!(bound_warning(&peer), None, "{vpn}");
+            assert_eq!(bound_warning(&bound_peer(&[vpn], &[])), None, "{vpn}");
+
+            peer.inbound_prefix_limits.pop();
+            let detail =
+                bound_warning(&peer).expect("retained global FlowSpec still needs a bound");
+            assert!(detail.contains(global), "{detail}");
+            assert!(!detail.contains(vpn), "{detail}");
+        }
     }
 
     #[test]

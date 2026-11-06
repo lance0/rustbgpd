@@ -1050,7 +1050,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "snapshots" -d 'Compare two complete `rbgp-ribsnap/1` snapshots without a daemon'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1066,7 +1066,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -f -a "add" -d 'Add a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -f -a "delete" -d 'Delete a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -s a -l family -d 'Address family (ipv4_flowspec or ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -s a -l family -d 'Global or VPN FlowSpec family; defaults to both global families' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1077,7 +1077,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s a -l family -d 'Address family (ipv4_flowspec or ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s a -l family -d 'Global or VPN FlowSpec family; defaults to both global families' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1088,7 +1088,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s a -l family -d 'Address family (required: ipv4_flowspec or ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l rd -d 'Route distinguisher (required for VPN families), e.g. 65000:100' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l route-target -d 'VPN scope route target; repeat for multiple targets' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l match -d 'Match components (e.g., dest=10.0.0.0/24 port==80)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l action -d 'Actions (e.g., drop, rate=1000, redirect=65001:100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1101,7 +1103,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s a -l family -d 'Address family (required: ipv4_flowspec or ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l rd -d 'Route distinguisher identifying the VPN rule' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l match -d 'Match components identifying the rule' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l owner -d 'Lease owner the injected rule belongs to; without it only an unowned rule is deleted' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r

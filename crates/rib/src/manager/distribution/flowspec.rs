@@ -39,7 +39,7 @@ impl RibManager {
                     path_id: 0,
                 };
                 if rib.withdraw_flowspec(&route_key) {
-                    debug!(%peer, afi = ?key.afi, rule = %key.rule, "flowspec withdrawn");
+                    debug!(%peer, afi = ?key.afi, safi = ?key.family().1, rd = ?key.rd, rule = %key.rule, "flowspec withdrawn");
                     fs_affected.insert(key.clone());
                 }
                 if active_refresh.contains(&key.family())
@@ -103,7 +103,7 @@ impl RibManager {
                 .expect("peer rib must exist before chunk processing");
 
             for route in flowspec_announced {
-                debug!(%peer, rule = %route.rule, "flowspec announced");
+                debug!(%peer, afi = ?route.afi, safi = ?route.family().1, rd = ?route.rd, rule = %route.rule, "flowspec announced");
                 let stale_key = route.key();
                 fs_affected.insert(route.selection_key());
                 rib.insert_flowspec(route);
@@ -215,6 +215,16 @@ impl RibManager {
         route: crate::route::FlowSpecRoute,
         lease: Option<(&str, u32, Option<GuardedFence>)>,
     ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
+        if let Some(rd) = route.rd
+            && !matches!(route.afi, Afi::Ipv4 | Afi::Ipv6)
+        {
+            return Err(RibCommandError::internal(format!(
+                "FlowSpec {:?}/{:?} RD 0x{:016x} requires IPv4 or IPv6",
+                route.afi,
+                Safi::FlowSpecVpn,
+                u64::from_be_bytes(rd.octets())
+            )));
+        }
         let key = route.selection_key();
         let owned_key = InjectedKey::FlowSpec(key.clone());
         // Decide from the local Adj-RIB-In, not Loc-RIB: a received rule
@@ -262,7 +272,7 @@ impl RibManager {
         // disabled its candidate scan reads every FlowSpec row, so a
         // controller reconciling N rules would pay O(N^2).
         if outcome == InjectOutcome::Unchanged {
-            debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
+            debug!(afi = ?key.afi, safi = ?key.family().1, rd = ?key.rd, rule = %key.rule, ?outcome, "injected local FlowSpec route");
             if let Some((tag, lease_seconds)) = &started {
                 crate::injection_lease::log_generation_started(tag, *lease_seconds);
             }
@@ -274,7 +284,7 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         rib.insert_flowspec(route);
         crate::manager::helpers::set_local_flowspec_prefixes(&self.metrics, rib);
-        debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
+        debug!(afi = ?key.afi, safi = ?key.family().1, rd = ?key.rd, rule = %key.rule, ?outcome, "injected local FlowSpec route");
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
         self.recompute_and_distribute_flowspec(&fs_affected);
@@ -331,7 +341,7 @@ impl RibManager {
         crate::manager::helpers::set_local_flowspec_prefixes(&self.metrics, rib);
         if removed {
             let tag = self.forget_injected(&owned_key);
-            debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
+            debug!(afi = ?key.afi, safi = ?key.family().1, rd = ?key.rd, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);
             self.recompute_and_distribute_flowspec(&fs_affected);
@@ -344,10 +354,17 @@ impl RibManager {
                 tag: None,
             }));
         } else {
-            let _ = reply.send(Err(RibCommandError::not_found(format!(
-                "FlowSpec {:?} rule {} not found",
-                key.afi, key.rule
-            ))));
+            let message = match key.rd {
+                Some(rd) => format!(
+                    "FlowSpec {:?}/{:?} RD 0x{:016x} rule {} not found",
+                    key.afi,
+                    key.family().1,
+                    u64::from_be_bytes(rd.octets()),
+                    key.rule
+                ),
+                None => format!("FlowSpec {:?} rule {} not found", key.afi, key.rule),
+            };
+            let _ = reply.send(Err(RibCommandError::not_found(message)));
         }
         false
     }
@@ -686,9 +703,10 @@ impl RibManager {
             crate::manager::helpers::FLOWSPEC_FAMILIES,
             lens.flowspec,
         );
-        self.metrics.set_loc_rib_prefixes(
-            "l3vpn_ipv4_flowspec",
-            crate::manager::helpers::gauge_val(lens.flowspec_vpn),
+        crate::manager::helpers::set_loc_rib_prefixes(
+            &self.metrics,
+            crate::manager::helpers::VPN_FLOWSPEC_FAMILIES,
+            lens.flowspec_vpn,
         );
 
         // Distribute FlowSpec changes to outbound peers

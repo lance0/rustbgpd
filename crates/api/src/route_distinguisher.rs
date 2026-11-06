@@ -32,6 +32,16 @@ pub(crate) fn parse_family_rd(value: &str) -> Result<Option<RouteDistinguisher>,
     }
 }
 
+pub(crate) fn parse_originated_rd(value: &str) -> Result<RouteDistinguisher, Status> {
+    let rd = parse_rd(value)?;
+    if rd.rd_type() > 2 {
+        return Err(Status::invalid_argument(
+            "originated RD must have type 0, 1 or 2",
+        ));
+    }
+    Ok(rd)
+}
+
 pub(crate) fn format_rd(rd: RouteDistinguisher) -> String {
     // Small Type 2 ASNs otherwise display exactly like a different Type 0 RD.
     if rd.rd_type() == 2 && rd.0[2..4] == [0, 0] {

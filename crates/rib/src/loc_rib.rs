@@ -104,8 +104,8 @@ pub struct FamilyLens {
     pub unicast: [usize; 2],
     /// `[ipv4_flowspec, ipv6_flowspec]`: global (SAFI 133) rules only.
     pub flowspec: [usize; 2],
-    /// `l3vpn_ipv4_flowspec`: VPN `FlowSpec` (SAFI 134) rules.
-    pub flowspec_vpn: usize,
+    /// `[l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec]`: SAFI 134 rules.
+    pub flowspec_vpn: [usize; 2],
     /// `[l3vpn_ipv4_unicast, l3vpn_ipv6_unicast]`.
     pub vpn: [usize; 2],
     /// `[ipv4_labeled_unicast, ipv6_labeled_unicast]`.
@@ -119,9 +119,8 @@ pub struct FamilyLens {
 pub(crate) struct SecondFamilyCounts {
     pub(crate) unicast: usize,
     pub(crate) flowspec: usize,
-    /// VPN `FlowSpec` (SAFI 134) rules in the `FlowSpec` map, a third
-    /// family beside its two global AFIs.
-    pub(crate) flowspec_vpn: usize,
+    /// VPN `FlowSpec` (SAFI 134) rules by AFI, beside the two global AFIs.
+    pub(crate) flowspec_vpn: [usize; 2],
     pub(crate) vpn: usize,
     pub(crate) labeled: usize,
     pub(crate) bgpls: usize,
@@ -367,7 +366,7 @@ impl LocRib {
         FamilyLens {
             unicast: split(self.routes.len(), second.unicast),
             flowspec: split(
-                self.flowspec_routes.len() - second.flowspec_vpn,
+                self.flowspec_routes.len() - second.flowspec_vpn[0] - second.flowspec_vpn[1],
                 second.flowspec,
             ),
             flowspec_vpn: second.flowspec_vpn,
@@ -503,8 +502,13 @@ impl LocRib {
                 if changed {
                     let (v6, vpn) = (key.afi == Afi::Ipv6, key.rd.is_some());
                     let added = self.flowspec_routes.insert(key, new_best).is_none();
-                    track(&mut self.second_family.flowspec, v6, added, false);
-                    track(&mut self.second_family.flowspec_vpn, vpn, added, false);
+                    track(&mut self.second_family.flowspec, v6 && !vpn, added, false);
+                    track(
+                        &mut self.second_family.flowspec_vpn[usize::from(v6)],
+                        vpn,
+                        added,
+                        false,
+                    );
                 }
                 changed
             }
@@ -534,12 +538,12 @@ impl LocRib {
         let removed = self.flowspec_routes.remove(key).is_some();
         track(
             &mut self.second_family.flowspec,
-            key.afi == Afi::Ipv6,
+            key.afi == Afi::Ipv6 && key.rd.is_none(),
             false,
             removed,
         );
         track(
-            &mut self.second_family.flowspec_vpn,
+            &mut self.second_family.flowspec_vpn[usize::from(key.afi == Afi::Ipv6)],
             key.rd.is_some(),
             false,
             removed,

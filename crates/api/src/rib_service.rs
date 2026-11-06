@@ -1,7 +1,7 @@
 //! gRPC RIB service — route listing, filtering, and bounded event history.
 
 use rustbgpd_rib::{PageSource, PeerId, PeerScope};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
 use std::sync::OnceLock;
 #[cfg(feature = "bench-internals")]
@@ -504,17 +504,32 @@ fn validate_unicast_afi_safi(value: i32) -> Result<(), Status> {
 }
 
 /// Validate the requested `FlowSpec` route-listing address family.
-/// 0 = UNSPECIFIED (treat as "any"), 3-4 = valid `FlowSpec` families.
+/// UNSPECIFIED selects only global SAFI 133; VPN requires explicit family 13 or 14.
 fn validate_flowspec_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Flowspec as i32
         && value != proto::AddressFamily::Ipv6Flowspec as i32
+        && value != proto::AddressFamily::L3vpnIpv4Flowspec as i32
+        && value != proto::AddressFamily::L3vpnIpv6Flowspec as i32
     {
         return Err(Status::invalid_argument(
-            "FlowSpec route listing supports only IPv4/IPv6 FlowSpec address families",
+            "FlowSpec route listing supports global or VPN IPv4/IPv6 FlowSpec",
         ));
     }
     Ok(())
+}
+
+fn flowspec_matches_family(route: &FlowSpecRoute, family: i32) -> bool {
+    match proto::AddressFamily::try_from(family) {
+        Ok(proto::AddressFamily::Unspecified) => {
+            route.rd.is_none() && matches!(route.afi, Afi::Ipv4 | Afi::Ipv6)
+        }
+        Ok(proto::AddressFamily::Ipv4Flowspec) => route.afi == Afi::Ipv4 && route.rd.is_none(),
+        Ok(proto::AddressFamily::Ipv6Flowspec) => route.afi == Afi::Ipv6 && route.rd.is_none(),
+        Ok(proto::AddressFamily::L3vpnIpv4Flowspec) => route.afi == Afi::Ipv4 && route.rd.is_some(),
+        Ok(proto::AddressFamily::L3vpnIpv6Flowspec) => route.afi == Afi::Ipv6 && route.rd.is_some(),
+        _ => false,
+    }
 }
 
 /// Whether a route matches the requested address family.
@@ -3002,11 +3017,7 @@ impl proto::rib_service_server::RibService for RibService {
 
         // Family narrowing runs inside the RIB task, so a single-family
         // listing never costs a copy of the other family's rows.
-        let afi_filter = match req.afi_safi {
-            x if x == proto::AddressFamily::Ipv4Flowspec as i32 => Some(Afi::Ipv4),
-            x if x == proto::AddressFamily::Ipv6Flowspec as i32 => Some(Afi::Ipv6),
-            _ => None, // unspecified = all
-        };
+        let family = req.afi_safi;
         if !req.received_peer_address.is_empty() {
             let key = crate::peer_selector::require_neighbor(
                 "received_peer_address",
@@ -3015,8 +3026,8 @@ impl proto::rib_service_server::RibService for RibService {
                 self.roster(),
             )?;
             let peer = self.rib_peer(&key);
-            let filter = row_filter(afi_filter.is_some(), move |row: &ReceivedFlowSpecRoute| {
-                afi_filter.is_none_or(|afi| row.route.afi == afi)
+            let filter = row_filter(true, move |row: &ReceivedFlowSpecRoute| {
+                flowspec_matches_family(&row.route, family)
             });
             let matched = rib_manager_read(&self.rib_tx, |reply| {
                 RibUpdate::QueryReceivedFlowSpecRoutes {
@@ -3044,8 +3055,8 @@ impl proto::rib_service_server::RibService for RibService {
                 advertised_view: false,
             }));
         }
-        let filter = row_filter(afi_filter.is_some(), move |route: &FlowSpecRoute| {
-            afi_filter.is_none_or(|afi| route.afi == afi)
+        let filter = row_filter(true, move |route: &FlowSpecRoute| {
+            flowspec_matches_family(route, family)
         });
 
         let advertised_key = crate::peer_selector::parse_neighbor(
@@ -4202,11 +4213,24 @@ fn flowspec_actions_to_proto(attributes: &[PathAttribute]) -> Vec<proto::FlowSpe
     actions
 }
 
+fn flowspec_scope_rt_to_proto(community: rustbgpd_wire::ExtendedCommunity) -> Option<String> {
+    if !crate::injection_service::is_flowspec_scope_rt(community) {
+        return None;
+    }
+    let (admin, value) = community.route_target()?;
+    Some(match community.type_byte() {
+        0x01 => format!("{}:{value}", Ipv4Addr::from(admin)),
+        0x02 if u16::try_from(admin).is_ok() => format!("0.{admin}:{value}"),
+        _ => format!("{admin}:{value}"),
+    })
+}
+
 fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let mut as_path = Vec::new();
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();
     let mut ipv6_extended_communities = Vec::new();
+    let mut route_targets = Vec::new();
 
     for attr in &route.attributes {
         if let Some(values) = attr.communities() {
@@ -4215,6 +4239,14 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         }
         if let Some(values) = attr.extended_communities() {
             extended_communities.extend(values.iter().map(|c| c.as_u64()));
+            if route.rd.is_some() {
+                route_targets.extend(
+                    values
+                        .iter()
+                        .copied()
+                        .filter_map(flowspec_scope_rt_to_proto),
+                );
+            }
             continue;
         }
         if let Some(values) = attr.ipv6_extended_communities() {
@@ -4244,9 +4276,11 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         !matches!(route.afi, Afi::L2Vpn),
         "FlowSpec route with AFI L2VPN — upstream invariant violation"
     );
-    let afi_safi = match route.afi {
-        Afi::Ipv4 => proto::AddressFamily::Ipv4Flowspec,
-        Afi::Ipv6 => proto::AddressFamily::Ipv6Flowspec,
+    let afi_safi = match (route.afi, route.rd) {
+        (Afi::Ipv4, Some(_)) => proto::AddressFamily::L3vpnIpv4Flowspec,
+        (Afi::Ipv6, Some(_)) => proto::AddressFamily::L3vpnIpv6Flowspec,
+        (Afi::Ipv4, None) => proto::AddressFamily::Ipv4Flowspec,
+        (Afi::Ipv6, None) => proto::AddressFamily::Ipv6Flowspec,
         _ => proto::AddressFamily::Unspecified,
     };
 
@@ -4263,6 +4297,8 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         lease_generation: None,
         lease_remaining_ms: None,
         admission_revision: None,
+        rd: route.rd.map_or_else(String::new, format_rd),
+        route_targets,
     }
 }
 
@@ -8886,6 +8922,7 @@ mod tests {
                     lease_remaining_ms: None,
                     ipv6_extended_communities: vec![],
                     admission_revision: None,
+                    ..Default::default()
                 }),
                 path_id: u32::MAX,
                 selected: false,
@@ -9078,14 +9115,14 @@ mod tests {
             let RibUpdate::QueryFlowSpecRoutes { filter, reply } = rx.recv().await.unwrap() else {
                 panic!("ordinary listing must use selected query")
             };
-            assert!(filter.is_none());
+            assert!(filter.is_some());
             reply.send(Vec::new()).unwrap();
             let RibUpdate::QueryReceivedFlowSpecRoutes { filter, reply, .. } =
                 rx.recv().await.unwrap()
             else {
                 panic!("expected received query")
             };
-            assert!(filter.is_none());
+            assert!(filter.is_some());
             reply.send(Vec::new()).unwrap();
         });
         for received in [false, true] {
@@ -11135,3 +11172,6 @@ mod tests {
         assert!(err.message().contains("page_token"));
     }
 }
+
+#[cfg(test)]
+mod vpn_flowspec_tests;
