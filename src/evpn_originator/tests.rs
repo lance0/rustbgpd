@@ -5536,6 +5536,61 @@ async fn port_move_that_still_loses_at_max_counts_but_does_not_advertise() {
     }
 }
 
+/// RFC 7432 §15 with RFC 9721 §6.4/§6.5 peer sync, two MAC/IP bindings.
+/// Both bindings first yield to different-segment contenders at 5. One
+/// poll then delivers three changes: the first binding's contender drops
+/// to 0 from a higher PE IP, so it wins again; the second binding's
+/// contender rises to 20; and a same-segment peer floor of 10 appears.
+/// The first binding must come back once at sequence 10. The second must
+/// stay withdrawn. Adopting 10 against its stale contender at 5 must not
+/// make it inject and then withdraw within the poll.
+#[tokio::test]
+async fn multi_binding_peer_sync_stages_contenders_before_adopting() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let contender = |ip: &str, next_hop: &str, seq| {
+        with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, Some(ip), next_hop, Some(seq), false),
+            segment_esi(2),
+        )
+    };
+    let mut h = PeerSyncHarness::new(segments, Vec::new());
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    for ip in ["192.0.2.10", "192.0.2.11"] {
+        h.observe(LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa(ip),
+        })
+        .await;
+    }
+    h.routes_tx.send_replace(vec![
+        contender("192.0.2.10", "10.0.0.3", 5),
+        contender("192.0.2.11", "10.0.0.3", 5),
+    ]);
+    h.repoll().await;
+    assert!(
+        h.advertised.lock().await.is_empty(),
+        "both bindings must yield first"
+    );
+    let _ = h.take_log().await;
+
+    h.routes_tx.send_replace(vec![
+        contender("192.0.2.10", "10.0.0.3", 0),
+        contender("192.0.2.11", "10.0.0.3", 20),
+        eligible_peer_sync_route(10, None),
+    ]);
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, Some("192.0.2.10")),
+            Some(10)
+        )],
+        "one Inject for the winning binding, nothing for the losing one"
+    );
+}
+
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
     with_esi(
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),
