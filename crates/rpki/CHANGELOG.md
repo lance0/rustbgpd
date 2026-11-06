@@ -5,6 +5,28 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.10.0 - Unreleased
 
+- Bound the RPKI records an `RtrClient` holds. `RtrClient::with_record_limits`
+  takes a per-cache cap and a shared `RecordBudget`. Records (VRPs plus ASPA
+  provider ASNs) are charged while a transaction is decoded. A transaction that
+  would exceed either cap ends the session with the new
+  `RtrError::RecordLimit`, publishes nothing, and keeps the cache's last
+  accepted data. The next query is a Reset Query. With
+  `RtrClient::with_cache_inventory`, the charge travels with each accepted
+  update: it stays charged while the update waits for `VrpManager`, and the
+  manager releases it when that cache's data is replaced or removed. Without
+  the inventory attachment, the client keeps the charge for its last accepted
+  data, so a consumer of the plain `VrpUpdate` channel that queues updates is
+  not covered. Withdrawals are charged against the total budget while their
+  delta is staged or queued, and released once the manager applies it; they do
+  not count against the per-cache cap.
+- A second Cache Response inside one RTR response now ends the transaction as
+  a protocol violation. Previously it restarted collection, and nothing staged
+  before it was published.
+- **Behavior change:** without `with_record_limits`, a client uses
+  `DEFAULT_MAX_CACHE_RECORDS` (4000000) and its own `DEFAULT_MAX_TOTAL_RECORDS`
+  (10000000) budget. Previously the only limit was the per-transaction record
+  budget, which reset with every serial update.
+- The new API is additive, and `RtrError` was already `#[non_exhaustive]`.
 - Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
   new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
   or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These

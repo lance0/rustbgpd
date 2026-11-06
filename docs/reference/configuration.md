@@ -3378,6 +3378,46 @@ address = "[2001:db8::10]:3323"
 | `md5_password` | string | no | unset | TCP MD5 key (RFC 2385, 1..=80 bytes) installed on the RTR socket before connect. Mutually exclusive with `tcp_ao` |
 | `tcp_ao` | table or array of tables | no | unset | TCP-AO keyring (RFC 5925) installed on the RTR socket before connect, in the same shape and with the same validation as a neighbor `tcp_ao`. Mutually exclusive with `md5_password` |
 
+### Record limits
+
+Two `[rpki]` keys bound the memory RTR data can take. Both count RPKI
+records: each VRP is one record, and each ASPA record counts one per provider
+ASN.
+
+| Field | Type | Required | Default | Description |
+|-------|------|:--------:|:-------:|-------------|
+| `max_records_per_cache` | u64 | no | 4000000 | Most records one cache may hold. Must be >= 1 and <= `max_records_total` |
+| `max_records_total` | u64 | no | 10000000 | Most records held across all caches. Must be >= 1 |
+
+The global RPKI publishes about 1.03 million VRPs in 2026, so the per-cache
+default is about four complete sets, and three complete caches use about a
+third of the total. Records are counted as each transfer is received:
+
+- A transfer that would exceed either limit is refused before its records are
+  stored or published. The RTR session ends without an Error Report.
+- The cache's last accepted data stays in the validation table, and the next
+  connection asks for a full table with a Reset Query.
+- A full table counts from zero. An incremental update adds its
+  announcements to the cache's count, and withdrawals do not lower it until
+  the next full table. On a long session with heavy churn, the count can
+  therefore reach the limit and trigger a full table early.
+- While a full table is received, it counts toward `max_records_total`
+  together with the data it replaces. Accepted data still waiting to be
+  applied to the validation table also counts, until it replaces the old data
+  or is removed.
+- If no full table fits, the retained data is discarded when it expires, as
+  for an unreachable cache.
+
+Each refusal is logged as `RTR session ended` with an `RPKI record limit`
+error. The cache shows as disconnected in `bgp_rpki_cache_connected` and in
+`rbgp rpki caches` between attempts.
+
+```toml
+[rpki]
+max_records_per_cache = 4000000
+max_records_total = 10000000
+```
+
 ### Transport authentication
 
 ```toml
@@ -6255,6 +6295,7 @@ quoting it:
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval (...) must be >= refresh_interval` |
 | RPKI `max_expire_interval`, when set, must be <= 172800 and > both `refresh_interval` and `retry_interval` | `max_expire_interval ... must be <= 172800` / `must be > refresh_interval` / `must be > retry_interval` |
 | RPKI cache addresses must be unique numeric `IP:port` endpoints (bracketed for IPv6) | `invalid address` / `duplicate address` |
+| RPKI `max_records_per_cache` and `max_records_total` must be >= 1, and the per-cache limit must not exceed the total | `must be >= 1` / `max_records_per_cache (...) must be <= max_records_total (...)` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `route_server_client requires eBGP` |

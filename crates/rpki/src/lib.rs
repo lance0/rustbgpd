@@ -65,7 +65,8 @@ use std::sync::Arc;
 pub use aspa::{AspaRecord, AspaTable};
 pub use aspa_verify::{AspaInvalidHop, AspaVerificationResult};
 pub use rtr_client::{
-    EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS, RtrClient, RtrClientConfig, VrpUpdate,
+    DEFAULT_MAX_CACHE_RECORDS, DEFAULT_MAX_TOTAL_RECORDS, EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS,
+    RecordBudget, RtrClient, RtrClientConfig, VrpUpdate,
 };
 pub use vrp::{CoveringVrp, CoveringVrps, MAX_COVERING_VRPS, VrpEntry, VrpTable};
 pub use vrp_manager::{
