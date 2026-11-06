@@ -1087,6 +1087,28 @@ Keep the annotated config under version control and treat the daemon's file as
 generated output. A deployment that only ever edits the file and sends SIGHUP
 keeps its comments; SIGHUP alone never writes the file.
 
+A persisted mutation never overwrites an edit the daemon has not adopted.
+Before it writes, the daemon checks that the file still holds the bytes it
+last read (at boot or SIGHUP) or wrote. The check runs when the mutation
+stages its write, before any runtime change, and again just before the
+rename.
+
+- **An edit is pending when the mutation starts.** The mutation is refused
+  with `FAILED_PRECONDITION` (`config persistence failed: … the config file
+  changed on disk after the daemon last read or wrote it`), and nothing
+  changes.
+- **An edit lands while the mutation applies.** The publication is refused
+  and the edit stays on disk.
+  - A config transaction (`rbgp config apply`, rollback, gNMI `Set`)
+    compensates its runtime change and returns `FAILED_PRECONDITION`.
+  - A neighbor, policy, peer-group or FIB-table RPC cannot undo its runtime
+    change. It returns `INTERNAL` and the daemon
+    [fences and exits 70](#runtime-config-settlement-fail-stop). The
+    supervisor restarts it from the edited file.
+
+Either way, `rbgp doctor` reports `daemon.config_freshness` yellow until a
+SIGHUP adopts the edit. After that, mutations write the file again.
+
 ---
 
 ## Upgrading
