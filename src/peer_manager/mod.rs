@@ -898,6 +898,10 @@ pub struct PeerManager {
     /// only their bindings advertise `restart_state = true` in the window,
     /// as only startup static peers do.
     planned_restart_interfaces: HashSet<String>,
+    /// Static neighbors of the planned restart (the startup roster): they
+    /// advertise `restart_state = true` in the window however often they are
+    /// rebuilt, until a deletion ends their RIB waiter.
+    planned_restart_peers: HashSet<PeerKey>,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
     /// Optional BMP event sender (None when BMP not configured).
@@ -1830,6 +1834,7 @@ impl PeerManager {
             cluster_id,
             local_gr_restart_until,
             planned_restart_interfaces,
+            planned_restart_peers: HashSet::new(),
             metrics,
             rib_tx,
             bmp_tx,
@@ -1936,6 +1941,18 @@ impl PeerManager {
             .is_some_and(|rpki| rpki.local_revalidation)
     }
 
+    /// The planned restart's deadline while it is open, for a Graceful
+    /// Restart neighbor of its roster: a static one from the startup roster
+    /// on every rebuild, an interface-only binding by its flag.
+    fn gr_restart_until(&self, config: &PeerManagerNeighborConfig) -> Option<Instant> {
+        let roster = config.gr_restart_eligible
+            || self
+                .planned_restart_peers
+                .contains(&PeerKey::new(config.address, config.interface.clone()));
+        self.local_gr_restart_until
+            .filter(|deadline| roster && config.graceful_restart && *deadline > Instant::now())
+    }
+
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
         let families = if config.families.is_empty() {
             vec![(Afi::Ipv4, Safi::Unicast)]
@@ -2002,12 +2019,7 @@ impl PeerManager {
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
         transport.gr_peer_restart_time_max = config.gr_peer_restart_time_max;
         transport.llgr_stale_time = config.llgr_stale_time;
-        transport.gr_restart_until = if config.gr_restart_eligible && config.graceful_restart {
-            self.local_gr_restart_until
-                .filter(|deadline| *deadline > Instant::now())
-        } else {
-            None
-        };
+        transport.gr_restart_until = self.gr_restart_until(config);
         transport.route_reflector_client = config.route_reflector_client;
         transport.orr_vantage = config.orr_vantage;
         transport.route_server_client = config.route_server_client;

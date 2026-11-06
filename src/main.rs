@@ -5359,7 +5359,8 @@ async fn run<T>(
             ),
             transport.rib_peer.clone(),
         )
-    }));
+    }))
+    .with_planned_restart_peers(&peer_configs);
     let peer_mgr = if let Some((_, accepted_identity_rx)) = &accepted_watch {
         peer_mgr.with_accepted_identity(accepted_identity_rx.clone())
     } else {
@@ -6553,7 +6554,7 @@ async fn run<T>(
             gr_peer_restart_time_max: transport_config.gr_peer_restart_time_max,
             gr_stale_routes_time: transport_config.gr_stale_routes_time,
             llgr_stale_time: transport_config.llgr_stale_time,
-            gr_restart_eligible: true,
+            gr_restart_eligible: false,
             local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
             route_reflector_client: transport_config.route_reflector_client,
             orr_vantage: transport_config.orr_vantage,

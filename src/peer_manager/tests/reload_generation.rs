@@ -207,6 +207,12 @@ impl GenerationHarness {
     /// static neighbor, installed from the same resolution the reload
     /// planner compares against.
     fn new(config: &Config) -> Self {
+        Self::new_at(config, None)
+    }
+
+    /// As [`Self::new`], started inside a planned restart's window as the
+    /// daemon starts: the startup neighbors are the restart's roster.
+    fn new_at(config: &Config, restart_until: Option<std::time::Instant>) -> Self {
         let (_tx, rx) = mpsc::channel(16);
         let (rib_tx, rib) = spawn_generation_rib(false);
         let mgr = PeerManager::new_with_config(
@@ -215,13 +221,14 @@ impl GenerationHarness {
             config.global.asn,
             config.global.router_id.parse().unwrap(),
             None,
-            None,
+            restart_until,
             BgpMetrics::new(),
             rib_tx,
             None,
             None,
             config.clone(),
-        );
+        )
+        .with_planned_restart_peers(&config.resolved_neighbors().unwrap());
         let mut harness = Self {
             mgr,
             counters: BTreeMap::new(),
@@ -1505,6 +1512,71 @@ async fn compound_reshape_and_member_edit_replace_each_peer_exactly_once() {
     );
     // The replacement received the final `.rpol` export rule directly.
     assert_eq!(harness.export_med("10.0.0.2"), Some(20));
+    harness.shutdown().await;
+}
+
+/// RFC 4724 §3, §4.1: a static neighbor of the planned restart's roster stays a
+/// selection-deferral waiter when a SIGHUP rebuilds it inside the window, so
+/// the rebuilt session still advertises the Restart State bit. A neighbor the
+/// reload adds, or one deleted and re-added, is not on the roster.
+#[tokio::test]
+async fn sighup_rebuilt_roster_neighbor_keeps_the_restart_state_in_the_window() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let restart_until = std::time::Instant::now() + Duration::from_secs(600);
+    let mut harness = GenerationHarness::new_at(&prior, Some(restart_until));
+    let restart_until_of = |harness: &GenerationHarness, address: &str| {
+        harness.mgr.peers[&key(address.parse().unwrap())]
+            .transport_config
+            .gr_restart_until
+    };
+    let apply = async |harness: &mut GenerationHarness, toml: String| {
+        fixture.write_toml(&toml);
+        let candidate = fixture.load();
+        let outcome = tokio::time::timeout(Duration::from_secs(30), harness.apply(&candidate))
+            .await
+            .expect("generation settles");
+        let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+            panic!("{outcome:?}");
+        };
+        receipt
+    };
+
+    // The group hold-time edit rebuilds both members; one neighbor is added.
+    let rebuilt = format!(
+        "{}\n[[neighbors]]\naddress = \"10.0.0.20\"\nremote_asn = 65020\n",
+        fixture
+            .base_toml()
+            .replace("hold_time = 90", "hold_time = 60")
+    );
+    let receipt = apply(&mut harness, rebuilt.clone()).await;
+    assert_eq!((receipt.replaced, receipt.added), (2, 1), "{receipt}");
+    for member in ["10.0.0.2", "2001:db8::3"] {
+        // Mutation-red: rebuilding with a startup-only flag clears R.
+        assert_eq!(
+            restart_until_of(&harness, member),
+            Some(restart_until),
+            "rebuilt roster neighbor {member} keeps R=1"
+        );
+    }
+    assert_eq!(
+        restart_until_of(&harness, "10.0.0.20"),
+        None,
+        "a neighbor added after the restart sends R=0"
+    );
+
+    // Deleting a roster neighbor ends its waiter; its re-add sends R=0.
+    let bystander = "\n[[neighbors]]\naddress = \"10.0.0.9\"\nremote_asn = 65009\nhold_time = 180\nexport_policy_chain = [\"members-out\"]\n";
+    assert!(rebuilt.contains(bystander));
+    let receipt = apply(&mut harness, rebuilt.replace(bystander, "\n")).await;
+    assert_eq!(receipt.removed, 1, "{receipt}");
+    let receipt = apply(&mut harness, rebuilt).await;
+    assert_eq!(receipt.added, 1, "{receipt}");
+    assert_eq!(
+        restart_until_of(&harness, "10.0.0.9"),
+        None,
+        "a deleted and re-added neighbor has left the roster"
+    );
     harness.shutdown().await;
 }
 

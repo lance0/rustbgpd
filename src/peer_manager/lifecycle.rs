@@ -2664,6 +2664,23 @@ impl PeerManager {
         self
     }
 
+    /// Seed the planned restart's static roster: the startup neighbors with
+    /// Graceful Restart, the same filter that names the RIB's deferral
+    /// waiters.
+    #[must_use]
+    pub(crate) fn with_planned_restart_peers(
+        mut self,
+        neighbors: &[crate::config::ResolvedNeighbor],
+    ) -> Self {
+        self.planned_restart_peers
+            .extend(
+                crate::planned_restart_neighbors(neighbors).map(|transport| {
+                    PeerKey::new(transport.remote_addr.ip(), transport.peer_interface.clone())
+                }),
+            );
+        self
+    }
+
     /// The RIB identity slot for a static neighbor: its retained (or seeded)
     /// slot, or a newly allocated handle, flagged as new so a refused add can
     /// release it.
@@ -2764,6 +2781,9 @@ impl PeerManager {
     pub(super) fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);
+        // Its RIB handle, and with it the deferral waiter, ends here: a
+        // re-added neighbor is not part of the planned restart.
+        self.planned_restart_peers.remove(peer);
         // A peer installed without a retained slot (a test harness peer)
         // ran on its standalone slot, which is its address's pinned handle.
         let rib_peer = self.rib_peers.remove(peer).map_or_else(
