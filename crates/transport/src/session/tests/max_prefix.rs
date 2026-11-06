@@ -3345,3 +3345,190 @@ fn max_prefix_scopes_split_into_metric_family_and_stage() {
         );
     }
 }
+
+/// A session that negotiated Add-Path receive for IPv4 VPN and IPv4
+/// labeled unicast, with the given action and `receive_max`.
+fn vpn_labeled_add_path_session(
+    action: crate::config::MaxPrefixAction,
+    receive_max: u16,
+) -> (PeerSession, mpsc::Receiver<RibUpdate>) {
+    let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.max_prefix_action = action;
+    session.config.peer.paths_limit_receive_max = receive_max;
+    let mut negotiated = negotiated_session(65002, true);
+    negotiated.negotiated_families = vec![
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ];
+    for family in [
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ] {
+        negotiated
+            .add_path_families
+            .insert(family, AddPathMode::Both);
+    }
+    install_test_negotiated_session(&mut session, negotiated);
+    (session, rib_rx)
+}
+
+fn vpn_nlri() -> rustbgpd_wire::VpnNlri {
+    rustbgpd_wire::VpnNlri {
+        labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+        route_distinguisher: rustbgpd_wire::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+        prefix: rustbgpd_wire::VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+    }
+}
+
+fn labeled_nlri() -> rustbgpd_wire::LabeledNlri {
+    rustbgpd_wire::LabeledNlri {
+        labels: vec![MplsLabelEntry::try_new(4094, 0, true).unwrap()],
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)),
+    }
+}
+
+/// One `MP_REACH_NLRI` UPDATE announcing `path_ids` for one VPN or labeled NLRI.
+fn vpn_or_labeled_update(vpn: bool, path_ids: impl Iterator<Item = u32>) -> UpdateMessage {
+    let (mut vpn_announced, mut labeled_announced) = (Vec::new(), Vec::new());
+    for path_id in path_ids {
+        if vpn {
+            vpn_announced.push(rustbgpd_wire::VpnNlriEntry {
+                path_id,
+                nlri: vpn_nlri(),
+            });
+        } else {
+            labeled_announced.push(rustbgpd_wire::LabeledNlriEntry {
+                path_id,
+                nlri: labeled_nlri(),
+            });
+        }
+    }
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: if vpn {
+                Safi::MplsVpn
+            } else {
+                Safi::LabeledUnicast
+            },
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced,
+            vpn_announced,
+            rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
+        })),
+    ];
+    UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body)
+}
+
+/// Path IDs the RIB received in VPN or labeled route updates.
+fn delivered_vpn_labeled_path_ids(rib_rx: &mut mpsc::Receiver<RibUpdate>) -> Vec<u32> {
+    let mut ids = Vec::new();
+    while let Ok(update) = rib_rx.try_recv() {
+        match update {
+            RibUpdate::VpnRoutesReceived { announced, .. } => {
+                ids.extend(announced.iter().map(|route| route.path_id));
+            }
+            RibUpdate::LabeledRoutesReceived { announced, .. } => {
+                ids.extend(announced.iter().map(|route| route.path_id));
+            }
+            _ => {}
+        }
+    }
+    ids.sort_unstable();
+    ids
+}
+
+/// The default per-key Add-Path receive cap covers VPN (SAFI 128) and
+/// labeled unicast (SAFI 4), the other families Add-Path receive is
+/// advertised for: past 1024 path IDs for one RD+prefix or labeled prefix
+/// the excess is withheld and counted, and a withdrawal frees a slot.
+#[tokio::test]
+async fn add_path_receive_default_cap_covers_vpn_and_labeled() {
+    let cap = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    for (vpn, family) in [
+        (true, "l3vpn_ipv4_unicast"),
+        (false, "ipv4_labeled_unicast"),
+    ] {
+        let (mut session, mut rib_rx) =
+            vpn_labeled_add_path_session(crate::config::MaxPrefixAction::Shutdown, 0);
+        session
+            .process_update(vpn_or_labeled_update(vpn, 0..cap + 2))
+            .await;
+        assert!(
+            !session.stop_requested,
+            "{family}: the default cap never tears down"
+        );
+        assert_eq!(
+            delivered_vpn_labeled_path_ids(&mut rib_rx),
+            (0..cap).collect::<Vec<_>>(),
+            "{family}"
+        );
+        assert!(
+            (add_path_receive_attempts(&session, family, "block") - 2.0).abs() < f64::EPSILON,
+            "{family}: both excess IDs are counted as withheld"
+        );
+        // A replacement needs no slot; a withdrawal-free re-announce of an
+        // admitted ID passes, and a new ID is still withheld.
+        session
+            .process_update(vpn_or_labeled_update(vpn, [0, cap + 9].into_iter()))
+            .await;
+        assert_eq!(
+            delivered_vpn_labeled_path_ids(&mut rib_rx),
+            vec![0],
+            "{family}"
+        );
+    }
+}
+
+/// A configured `receive_max` applies to VPN and labeled unicast with the
+/// configured action: under `"shutdown"` the session is torn down with the
+/// family named in the latch.
+#[tokio::test]
+async fn add_path_receive_max_shutdown_covers_vpn() {
+    let (mut session, _rib_rx) =
+        vpn_labeled_add_path_session(crate::config::MaxPrefixAction::Shutdown, 2);
+    session
+        .process_update(vpn_or_labeled_update(true, 0..3))
+        .await;
+    assert!(session.stop_requested);
+    assert!(
+        (add_path_receive_attempts(&session, "l3vpn_ipv4_unicast", "shutdown") - 1.0).abs()
+            < f64::EPSILON
+    );
+}
+
+/// Under `"warning"`, the hard ceiling is `max(receive_max, 1024)`: with
+/// `receive_max` at 1024 the cap and ceiling coincide, so the excess is
+/// withheld and counted as `"block"` and nothing is counted as a warning.
+#[tokio::test]
+async fn add_path_receive_warning_blocks_at_a_cap_of_the_ceiling() {
+    let cap = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    let (mut session, mut rib_rx) = vpn_labeled_add_path_session(
+        crate::config::MaxPrefixAction::Warning,
+        DEFAULT_ADD_PATH_RECEIVE_MAX,
+    );
+    session
+        .process_update(vpn_or_labeled_update(true, 0..cap + 2))
+        .await;
+    assert_eq!(
+        delivered_vpn_labeled_path_ids(&mut rib_rx).len(),
+        cap as usize
+    );
+    assert!(
+        (add_path_receive_attempts(&session, "l3vpn_ipv4_unicast", "block") - 2.0).abs()
+            < f64::EPSILON
+    );
+    assert!(
+        add_path_receive_attempts(&session, "l3vpn_ipv4_unicast", "warning").abs() < f64::EPSILON
+    );
+}

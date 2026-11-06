@@ -1707,7 +1707,7 @@ impl PeerSession {
         // first awaited RIB delivery so actor state and gauges cannot diverge
         // on backpressure or channel failure.
         if let Some(admission) = path_admission
-            && self.enforce_path_receive_admission(admission).await
+            && self.enforce_path_receive_limits(admission.exceeded).await
         {
             return;
         }
@@ -3859,6 +3859,8 @@ impl PeerSession {
                 vpn_withdrawn.push(key);
             }
         }
+        let mut vpn_labeled_exceeded = Vec::new();
+        self.withhold_excess_vpn_paths(&mut vpn_announced, &mut vpn_labeled_exceeded);
         self.block_over_limit_vpn(&mut vpn_announced);
         for route in &vpn_announced {
             // Keyed by (RD+prefix, path_id): under VPN Add-Path each received
@@ -3876,6 +3878,7 @@ impl PeerSession {
                 labeled_withdrawn.push(key);
             }
         }
+        self.withhold_excess_labeled_paths(&mut labeled_announced, &mut vpn_labeled_exceeded);
         self.block_over_limit_labeled(&mut labeled_announced);
         for route in &labeled_announced {
             // Keyed by (prefix, path_id): under labeled Add-Path each
@@ -3900,9 +3903,9 @@ impl PeerSession {
             import_policy_routes_permitted,
             import_policy_routes_denied,
         );
-        if let Some(admission) = path_admission
-            && self.enforce_path_receive_admission(admission).await
-        {
+        let mut exceeded_paths = path_admission.map_or_else(Vec::new, |a| a.exceeded);
+        exceeded_paths.append(&mut vpn_labeled_exceeded);
+        if !exceeded_paths.is_empty() && self.enforce_path_receive_limits(exceeded_paths).await {
             return;
         }
         if self.enforce_max_prefix_limits(true).await {

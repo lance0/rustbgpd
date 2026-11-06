@@ -1430,21 +1430,25 @@ accepting. Neither mode latches the peer or sends a NOTIFICATION, and
 `max_prefix_action = "block"` requires the aggregate `max_prefixes` to be
 unset.
 
-For negotiated IPv4/IPv6-unicast Add-Path receive, a nonzero
-`add_path.receive_max` also caps retained path IDs **per prefix**. Unset or
+For every negotiated Add-Path receive family (IPv4/IPv6 unicast, VPNv4/VPNv6
+and IPv4/IPv6 labeled unicast), a nonzero `add_path.receive_max` also caps
+retained path IDs **per prefix** (per RD + prefix for VPN). Unset or
 zero, a default cap of 1024 path IDs per prefix applies and always behaves
 as `"block"`, independent of `max_prefix_action`; it advertises no
-Paths-Limit capability. Either cap counts accepted IDs plus rejected IDs
-only when that family's
+Paths-Limit capability. Either cap counts accepted IDs, plus, for unicast,
+rejected IDs only when that family's
 `max_prefixes_received_*` bound enables rejected-identity tracking. Without
 that bound, a denied path does not occupy a receive-cap slot; rejected-route
 diagnostics remain separately capacity-bounded. An existing ID can be
 replaced at the cap, and a withdrawal releases its slot. Under `"block"`, a
 net-new over-limit ID is withheld; recovery requires peer reannouncement or
 a session reset. Under `"shutdown"`, the peer receives Cease/1 and is latched
-off as above. Under `"warning"`, a configured cap observes the excess and
-accepts it up to a safety ceiling of `max(receive_max, 1024)` path IDs per
-prefix; past the ceiling the excess is withheld and counted as `"block"`. `bgp_add_path_receive_limit_attempts_total`
+off as above. Under `"warning"`, the excess is admitted and counted as a
+warning. Every action has a hard ceiling of `max(receive_max, 1024)` path IDs
+per prefix, at which the excess is withheld and counted as `"block"`: so
+`"warning"` warns only between `receive_max` and 1024, blocks at the cap when
+`receive_max` is 1024 or more, and `receive_max = 65535` admits up to 65,535
+paths per prefix. `bgp_add_path_receive_limit_attempts_total`
 counts net-new ID admission attempts beyond the cap, including repeated
 attempts to send a withheld ID. Replacing an already admitted ID does not
 count. The counter is labeled by peer, family and action; the default cap
@@ -1968,7 +1972,7 @@ name it.
 | `bgp_max_prefix_limit{peer,family,stage}` | Effective finite bound for the same family and stage; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,family,stage}` | Saturating `limit - usage` for a finite bound; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,family,stage}` | 1 while a `max_prefix_action = "block"` episode is open for a finite bound — net-new prefixes are being withheld until usage falls back under the bound; present for every finite bound, reaped with the other capacity series |
-| `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for negotiated `ipv4_unicast` or `ipv6_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
+| `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for a negotiated Add-Path receive family: `ipv4_unicast`, `ipv6_unicast`, `l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast` or `ipv6_labeled_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
 | `bgp_orf_capacity_rejections_total{peer,family}` | Address-Prefix ORF groups rejected because an ADD would exceed the 4,096-entry cap for `ipv4_unicast` or `ipv6_unicast`; the installed filter is retained. Reaped on configured peer deletion |
 | `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Absent while unique-prefix usage is unknown during incomplete admission recovery; restored when known. Series reaped on session teardown |
 | `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |

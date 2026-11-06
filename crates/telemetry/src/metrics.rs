@@ -5457,7 +5457,15 @@ impl BgpMetrics {
     /// Count one net-new Add-Path ID attempted beyond the cap. Repeated
     /// withheld IDs count again; an admitted-ID replacement does not.
     pub fn record_add_path_receive_limit_attempt(&self, peer: &str, family: &str, action: &str) {
-        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        debug_assert!(matches!(
+            family,
+            "ipv4_unicast"
+                | "ipv6_unicast"
+                | "l3vpn_ipv4_unicast"
+                | "l3vpn_ipv6_unicast"
+                | "ipv4_labeled_unicast"
+                | "ipv6_labeled_unicast"
+        ));
         debug_assert!(matches!(action, "shutdown" | "block" | "warning"));
         self.0
             .add_path_receive_limit_attempts

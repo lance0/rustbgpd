@@ -2667,7 +2667,7 @@ remote_asn = 65002
 receive = true    # accept multiple paths per prefix from this peer
 send = true       # advertise multiple paths per prefix to this peer
 send_max = 4      # limit to top 4 candidates (omit for unlimited)
-receive_max = 3   # advertise and locally cap received unicast paths per prefix
+receive_max = 3   # advertise and locally cap received paths per prefix
 ```
 
 | Field      | Type    | Required | Default | Description                                |
@@ -2675,7 +2675,7 @@ receive_max = 3   # advertise and locally cap received unicast paths per prefix
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
-| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local IPv4/IPv6-unicast Add-Path cap per prefix (1..=65535); omit or set 0 to advertise nothing and apply the default local cap of 1024 |
+| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local Add-Path receive cap per prefix (unicast, VPN and labeled unicast; 1..=65535); omit or set 0 to advertise nothing and apply the default local cap of 1024 |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
@@ -2685,23 +2685,29 @@ If both are enabled, `Both` is advertised.
 draft-abraitis-idr-addpath-paths-limit-04). rustbgpd advertises the value only
 for families where Add-Path receive is enabled. A remote Paths-Limit tuple caps
 the corresponding outbound Add-Path family at the smaller of `send_max` and
-the peer's value; it does not affect other families. For negotiated IPv4/IPv6
-unicast Add-Path receive, rustbgpd also applies `receive_max` locally to each
-prefix's retained path IDs. Accepted IDs count; rejected IDs count only when
-`max_prefixes_received_ipv4_unicast` or `max_prefixes_received_ipv6_unicast` enables received
-identity tracking for that family. `max_prefix_action = "block"` withholds a
-net-new ID beyond the cap, `"shutdown"` sends Cease/1 and latches the peer,
-and `"warning"` reports the over-limit attempt but keeps accepting up to a
-safety ceiling of `max(receive_max, 1024)` IDs, past which the excess is
-withheld and counted as `"block"`. A
-replacement of an existing ID needs no new slot, and a withdrawal releases
-one. Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
-capability but still caps each IPv4/IPv6-unicast prefix at 1024 retained path
-IDs. Past that default it always withholds the excess as `"block"` does,
-whatever `max_prefix_action` says: the session stays up, and `"warning"` does
-not lift the bound. Set `receive_max` explicitly for a peer that legitimately
-sends more paths per prefix. The cap does not locally police other AFI/SAFI
-families. Changing
+the peer's value; it does not affect other families. Every family Add-Path
+receive is advertised for (IPv4/IPv6 unicast, VPNv4/VPNv6 and IPv4/IPv6
+labeled unicast) also gets `receive_max` applied locally to the path IDs
+retained per prefix (per RD + prefix for VPN). Accepted IDs count; for
+unicast, rejected IDs also count when `max_prefixes_received_ipv4_unicast` or
+`max_prefixes_received_ipv6_unicast` enables received identity tracking for
+that family. A replacement of an existing ID needs no new slot, and a
+withdrawal releases one.
+
+Past the cap, `max_prefix_action = "block"` withholds a net-new ID,
+`"shutdown"` sends Cease/1 and latches the peer, and `"warning"` admits the
+ID and counts it as a warning. Under every action, a hard ceiling of
+`max(receive_max, 1024)` path IDs per prefix applies: at the ceiling the
+excess is withheld and counted as `"block"`. So `"warning"` warns only for
+IDs between `receive_max` and 1024; with `receive_max` of 1024 or more it
+blocks at the cap and never warns. An operator-set `receive_max = 65535`
+admits up to 65,535 paths per prefix under any action.
+
+Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
+capability but still caps each prefix at 1024 retained path IDs, and past
+that default it always withholds the excess as `"block"` does, whatever
+`max_prefix_action` says, so the session stays up. Set `receive_max`
+explicitly for a peer that legitimately sends more paths per prefix. Changing
 `receive_max` rebuilds the session to renegotiate OPEN; the replacement starts
 with fresh accounting. Zero tuples and tuples without matching Add-Path negotiation are
 ignored. Because the draft expired without IETF adoption, deploy this only
