@@ -1622,6 +1622,17 @@ impl InMemoryHandle {
             .insert_bridge_port(name, ifindex, state);
     }
 
+    /// Remove one named bridge port from the fake kernel's link
+    /// inventory, as when the link is deleted.
+    pub fn remove_bridge_port(&self, name: &str) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .bridge_ports
+            .remove(name);
+    }
+
     /// Pre-load a kernel-side nexthop op so the actor's startup
     /// adoption pass (`dump_owned_nexthops`) sees it — used for
     /// "daemon restarts with prior NHIDs left over" tests.

@@ -33,6 +33,8 @@
 
 use std::process::Command;
 
+use rustbgpd_evpn::{AcGateState, BumEnforcementTable, EthernetSegmentIdentifier};
+use rustbgpd_evpn_linux::ac_gate::{resolve_ac_gate_plan, restore_ops};
 use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, LinuxDataplane};
 
 fn netns_gate() -> bool {
@@ -180,4 +182,120 @@ async fn linux_dataplane_set_ac_port_state_round_trip() {
         "expected `state forwarding` after restore:\n{dump}"
     );
     assert_flood_untouched(&dump, "restore");
+}
+
+/// LAN-2909 L-E2: the AC-gate restore for a port that left management
+/// is keyed by its remembered ifindex. Here the gated port is deleted
+/// and an unrelated, operator-disabled bridge port is created with the
+/// same ifindex (`ip link add ... index N`) before the next snapshot.
+/// The restore must not set that unrelated port forwarding.
+#[tokio::test]
+async fn ac_gate_restore_skips_a_recycled_ifindex() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+    if std::env::var("RUSTBGPD_AC_GATE_INNER").as_deref() == Ok("recycle") {
+        ac_gate_restore_skips_a_recycled_ifindex_inner().await;
+        return;
+    }
+    let ns = NetnsFixture::create("ac-gate-recycle");
+    let exe = std::env::current_exe().expect("self-exe");
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args([
+            "--exact",
+            "--nocapture",
+            "ac_gate_restore_skips_a_recycled_ifindex",
+        ])
+        .env("RUSTBGPD_AC_GATE_INNER", "recycle")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner recycle invocation failed");
+}
+
+async fn ac_gate_restore_skips_a_recycled_ifindex_inner() {
+    run("ip", &["link", "add", "br100", "type", "bridge"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "ce-a",
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "ce-a-peer",
+        ],
+    );
+    run("ip", &["link", "set", "ce-a", "master", "br100"]);
+    for dev in ["br100", "ce-a", "ce-a-peer"] {
+        run("ip", &["link", "set", dev, "up"]);
+    }
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+
+    // Pass 1: the single-active binding blocks ce-a.
+    let mut gated = BumEnforcementTable::new();
+    gated.set_ac_gate(
+        EthernetSegmentIdentifier::new([1; 10]),
+        "ce-a".to_string(),
+        AcGateState::Blocked,
+    );
+    let first = resolve_ac_gate_plan(&gated, &dp.dump_snapshot().await.unwrap());
+    let [op] = first.ops.as_slice() else {
+        panic!("expected one block op, got {:?}", first.ops);
+    };
+    dp.apply(&DataplaneOp::SetAcPortState {
+        ifindex: op.ifindex,
+        blocked: op.blocked,
+    })
+    .await
+    .expect("block ce-a");
+    let recycled = op.ifindex.to_string();
+
+    // Between passes: ce-a goes away and an unrelated port takes its
+    // ifindex, enslaved and deliberately disabled by the operator.
+    run("ip", &["link", "del", "ce-a"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "other",
+            "index",
+            &recycled,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "other-peer",
+        ],
+    );
+    run("ip", &["link", "set", "other", "master", "br100"]);
+    for dev in ["other", "other-peer"] {
+        run("ip", &["link", "set", dev, "up"]);
+    }
+    run("bridge", &["link", "set", "dev", "other", "state", "0"]);
+
+    // Pass 2: the binding is gone; plan the restore from a fresh dump.
+    let snapshot = dp.dump_snapshot().await.unwrap();
+    let second = resolve_ac_gate_plan(&BumEnforcementTable::new(), &snapshot);
+    for plan in restore_ops(&first.managed, &second.managed, &snapshot) {
+        dp.apply(&DataplaneOp::SetAcPortState {
+            ifindex: plan.ifindex,
+            blocked: plan.blocked,
+        })
+        .await
+        .expect("restore op");
+    }
+    let dump =
+        String::from_utf8_lossy(&run("bridge", &["-d", "link", "show", "dev", "other"]).stdout)
+            .to_string();
+    assert!(
+        dump.contains("state disabled"),
+        "an unrelated port on the recycled ifindex was re-enabled:\n{dump}"
+    );
 }

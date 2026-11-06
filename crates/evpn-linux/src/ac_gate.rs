@@ -68,6 +68,20 @@ pub struct AcGatePortPlan {
     pub blocked: bool,
 }
 
+/// One bridge port under AC-gate management.
+///
+/// The bound interface name is the port's identity. A restore targets
+/// the remembered ifindex only while the snapshot still resolves that
+/// name to it, so an ifindex recycled by an unrelated link is never
+/// touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcGateManagedPort {
+    /// Bound interface name the port resolved from.
+    pub interface: String,
+    /// Desired blocked state this pass.
+    pub blocked: bool,
+}
+
 /// Result of resolving the intent's AC-gate rows against the current
 /// kernel snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,7 +93,7 @@ pub struct AcGateResolution {
     /// blocked state — resolved or not yet matching. Fed back as the
     /// next pass's `last_managed` so [`restore_ops`] can detect
     /// ports leaving management.
-    pub managed: BTreeMap<u32, bool>,
+    pub managed: BTreeMap<u32, AcGateManagedPort>,
     /// Bound interface names that did not resolve to a bridge port
     /// in the snapshot (link missing, or not enslaved to any
     /// bridge). The reconciler warns for names newly entering this
@@ -113,7 +127,7 @@ pub fn resolve_ac_gate_plan(
     snapshot: &KernelSnapshot,
 ) -> AcGateResolution {
     let mut resolution = AcGateResolution::default();
-    let mut desired_by_ifindex: BTreeMap<u32, bool> = BTreeMap::new();
+    let mut desired_by_ifindex: BTreeMap<u32, AcGateManagedPort> = BTreeMap::new();
 
     for entry in intent.ac_gates() {
         let Some(port) = snapshot.bridge_ports.get(&entry.interface) else {
@@ -127,8 +141,11 @@ pub fn resolve_ac_gate_plan(
         let blocked = entry.state.is_blocked();
         desired_by_ifindex
             .entry(port.ifindex)
-            .and_modify(|existing| *existing |= blocked) // blocked wins
-            .or_insert(blocked);
+            .and_modify(|existing| existing.blocked |= blocked) // blocked wins
+            .or_insert_with(|| AcGateManagedPort {
+                interface: entry.interface.clone(),
+                blocked,
+            });
     }
 
     let observed_by_ifindex: BTreeMap<u32, Option<u8>> = snapshot
@@ -137,7 +154,8 @@ pub fn resolve_ac_gate_plan(
         .map(|p| (p.ifindex, p.state))
         .collect();
 
-    for (&ifindex, &blocked) in &desired_by_ifindex {
+    for (&ifindex, port) in &desired_by_ifindex {
+        let blocked = port.blocked;
         let desired_state = if blocked {
             BR_STATE_DISABLED
         } else {
@@ -164,29 +182,30 @@ pub fn resolve_ac_gate_plan(
 /// restore-to-allow-all discipline.
 ///
 /// Ports already observed forwarding (the kernel's carrier check may
-/// have re-enabled them) and ports that vanished from the snapshot
-/// entirely (link deleted) emit nothing.
+/// have re-enabled them) emit nothing. So does a port whose bound
+/// interface no longer resolves to the remembered ifindex: the link
+/// was deleted, or the ifindex now belongs to an unrelated bridge
+/// port that rustbgpd never gated.
 #[must_use]
 pub fn restore_ops(
-    last_managed: &BTreeMap<u32, bool>,
-    managed: &BTreeMap<u32, bool>,
+    last_managed: &BTreeMap<u32, AcGateManagedPort>,
+    managed: &BTreeMap<u32, AcGateManagedPort>,
     snapshot: &KernelSnapshot,
 ) -> Vec<AcGatePortPlan> {
-    let observed_by_ifindex: BTreeMap<u32, Option<u8>> = snapshot
-        .bridge_ports
-        .values()
-        .map(|p| (p.ifindex, p.state))
-        .collect();
-
     last_managed
         .iter()
-        .filter(|&(ifindex, &blocked)| blocked && !managed.contains_key(ifindex))
-        .filter_map(|(&ifindex, _)| {
-            // Only restore ports that still exist as bridge ports, are
-            // not already forwarding, and are not in an STP-owned state
-            // (STP and the AC gate cannot both own the whole-port knob).
-            let observed = observed_by_ifindex.get(&ifindex)?;
-            if observed.is_some_and(is_stp_owned_state) || *observed == Some(BR_STATE_FORWARDING) {
+        .filter(|&(ifindex, port)| port.blocked && !managed.contains_key(ifindex))
+        .filter_map(|(&ifindex, port)| {
+            // Only restore the same bridge port, still present, not
+            // already forwarding, and not in an STP-owned state (STP
+            // and the AC gate cannot both own the whole-port knob).
+            let observed = snapshot
+                .bridge_ports
+                .get(&port.interface)
+                .filter(|observed| observed.ifindex == ifindex)?;
+            if observed.state.is_some_and(is_stp_owned_state)
+                || observed.state == Some(BR_STATE_FORWARDING)
+            {
                 return None;
             }
             Some(AcGatePortPlan {
@@ -214,6 +233,21 @@ mod tests {
         EthernetSegmentIdentifier::new([seed; 10])
     }
 
+    fn managed(ports: &[(u32, &str, bool)]) -> BTreeMap<u32, AcGateManagedPort> {
+        ports
+            .iter()
+            .map(|&(ifindex, interface, blocked)| {
+                (
+                    ifindex,
+                    AcGateManagedPort {
+                        interface: interface.to_string(),
+                        blocked,
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn snapshot_with_port(name: &str, ifindex: u32, state: Option<u8>) -> KernelSnapshot {
         let mut snap = KernelSnapshot::new();
         snap.insert_bridge_port(name, ifindex, state);
@@ -234,7 +268,7 @@ mod tests {
                 blocked: true
             }]
         );
-        assert_eq!(res.managed.get(&10), Some(&true));
+        assert_eq!(res.managed.get(&10).map(|p| p.blocked), Some(true));
         assert_eq!(res.unresolved.len(), 0);
     }
 
@@ -247,7 +281,7 @@ mod tests {
         let res = resolve_ac_gate_plan(&table, &snap);
         assert!(res.ops.is_empty(), "observed already matches desired");
         // Still managed — removal later must restore it.
-        assert_eq!(res.managed.get(&10), Some(&true));
+        assert_eq!(res.managed.get(&10).map(|p| p.blocked), Some(true));
     }
 
     #[test]
@@ -289,7 +323,7 @@ mod tests {
                 blocked: false
             }]
         );
-        assert_eq!(res.managed.get(&10), Some(&false));
+        assert_eq!(res.managed.get(&10).map(|p| p.blocked), Some(false));
     }
 
     #[test]
@@ -303,7 +337,7 @@ mod tests {
 
         let res = resolve_ac_gate_plan(&table, &snap);
         assert_eq!(res.ops.len(), 0);
-        assert_eq!(res.managed.get(&10), Some(&false));
+        assert_eq!(res.managed.get(&10).map(|p| p.blocked), Some(false));
     }
 
     #[test]
@@ -366,16 +400,15 @@ mod tests {
                 blocked: true
             }]
         );
-        assert_eq!(res.managed.get(&10), Some(&true));
+        assert_eq!(res.managed.get(&10).map(|p| p.blocked), Some(true));
     }
 
     #[test]
     fn restore_emits_forwarding_for_port_leaving_management() {
-        let last: BTreeMap<u32, bool> = [(10, true)].into();
-        let managed = BTreeMap::new();
+        let last = managed(&[(10, "eth2", true)]);
         let snap = snapshot_with_port("eth2", 10, Some(BR_STATE_DISABLED));
 
-        let ops = restore_ops(&last, &managed, &snap);
+        let ops = restore_ops(&last, &BTreeMap::new(), &snap);
         assert_eq!(
             ops,
             vec![AcGatePortPlan {
@@ -385,12 +418,22 @@ mod tests {
         );
     }
 
+    // LAN-2909 L-E2: the gated port left and an unrelated bridge port
+    // now holds its ifindex. Restoring by ifindex alone would set that
+    // port forwarding.
+    #[test]
+    fn restore_skips_an_ifindex_recycled_by_another_port() {
+        let last = managed(&[(10, "eth2", true)]);
+        let snap = snapshot_with_port("other", 10, Some(BR_STATE_DISABLED));
+        assert_eq!(restore_ops(&last, &BTreeMap::new(), &snap), Vec::new());
+    }
+
     #[test]
     fn restore_skips_port_already_forwarding_or_still_managed() {
         // Kernel carrier check may have re-enabled the port already —
         // no redundant netlink write.
-        let last: BTreeMap<u32, bool> = [(10, true), (11, true), (12, false)].into();
-        let managed: BTreeMap<u32, bool> = [(11, true)].into();
+        let last = managed(&[(10, "eth2", true), (11, "eth3", true), (12, "eth4", false)]);
+        let still = managed(&[(11, "eth3", true)]);
         let mut snap = KernelSnapshot::new();
         snap.insert_bridge_port("eth2", 10, Some(BR_STATE_FORWARDING));
         snap.insert_bridge_port("eth3", 11, Some(BR_STATE_DISABLED));
@@ -399,12 +442,12 @@ mod tests {
         // 10: already forwarding → skip. 11: still managed → skip.
         // 12: was managed-forwarding (never blocked) → nothing to
         // restore.
-        assert_eq!(restore_ops(&last, &managed, &snap).len(), 0);
+        assert_eq!(restore_ops(&last, &still, &snap).len(), 0);
     }
 
     #[test]
     fn restore_skips_stp_owned_port() {
-        let last: BTreeMap<u32, bool> = [(10, true)].into();
+        let last = managed(&[(10, "eth2", true)]);
         let snap = snapshot_with_port("eth2", 10, Some(BR_STATE_BLOCKING));
 
         assert!(
@@ -417,7 +460,7 @@ mod tests {
     fn restore_skips_vanished_port() {
         // Link deleted from the kernel — ENODEV would be the only
         // outcome; nothing to restore.
-        let last: BTreeMap<u32, bool> = [(10, true)].into();
+        let last = managed(&[(10, "eth2", true)]);
         assert_eq!(
             restore_ops(&last, &BTreeMap::new(), &KernelSnapshot::new()).len(),
             0

@@ -516,7 +516,7 @@ struct ActorState {
     /// change detection, which diffs desired against the *observed*
     /// port state each pass because the kernel rewrites bridge-port
     /// state on carrier transitions (see `crate::ac_gate`).
-    last_ac_gate_managed: BTreeMap<u32, bool>,
+    last_ac_gate_managed: BTreeMap<u32, crate::ac_gate::AcGateManagedPort>,
     /// Bound AC interface names we've already warned about for
     /// failing to resolve to a bridge port. Same new-entry-only
     /// discipline as `warned_ipv6_fallback`: warn when a name enters
@@ -619,6 +619,12 @@ struct ActorState {
     /// mutation is restart-required; a fresh actor starts with an
     /// empty baseline.
     last_bum_plan: BTreeMap<u32, crate::bum_filter::BumPortFlags>,
+    /// Bridge-port name each `last_bum_plan` ifindex had when it entered
+    /// the plan (`None` when the snapshot named no bridge port for it).
+    /// A restore to allow-all targets the remembered ifindex only while
+    /// it still names the same port, so an ifindex recycled by an
+    /// unrelated link is never touched.
+    last_bum_port_names: BTreeMap<u32, Option<String>>,
     /// Last `IpVrfStatus` we observed for each configured IP-VRF, used
     /// to detect transitions (`Ready` ↔ `NotReady`, or a change in the
     /// failing-predicate set) so the per-pass `probe_ip_vrfs` call
@@ -807,6 +813,7 @@ impl ActorState {
             reconcile_generation: 0,
             epoch: Instant::now(),
             last_bum_plan: BTreeMap::new(),
+            last_bum_port_names: BTreeMap::new(),
             last_ip_vrf_status: BTreeMap::new(),
             l3_owned: crate::l3_diff::L3OwnedState::default(),
             last_l3_drop_counts: std::collections::BTreeMap::new(),
@@ -1457,7 +1464,37 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .iter()
             .map(|(&ifindex, &flags)| crate::bum_filter::BumPortFlagPlan { ifindex, flags })
             .collect();
-        let bum_changes = crate::bum_filter::diff_flag_plans(&prior_bum_plan, &new_bum_plan);
+        let mut bum_changes = crate::bum_filter::diff_flag_plans(&prior_bum_plan, &new_bum_plan);
+        // A restore (an ifindex that left the plan) applies only while
+        // the ifindex still names the port it was managed as. A port that
+        // vanished, or whose ifindex now belongs to another link, is
+        // dropped from the baseline without a kernel write.
+        let port_names: BTreeMap<u32, &str> = snapshot
+            .bridge_ports
+            .iter()
+            .map(|(name, port)| (port.ifindex, name.as_str()))
+            .collect();
+        bum_changes.retain(|change| {
+            let restore = !new_bum_plan.iter().any(|p| p.ifindex == change.ifindex);
+            let same_port = self
+                .state
+                .last_bum_port_names
+                .get(&change.ifindex)
+                .is_none_or(|name| name.as_deref() == port_names.get(&change.ifindex).copied());
+            if restore && !same_port {
+                self.state.last_bum_plan.remove(&change.ifindex);
+                self.state.last_bum_port_names.remove(&change.ifindex);
+            }
+            !restore || same_port
+        });
+        for plan in &new_bum_plan {
+            self.state.last_bum_port_names.insert(
+                plan.ifindex,
+                port_names
+                    .get(&plan.ifindex)
+                    .map(|name| (*name).to_string()),
+            );
+        }
         if self.config.apply_bum_enforcement {
             // Append the BUM ops to the same plan so the existing
             // apply_plan loop dispatches them through Dataplane::apply
@@ -1714,6 +1751,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // baseline.
             self.state.last_bum_plan = new_bum_plan.iter().map(|p| (p.ifindex, p.flags)).collect();
         }
+        let last_bum_plan = &self.state.last_bum_plan;
+        self.state
+            .last_bum_port_names
+            .retain(|ifindex, _| last_bum_plan.contains_key(ifindex));
 
         // Advance the AC-gate management baseline. Change detection
         // is observed-state-based (above), so this map only powers
@@ -1733,8 +1774,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     })
                     .collect();
                 for op in &ac_restore {
-                    if !succeeded_ac.contains(&op.ifindex) {
-                        new_managed.insert(op.ifindex, true);
+                    if !succeeded_ac.contains(&op.ifindex)
+                        && let Some(port) = self.state.last_ac_gate_managed.get(&op.ifindex)
+                    {
+                        new_managed.insert(
+                            op.ifindex,
+                            crate::ac_gate::AcGateManagedPort {
+                                interface: port.interface.clone(),
+                                blocked: true,
+                            },
+                        );
                     }
                 }
             }
@@ -4808,8 +4857,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             self.state
                 .last_ac_gate_managed
                 .iter()
-                .filter_map(|(&ifindex, &blocked)| {
-                    blocked.then_some(DataplaneOp::SetAcPortState {
+                .filter_map(|(&ifindex, port)| {
+                    port.blocked.then_some(DataplaneOp::SetAcPortState {
                         ifindex,
                         blocked: false,
                     })
