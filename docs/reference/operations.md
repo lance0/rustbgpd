@@ -2866,7 +2866,7 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_local_observations_dropped_total{reason="channel_closed"}` | Kernel local-MAC observations classified by the netlink notify loop after the originator receiver was gone |
 | `evpn_duplicate_ip_moves_total{vni}` | Conflicting IPv4/IPv6 ownership observations counted by the optional detect-only IP detector |
 | `evpn_duplicate_ip_threshold_exceeded_total{vni}` | Per-IP M/N threshold crossings; each crossing logs the VNI, IP, observed MAC, threshold, and window without changing routes |
-| `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator |
+| `evpn_duplicate_mac_moves_total{vni,mac}` | MAC moves detected by local learning (RFC 7432 §15.1): a local learn or local port move of a MAC that another segment advertises. Remote announcements and withdrawals alone do not count |
 | `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
 | `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` | RFC 7432 §15.1 M/N threshold crossings. `action` is `detect` or `suppress_local` from the per-instance config |
 | `evpn_duplicate_mac_quarantine_active{vni,mac}` | `1` while `action = "suppress_local"` is actively suppressing local Type 2 originations for that key; returns to `0` after timed recovery |
