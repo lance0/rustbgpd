@@ -1666,10 +1666,13 @@ impl SessionExportProfile {
             next_hop,
             link_local_next_hop,
         )));
+        // RFC 7606 §5.1: MP_REACH_NLRI SHALL be encoded first, so a receiver
+        // can still find the NLRI to treat as withdrawn when a later
+        // attribute is malformed.
         let message = UpdateMessage::try_build_from_attribute_iter(
             &[],
             &[],
-            base_attrs.iter().chain(std::iter::once(&mp_reach)),
+            std::iter::once(&mp_reach).chain(base_attrs.iter()),
             self.four_octet_as(),
             self.add_path_send((afi, safi)),
             ipv4_mode,
@@ -3586,6 +3589,45 @@ mod tests {
         assert_eq!(mp.announced, vec![NlriEntry { path_id: 0, prefix }]);
     }
 
+    /// RFC 7606 §5.1: `MP_REACH_NLRI` SHALL be the first path attribute, so a
+    /// receiver can recover the NLRI to treat as withdrawn even when a later
+    /// attribute is malformed.
+    #[test]
+    fn mp_reach_is_the_first_encoded_attribute() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let config = TransportConfig::new(peer, "[2001:db8::2]:179".parse().unwrap());
+        let socket_local: IpAddr = "2001:db8::10".parse().unwrap();
+        let mut profile = SessionExportProfile::initial(&config, Some(socket_local), false);
+        profile.four_octet_as = true;
+        profile.extended_nexthop_ipv4 = true;
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        let route = as4_projection_route(prefix, "192.0.2.1".parse().unwrap());
+        let probe = profile
+            .probe_announcement(ExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: None,
+            })
+            .expect("socket-local IPv6 supplies the eBGP next hop");
+        let mut bytes = bytes::Bytes::from(encoded(probe.message));
+        let super::super::Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("expected UPDATE");
+        };
+        assert!(message.path_attributes.len() > 2);
+        assert_eq!(
+            message.path_attributes[1],
+            rustbgpd_wire::constants::attr_type::MP_REACH_NLRI,
+            "first attribute type code"
+        );
+        let parsed = message.parse(true, false, &[]).unwrap();
+        assert!(parsed.attributes.len() > 1, "other attributes follow");
+        assert!(matches!(
+            parsed.attributes[0],
+            PathAttribute::MpReachNlri(_)
+        ));
+    }
+
     #[test]
     fn scoped_ipv4_extended_next_hop_changes_when_global_ipv6_is_set() {
         let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
@@ -3809,7 +3851,7 @@ mod tests {
             Prefix::V6(Ipv6Prefix::new("2001:db8:40::".parse().unwrap(), 48)),
             IpAddr::V6("2001:db8::1".parse().unwrap()),
         );
-        for (four_octet_as, expected_types) in [(false, vec![1, 2, 17, 14]), (true, vec![1, 2, 14])]
+        for (four_octet_as, expected_types) in [(false, vec![14, 1, 2, 17]), (true, vec![14, 1, 2])]
         {
             let snapshot = as4_projection_snapshot(four_octet_as);
             let probe = snapshot
