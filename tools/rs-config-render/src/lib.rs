@@ -3230,14 +3230,26 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
 
     render_scrub_test(&mut tests, scrubbed);
 
+    // `reject-long-as-path` rejects at this length and above.
+    let max_len = filtering.max_as_path_len;
+    let long_path_len = max_len.saturating_add(1);
     if filtering.reject_invalid_as_in_as_path {
         let _ = writeln!(sets, "asn-set rs-invalid-asns {{ {INVALID_ASNS} }}");
+        // A loop cannot sit in an `if` body, so the length guard breaks out
+        // on the first element: a long path is left to `reject-long-as-path`,
+        // the loop never reaches its 4,096-element cap, and the route is a
+        // plain reject attributed to that term rather than a fail-closed
+        // evaluation error.
         let _ = write!(
             terms,
             "    # 0, AS_TRANS, 16-bit doc/private/reserved (64496-65551), and the\n\
-             \x20   # 32-bit private+reserved range (4200000000-4294967295).\n\
+             \x20   # 32-bit private+reserved range (4200000000-4294967295). Longer\n\
+             \x20   # paths are left to reject-long-as-path.\n\
              \x20   term reject-invalid-asn {{\n\
-             \x20       for asn in route.as-path {{ if asn in rs-invalid-asns {{ reject }} }}\n\
+             \x20       for asn in route.as-path {{\n\
+             \x20           if route.as-path.len >= {long_path_len} {{ break }}\n\
+             \x20           if asn in rs-invalid-asns {{ reject }}\n\
+             \x20       }}\n\
              \x20   }}\n"
         );
         tests.push_str(
@@ -3293,11 +3305,9 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
         );
     }
 
-    let max_len = filtering.max_as_path_len;
     let _ = writeln!(
         terms,
-        "    term reject-long-as-path {{ if route.as-path.len >= {} {{ reject }} }}",
-        max_len.saturating_add(1)
+        "    term reject-long-as-path {{ if route.as-path.len >= {long_path_len} {{ reject }} }}"
     );
     if max_len <= 64 {
         let long_path = vec!["3333"; max_len as usize + 1].join(" ");

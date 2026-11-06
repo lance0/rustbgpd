@@ -40,12 +40,12 @@ ast.literal.route-origin-ipv4 2
 ast.literal.well-known-ext 35
 ast.action.prepend 56
 ast.action.let 63
-ast.action.break 33
+ast.action.break 50
 ast.action.continue 22
 ast.expr.or 11
 ast.expr.and 38
 ast.expr.not 5
-ast.expr.cmp 313
+ast.expr.cmp 328
 ast.expr.in 119
 ast.expr.ident-in 69
 ast.expr.has 9
@@ -74,9 +74,9 @@ ast.arith.div 11
 ast.arith.rem 11
 ast.cmp.eq 218
 ast.cmp.ne 40
-ast.cmp.ge 206
+ast.cmp.ge 222
 ast.cmp.le 4
-ast.rhs.integer 143
+ast.rhs.integer 159
 ast.rhs.identifier 92
 ast.rhs.ip 9
 ast.rhs.prefix 57
@@ -88,7 +88,7 @@ ast.field.route.large-communities 1
 ast.field.route.ext-communities 9
 ast.field.route.any-community 5
 ast.field.route.as-path 92
-ast.field.route.as-path.len 52
+ast.field.route.as-path.len 68
 ast.field.route.communities.len 4
 ast.field.route.large-communities.len 3
 ast.field.route.ext-communities.len 2
@@ -202,7 +202,7 @@ ir.guard.community-contains 52
 ir.guard.community-in-set 25
 ir.guard.community-kind-in-set 63
 ir.guard.as-path-matches 141
-ir.guard.as-path-len 89
+ir.guard.as-path-len 98
 ir.guard.origin-as-eq 21
 ir.guard.origin-as-ne 9
 ir.guard.origin-as-in-set 53
@@ -225,7 +225,7 @@ ir.guard.rpki-is 52
 ir.guard.aspa-is 76
 ir.guard.value-cmp 204
 ir.guard.exists 12
-ir.guard.local-in-asn-set 40
+ir.guard.local-in-asn-set 39
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 10
 ir.guard.and 217
@@ -244,7 +244,7 @@ ir.action.deny 429
 ir.action.continue 272
 ir.action.bind 132
 ir.action.for-each 102
-ir.action.break 33
+ir.action.break 50
 ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 22
@@ -942,7 +942,7 @@ tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 | row
 tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 | row client-as4242-1 rest => #2 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-black-list-prefix => #10 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-bogon-prefix => #9 reject
-tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-invalid-asn => #5 for asn in route.as-path { reject }
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-invalid-asn => #5 for asn in route.as-path { break | reject }
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-long-as-path => #8 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-never-via-rs => #7 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-rpki-invalid => #13 reject

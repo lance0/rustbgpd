@@ -130,6 +130,29 @@ fn hygiene_tests_fail_when_a_scrub_term_is_deleted() {
     }
 }
 
+/// The invalid-ASN loop never meets a path the long-path term rejects, so a
+/// path past the loop's 4,096-element cap is a plain reject rather than a
+/// fail-closed evaluation error, and an invalid ASN in a long path is still
+/// rejected.
+#[test]
+fn long_paths_with_invalid_asns_reject_without_an_evaluation_error() {
+    let rendered = render(&to_yaml(&healthy_value()), &rtr_options()).expect("healthy render");
+    let mut hygiene = rendered.files["policy/rs-hygiene.rpol"].clone();
+    for (name, len) in [
+        ("at-the-limit", 32),
+        ("just-over", 33),
+        ("past-loop-cap", 5000),
+    ] {
+        let path = vec!["3333"; len].join(" ");
+        hygiene.push_str(&format!(
+            "test long-{name} {{\n    route {{ prefix 203.0.113.0/24; as-path \"{path} 64512\" }}\n    \
+             expect rs-hygiene == reject\n}}\n"
+        ));
+    }
+    let report = run_rpol_tests(&hygiene).unwrap();
+    assert!(report.all_passed(), "{:#?}", report.failures);
+}
+
 fn refusals(result: Result<rs_config_render::Rendered, RenderError>) -> Vec<String> {
     match result {
         Err(RenderError::Refused(items)) => items,
