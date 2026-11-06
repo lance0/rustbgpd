@@ -846,7 +846,13 @@ log_format = "json"
     /// in that window, the marker must keep the mtime of the bytes the reload
     /// read, so `rbgp doctor` (which warns when the file's mtime is newer than
     /// the marker) still reports the second save as pending.
-    #[tokio::test]
+    ///
+    /// Paused time keeps the bounds below off the wall clock: adoption fsyncs
+    /// the history store on the blocking pool, which can take seconds on a
+    /// loaded host, and tokio does not auto-advance a paused clock while a
+    /// blocking task is in flight. The bounds still catch a persister that
+    /// idles without acknowledging.
+    #[tokio::test(start_paused = true)]
     async fn reload_adoption_records_the_mtime_read_at_load_not_at_adoption() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
