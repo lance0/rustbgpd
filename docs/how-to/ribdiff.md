@@ -389,6 +389,11 @@ octets trailing the next hop refuse the dump (exit 2). RFC 8050 Add-Path
 entries carry their path identifier through as `path_id`. Extended and
 large communities are emitted from the raw attribute bytes.
 
+The dump is read twice, one record at a time: the first pass validates
+every record and measures the snapshot, the second writes it. Memory stays
+near one record whatever the file size. A record longer than 16 MiB or a
+snapshot longer than 4 GiB refuses the dump (exit 2, nothing emitted).
+
 <a id="rbgp-diff-snapshot-from-bmp--rfc-8671-post-policy-bmp-captures"></a>
 ### BMP post-policy snapshots
 

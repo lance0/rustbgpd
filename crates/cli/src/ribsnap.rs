@@ -11,10 +11,11 @@
 //! them against an Adj-RIB-Out would manufacture false divergence or,
 //! worse, false equality.
 //!
-//! Fail-closed emission: output is buffered and printed only after the
-//! entire dump parses; the counted completion trailer is therefore only
-//! ever present on a fully-converted snapshot. Any parse error exits 2
-//! with nothing written to stdout.
+//! Fail-closed emission: the dump is read twice, one record at a time. The
+//! first pass parses every record and measures the output; the second
+//! renders it. Any parse error, an oversized record, or an output past the
+//! limit exits 2 with nothing written to stdout, so the counted completion
+//! trailer is only ever present on a fully-converted snapshot.
 //!
 //! Wire notes (RFC 6396 §4.3.4): `AS_PATH` is always 4-octet. The
 //! `MP_REACH_NLRI` inside a RIB entry is decoded by
@@ -93,6 +94,11 @@ pub(crate) struct SnapRoute {
     pub(crate) unknown_attrs: Vec<UnknownWireAttr>,
 }
 
+/// Largest `TABLE_DUMP_V2` record payload read into memory, matching the
+/// daemon's MRT reader. Records are read one at a time, so this bounds the
+/// adapter's input buffer whatever the file size.
+const MAX_RECORD_LEN: usize = 16 * 1024 * 1024;
+
 /// Largest snapshot either adapter writes. The output is measured before
 /// the first byte reaches stdout, so an input that would render past it is
 /// refused (exit 2) with nothing written.
@@ -102,11 +108,42 @@ pub(crate) const MAX_OUTPUT_BYTES: u64 = 1 << 32;
 /// stderr on refusal, and return the exit code.
 #[must_use]
 pub fn from_mrt(opts: &FromMrtOpts<'_>) -> i32 {
-    let result = run(opts);
     let stdout = std::io::stdout();
-    emit_mrt_snapshot(result, &mut stdout.lock())
+    from_mrt_to(opts, &mut stdout.lock())
 }
 
+/// [`from_mrt`] with the snapshot written to `writer`. The dump is read
+/// twice, one record at a time: the first pass validates every record and
+/// measures the output, the second renders it.
+#[must_use]
+pub fn from_mrt_to(opts: &FromMrtOpts<'_>, writer: &mut dyn std::io::Write) -> i32 {
+    from_mrt_with_limit(opts, writer, MAX_OUTPUT_BYTES)
+}
+
+fn from_mrt_with_limit(
+    opts: &FromMrtOpts<'_>,
+    writer: &mut dyn std::io::Write,
+    max_output: u64,
+) -> i32 {
+    let validated = check_opts(opts).and_then(|peer| {
+        let file = std::fs::File::open(opts.file)
+            .map_err(|e| format!("cannot read {}: {e}", opts.file.display()))?;
+        let routes = measure(opts, peer, &mut std::io::BufReader::new(&file), max_output)?;
+        Ok((file, peer, routes))
+    });
+    match validated {
+        Ok((file, peer, routes)) => write_streamed(writer, "MRT snapshot output", |w| {
+            std::io::Seek::rewind(&mut &file)?;
+            render_stream(opts, peer, &mut std::io::BufReader::new(&file), routes, w)
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            EXIT_REFUSED
+        }
+    }
+}
+
+#[cfg(test)]
 fn emit_mrt_snapshot(result: Result<String, String>, writer: &mut dyn std::io::Write) -> i32 {
     match result {
         Ok(snapshot) => write_snapshot(writer, snapshot.as_bytes(), "MRT snapshot output"),
@@ -117,19 +154,10 @@ fn emit_mrt_snapshot(result: Result<String, String>, writer: &mut dyn std::io::W
     }
 }
 
-/// Write an already-rendered snapshot byte-for-byte and flush it (shared by
-/// the MRT and BMP adapters). A closed pipe exits 2 quietly; every other
-/// output failure is reported.
+/// Write an already-rendered snapshot byte-for-byte and flush it.
+#[cfg(test)]
 pub(crate) fn write_snapshot(writer: &mut dyn std::io::Write, bytes: &[u8], context: &str) -> i32 {
-    match writer.write_all(bytes).and_then(|()| writer.flush()) {
-        Ok(()) => EXIT_OK,
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::BrokenPipe {
-                eprintln!("Error: cannot write {context}: {error}");
-            }
-            EXIT_REFUSED
-        }
-    }
+    write_streamed(writer, context, |w| w.write_all(bytes))
 }
 
 /// Stream a validated snapshot through `render` and flush it (shared by
@@ -152,7 +180,7 @@ pub(crate) fn write_streamed(
     }
 }
 
-fn run(opts: &FromMrtOpts<'_>) -> Result<String, String> {
+fn check_opts(opts: &FromMrtOpts<'_>) -> Result<IpAddr, String> {
     if opts.view != "adj-rib-out-capture" {
         return Err(format!(
             "view {:?} is not comparable against an Adj-RIB-Out: a TABLE_DUMP_V2 dump of a \
@@ -167,10 +195,14 @@ fn run(opts: &FromMrtOpts<'_>) -> Result<String, String> {
             }
         ));
     }
-    let peer: IpAddr = opts
-        .peer
+    opts.peer
         .parse()
-        .map_err(|e| format!("invalid --peer address {:?}: {e}", opts.peer))?;
+        .map_err(|e| format!("invalid --peer address {:?}: {e}", opts.peer))
+}
+
+#[cfg(test)]
+fn run(opts: &FromMrtOpts<'_>) -> Result<String, String> {
+    let peer = check_opts(opts)?;
     let data = std::fs::read(opts.file)
         .map_err(|e| format!("cannot read {}: {e}", opts.file.display()))?;
     convert(opts, peer, &data)
@@ -182,15 +214,26 @@ fn run(opts: &FromMrtOpts<'_>) -> Result<String, String> {
 ///
 /// # Errors
 ///
-/// Returns the refusal message for any malformed or truncated dump.
+/// Returns the refusal message for any malformed, truncated, or over-limit
+/// dump.
 pub fn convert(opts: &FromMrtOpts<'_>, peer: IpAddr, data: &[u8]) -> Result<String, String> {
-    let routes = parse_mrt(data).map_err(|e| format!("{}: {e}", opts.file.display()))?;
-    Ok(render(opts, peer, &routes))
+    convert_with_limit(opts, peer, data, MAX_OUTPUT_BYTES)
 }
 
-/// Render the full NDJSON snapshot (header, routes, counted trailer).
-fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute)]) -> String {
-    let mut out = String::new();
+fn convert_with_limit(
+    opts: &FromMrtOpts<'_>,
+    peer: IpAddr,
+    data: &[u8],
+    max_output: u64,
+) -> Result<String, String> {
+    let routes = measure(opts, peer, &mut &data[..], max_output)?;
+    let mut out = Vec::new();
+    render_stream(opts, peer, &mut &data[..], routes, &mut out).map_err(|e| e.to_string())?;
+    String::from_utf8(out).map_err(|e| e.to_string())
+}
+
+/// The header record line, newline included.
+fn header_line(opts: &FromMrtOpts<'_>) -> String {
     // Adapter contract `from-mrt/1` (see docs/how-to/ribdiff.md): adapter id +
     // attested view + optional free-form label.
     let mut source = "from-mrt/1 view=adj-rib-out-capture".to_string();
@@ -203,16 +246,7 @@ fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute
         "source": source,
         "generation": opts.generation,
     });
-    out.push_str(&header.to_string());
-    out.push('\n');
-    for (addr, len, route) in routes {
-        out.push_str(&route_record_json(peer, opts.peer_asn, *addr, *len, route));
-        out.push('\n');
-    }
-    let trailer = serde_json::json!({"record": "trailer", "routes": routes.len()});
-    out.push_str(&trailer.to_string());
-    out.push('\n');
-    out
+    format!("{header}\n")
 }
 
 /// The counted trailer line, newline included (shared by both adapters).
@@ -221,6 +255,78 @@ pub(crate) fn trailer_line(routes: usize) -> String {
         "{}\n",
         serde_json::json!({"record": "trailer", "routes": routes})
     )
+}
+
+/// Pass one: parse every record, measure the rendered snapshot, and return
+/// the route count. Nothing is retained between records.
+fn measure(
+    opts: &FromMrtOpts<'_>,
+    peer: IpAddr,
+    reader: &mut dyn std::io::Read,
+    max_output: u64,
+) -> Result<usize, String> {
+    let mut routes = 0_usize;
+    let mut size = header_line(opts).len() as u64;
+    for_each_route(reader, &mut |addr, len, route| {
+        size += route_record_json(peer, opts.peer_asn, addr, len, &route).len() as u64 + 1;
+        if size > max_output {
+            return Err(format!(
+                "the snapshot would exceed the {max_output}-byte output limit; refusing"
+            ));
+        }
+        routes += 1;
+        Ok(())
+    })
+    .map_err(|e| format!("{}: {e}", opts.file.display()))?;
+    if size + trailer_line(routes).len() as u64 > max_output {
+        return Err(format!(
+            "{}: the snapshot would exceed the {max_output}-byte output limit; refusing",
+            opts.file.display()
+        ));
+    }
+    Ok(routes)
+}
+
+/// Pass two: render the validated dump. A parse failure here means the
+/// input changed after validation; the output then lacks its trailer.
+fn render_stream(
+    opts: &FromMrtOpts<'_>,
+    peer: IpAddr,
+    reader: &mut dyn std::io::Read,
+    routes: usize,
+    out: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    out.write_all(header_line(opts).as_bytes())?;
+    let mut written = 0_usize;
+    let mut failure = None;
+    let parsed = for_each_route(reader, &mut |addr, len, route| {
+        let line = route_record_json(peer, opts.peer_asn, addr, len, &route);
+        if let Err(error) = out
+            .write_all(line.as_bytes())
+            .and_then(|()| out.write_all(b"\n"))
+        {
+            failure = Some(error);
+            return Err(String::new());
+        }
+        written += 1;
+        Ok(())
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if let Err(e) = parsed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("input changed after validation: {e}"),
+        ));
+    }
+    if written != routes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("input changed after validation: {written} routes, expected {routes}"),
+        ));
+    }
+    out.write_all(trailer_line(routes).as_bytes())
 }
 
 /// Render one `rbgp-ribsnap/1` route record (shared by the MRT and BMP
@@ -365,6 +471,73 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Walk a `TABLE_DUMP_V2` dump, calling `each` once per RIB entry
+/// (Add-Path duplicates stay duplicates — the snapshot format compares
+/// multiplicity). One record payload, at most [`MAX_RECORD_LEN`] bytes, is
+/// in memory at a time.
+fn for_each_route(
+    reader: &mut dyn std::io::Read,
+    each: &mut dyn FnMut(IpAddr, u8, SnapRoute) -> Result<(), String>,
+) -> Result<(), String> {
+    use std::io::Read as _;
+
+    let mut payload = Vec::new();
+    let mut rib_records = 0_usize;
+    loop {
+        let mut header = [0_u8; 12];
+        let got = read_full(reader, &mut header)?;
+        if got == 0 {
+            break;
+        }
+        if got < header.len() {
+            return Err(format!(
+                "truncated record: need {} bytes, have {got}",
+                header.len()
+            ));
+        }
+        let mrt_type = u16::from_be_bytes([header[4], header[5]]);
+        let subtype = u16::from_be_bytes([header[6], header[7]]);
+        let length = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+        if length > MAX_RECORD_LEN {
+            return Err(format!(
+                "record declares {length} payload bytes; the per-record limit is \
+                 {MAX_RECORD_LEN}, refusing"
+            ));
+        }
+        payload.clear();
+        reader
+            .take(length as u64)
+            .read_to_end(&mut payload)
+            .map_err(|e| format!("cannot read record: {e}"))?;
+        if payload.len() < length {
+            return Err(format!(
+                "truncated record: need {length} bytes, have {}",
+                payload.len()
+            ));
+        }
+        if mrt_type != TABLE_DUMP_V2 {
+            continue;
+        }
+        let (v6, addpath) = match subtype {
+            RIB_IPV4_UNICAST => (false, false),
+            RIB_IPV6_UNICAST => (true, false),
+            RIB_IPV4_UNICAST_ADDPATH => (false, true),
+            RIB_IPV6_UNICAST_ADDPATH => (true, true),
+            _ => continue,
+        };
+        parse_rib_record(&payload, v6, addpath, each)
+            .map_err(|e| format!("TABLE_DUMP_V2 subtype {subtype}: {e}"))?;
+        rib_records += 1;
+    }
+    if rib_records == 0 {
+        return Err(
+            "no TABLE_DUMP_V2 IPv4/IPv6 unicast RIB records found (is this a RIB dump?)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Fill `buf` unless the input ends first; returns the bytes read.
 pub(crate) fn read_full(reader: &mut dyn std::io::Read, buf: &mut [u8]) -> Result<usize, String> {
     let mut filled = 0;
@@ -379,39 +552,13 @@ pub(crate) fn read_full(reader: &mut dyn std::io::Read, buf: &mut [u8]) -> Resul
     Ok(filled)
 }
 
-/// Parse a `TABLE_DUMP_V2` dump into (prefix, length, route) entries, one
-/// per RIB entry (Add-Path duplicates stay duplicates — the snapshot
-/// format compares multiplicity).
+#[cfg(test)]
 fn parse_mrt(data: &[u8]) -> Result<Vec<(IpAddr, u8, SnapRoute)>, String> {
-    let mut cur = Cursor::new(data);
     let mut routes = Vec::new();
-    let mut rib_records = 0_usize;
-    while !cur.is_empty() {
-        let _timestamp = cur.read_u32()?;
-        let mrt_type = cur.read_u16()?;
-        let subtype = cur.read_u16()?;
-        let length = cur.read_u32()? as usize;
-        let payload = cur.take(length)?;
-        if mrt_type != TABLE_DUMP_V2 {
-            continue;
-        }
-        let (v6, addpath) = match subtype {
-            RIB_IPV4_UNICAST => (false, false),
-            RIB_IPV6_UNICAST => (true, false),
-            RIB_IPV4_UNICAST_ADDPATH => (false, true),
-            RIB_IPV6_UNICAST_ADDPATH => (true, true),
-            _ => continue,
-        };
-        parse_rib_record(payload, v6, addpath, &mut routes)
-            .map_err(|e| format!("TABLE_DUMP_V2 subtype {subtype}: {e}"))?;
-        rib_records += 1;
-    }
-    if rib_records == 0 {
-        return Err(
-            "no TABLE_DUMP_V2 IPv4/IPv6 unicast RIB records found (is this a RIB dump?)"
-                .to_string(),
-        );
-    }
+    for_each_route(&mut &data[..], &mut |addr, len, route| {
+        routes.push((addr, len, route));
+        Ok(())
+    })?;
     Ok(routes)
 }
 
@@ -422,7 +569,7 @@ fn parse_rib_record(
     payload: &[u8],
     v6: bool,
     addpath: bool,
-    routes: &mut Vec<(IpAddr, u8, SnapRoute)>,
+    each: &mut dyn FnMut(IpAddr, u8, SnapRoute) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut cur = Cursor::new(payload);
     let _sequence = cur.read_u32()?;
@@ -438,7 +585,7 @@ fn parse_rib_record(
         let attrs = cur.take(attr_len)?;
         let mut route = parse_attributes(attrs)?;
         route.path_id = path_id;
-        routes.push((addr, prefix_len, route));
+        each(addr, prefix_len, route)?;
     }
     if !cur.is_empty() {
         return Err("trailing bytes after declared RIB entries".to_string());
@@ -933,6 +1080,50 @@ mod tests {
 
         let dump = write_dump(&[]);
         assert!(run(&opts(dump.path(), "adj-rib-out-capture")).is_err());
+    }
+
+    /// Load-bearing: reading the declared length without the per-record
+    /// bound buffers an attacker-sized record, and the skipped record here
+    /// would let the dump convert.
+    #[test]
+    fn oversized_record_is_refused_with_nothing_written() {
+        let mut bytes = vec![0, 0, 0, 0, 0, 13, 0, 1];
+        bytes.extend_from_slice(&u32::try_from(MAX_RECORD_LEN + 1).unwrap().to_be_bytes());
+        bytes.resize(bytes.len() + MAX_RECORD_LEN + 1, 0);
+        bytes.extend_from_slice(&sample_dump());
+        let dump = write_dump(&bytes);
+        let err = run(&opts(dump.path(), "adj-rib-out-capture")).unwrap_err();
+        assert!(err.contains("per-record limit"), "{err}");
+        let mut output = Vec::new();
+        assert_eq!(
+            from_mrt_to(&opts(dump.path(), "adj-rib-out-capture"), &mut output),
+            EXIT_REFUSED
+        );
+        assert_eq!(output, [] as [u8; 0]);
+
+        // A length field alone is refused before any payload is buffered.
+        let header_only = write_dump(&[0, 0, 0, 0, 0, 13, 0, 2, 0xFF, 0xFF, 0xFF, 0xFF]);
+        let err = run(&opts(header_only.path(), "adj-rib-out-capture")).unwrap_err();
+        assert!(err.contains("per-record limit"), "{err}");
+    }
+
+    /// Load-bearing: without the output bound a dump whose snapshot
+    /// renders past the limit converts instead of refusing.
+    #[test]
+    fn output_over_limit_is_refused_with_nothing_written() {
+        let dump = write_dump(&sample_dump());
+        let opts = opts(dump.path(), "adj-rib-out-capture");
+        let snapshot = run(&opts).unwrap();
+        let mut output = Vec::new();
+        let limit = snapshot.len() as u64;
+        assert_eq!(from_mrt_with_limit(&opts, &mut output, limit), EXIT_OK);
+        assert_eq!(output, snapshot.as_bytes());
+        output.clear();
+        assert_eq!(
+            from_mrt_with_limit(&opts, &mut output, limit - 1),
+            EXIT_REFUSED
+        );
+        assert_eq!(output, [] as [u8; 0]);
     }
 
     /// One `RIB_IPV6_UNICAST` entry whose `MP_REACH_NLRI` value is `value`.

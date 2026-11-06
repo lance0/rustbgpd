@@ -1,7 +1,7 @@
-//! Heap bounds for `rbgp diff snapshot from-bmp`.
+//! Heap bounds for `rbgp diff snapshot from-bmp` and `from-mrt`.
 //!
 //! A snapshot repeats every route's attributes, so a small capture can
-//! render to a large output. The converter must not hold that output, or
+//! render to a large output. The converters must not hold that output, or
 //! one attribute copy per NLRI, in memory: peak heap stays near one record
 //! however many routes the input carries.
 
@@ -11,7 +11,7 @@ use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::UNIX_EPOCH;
 
-use rustbgpctl::ribsnap_bmp;
+use rustbgpctl::{ribsnap, ribsnap_bmp};
 use rustbgpd_bmp::codec::{encode_initiation, encode_peer_up, encode_route_monitoring};
 use rustbgpd_bmp::{BmpPeerInfo, BmpPeerType, BmpVersion};
 use rustbgpd_wire::{Capability, OpenMessage};
@@ -187,6 +187,44 @@ fn from_bmp_peak_heap_stays_near_one_record() {
     assert!(output > 10_000_000, "{output} output bytes");
     assert!(
         peak < 2 << 20,
+        "peak heap {peak} bytes for {output} output bytes"
+    );
+}
+
+fn mrt_record(payload: &[u8]) -> Vec<u8> {
+    let mut record = vec![0, 0, 0, 0, 0, 13, 0, 2]; // TABLE_DUMP_V2 RIB_IPV4_UNICAST
+    record.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+    record.extend_from_slice(payload);
+    record
+}
+
+/// Load-bearing: reading the whole dump, collecting every route, and
+/// buffering the rendered snapshot all grow with the input.
+#[test]
+fn from_mrt_peak_heap_stays_near_one_record() {
+    let mut dump = Vec::new();
+    for route in 0..50_000_u32 {
+        let [_, a, b, c] = route.to_be_bytes();
+        let mut payload = route.to_be_bytes().to_vec(); // sequence
+        payload.extend_from_slice(&[32, 10, a, b, c, 0, 1]); // /32, one entry
+        payload.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 4, 0x40, 1, 1, 0]); // ORIGIN IGP
+        dump.extend(mrt_record(&payload));
+    }
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&dump).unwrap();
+    let opts = ribsnap::FromMrtOpts {
+        file: file.path(),
+        view: "adj-rib-out-capture",
+        peer: "192.0.2.9",
+        peer_asn: 64501,
+        source: None,
+        generation: 0,
+    };
+    let (code, output, peak) = measure(|sink| ribsnap::from_mrt_to(&opts, sink));
+    assert_eq!(code, 0);
+    assert!(output > 4_000_000, "{output} output bytes");
+    assert!(
+        peak < 1 << 20,
         "peak heap {peak} bytes for {output} output bytes"
     );
 }
