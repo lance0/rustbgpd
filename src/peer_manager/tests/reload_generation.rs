@@ -6284,3 +6284,109 @@ async fn set_peer_group_accepts_session_edits_and_applies_policy_to_a_bound_peer
     );
     harness.shutdown().await;
 }
+
+/// A generation that removes neighbors whose sessions are parked on a full
+/// RIB mailbox (ADR-0078) stops them all in one command window, not one per
+/// removed neighbor, and serves readiness while it waits.
+#[tokio::test(start_paused = true)]
+async fn generation_removes_wedged_neighbors_in_one_window() {
+    use super::command_fan_out::{WINDOW, one_readiness_serving_window, wedged_session};
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let removed: Vec<PeerKey> = harness.mgr.peers.keys().cloned().collect();
+    assert_eq!(removed.len(), 3);
+    for peer in &removed {
+        let session_id = harness.mgr.peers[peer].session_id();
+        let (previous, _) = harness
+            .mgr
+            .peers
+            .replace_handle(peer, wedged_session(), session_id)
+            .unwrap();
+        previous.shutdown().await.unwrap().unwrap();
+    }
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    harness.mgr = harness.mgr.with_readiness_queries(readiness_rx);
+    let mut candidate = prior.clone();
+    candidate.neighbors.retain(|_| false);
+
+    let (outcome, harness) = one_readiness_serving_window(&readiness_tx, WINDOW, async move {
+        let outcome = harness.apply(&candidate).await;
+        (outcome, harness)
+    })
+    .await;
+    let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(receipt.removed, removed.len());
+    assert!(harness.mgr.peers.is_empty());
+    harness.shutdown().await;
+}
+
+/// A removal that cannot detach fails the generation, but the removals
+/// detached before it are still deleted and recorded, so the unwind re-adds
+/// them. Removals after it are never reached.
+#[tokio::test]
+async fn generation_removal_failure_re_adds_the_neighbors_removed_before_it() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    // Removals run in peer order.
+    let first = key("10.0.0.2".parse().unwrap());
+    let protected = key("10.0.0.9".parse().unwrap());
+    let last = key("2001:db8::3".parse().unwrap());
+    // A TCP-AO owner's removal requires a restart, so its detach fails.
+    harness
+        .mgr
+        .peers
+        .get_mut(&protected)
+        .unwrap()
+        .transport_config
+        .tcp_ao = Some(
+        rustbgpd_transport::TcpAoConfig {
+            key: "secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
+    let sessions: BTreeMap<PeerKey, u64> = [&first, &protected, &last]
+        .into_iter()
+        .map(|peer| (peer.clone(), harness.mgr.peers[peer].session_id()))
+        .collect();
+    let mut candidate = prior.clone();
+    candidate.neighbors.retain(|_| false);
+
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::FullyCompensated(error) = &outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(error.contains("remove 10.0.0.9"), "{error}");
+    assert_eq!(harness.mgr.current_config, prior);
+    assert_ne!(
+        harness.mgr.peers[&first].session_id(),
+        sessions[&first],
+        "the neighbor removed before the failure is deleted, then re-added"
+    );
+    assert_eq!(
+        harness.counters[&first.address]
+            .stops
+            .load(Ordering::SeqCst),
+        1
+    );
+    for peer in [&protected, &last] {
+        assert_eq!(
+            harness.mgr.peers[peer].session_id(),
+            sessions[peer],
+            "{peer} keeps its session"
+        );
+        assert_eq!(
+            harness.counters[&peer.address].stops.load(Ordering::SeqCst),
+            0
+        );
+    }
+    harness.shutdown().await;
+}

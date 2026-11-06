@@ -498,37 +498,59 @@ impl PeerManager {
         }
 
         // 4. Removals first, each captured with its admin and gshut state,
-        //    so a later replacement or addition failure re-adds them.
+        //    so a later replacement or addition failure re-adds them. Every
+        //    removed peer is detached, then their sessions stop together
+        //    (`delete_detached_peers`): sessions that stopped draining
+        //    commands cost one delete window per 64 of them, not one per
+        //    peer. A detach failure still deletes and records the peers
+        //    detached before it, so the unwind re-adds them.
+        let mut detached = Vec::with_capacity(resolved.remove.len());
+        let mut runtime_state = Vec::with_capacity(resolved.remove.len());
+        let mut remove_failure = None;
         for peer in resolved.remove {
-            let Some((enabled, graceful_shutdown)) = self
+            let Some(state) = self
                 .peers
                 .get(&peer)
                 .map(|managed| (managed.enabled, managed.advertise_graceful_shutdown))
             else {
-                return self
-                    .fail_reload_generation(
-                        applied,
-                        format!("remove {peer}: peer vanished before removal"),
-                        false,
-                    )
-                    .await;
+                remove_failure = Some(format!("remove {peer}: peer vanished before removal"));
+                break;
             };
-            match self.delete_peer(peer.clone(), false).await {
-                Ok(config) => applied.removed.push(RemovedPeer {
-                    config,
-                    enabled,
-                    graceful_shutdown,
-                }),
+            match self
+                .detach_peer_for_delete(peer.clone(), false, None, true, None, None)
+                .await
+            {
+                Ok(peer) => {
+                    detached.push(peer);
+                    runtime_state.push(state);
+                }
                 Err(error) => {
-                    return self
-                        .fail_reload_generation(applied, format!("remove {peer}: {error}"), false)
-                        .await;
+                    remove_failure = Some(format!("remove {peer}: {error}"));
+                    break;
                 }
             }
         }
+        let removed = self.delete_detached_peers(detached).await;
+        applied
+            .removed
+            .extend(removed.into_iter().zip(runtime_state).map(
+                |(config, (enabled, graceful_shutdown))| RemovedPeer {
+                    config,
+                    enabled,
+                    graceful_shutdown,
+                },
+            ));
+        if let Some(error) = remove_failure {
+            return self.fail_reload_generation(applied, error, false).await;
+        }
 
         // 5. Replacements: one delete/re-add per peer with final policies.
-        //    The primitive restores its own already-reshaped members.
+        //    The primitive restores its own already-reshaped members. It
+        //    stays one peer at a time: the shared reshape engine (ADR-0081)
+        //    stops at the first failure with every later member untouched,
+        //    and a first-member failure reports no effect. Stopping every
+        //    member's sessions together would tear down later members
+        //    before an earlier re-add can fail.
         if !resolved.replace.is_empty() {
             match self
                 .apply_peer_reshape_snapshot_classified(
