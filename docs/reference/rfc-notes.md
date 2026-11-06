@@ -1635,6 +1635,18 @@ separate from control-plane-only families advertising F=1.
 
 ## RFC 7911 — Add-Path
 
+### Malformed capability values
+
+An Add-Path capability value that is empty or not a whole number of 4-octet
+tuples is a malformed OPEN: the session is refused with OPEN Message Error /
+Unspecific (2/0), as RFC 4271 §6.2 prescribes for a recognized but malformed
+optional parameter, and as FRR and BIRD do. Ignoring it would leave the peer
+believing Add-Path was advertised, so it would send path IDs that are read as
+prefixes. The same rule covers Multiprotocol (length other than 4), Graceful
+Restart (not 2 + 4n), Long-Lived Graceful Restart (not a multiple of 7),
+Extended Next Hop (not a multiple of 6) and Paths-Limit (not a multiple of 5).
+A well-sized value that names only unmodeled families is ignored, not refused.
+
 ### Experimental Paths-Limit
 
 Capability code 76 implements the tuple format from the expired

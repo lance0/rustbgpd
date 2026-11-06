@@ -114,6 +114,16 @@ pub fn validate_open(
         ));
     }
 
+    // RFC 4271 §6.2: a recognized optional parameter that is malformed gets
+    // OPEN Message Error / Unspecific (0), as FRR and BIRD send.
+    if malformed_per_family_capability(open) {
+        return Err(NotificationMessage::new(
+            NotificationCode::OpenMessage,
+            0,
+            Bytes::new(),
+        ));
+    }
+
     let remote_role = validate_role_capability(open, config)?;
 
     // Negotiate hold time
@@ -492,6 +502,30 @@ fn role_mismatch_notification() -> NotificationMessage {
 /// RFC 4271 §4.2 — negotiated hold time is the minimum of the two
 /// proposals.  If either side proposes 0 (no keepalives), the result is 0.
 #[must_use]
+/// Whether a recognized per-family capability carries a value that is not a
+/// whole number of its tuples. The wire decoder keeps such a value as
+/// `Capability::Unknown` under its own code, so the capability is silently
+/// lost while the peer believes it was sent: for Add-Path, the peer would
+/// then send path IDs that we read as prefixes. A well-sized value naming
+/// only unmodeled families is not malformed.
+fn malformed_per_family_capability(open: &OpenMessage) -> bool {
+    open.capabilities.iter().any(|capability| {
+        let Capability::Unknown { code, data } = capability else {
+            return false;
+        };
+        let len = data.len();
+        match *code {
+            capability_code::MULTI_PROTOCOL => len != 4,
+            capability_code::ADD_PATH => len == 0 || !len.is_multiple_of(4),
+            capability_code::GRACEFUL_RESTART => len < 2 || !(len - 2).is_multiple_of(4),
+            capability_code::LONG_LIVED_GRACEFUL_RESTART => !len.is_multiple_of(7),
+            capability_code::EXTENDED_NEXT_HOP => !len.is_multiple_of(6),
+            capability_code::PATHS_LIMIT => !len.is_multiple_of(5),
+            _ => false,
+        }
+    })
+}
+
 fn negotiate_hold_time(local: u16, peer: u16) -> u16 {
     if local == 0 || peer == 0 {
         0
@@ -1792,6 +1826,61 @@ mod tests {
             !neg.effective_add_path_send_limits
                 .contains_key(&(Afi::Ipv6, Safi::MplsVpn))
         );
+    }
+
+    /// RFC 4271 §6.2: a recognized per-family capability whose value is not
+    /// a whole number of tuples is OPEN Message Error / Unspecific (0), decoded
+    /// from the wire. A well-sized value for unmodeled families is accepted.
+    #[test]
+    fn malformed_per_family_capability_length_is_open_message_error() {
+        use bytes::BytesMut;
+        let decoded = |code: u8, value: &'static [u8]| {
+            let mut open = peer_open();
+            open.capabilities.push(Capability::Unknown {
+                code,
+                data: Bytes::from_static(value),
+            });
+            let mut wire = BytesMut::new();
+            open.encode(&mut wire).unwrap();
+            let mut body = wire
+                .freeze()
+                .split_off(rustbgpd_wire::constants::HEADER_LEN);
+            let body_len = body.len();
+            OpenMessage::decode(&mut body, body_len).unwrap()
+        };
+        let cfg = test_config();
+        let cases: [(u8, &'static [u8]); 7] = [
+            (capability_code::ADD_PATH, &[0, 1, 1]),
+            (capability_code::ADD_PATH, &[0, 1, 1, 3, 0, 2, 1]),
+            (capability_code::MULTI_PROTOCOL, &[0, 1, 0]),
+            (capability_code::GRACEFUL_RESTART, &[0, 120, 0]),
+            (
+                capability_code::LONG_LIVED_GRACEFUL_RESTART,
+                &[0, 1, 1, 0, 0, 0],
+            ),
+            (capability_code::EXTENDED_NEXT_HOP, &[0, 1, 0, 1, 0]),
+            (capability_code::PATHS_LIMIT, &[0, 1, 1, 0]),
+        ];
+        for (code, value) in cases {
+            let err = validate_open(&decoded(code, value), &cfg).unwrap_err();
+            assert_eq!(
+                (err.code, err.subcode),
+                (NotificationCode::OpenMessage, 0),
+                "capability {code} length {}",
+                value.len()
+            );
+        }
+        // Well sized, but naming AFI 99 only: ignored, not malformed.
+        let ignored: [(u8, &'static [u8]); 2] = [
+            (capability_code::ADD_PATH, &[0, 99, 1, 3]),
+            (capability_code::MULTI_PROTOCOL, &[0, 99, 0, 1]),
+        ];
+        for (code, value) in ignored {
+            assert!(
+                validate_open(&decoded(code, value), &cfg).is_ok(),
+                "capability {code}"
+            );
+        }
     }
 
     #[test]
