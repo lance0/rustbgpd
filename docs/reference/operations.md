@@ -1426,19 +1426,23 @@ accepting. Neither mode latches the peer or sends a NOTIFICATION, and
 unset.
 
 For negotiated IPv4/IPv6-unicast Add-Path receive, a nonzero
-`add_path.receive_max` also caps retained path IDs **per prefix**. It counts
-accepted IDs plus rejected IDs only when that family's
+`add_path.receive_max` also caps retained path IDs **per prefix**. Unset or
+zero, a default cap of 1024 path IDs per prefix applies and always behaves
+as `"block"`, independent of `max_prefix_action`; it advertises no
+Paths-Limit capability. Either cap counts accepted IDs plus rejected IDs
+only when that family's
 `max_prefixes_received_*` bound enables rejected-identity tracking. Without
 that bound, a denied path does not occupy a receive-cap slot; rejected-route
 diagnostics remain separately capacity-bounded. An existing ID can be
 replaced at the cap, and a withdrawal releases its slot. Under `"block"`, a
 net-new over-limit ID is withheld; recovery requires peer reannouncement or
 a session reset. Under `"shutdown"`, the peer receives Cease/1 and is latched
-off as above. Under `"warning"`, the excess is observed but accepted, so
-the cap does not bound memory. `bgp_add_path_receive_limit_attempts_total`
+off as above. Under `"warning"`, a configured cap observes the excess but
+accepts it, so it does not bound memory. `bgp_add_path_receive_limit_attempts_total`
 counts net-new ID admission attempts beyond the cap, including repeated
 attempts to send a withheld ID. Replacing an already admitted ID does not
-count. The counter is labeled by peer, family and action. The
+count. The counter is labeled by peer, family and action; the default cap
+records `action="block"`. The
 `bgp_max_prefix_*` gauges and counters continue to describe
 unique-prefix bounds, not this path count. A `receive_max` config edit
 rebuilds the session; a lower cap applies to the replacement session, not as

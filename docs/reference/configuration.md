@@ -2651,7 +2651,7 @@ receive_max = 3   # advertise and locally cap received unicast paths per prefix
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
-| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local IPv4/IPv6-unicast Add-Path cap per prefix (1..=65535); omit or set 0 for unlimited |
+| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local IPv4/IPv6-unicast Add-Path cap per prefix (1..=65535); omit or set 0 to advertise nothing and apply the default local cap of 1024 |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
@@ -2669,7 +2669,13 @@ identity tracking for that family. `max_prefix_action = "block"` withholds a
 net-new ID beyond the cap, `"shutdown"` sends Cease/1 and latches the peer,
 and `"warning"` reports the over-limit attempt but keeps accepting. A
 replacement of an existing ID needs no new slot, and a withdrawal releases
-one. The cap does not locally police other AFI/SAFI families. Changing
+one. Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
+capability but still caps each IPv4/IPv6-unicast prefix at 1024 retained path
+IDs. Past that default it always withholds the excess as `"block"` does,
+whatever `max_prefix_action` says: the session stays up, and `"warning"` does
+not lift the bound. Set `receive_max` explicitly for a peer that legitimately
+sends more paths per prefix. The cap does not locally police other AFI/SAFI
+families. Changing
 `receive_max` rebuilds the session to renegotiate OPEN; the replacement starts
 with fresh accounting. Zero tuples and tuples without matching Add-Path negotiation are
 ignored. Because the draft expired without IETF adoption, deploy this only

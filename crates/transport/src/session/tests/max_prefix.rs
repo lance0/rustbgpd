@@ -2191,19 +2191,73 @@ async fn add_path_receive_max_blocks_third_path_for_one_prefix() {
     assert!(session.known_paths.contains(&(Prefix::V4(prefix), 3)));
 }
 
+/// Without `receive_max`, a default per-prefix cap still bounds retained
+/// Add-Path identities (LAN-2897). Past it the excess is withheld and counted
+/// under every `max_prefix_action`: an unconfigured cap never tears the
+/// session down, and `"warning"` does not leave it unbounded. Legitimate
+/// paths up to the cap reach the RIB exactly.
 #[tokio::test]
-async fn add_path_receive_max_unset_keeps_existing_unlimited_behavior() {
-    let config = mode_config(crate::config::MaxPrefixAction::Block);
-    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
-    install_dual_stack_session(&mut session, true);
-    assert!(session.path_receive_admission().is_none());
-    let prefix = v4_prefix(1);
-    for path_id in 0..=3 {
+async fn add_path_receive_default_cap_withholds_excess_paths() {
+    use crate::config::MaxPrefixAction;
+    let cap = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    for action in [
+        MaxPrefixAction::Shutdown,
+        MaxPrefixAction::Block,
+        MaxPrefixAction::Warning,
+    ] {
+        let (mut session, mut rib_rx, _notify_rx, _server) =
+            notifying_session(mode_config(action)).await;
+        install_dual_stack_session(&mut session, true);
+        assert_eq!(session.config.peer.paths_limit_receive_max, 0);
+        let prefix = v4_prefix(1);
+        let entries: Vec<_> = (0..cap + 2)
+            .map(|path_id| Ipv4NlriEntry { path_id, prefix })
+            .collect();
+        let flood = UpdateMessage::build(
+            &entries,
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        );
+        session.process_update(flood).await;
+
+        assert!(session.read_half.is_some(), "{action:?} must not tear down");
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(
+            session.known_prefix_refcounts[&Prefix::V4(prefix)],
+            usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)
+        );
+        let mut admitted = Vec::new();
+        while let Ok(RibUpdate::RoutesReceived { announced, .. }) = rib_rx.try_recv() {
+            admitted.extend(announced.into_iter().map(|route| route.path_id));
+        }
+        admitted.sort_unstable();
+        assert_eq!(admitted, (0..cap).collect::<Vec<_>>(), "{action:?}");
+        assert!(
+            (add_path_receive_attempts(&session, "ipv4_unicast", "block") - 2.0).abs()
+                < f64::EPSILON,
+            "{action:?}: both excess IDs are counted as withheld"
+        );
+
+        // A withdrawal releases a slot for a new ID.
+        session.process_update(ipv4_withdraw(prefix, 0, true)).await;
         session
-            .process_update(ipv4_announce(prefix, path_id, true))
+            .process_update(ipv4_announce(prefix, cap + 5, true))
             .await;
+        assert!(session.known_paths.contains(&(Prefix::V4(prefix), cap + 5)));
+        assert_eq!(
+            session.known_prefix_refcounts[&Prefix::V4(prefix)],
+            usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)
+        );
     }
-    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 4);
 }
 
 #[tokio::test]
@@ -2212,7 +2266,11 @@ async fn add_path_receive_max_does_not_allocate_admission_for_plain_session() {
     let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
     session.config.peer.paths_limit_receive_max = 2;
     install_dual_stack_session(&mut session, false);
-    assert!(session.path_receive_admission().is_none());
+    assert!(
+        session
+            .path_receive_admission(std::iter::once(Prefix::V4(v4_prefix(1))))
+            .is_none()
+    );
 }
 
 #[tokio::test]
