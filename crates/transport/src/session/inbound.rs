@@ -821,6 +821,46 @@ impl PeerSession {
         );
     }
 
+    /// One WARN per malformed UPDATE, and only at power-of-two UPDATE counts
+    /// per TCP connection; DEBUG keeps every record. One UPDATE can carry
+    /// hundreds of malformed records, and a peer can repeat it at will, so
+    /// neither may set the WARN volume. `bgp_update_malformed_total` counts
+    /// every UPDATE.
+    fn log_malformed_attributes(
+        &mut self,
+        malformed: &[rustbgpd_wire::MalformedAttribute],
+        coalesced_duplicates: u32,
+    ) {
+        let (Some(first), Some(disposition)) = (
+            malformed.first(),
+            malformed.iter().map(|m| m.disposition).max(),
+        ) else {
+            return;
+        };
+        self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
+        if self.malformed_attribute_updates.is_power_of_two() {
+            warn!(
+                peer = %self.peer_label,
+                malformed_updates = self.malformed_attribute_updates,
+                malformed_attributes = malformed.len(),
+                coalesced_duplicates,
+                disposition = disposition.as_str(),
+                attr_type = first.type_code,
+                error = %first.error,
+                "malformed path attributes (RFC 7606 revised error handling); first cause shown, all causes at DEBUG"
+            );
+        }
+        for m in malformed {
+            debug!(
+                peer = %self.peer_label,
+                attr_type = m.type_code,
+                disposition = m.disposition.as_str(),
+                error = %m.error,
+                "malformed path attribute (RFC 7606 revised error handling)"
+            );
+        }
+    }
+
     /// Preserve the established OTC ingress diagnostic surfaces for a
     /// decision that rejects one or more unicast announcements.
     fn observe_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) {
@@ -1811,6 +1851,7 @@ impl PeerSession {
         let revised = rustbgpd_wire::RevisedParsedUpdate {
             update: parsed,
             malformed: Vec::new(),
+            coalesced_duplicates: 0,
         };
         Box::pin(self.process_decoded_update(None, revised, Vec::new(), false)).await;
     }
@@ -1922,15 +1963,7 @@ impl PeerSession {
         for (route_type, discarded) in evpn_discarded {
             self.record_evpn_discard(route_type, discarded);
         }
-        for m in &malformed {
-            warn!(
-                peer = %self.peer_label,
-                attr_type = m.type_code,
-                disposition = m.disposition.as_str(),
-                error = %m.error,
-                "malformed path attribute (RFC 7606 revised error handling)"
-            );
-        }
+        self.log_malformed_attributes(&malformed, revised.coalesced_duplicates);
         if !malformed.is_empty()
             && let Some(update) = update
         {

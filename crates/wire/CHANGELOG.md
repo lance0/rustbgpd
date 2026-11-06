@@ -33,6 +33,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   RFC 8956 defines it. In an IPv4 rule, global (SAFI 133) or VPN (SAFI 134),
   it is an unknown component type and the NLRI is malformed (RFC 8955 §4.2);
   earlier releases accepted it.
+- RFC 7606 revised decoding records a repeated attribute type once per
+  cause (duplicate, prohibited AS-set, AS 0) instead of once per occurrence,
+  so decoding allocates the same amount however often a type repeats.
+  `RevisedAttributeDecode` and `RevisedParsedUpdate` gain
+  `coalesced_duplicates`, the repeats represented by an earlier record.
+  Dispositions are unchanged. The new public fields break struct literals.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
   types. These crate versions are not published by this change.
 

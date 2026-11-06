@@ -1129,7 +1129,15 @@ pub struct RevisedAttributeDecode {
     pub bgpls_nlri_discarded: u32,
     /// Malformed attributes recovered without aborting the decode, each with
     /// its RFC 7606 disposition. Empty means the UPDATE was clean.
+    ///
+    /// A duplicated attribute type contributes at most one record per cause
+    /// (duplicate, prohibited AS-set, AS 0), however often it repeats.
     pub malformed: Vec<MalformedAttribute>,
+    /// Discarded duplicate occurrences represented by an earlier duplicate
+    /// record of the same type rather than by a record of their own. When
+    /// every cause is attribute-discard, `malformed.len() +
+    /// coalesced_duplicates` is the number of discarded occurrences.
+    pub coalesced_duplicates: u32,
 }
 /// Decode path attributes with RFC 7606 revised error handling.
 ///
@@ -1198,6 +1206,11 @@ pub(crate) fn decode_path_attributes_revised_observed(
     let mut evpn_discarded = crate::evpn::EvpnNlriDiscardObservations::new();
     let mut malformed = Vec::new();
     let mut seen = [false; 256];
+    // Causes already recorded per type code. A peer can repeat one type
+    // thousands of times in a single UPDATE; later repeats are counted, not
+    // recorded, so they cost no allocation here or log line in the caller.
+    let mut reported = [0_u8; 256];
+    let mut coalesced_duplicates = 0_u32;
     while !buf.is_empty() {
         let (flags, type_code, value) = match split_next_attribute_mp_aware(&mut buf) {
             Ok(split) => split,
@@ -1236,7 +1249,9 @@ pub(crate) fn decode_path_attributes_revised_observed(
             attr_type::AS4_PATH => prohibited_as_set(value, 4),
             _ => None,
         };
-        if let Some(segment_type) = prohibited_segment {
+        if let Some(segment_type) = prohibited_segment
+            && first_report(&mut reported, type_code, REPORTED_AS_SET)
+        {
             malformed.push(MalformedAttribute {
                 type_code,
                 disposition: ErrorDisposition::TreatAsWithdraw,
@@ -1253,7 +1268,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal.
             // A duplicate Community Container is treat-as-withdraw; other
             // duplicates keep the first occurrence and discard the rest.
-            let error = DecodeError::UpdateAttributeError {
+            let duplicate_error = || DecodeError::UpdateAttributeError {
                 subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
                 data: vec![],
                 detail: format!("duplicate attribute type {type_code}"),
@@ -1263,13 +1278,13 @@ pub(crate) fn decode_path_attributes_revised_observed(
                 attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI
             ) {
                 return Err(crate::UpdateDecodeError {
-                    error,
+                    error: duplicate_error(),
                     type_code: Some(type_code),
                 });
             }
             // RFC 7607: a later AS_PATH containing AS 0 still contributes
             // treat-as-withdraw before RFC 7606 discards the duplicate.
-            if as_path_zero {
+            if as_path_zero && first_report(&mut reported, type_code, REPORTED_AS_ZERO) {
                 malformed.push(MalformedAttribute {
                     type_code,
                     disposition: ErrorDisposition::TreatAsWithdraw,
@@ -1280,15 +1295,21 @@ pub(crate) fn decode_path_attributes_revised_observed(
                     },
                 });
             }
-            malformed.push(MalformedAttribute {
-                type_code,
-                disposition: if type_code == attr_type::COMMUNITY_CONTAINER {
-                    ErrorDisposition::TreatAsWithdraw
-                } else {
-                    ErrorDisposition::AttributeDiscard
-                },
-                error,
-            });
+            // Every repeat has the same disposition, so one record carries
+            // the §3 (h) outcome for all of them.
+            if first_report(&mut reported, type_code, REPORTED_DUPLICATE) {
+                malformed.push(MalformedAttribute {
+                    type_code,
+                    disposition: if type_code == attr_type::COMMUNITY_CONTAINER {
+                        ErrorDisposition::TreatAsWithdraw
+                    } else {
+                        ErrorDisposition::AttributeDiscard
+                    },
+                    error: duplicate_error(),
+                });
+            } else {
+                coalesced_duplicates = coalesced_duplicates.saturating_add(1);
+            }
             continue;
         }
         if is_unknown_optional_non_transitive(flags, type_code) {
@@ -1459,9 +1480,22 @@ pub(crate) fn decode_path_attributes_revised_observed(
             attributes: attrs,
             bgpls_nlri_discarded: bgpls_discarded,
             malformed,
+            coalesced_duplicates,
         },
         evpn_discarded,
     ))
+}
+
+const REPORTED_DUPLICATE: u8 = 1;
+const REPORTED_AS_SET: u8 = 1 << 1;
+const REPORTED_AS_ZERO: u8 = 1 << 2;
+
+/// Mark `cause` reported for `type_code`; true only the first time.
+fn first_report(reported: &mut [u8; 256], type_code: u8, cause: u8) -> bool {
+    let slot = &mut reported[usize::from(type_code)];
+    let first = *slot & cause == 0;
+    *slot |= cause;
+    first
 }
 
 /// RFC 4271 section 5 requires unrecognized optional non-transitive
@@ -7957,8 +7991,10 @@ mod tests {
         };
         assert_eq!(data, &bytes);
     }
+    /// A prohibited AS-set counts once per attribute type per UPDATE: never
+    /// twice for one occurrence, and never once per repeated duplicate.
     #[test]
-    fn revised_prohibited_as_sets_count_each_occurrence_once() {
+    fn revised_prohibited_as_sets_count_once_per_type() {
         for (type_code, flags) in [(attr_type::AS_PATH, 0x40), (attr_type::AS4_PATH, 0xC0)] {
             for segment_type in [1, 4] {
                 for copies in [1, 2] {
@@ -7970,11 +8006,7 @@ mod tests {
                         .iter()
                         .filter(|cause| matches!(cause.error, DecodeError::ProhibitedAsSet { .. }))
                         .collect();
-                    assert_eq!(
-                        causes.len(),
-                        copies,
-                        "{type_code}/{segment_type}: {causes:?}"
-                    );
+                    assert_eq!(causes.len(), 1, "{type_code}/{segment_type}: {causes:?}");
                     assert!(
                         causes
                             .iter()
@@ -8277,6 +8309,76 @@ mod tests {
             decoded.malformed[0].disposition,
             ErrorDisposition::AttributeDiscard
         );
+    }
+    /// Load-bearing coalescing proof: one record per repeated occurrence, or
+    /// dropping repeats without counting them, fails here. The disposition
+    /// stays attribute-discard and the first occurrence wins.
+    #[test]
+    fn revised_repeated_duplicates_coalesce_into_one_record() {
+        let mut buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            &[0, 0, 0, 5],
+        ));
+        for _ in 0..1_000 {
+            buf.extend(attr_bytes(
+                attr_flags::OPTIONAL,
+                attr_type::MULTI_EXIT_DISC,
+                &[0, 0, 0, 9],
+            ));
+        }
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert!(decoded.attributes.contains(&PathAttribute::Med(5)));
+        assert!(!decoded.attributes.contains(&PathAttribute::Med(9)));
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::MULTI_EXIT_DISC);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+        assert_eq!(decoded.coalesced_duplicates, 999);
+    }
+    /// Load-bearing: coalescing must not hide a stronger cause. A prohibited
+    /// AS-set first seen in a late repeat still makes the UPDATE
+    /// treat-as-withdraw, and repeats of it add no further records.
+    #[test]
+    fn revised_repeated_as_path_duplicates_keep_first_treat_as_withdraw_cause() {
+        let plain = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0, 0, 0xFD, 0xEA],
+        );
+        let with_set = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[1, 1, 0, 0, 0xFD, 0xEA],
+        );
+        let mut buf = valid_as_path_bytes();
+        for _ in 0..500 {
+            buf.extend(&plain);
+        }
+        for _ in 0..500 {
+            buf.extend(&with_set);
+        }
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 1);
+        assert_eq!(decoded.coalesced_duplicates, 999);
+        let causes: Vec<_> = decoded
+            .malformed
+            .iter()
+            .map(|m| (m.type_code, m.disposition))
+            .collect();
+        assert_eq!(
+            causes,
+            [
+                (attr_type::AS_PATH, ErrorDisposition::AttributeDiscard),
+                (attr_type::AS_PATH, ErrorDisposition::TreatAsWithdraw),
+            ]
+        );
+        assert!(matches!(
+            decoded.malformed[1].error,
+            DecodeError::ProhibitedAsSet { .. }
+        ));
     }
     /// Load-bearing full-octet duplicate proof: shrinking the fixed duplicate
     /// table below all 256 type codes panics on this fixture; special-casing

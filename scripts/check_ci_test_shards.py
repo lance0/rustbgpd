@@ -89,6 +89,7 @@ SHARDS = {
                 "daemon",
                 "daemon_wide_confirmation",
                 "diff_snapshots",
+                "duplicate_attribute_allocations",
                 "evpn_explain",
                 "evpn_peer_views",
                 "exit_codes",

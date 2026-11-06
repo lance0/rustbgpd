@@ -336,7 +336,8 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         return Err(ReadError::AttributeDecode(malformed.error.clone()));
     }
     let discarded_path_attributes = u64::try_from(decoded.malformed.len())
-        .map_err(|_| malformed(base, "discarded path-attribute count exceeds u64"))?;
+        .map_err(|_| malformed(base, "discarded path-attribute count exceeds u64"))?
+        + u64::from(decoded.coalesced_duplicates);
     let discarded_bgpls_nlris = u64::from(decoded.bgpls_nlri_discarded);
     let attributes = decoded.attributes;
     let (next_hop, link_local_next_hop) = match mp_next_hop {

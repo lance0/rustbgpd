@@ -92,10 +92,19 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     notification_log_metadata(metadata)
         || connect_failure_log_metadata(metadata)
         || writer_failure_log_metadata(metadata)
+        || malformed_attribute_warn_metadata(metadata)
         || (*metadata.level() == tracing::Level::WARN
             && ["peer", "family", "route_type", "discarded"]
                 .into_iter()
                 .all(|field| metadata.fields().field(field).is_some()))
+}
+
+/// Any per-attribute or per-UPDATE RFC 7606 malformed-attribute WARN.
+fn malformed_attribute_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::WARN
+        && ["peer", "attr_type", "disposition", "error"]
+            .into_iter()
+            .all(|field| metadata.fields().field(field).is_some())
 }
 
 fn notification_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
@@ -1914,6 +1923,58 @@ fn evpn_discard_warnings_are_bounded_per_type_and_connection() {
         (counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_total")[0].1 - 18.0).abs()
             < f64::EPSILON
     );
+}
+
+/// Load-bearing log-volume proof: one WARN per malformed attribute record,
+/// or per UPDATE without the per-connection power-of-two gate, fails here.
+#[test]
+fn duplicate_attribute_warnings_are_bounded_per_update_and_connection() {
+    const DUPLICATES: usize = 2_000;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let _server = runtime.block_on(async {
+        let (client, server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        server
+    });
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut update = aspa_first_as_update(prefix, 65002, true);
+    let mut attributes = update.path_attributes.to_vec();
+    for med in 0..=DUPLICATES {
+        attributes.extend([0x80, 4, 4, 0, 0, 0, if med == 0 { 42 } else { 9 }]);
+    }
+    update.path_attributes = Bytes::from(attributes);
+
+    let process = |session: &mut PeerSession| {
+        capture_session_logs(|| runtime.block_on(session.process_update(update.clone())))
+    };
+    let events = process(&mut session);
+    assert_eq!(events.len(), 1, "one WARN per UPDATE: {:?}", events.first());
+    assert_eq!(events[0]["malformed_attributes"], "1");
+    assert_eq!(
+        events[0]["coalesced_duplicates"],
+        (DUPLICATES - 1).to_string()
+    );
+    assert_eq!(events[0]["disposition"], "attribute-discard");
+    assert_eq!(process(&mut session).len(), 1, "second UPDATE warns");
+    assert_eq!(process(&mut session).len(), 0, "third UPDATE is DEBUG only");
+    assert_eq!(process(&mut session).len(), 1, "fourth UPDATE warns");
+    session.close_tcp();
+    assert_eq!(process(&mut session).len(), 1, "a new connection re-arms");
+
+    // RFC 7606 §3 (g) disposition is unchanged: the first MED survives.
+    assert_eq!(update_malformed_count(&session, "attribute_discard"), 5);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 0);
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("attribute-discard keeps the route");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].med(), 42);
 }
 
 #[test]

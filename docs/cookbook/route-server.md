@@ -455,8 +455,9 @@ UPDATE as withdrawn when it decodes it (RFC 9774, RFC 7606). The
 rejected-route view lists such a prefix with reason `treat_as_withdraw`;
 the member's `bgp_update_malformed_total{disposition="treat_as_withdraw"}`
 and `bgp_update_malformed_causes_total{reason="as_set_prohibited"}`
-counters increment, and the log carries a `malformed path attribute`
-warning. The member has to stop sending the AS_SET.
+counters increment, and the log carries a `malformed path attributes`
+warning (repeats are logged at power-of-two counts per connection). The
+member has to stop sending the AS_SET.
 
 **A prefix is hidden from one member but present in the Loc-RIB.** That
 member's own export policy denies the single best path. In `single-best`
