@@ -73,11 +73,14 @@ pub enum ImetOriginateOutcome {
     },
     /// The RIB command channel closed before the inject could be sent,
     /// or the RIB failed to acknowledge it within the ADR-0102
-    /// [`crate::evpn_ack::RIB_ACK_TIMEOUT`]. The route is not tracked;
-    /// converge callers report a failure and may retry (the inject is
-    /// idempotent per key).
+    /// [`crate::evpn_ack::RIB_ACK_TIMEOUT`]. A timed-out inject may still
+    /// be applied later, so the key is tracked as unacknowledged: rollback
+    /// and shutdown withdraw it, and a retry re-injects (the inject is
+    /// idempotent per key). A closed channel is tracked the same way;
+    /// with the RIB gone there is no route to install or withdraw.
+    /// Converge callers report a failure.
     RibUnavailable {
-        /// Type 3 route key that would have been injected.
+        /// Type 3 route key that may have been injected.
         key: EvpnRouteKey,
     },
     /// The RIB rejected the inject request.
@@ -129,10 +132,10 @@ pub enum ImetWithdrawOutcome {
 #[derive(Debug, Default)]
 pub struct EvpnImetController {
     originated: BTreeMap<EvpnInstanceId, EvpnRouteKey>,
-    /// Tracked VNIs whose last inject reply was dropped: the route may or
-    /// may not be installed. The key stays tracked so a withdraw covers it,
-    /// but a later originate re-injects instead of reporting
-    /// `AlreadyOriginated`.
+    /// Tracked VNIs whose last inject was not acknowledged (reply dropped
+    /// or ack timeout): the route may or may not be installed. The key
+    /// stays tracked so a withdraw covers it, but a later originate
+    /// re-injects instead of reporting `AlreadyOriginated`.
     unacknowledged: BTreeSet<EvpnInstanceId>,
 }
 
@@ -190,13 +193,16 @@ impl EvpnImetController {
                 self.originated.insert(instance.id, key);
                 self.unacknowledged.remove(&instance.id);
             }
-            ImetOriginateOutcome::ReplyDropped { .. } => {
+            // No ack: the RIB may still apply the inject, so track the key
+            // for rollback and shutdown withdraws. A withdraw of a route the
+            // RIB never installed answers NotFound, which counts as withdrawn.
+            ImetOriginateOutcome::ReplyDropped { .. }
+            | ImetOriginateOutcome::RibUnavailable { .. } => {
                 self.originated.insert(instance.id, key);
                 self.unacknowledged.insert(instance.id);
             }
             // An unacknowledged entry stays tracked and unacknowledged.
             ImetOriginateOutcome::AlreadyOriginated { .. }
-            | ImetOriginateOutcome::RibUnavailable { .. }
             | ImetOriginateOutcome::Rejected { .. } => {}
         }
         outcome
@@ -224,7 +230,7 @@ impl EvpnImetController {
     /// Originate one Type 3 IMET route per instance.
     ///
     /// Per-instance failures are logged and do not abort later instances.
-    /// Returns the accepted, already-originated, or reply-unknown tracked
+    /// Returns the accepted, already-originated, or unacknowledged tracked
     /// route keys.
     pub async fn originate_all(
         &mut self,
@@ -236,9 +242,9 @@ impl EvpnImetController {
             match self.originate_instance(inst, rib_tx).await {
                 ImetOriginateOutcome::Originated { key }
                 | ImetOriginateOutcome::AlreadyOriginated { key }
-                | ImetOriginateOutcome::ReplyDropped { key } => keys.push(key),
-                ImetOriginateOutcome::RibUnavailable { .. }
-                | ImetOriginateOutcome::Rejected { .. } => {}
+                | ImetOriginateOutcome::ReplyDropped { key }
+                | ImetOriginateOutcome::RibUnavailable { key } => keys.push(key),
+                ImetOriginateOutcome::Rejected { .. } => {}
             }
         }
         keys
@@ -902,11 +908,116 @@ mod tests {
             matches!(outcome, ImetOriginateOutcome::RibUnavailable { .. }),
             "ack timeout must surface as a converge failure, got {outcome:?}"
         );
-        assert!(
-            controller.lock().await.is_empty(),
-            "an unacknowledged originate must not be tracked"
+        assert_eq!(
+            controller.lock().await.len(),
+            1,
+            "a timed-out originate stays tracked so a withdraw covers it"
         );
         drop(parked_reply);
+    }
+
+    /// RIB stand-in that is backlogged past the ack timeout: it applies each
+    /// inject only after [`crate::evpn_ack::RIB_ACK_TIMEOUT`] has expired for
+    /// the caller, then serves withdraws against the routes it holds
+    /// (`NotFound` for an absent key, like the real RIB). Needs paused time.
+    fn late_applying_rib(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::Mutex<BTreeSet<EvpnRouteKey>>>,
+    ) {
+        let installed = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+        let rib = tokio::spawn({
+            let installed = installed.clone();
+            async move {
+                while let Some(msg) = rib_rx.recv().await {
+                    match msg {
+                        RibUpdate::InjectEvpn { route, reply } => {
+                            tokio::time::sleep(
+                                crate::evpn_ack::RIB_ACK_TIMEOUT
+                                    + std::time::Duration::from_secs(1),
+                            )
+                            .await;
+                            installed.lock().unwrap().insert(route.key());
+                            let _ = reply.send(Ok(()));
+                        }
+                        RibUpdate::WithdrawEvpn { key, reply } => {
+                            let result = if installed.lock().unwrap().remove(&key) {
+                                Ok(())
+                            } else {
+                                Err(RibCommandError::not_found("EVPN route key not found"))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+        (rib, installed)
+    }
+
+    /// Regression: the RIB applies an inject after its ack timed out. The
+    /// controller must still own the key, so the shutdown sweep withdraws the
+    /// route instead of leaving a Type 3 that outlives the VNI and keeps
+    /// remote VTEPs flooding BUM traffic toward it.
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_inject_applied_late_is_withdrawn_by_shutdown_sweep() {
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let (rib, installed) = late_applying_rib(rib_rx);
+        let mut controller = EvpnImetController::new();
+
+        let outcome = controller
+            .originate_instance(local_instance(100), &rib_tx)
+            .await;
+        let ImetOriginateOutcome::RibUnavailable { key } = outcome else {
+            panic!("expected an ack timeout, got {outcome:?}");
+        };
+        assert_eq!(controller.originated_key(vni(100)), Some(key));
+
+        controller.withdraw_all(&rib_tx).await;
+        drop(rib_tx);
+        rib.await.unwrap();
+
+        assert!(
+            installed.lock().unwrap().is_empty(),
+            "the late-applied Type 3 must be withdrawn"
+        );
+        assert!(controller.is_empty());
+    }
+
+    /// A timed-out inject the RIB never applied: the withdraw answers
+    /// `NotFound`, which converges to withdrawn rather than stranding the key.
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_inject_never_applied_untracks_on_not_found_withdraw() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let mut controller = EvpnImetController::new();
+
+        let (outcome, parked_reply) = tokio::join!(
+            controller.originate_instance(local_instance(100), &rib_tx),
+            async {
+                match rib_rx.recv().await.expect("inject reaches the RIB") {
+                    RibUpdate::InjectEvpn { reply, .. } => reply,
+                    _other => panic!("expected InjectEvpn"),
+                }
+            }
+        );
+        let ImetOriginateOutcome::RibUnavailable { key } = outcome else {
+            panic!("expected an ack timeout, got {outcome:?}");
+        };
+        drop(parked_reply);
+
+        // Bounded so a controller that sends no withdraw fails the assert
+        // below instead of parking this responder forever.
+        let (outcome, ()) = tokio::join!(controller.withdraw_instance(vni(100), &rib_tx), async {
+            if let Ok(Some(RibUpdate::WithdrawEvpn { reply, .. })) =
+                tokio::time::timeout(crate::evpn_ack::RIB_ACK_TIMEOUT, rib_rx.recv()).await
+            {
+                let _ = reply.send(Err(RibCommandError::not_found("EVPN route key not found")));
+            }
+        });
+        assert_eq!(outcome, ImetWithdrawOutcome::Withdrawn { key });
+        assert!(controller.is_empty());
     }
 
     /// Same wedged-RIB bound for the withdraw path: the ack timeout maps to

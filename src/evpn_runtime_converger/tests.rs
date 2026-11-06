@@ -10504,8 +10504,8 @@ async fn converge_failure_with_no_effect_is_failed_precondition() {
 
 #[tokio::test]
 async fn converge_failure_with_unacknowledged_first_step_is_internal() {
-    // The IMET inject reply never arrives: the route may be installed but
-    // is untracked, so the failure cannot claim no effect.
+    // The IMET inject reply never arrives: the route may be installed, so
+    // the failure cannot claim no effect.
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
     let held = Arc::new(std::sync::Mutex::new(Vec::new()));
     let _rib = tokio::spawn({
@@ -10547,6 +10547,75 @@ async fn converge_failure_with_unacknowledged_first_step_is_internal() {
     };
     assert!(message.contains("not restored"), "{message}");
     assert_eq!(held.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn converge_rollback_withdraws_imet_applied_after_ack_timeout() {
+    // A backlogged RIB applies the added VNI's Type 3 inject only after the
+    // ack timed out. The add's rollback must withdraw that route; an untracked
+    // timed-out inject left it installed after the VNI was rolled back.
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let installed = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    let _rib = tokio::spawn({
+        let installed = installed.clone();
+        async move {
+            let mut rib_rx = rib_rx;
+            let (events_tx, _) = broadcast::channel(16);
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        // Under paused time this resumes only after the
+                        // caller's ack wait has expired.
+                        tokio::time::sleep(
+                            crate::evpn_ack::RIB_ACK_TIMEOUT + Duration::from_secs(1),
+                        )
+                        .await;
+                        installed.lock().unwrap().insert(route.key());
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        let result = if installed.lock().unwrap().remove(&key) {
+                            Ok(())
+                        } else {
+                            Err(RibCommandError::not_found("EVPN route key not found"))
+                        };
+                        let _ = reply.send(result);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    tokio::time::pause();
+    let current = runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml());
+    let (dataplane, _instances_rx, _ip_vrfs_rx) =
+        owned_dataplane(Arc::new(current.instances().clone()));
+    let imet = Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()));
+
+    let (error, _) = apply_l2vni_class_case(
+        l2vni_runtime_candidate_toml(),
+        two_l2vni_runtime_candidate_toml(),
+        rib_tx,
+        &dataplane,
+        imet.clone(),
+    )
+    .await;
+
+    let GrpcEvpnRuntimeApplyError::Internal(message) = &error else {
+        panic!("an unacknowledged step is known divergence, got {error:?}");
+    };
+    assert!(message.contains("RibUnavailable"), "{message}");
+    assert!(
+        installed.lock().unwrap().is_empty(),
+        "the rollback must withdraw the late-applied Type 3"
+    );
+    assert!(imet.lock().await.is_empty());
 }
 
 #[tokio::test]
