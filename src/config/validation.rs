@@ -1343,6 +1343,19 @@ impl Config {
 
         // Validate RPKI cache server config
         if let Some(ref rpki) = self.rpki {
+            let (per_cache, total) = (rpki.max_records_per_cache(), rpki.max_records_total());
+            if per_cache == 0 || total == 0 {
+                return Err(ConfigError::InvalidRpkiConfig {
+                    reason: "max_records_per_cache and max_records_total must be >= 1".to_string(),
+                });
+            }
+            if per_cache > total {
+                return Err(ConfigError::InvalidRpkiConfig {
+                    reason: format!(
+                        "max_records_per_cache ({per_cache}) must be <= max_records_total ({total})"
+                    ),
+                });
+            }
             let mut cache_addresses = HashMap::new();
             for (i, server) in rpki.cache_servers.iter().enumerate() {
                 let address = server.address.parse::<SocketAddr>().map_err(|e| {

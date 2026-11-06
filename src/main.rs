@@ -5181,6 +5181,13 @@ async fn run<T>(
             RpkiTaskKind::AspaForwarder,
         );
 
+        // One record budget shared by every cache's client.
+        let max_cache_records =
+            usize::try_from(rpki_config.max_records_per_cache()).unwrap_or(usize::MAX);
+        let record_budget = rustbgpd_rpki::RecordBudget::new(
+            usize::try_from(rpki_config.max_records_total()).unwrap_or(usize::MAX),
+        );
+
         // Spawn one RTR client per configured cache server
         for (cache_ordinal, server) in rpki_config.cache_servers.iter().enumerate() {
             let addr: std::net::SocketAddr = match server.address.parse() {
@@ -5204,6 +5211,7 @@ async fn run<T>(
             let expire_metrics = metrics.clone();
             let cache_label = addr.to_string();
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
+                .with_record_limits(max_cache_records, Arc::clone(&record_budget))
                 .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
