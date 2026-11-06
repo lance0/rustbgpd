@@ -57,6 +57,7 @@ pub(super) fn lab(config: Config) -> Lab {
     tokio::spawn(
         rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
     );
+    let metrics = BgpMetrics::new();
     let mgr = PeerManager::new_with_config(
         mpsc::channel(16).1,
         mpsc::channel(1).1,
@@ -64,7 +65,7 @@ pub(super) fn lab(config: Config) -> Lab {
         Ipv4Addr::new(10, 0, 0, 1),
         None,
         None,
-        BgpMetrics::new(),
+        metrics.clone(),
         rib_tx,
         None,
         None,
@@ -81,6 +82,10 @@ pub(super) fn lab(config: Config) -> Lab {
             let _ = applied_tx.send(command.desired.clone());
             if drop_next.swap(false, Ordering::SeqCst) {
                 continue;
+            }
+            // As the actor seeds a started session's gauge before it acks.
+            for params in command.desired.sessions.iter().filter(|p| p.enabled) {
+                metrics.record_bfd_state(&params.peer_label, false, false);
             }
             let acks = command
                 .desired

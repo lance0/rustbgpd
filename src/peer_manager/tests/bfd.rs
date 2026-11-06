@@ -2237,6 +2237,21 @@ fn strict_bfd_group_config() -> Config {
     config
 }
 
+/// The `bfd_session_up{peer}` value, or `None` when the series is absent.
+fn bfd_session_up_gauge(metrics: &BgpMetrics, peer: &str) -> Option<i64> {
+    use prometheus::Encoder;
+    let mut text = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&metrics.registry().gather(), &mut text)
+        .unwrap();
+    let needle = format!("bfd_session_up{{peer=\"{peer}\"}}");
+    String::from_utf8(text)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix(needle.as_str()))
+        .map(|value| value.trim().parse().unwrap())
+}
+
 fn runtime_neighbor(
     peer_group: Option<&str>,
     remote_asn: u32,
@@ -2296,6 +2311,13 @@ async fn a_runtime_neighbor_in_a_strict_bfd_group_runs_bfd_and_is_withheld() {
         lab.mgr.bfd_withholding(&RUNTIME_PEER),
         "strict BGP is withheld until BFD is Up"
     );
+    // The family's acknowledgement arrived before the peer was added; it
+    // must not reap the session's seeded Down gauge as a deletion's.
+    assert_eq!(
+        bfd_session_up_gauge(&lab.mgr.metrics, &RUNTIME_PEER.to_string()),
+        Some(0),
+        "a withheld strict neighbor reports its Down BFD session"
+    );
 
     lab.mgr
         .handle_bfd_state_change(crate::bfd_runtime::BfdStateChange {
@@ -2346,6 +2368,34 @@ async fn a_lost_bfd_socket_acknowledgement_makes_a_runtime_create_ambiguous() {
         lab.mgr.current_config.neighbors.is_empty(),
         "snapshot restored"
     );
+}
+
+/// A runtime create whose BFD session cannot be derived from the installed
+/// snapshot is refused with the snapshot restored, never added ungated. The
+/// seam stands in for an interface scope that vanishes between
+/// `resolve_neighbor` and the membership derivation.
+#[tokio::test]
+async fn a_runtime_create_whose_bfd_session_cannot_be_derived_is_refused() {
+    let mut lab = super::dynamic_bfd::lab(strict_bfd_group_config());
+    lab.mgr.bfd_coupling.as_mut().unwrap().derivation_failure =
+        Some("interface scope no longer resolves".into());
+
+    let error = lab
+        .mgr
+        .runtime_create_peer(runtime_neighbor(Some("strict-bfd"), 65009))
+        .await
+        .expect_err("a strict neighbor without its BFD session is refused");
+
+    assert!(
+        matches!(
+            error,
+            rustbgpd_api::peer_types::PeerLifecycleError::Precondition(_)
+        ),
+        "{error:?}"
+    );
+    assert!(!lab.mgr.peers.contains_key(&key(RUNTIME_PEER)), "not added");
+    assert!(lab.mgr.current_config.neighbors.is_empty());
+    assert!(lab.member(RUNTIME_PEER).is_none());
 }
 
 /// Deleting a strict-BFD neighbor and re-adding it without BFD (how the CLI

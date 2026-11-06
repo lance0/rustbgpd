@@ -902,22 +902,31 @@ impl PeerManager {
             PeerLifecycleError::Precondition(error)
         })?;
 
-        let previous_config = self.replace_current_config(next_config);
-        // The neighbor's BFD session can be the first in its socket family.
-        let failure = match self.open_bfd_member_family(address).await {
-            super::DynamicBfdSocketOutcome::Ready => None,
-            super::DynamicBfdSocketOutcome::Rejected(error) => Some((
-                PeerLifecycleError::Precondition(error),
+        let (previous_config, bfd) = self.install_current_config(next_config);
+        let failure = match bfd {
+            // Without its member a strict neighbor would start ungated:
+            // refuse a BFD session that cannot be derived, such as one whose
+            // interface scope vanished after `resolve_neighbor`.
+            Err(error) => Some((
+                PeerLifecycleError::Precondition(format!("BFD session for {peer}: {error}")),
                 RuntimeCreatePeerFailureEffect::FullyCompensated,
             )),
-            super::DynamicBfdSocketOutcome::Ambiguous(error) => Some((
-                PeerLifecycleError::Internal(format!("BFD socket family for {peer}: {error}")),
-                RuntimeCreatePeerFailureEffect::CompensationAmbiguous,
-            )),
+            // The neighbor's BFD session can be the first in its socket family.
+            Ok(()) => match self.open_bfd_member_family(address).await {
+                super::DynamicBfdSocketOutcome::Ready => None,
+                super::DynamicBfdSocketOutcome::Rejected(error) => Some((
+                    PeerLifecycleError::Precondition(error),
+                    RuntimeCreatePeerFailureEffect::FullyCompensated,
+                )),
+                super::DynamicBfdSocketOutcome::Ambiguous(error) => Some((
+                    PeerLifecycleError::Internal(format!("BFD socket family for {peer}: {error}")),
+                    RuntimeCreatePeerFailureEffect::CompensationAmbiguous,
+                )),
+            },
         };
         if let Some((error, effect)) = failure {
-            // A fenced coupling keeps the member: restoring the snapshot
-            // cannot settle BFD membership, so the outcome stays ambiguous.
+            // Restoring the snapshot removes any member it added, except
+            // under a fenced coupling: that outcome stays ambiguous.
             self.replace_current_config(previous_config);
             if let Some(slot) = &mut failure_effect {
                 **slot = effect;
