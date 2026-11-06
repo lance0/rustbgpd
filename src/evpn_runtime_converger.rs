@@ -487,9 +487,9 @@ impl EvpnRuntimeReloadApply {
     ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
         // External sources stay under the committed config's policy
         // directories, and reading them stays off the async workers.
-        let accepted_roots = match self.committed_config.lock() {
-            Ok(guard) => guard.candidate_source_roots(),
-            Err(poisoned) => poisoned.into_inner().candidate_source_roots(),
+        let limits = match self.committed_config.lock() {
+            Ok(guard) => guard.candidate_source_limits(),
+            Err(poisoned) => poisoned.into_inner().candidate_source_limits(),
         };
         let candidate_toml = request.candidate_toml.clone();
         let candidate = tokio::task::spawn_blocking(move || {
@@ -497,7 +497,7 @@ impl EvpnRuntimeReloadApply {
                 &candidate_toml,
                 "candidate EVPN runtime config",
                 false,
-                Some(&accepted_roots),
+                Some(&limits),
             )
         })
         .await

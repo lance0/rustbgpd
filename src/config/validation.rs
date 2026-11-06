@@ -3902,6 +3902,10 @@ enum PemKind {
     PrivateKey,
 }
 
+/// Largest gRPC credential file (PEM bundle or token) config validation
+/// reads.
+const MAX_GRPC_CREDENTIAL_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Validate a PEM-encoded TLS file at config-load / `--check` time.
 ///
 /// Checks readability and PEM framing/block kind. Startup and both `--check`
@@ -3913,7 +3917,13 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
             reason: format!("{field_name} must not be empty"),
         });
     }
-    let bytes = std::fs::read(path).map_err(|e| ConfigError::InvalidGrpcConfig {
+    // Bounded and regular-file-only: a FIFO or device path must not block
+    // or exhaust the load.
+    let bytes = rustbgpd_policy::datasets::read_regular_file_bounded(
+        Path::new(path),
+        MAX_GRPC_CREDENTIAL_FILE_BYTES,
+    )
+    .map_err(|e| ConfigError::InvalidGrpcConfig {
         reason: format!("failed to read {field_name} {path:?}: {e}"),
     })?;
     if bytes.is_empty() {
@@ -3983,7 +3993,15 @@ fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), 
             reason: format!("{field_name} must not be empty"),
         });
     }
-    let token = std::fs::read_to_string(path).map_err(|e| ConfigError::InvalidGrpcConfig {
+    let token = rustbgpd_policy::datasets::read_regular_file_bounded(
+        Path::new(path),
+        MAX_GRPC_CREDENTIAL_FILE_BYTES,
+    )
+    .and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })
+    .map_err(|e| ConfigError::InvalidGrpcConfig {
         reason: format!("failed to read {field_name} {path:?}: {e}"),
     })?;
     if token.trim_end().is_empty() {

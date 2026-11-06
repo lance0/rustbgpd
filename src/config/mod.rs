@@ -289,9 +289,21 @@ enum SourceRules<'a> {
     /// operator's include directives, and diagnostics quote source text.
     OnDisk,
     /// A candidate received over the API. Errors quote no file text; with
-    /// `Some`, every path must resolve under one of these canonical
-    /// directories.
-    Api(Option<&'a [PathBuf]>),
+    /// `Some` (callers below `operator_only`), its paths must stay within
+    /// these limits, whose roots are canonical.
+    Api(Option<&'a CandidateSourceLimits>),
+}
+
+/// What an API candidate below `operator_only` may name, taken from the
+/// running config by [`Config::candidate_source_limits`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CandidateSourceLimits {
+    /// Directories every `.rpol`, policy-root and dataset path must
+    /// resolve under.
+    roots: Vec<PathBuf>,
+    /// The gRPC credential files (TLS material, tokens) the candidate may
+    /// name. Validation reads them, so a candidate may not name others.
+    credential_files: Vec<String>,
 }
 
 /// Check that an external source named by an RPC candidate resolves under
@@ -413,6 +425,16 @@ impl Config {
             }
         };
         let toml_parse_ms = elapsed_ms(load_started);
+        if let SourceRules::Api(Some(limits)) = sources
+            && let Some(path) = config
+                .grpc_credential_files()
+                .find(|path| !limits.credential_files.iter().any(|known| known == path))
+        {
+            return Err(format!(
+                "error: gRPC credential file {path:?} is not one the running config uses; \
+                 below operator_only a candidate can name only those"
+            ));
+        }
         // Compile referenced .rpol files before validation: chain
         // references resolve against the combined TOML + rpol policy
         // namespace, and rpol compile diagnostics (already
@@ -574,8 +596,8 @@ impl Config {
             {
                 path = base.join(path);
             }
-            if let SourceRules::Api(Some(confine)) = sources {
-                confined_source_path(&path, confine).map_err(|reason| {
+            if let SourceRules::Api(Some(limits)) = sources {
+                confined_source_path(&path, &limits.roots).map_err(|reason| {
                     ConfigError::InvalidPolicyEntry {
                         reason: format!("[policy] rpol_roots: {reason}"),
                     }
@@ -594,8 +616,8 @@ impl Config {
                 path = base.join(path);
             }
             let display = path.display().to_string();
-            if let SourceRules::Api(Some(confine)) = sources {
-                confined_source_path(&path, confine).map_err(|reason| {
+            if let SourceRules::Api(Some(limits)) = sources {
+                confined_source_path(&path, &limits.roots).map_err(|reason| {
                     ConfigError::InvalidRpolFile {
                         path: display.clone(),
                         reason,
@@ -771,8 +793,8 @@ impl Config {
             let accepted = accepted_datasets
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
-            if let SourceRules::Api(Some(confine)) = sources {
-                confined_source_path(&path, confine).map_err(|reason| {
+            if let SourceRules::Api(Some(limits)) = sources {
+                confined_source_path(&path, &limits.roots).map_err(|reason| {
                     ConfigError::InvalidPolicyEntry {
                         reason: format!("dataset {name:?}: {reason}"),
                     }
@@ -970,13 +992,14 @@ impl Config {
         Self::load_candidate(content, source_name, true, SourceRules::OnDisk)
     }
 
-    /// The directories an RPC-supplied candidate may name external policy
-    /// sources under: this (accepted) config's `[policy] rpol_roots`, and
-    /// the directories of its `.rpol` files and dataset files. See
-    /// [`Self::load_rpc_candidate`].
-    pub(crate) fn candidate_source_roots(&self) -> Vec<PathBuf> {
+    /// What an API candidate below `operator_only` may name, from this
+    /// running config: policy sources under its `[policy] rpol_roots` and
+    /// the directories of its `.rpol` and dataset files, and only the gRPC
+    /// credential files it already uses. See [`Self::load_rpc_candidate`].
+    pub(crate) fn candidate_source_limits(&self) -> CandidateSourceLimits {
         let parent = |path: &str| std::path::Path::new(path).parent().map(PathBuf::from);
-        self.policy
+        let roots = self
+            .policy
             .rpol_roots
             .iter()
             .map(PathBuf::from)
@@ -992,21 +1015,41 @@ impl Config {
                     .values()
                     .filter_map(|dataset| parent(&dataset.path)),
             )
-            .collect()
+            .collect();
+        CandidateSourceLimits {
+            roots,
+            credential_files: self.grpc_credential_files().map(str::to_string).collect(),
+        }
+    }
+
+    /// The gRPC listener credential files config validation reads.
+    fn grpc_credential_files(&self) -> impl Iterator<Item = &str> {
+        let telemetry = &self.global.telemetry;
+        let tcp = telemetry.grpc_tcp.iter().flat_map(|tcp| {
+            [
+                &tcp.token_file,
+                &tcp.tls_cert_file,
+                &tcp.tls_key_file,
+                &tcp.tls_client_ca_file,
+            ]
+        });
+        let uds = telemetry.grpc_uds.iter().map(|uds| &uds.token_file);
+        tcp.chain(uds).filter_map(|path| path.as_deref())
     }
 
     /// Load a candidate received over the API (config diff, plan, apply,
     /// EVPN apply). Compile and dataset parse errors carry locations,
     /// never file text: the caller did not supply those files.
     ///
-    /// With `accepted_roots` (callers below `operator_only`), the load is
+    /// With `limits` (callers below `operator_only`), the load is
     /// confined: every `.rpol` file, `[policy] rpol_roots` entry and
-    /// dataset file must resolve (symlinks included) under one of them;
-    /// they come from [`Self::candidate_source_roots`] of the accepted
-    /// config. Imports stay confined as usual, to the candidate's own
-    /// roots, which are themselves inside. `None` is for operator callers,
-    /// who may stage a candidate's sources anywhere the daemon can read,
-    /// as an on-disk config can.
+    /// dataset file must resolve (symlinks included) under one of its
+    /// roots, and the gRPC credential files must be ones the running config
+    /// already uses. The limits come from [`Self::candidate_source_limits`]
+    /// of the running config. Imports stay confined as usual, to the
+    /// candidate's own roots, which are themselves inside. `None` is for
+    /// operator callers, who may stage a candidate's sources anywhere the
+    /// daemon can read, as an on-disk config can.
     ///
     /// With `capture_external_inputs`, the byte identity of every external
     /// source read is recorded in `policy.external_sources_digest`
@@ -1021,19 +1064,21 @@ impl Config {
         content: &str,
         source_name: &str,
         capture_external_inputs: bool,
-        accepted_roots: Option<&[PathBuf]>,
+        limits: Option<&CandidateSourceLimits>,
     ) -> Result<Self, String> {
-        let confine: Option<Vec<PathBuf>> = accepted_roots.map(|roots| {
-            roots
+        let canonical = limits.map(|limits| CandidateSourceLimits {
+            roots: limits
+                .roots
                 .iter()
                 .filter_map(|root| root.canonicalize().ok())
-                .collect()
+                .collect(),
+            credential_files: limits.credential_files.clone(),
         });
         Self::load_candidate(
             content,
             source_name,
             capture_external_inputs,
-            SourceRules::Api(confine.as_deref()),
+            SourceRules::Api(canonical.as_ref()),
         )
     }
 

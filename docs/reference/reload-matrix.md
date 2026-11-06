@@ -732,7 +732,8 @@ before sending the configuration to the daemon. Below `operator_only`, a
 candidate sent over the API (diff, plan, or EVPN apply) may name only `.rpol`
 files, `rpol_roots` and dataset files that resolve under the running config's
 policy directories: its `[policy] rpol_roots` and the directories of its
-`.rpol` and dataset files. Operator callers may stage candidate sources
+`.rpol` and dataset files. Its gRPC TLS and token file paths must be ones the
+running config already uses. Operator callers may stage candidate sources
 elsewhere. For every API caller, compile and dataset errors for those files
 report path, line and column without quoting file text; `rbgp policy check`
 on the host shows the full diagnostic.

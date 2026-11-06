@@ -8,6 +8,54 @@ use std::path::Path;
 
 use super::*;
 
+/// On a tree that opens a FIFO for reading, the reader blocks in open(2),
+/// possibly on the runtime's only free worker, so tokio timers alone cannot
+/// end the test. From an OS thread this opens `fifo` for writing, which
+/// releases such a reader: continuously from 7 s on, after the test's 5 s
+/// observation windows, and once more when dropped, before the FIFO's
+/// directory is removed.
+struct FifoReleaser {
+    fifo: std::path::PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FifoReleaser {
+    fn new(fifo: &Path) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (thread_fifo, thread_stop) = (fifo.to_path_buf(), std::sync::Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if start.elapsed() > Duration::from_secs(7) {
+                    release_fifo_reader(&thread_fifo);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Self {
+            fifo: fifo.to_path_buf(),
+            stop,
+        }
+    }
+}
+
+impl Drop for FifoReleaser {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..10 {
+            release_fifo_reader(&self.fifo);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+}
+
+fn release_fifo_reader(fifo: &Path) {
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(fifo);
+}
+
 const POLICY: &str = "policy edge-in {\n    term rest { accept }\n}\n";
 const SECRET: &str = "observer-bearer-TOKEN-5c1d";
 
@@ -216,6 +264,7 @@ async fn candidate_fifo_is_refused_promptly_and_the_actor_stays_responsive() {
         nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
+    let _release = FifoReleaser::new(&fifo);
     let mut manager = manager_with_policy_dir(policy_dir.path());
     let (tx, rx) = mpsc::channel(4);
     manager.rx = rx;
@@ -234,11 +283,6 @@ async fn candidate_fifo_is_refused_promptly_and_the_actor_stays_responsive() {
     let pinged = tokio::time::timeout(Duration::from_secs(5), ping).await;
     let diffed = tokio::time::timeout(Duration::from_secs(5), diff).await;
 
-    // Release a reader blocked in open(2) so a failing run still exits.
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(&fifo);
     assert!(
         pinged.is_ok(),
         "the actor must answer while the candidate loads"
@@ -313,4 +357,45 @@ async fn operator_candidate_may_name_new_directories_without_echoing_source() {
     };
     assert!(!error.contains(SECRET), "{error}");
     assert!(error.contains("token.txt:1:1: "), "{error}");
+}
+
+/// Config validation reads gRPC credential files, so a candidate's
+/// credential paths are held to the running config's below
+/// `operator_only`, and every caller's read refuses a FIFO without blocking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn candidate_credential_files_are_held_to_the_running_config() {
+    let policy_dir = tempfile::tempdir().unwrap();
+    let fifo = policy_dir.path().join("token.pipe");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
+    let _release = FifoReleaser::new(&fifo);
+    let with_token = candidate(&[&policy_dir.path().join("edge.rpol")], "").replace(
+        "[global.telemetry.grpc_uds]\n",
+        &format!(
+            "[global.telemetry.grpc_uds]\ntoken_file = {:?}\n",
+            fifo.display().to_string()
+        ),
+    );
+    for operator in [false, true] {
+        let manager = manager_with_policy_dir(policy_dir.path());
+        let diffed = tokio::time::timeout(
+            Duration::from_secs(10),
+            diff(manager, with_token.clone(), operator),
+        )
+        .await;
+        let Ok(Err(rustbgpd_api::peer_types::RuntimeConfigDiffError::InvalidCandidate(error))) =
+            diffed
+        else {
+            panic!("a FIFO token file must be refused promptly: {diffed:?}");
+        };
+        let expected = if operator {
+            "not a regular file"
+        } else {
+            "is not one the running config uses"
+        };
+        assert!(error.contains(expected), "{error}");
+    }
 }

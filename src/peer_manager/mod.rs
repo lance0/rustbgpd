@@ -1814,14 +1814,13 @@ impl PeerManager {
             }
             return;
         }
-        let accepted_roots =
-            (!operator_sources).then(|| self.current_config.candidate_source_roots());
+        let limits = (!operator_sources).then(|| self.current_config.candidate_source_limits());
         self.candidate_loads
             .spawn_blocking(move || LoadedCandidate {
                 candidate: reconcile::load_runtime_candidate(
                     &candidate_toml,
                     capture_external_inputs,
-                    accepted_roots.as_deref(),
+                    limits.as_ref(),
                 ),
                 pending,
             });

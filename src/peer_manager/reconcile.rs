@@ -22,18 +22,18 @@ use super::PeerManager;
 /// without capture, so its candidates classify as `Unverified` and keep the
 /// #1370 presence fence.
 ///
-/// `accepted_roots` confines the candidate's external sources (callers below
+/// `limits` confines the candidate's external sources (callers below
 /// `operator_only`); `None` is for operator callers.
 pub(super) fn load_runtime_candidate(
     candidate_toml: &str,
     capture_external_inputs: bool,
-    accepted_roots: Option<&[std::path::PathBuf]>,
+    limits: Option<&crate::config::CandidateSourceLimits>,
 ) -> Result<Config, String> {
     Config::load_rpc_candidate(
         candidate_toml,
         "candidate runtime config",
         capture_external_inputs,
-        accepted_roots,
+        limits,
     )
 }
 
@@ -251,7 +251,7 @@ impl PeerManager {
         self.diff_loaded_runtime_config(load_runtime_candidate(
             candidate_toml,
             false,
-            Some(&self.current_config.candidate_source_roots()),
+            Some(&self.current_config.candidate_source_limits()),
         ))
     }
 
@@ -275,7 +275,7 @@ impl PeerManager {
         let candidate = load_runtime_candidate(
             candidate_toml,
             verify_external_inputs,
-            Some(&self.current_config.candidate_source_roots()),
+            Some(&self.current_config.candidate_source_limits()),
         );
         self.plan_loaded_config_transaction(candidate, expected_runtime_snapshot_token)
             .await
