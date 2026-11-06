@@ -1494,8 +1494,18 @@ fn assert_auto_revert_recovery(lab: &Lab) {
     let mut restarted = lab.spawn("restart", false);
     wait_ready_and_idle(restarted.metrics, &mut restarted);
     lab.assert_disk("auto-candidate", false);
+    let backup = std::fs::read_dir(lab.root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with("rustbgpd.toml.unconfirmed-")
+            })
+        })
+        .expect("the unconfirmed candidate is saved aside");
     assert!(
-        std::fs::read_to_string(lab.root.path().join("rustbgpd.toml.unconfirmed"))
+        std::fs::read_to_string(backup)
             .unwrap()
             .contains("auto-candidate")
     );

@@ -417,8 +417,11 @@ then directly adopts that accepted snapshot for boot restore. The revert is
 unconditional, regardless of how much confirm time remained, because the
 operator's confirming session died with the old process (the NETCONF RFC 6241
 §8.4 rule: session loss cancels a confirmed commit). The unconfirmed candidate
-is saved once as `<recorded-target>.unconfirmed`; the loud boot banner names
-the transaction but redacts locator-carried paths and digests. A damaged,
+is saved once as `<recorded-target>.unconfirmed-<id>`, where `<id>` is 16 hex
+digits derived from that transaction's pending metadata. Each reverted
+transaction therefore keeps its own copy. The loud boot banner names the
+transaction and the `.unconfirmed-<id>` suffix, and redacts locator-carried
+paths and digests. A damaged,
 unsafe, oversized, or
 mismatched locator, metadata, or raw prior refuses boot before candidate
 contents are opened and before candidate or backup mutation.
@@ -438,8 +441,12 @@ recover with rustbgpd v0.64.0, or delete only after proving it
 terminal/intended. Never delete a live v3 locator.
 
 The boot-revert save-aside moves the unconfirmed candidate to
-`<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
-an existing `.unconfirmed`. That needs the config file and its directory to be
+`<config>.unconfirmed-<id>` with an atomic hard-link + unlink, so it never
+clobbers an existing file. A restart that interrupted the same revert finds its
+own earlier save under the same name and continues. If a different file holds
+that name, boot is refused with the candidate, the file and the pending
+authority untouched. The daemon never deletes these copies: remove each one
+once you have recovered what you need from it. That needs the config file and its directory to be
 on a filesystem that supports hard links — every local filesystem does. On a
 filesystem without hard-link support (some FUSE mounts, certain NFS setups),
 the save-aside fails and the daemon **refuses to boot** with the journal left

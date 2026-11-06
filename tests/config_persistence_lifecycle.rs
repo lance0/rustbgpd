@@ -1027,10 +1027,20 @@ impl Lab {
         PathBuf::from(path)
     }
 
+    /// The saved-aside unconfirmed candidate (`<config>.unconfirmed-<id>`),
+    /// or a path that does not exist when there is none.
     fn unconfirmed_backup(&self) -> PathBuf {
-        let mut path = self.config.clone().into_os_string();
-        path.push(".unconfirmed");
-        PathBuf::from(path)
+        let mut prefix = self.config.file_name().unwrap().to_os_string();
+        prefix.push(".unconfirmed-");
+        let prefix = prefix.to_string_lossy().into_owned();
+        std::fs::read_dir(self.config.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+            })
+            .unwrap_or_else(|| self.config.with_extension("toml.no-unconfirmed-backup"))
     }
 
     /// The ADR-0121 v3 commit-confirm pending-authority locator, published

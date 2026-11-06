@@ -48,6 +48,9 @@ pub struct BootRevertNotice {
     pub confirm_id: String,
     /// Where the unconfirmed candidate was saved aside.
     pub backup_path: PathBuf,
+    /// What the candidate's file name gained when it was saved beside its
+    /// recorded target, for the redacted v3 notice.
+    pub backup_suffix: String,
     /// The journal recorded a failed live rollback of this transaction: the
     /// state the daemon was in before this restart is uncertain (the banner
     /// says so), even though the boot revert itself succeeded.

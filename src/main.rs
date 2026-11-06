@@ -3088,6 +3088,7 @@ fn main() -> ExitCode {
                 boot_revert_notice = Some(confirm_journal::BootRevertNotice {
                     confirm_id: revert.notice.confirm_id,
                     backup_path: PathBuf::new(),
+                    backup_suffix: revert.notice.backup_suffix,
                     rollback_failed: revert.notice.rollback_failed,
                     redact_paths: true,
                     journal_cleanup_failed: revert.notice.residue_cleanup_failed,
@@ -4568,6 +4569,7 @@ async fn run<T>(
             error!(
                 confirm_id = %notice.confirm_id,
                 rollback_failed = notice.rollback_failed,
+                unconfirmed_candidate_suffix = %notice.backup_suffix,
                 "commit-confirmed transaction was never confirmed before the last shutdown — verified and reverted to the pre-transaction config at boot; the unconfirmed candidate was saved beside its recorded target"
             );
         } else {
@@ -4592,7 +4594,8 @@ async fn run<T>(
         }
         if notice.redact_paths {
             eprintln!(
-                "!! Booted from the verified pre-transaction config; the unconfirmed candidate was saved beside its recorded target."
+                "!! Booted from the verified pre-transaction config; the unconfirmed candidate was saved beside its recorded target, with {:?} appended to its name.",
+                notice.backup_suffix
             );
         } else {
             eprintln!(

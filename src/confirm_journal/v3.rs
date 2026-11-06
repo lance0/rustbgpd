@@ -37,6 +37,7 @@ const MAX_LOCATOR_BYTES: usize = 512 * 1024;
 const MAX_PATH_BYTES: usize = 64 * 1024;
 const LOCATOR_SUFFIX: &str = ".commit-confirm-locator.json";
 const RETIRED_V2_LOCATOR: &str = "retired v2 commit-confirm locator";
+const BACKUP_NAME_TAKEN: &str = "the boot revert's `.unconfirmed-<id>` backup name beside the recorded target is already taken by a different file; move that file away and restart; the unconfirmed candidate, that file and the pending authority were left untouched";
 const RETIRED_LOCATOR_FREE_AUTHORITY: &str = "retired locator-free commit-confirm authority exists; recover it with rustbgpd v0.64.0, or delete it only after proving the transaction is terminal and the current config is intended; the artifact was left untouched";
 pub(crate) const RAW_FILE_NAME: &str = "commit-confirm-v3-prior.toml";
 pub(crate) const METADATA_FILE_NAME: &str = "commit-confirm-v3-metadata.json";
@@ -101,6 +102,9 @@ impl LaunchIdentity {
             if message == RETIRED_LOCATOR_FREE_AUTHORITY {
                 return RETIRED_LOCATOR_FREE_AUTHORITY.to_string();
             }
+            if message == BACKUP_NAME_TAKEN {
+                return BACKUP_NAME_TAKEN.to_string();
+            }
             format!(
                 "v3 commit-confirm boot authority is invalid or unavailable ({:?}); inspect the config-adjacent locator and fixed owner-only pending files",
                 error.kind()
@@ -163,9 +167,10 @@ impl LaunchIdentity {
         .map_err(|_| invalid(RETIRED_LOCATOR_FREE_AUTHORITY))?;
 
         // Nothing above this point may touch the candidate or backup slot.
-        let backup_name = append_name(&target.name, b".unconfirmed")?;
+        let backup_suffix = backup_suffix(&metadata_bytes);
+        let backup_name = append_name(&target.name, backup_suffix.as_bytes())?;
         step(BootStep::CandidateSave)?;
-        save_candidate_aside(&target, &backup_name)?;
+        save_candidate_aside(&target, &backup_name, raw_toml.as_bytes())?;
         step(BootStep::ConfigRestore)?;
         target.replace(raw_toml.as_bytes())?;
 
@@ -186,6 +191,7 @@ impl LaunchIdentity {
             accepted,
             notice: BootRevertNotice {
                 confirm_id: metadata_wire.confirm_id,
+                backup_suffix,
                 rollback_failed: metadata_wire.rollback_failed,
                 residue_cleanup_failed,
             },
@@ -402,6 +408,9 @@ pub(crate) struct BootRevert {
 #[derive(Clone, Debug)]
 pub(crate) struct BootRevertNotice {
     pub(crate) confirm_id: String,
+    /// What the unconfirmed candidate's name gained when it was saved
+    /// beside the recorded target (`.unconfirmed-<16 hex digits>`).
+    pub(crate) backup_suffix: String,
     pub(crate) rollback_failed: bool,
     pub(crate) residue_cleanup_failed: bool,
 }
@@ -1264,10 +1273,42 @@ fn read_opened(file: &mut File, metadata: &std::fs::Metadata, cap: usize) -> io:
     Ok(bytes)
 }
 
-fn save_candidate_aside(target: &Entry, backup_name: &OsStr) -> io::Result<()> {
+/// The suffix the unconfirmed candidate is saved under: `.unconfirmed-` and
+/// the first 16 hex digits of the journaled metadata's SHA-256. A re-run of
+/// the same interrupted revert derives the same name, so it finds its own
+/// earlier save; a later transaction's revert gets a name of its own and
+/// never meets an earlier candidate.
+fn backup_suffix(metadata_bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(metadata_bytes);
+    let mut suffix = String::from(".unconfirmed-");
+    for byte in &digest[..8] {
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    suffix
+}
+
+/// Move the candidate at `target` to `backup_name` without replacing any
+/// file. An existing backup is accepted only as this revert's own earlier
+/// save: either the same inode is still linked at the target (stopped
+/// between link and unlink), or the target already holds the restored
+/// `prior` (stopped after the restore). Anything else refuses boot before
+/// the candidate or the backup is touched.
+fn save_candidate_aside(target: &Entry, backup_name: &OsStr, prior: &[u8]) -> io::Result<()> {
     use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
     use nix::unistd::{UnlinkatFlags, linkat, unlinkat};
 
+    let unlink_target = || {
+        unlinkat(
+            &target.directory.file,
+            Path::new(&target.name),
+            UnlinkatFlags::NoRemoveDir,
+        )
+        .map_err(errno)?;
+        target.directory.file.sync_all()
+    };
     match linkat(
         &target.directory.file,
         Path::new(&target.name),
@@ -1275,16 +1316,28 @@ fn save_candidate_aside(target: &Entry, backup_name: &OsStr) -> io::Result<()> {
         Path::new(backup_name),
         AtFlags::empty(),
     ) {
-        Ok(()) => {
-            unlinkat(
-                &target.directory.file,
-                Path::new(&target.name),
-                UnlinkatFlags::NoRemoveDir,
-            )
-            .map_err(errno)?;
-            target.directory.file.sync_all()
+        Ok(()) => unlink_target(),
+        // The target is gone: an earlier run moved it aside already.
+        Err(nix::errno::Errno::ENOENT) => Ok(()),
+        Err(nix::errno::Errno::EEXIST) => {
+            let identity = |name: &OsStr| {
+                fstatat(
+                    &target.directory.file,
+                    Path::new(name),
+                    AtFlags::AT_SYMLINK_NOFOLLOW,
+                )
+                .map(|stat| (stat.st_dev, stat.st_ino))
+                .map_err(errno)
+            };
+            if identity(&target.name)? == identity(backup_name)? {
+                return unlink_target();
+            }
+            let (current, _) = target.read_bounded(MAX_RAW_BYTES)?;
+            if current == prior {
+                return Ok(());
+            }
+            Err(invalid(BACKUP_NAME_TAKEN))
         }
-        Err(nix::errno::Errno::EEXIST | nix::errno::Errno::ENOENT) => Ok(()),
         Err(error) => Err(errno(error)),
     }
 }
@@ -1556,6 +1609,94 @@ log_format = "json"
         metadata: PathBuf,
         launch: LaunchIdentity,
         prior: Arc<AcceptedConfigSnapshot>,
+    }
+
+    /// Every saved unconfirmed candidate beside `config`, by name.
+    fn unconfirmed_backups(config: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            "{}.unconfirmed",
+            config.file_name().unwrap().to_str().unwrap()
+        );
+        let mut backups: Vec<PathBuf> = fs::read_dir(config.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .collect();
+        backups.sort();
+        backups
+    }
+
+    /// Two unconfirmed transactions reverted at two boots: each candidate
+    /// survives under its own name, and the config is the prior both times.
+    #[test]
+    fn a_second_boot_revert_keeps_its_own_candidate() {
+        let fixture = fixture();
+        for (confirm_id, candidate) in [("first", "candidate-one"), ("second", "candidate-two")] {
+            fixture
+                .launch
+                .publish(&fixture.state, confirm_id, 9, &fixture.prior)
+                .unwrap();
+            fs::write(&fixture.config, candidate).unwrap();
+            assert!(
+                fixture.launch.boot_revert_check().unwrap().is_some(),
+                "{confirm_id}"
+            );
+            assert_eq!(
+                fs::read_to_string(&fixture.config).unwrap(),
+                fixture.prior.normalized_toml(),
+                "{confirm_id}"
+            );
+        }
+        let saved: Vec<String> = unconfirmed_backups(&fixture.config)
+            .iter()
+            .map(|path| fs::read_to_string(path).unwrap())
+            .collect();
+        assert!(saved.contains(&"candidate-one".to_string()), "{saved:?}");
+        assert!(saved.contains(&"candidate-two".to_string()), "{saved:?}");
+    }
+
+    /// The reported suffix names the file holding this revert's candidate.
+    /// A different file already under that name refuses boot with the
+    /// candidate, the occupant and the pending authority untouched.
+    #[test]
+    fn boot_revert_reports_its_backup_and_refuses_an_occupied_name() {
+        let fixture = fixture();
+        fixture
+            .launch
+            .publish(&fixture.state, "reported", 9, &fixture.prior)
+            .unwrap();
+        fs::write(&fixture.config, "candidate-reported").unwrap();
+        let reverted = fixture.launch.boot_revert_check().unwrap().unwrap();
+        let mut name = fixture.config.clone().into_os_string();
+        name.push(&reverted.notice.backup_suffix);
+        assert_eq!(fs::read_to_string(&name).unwrap(), "candidate-reported");
+
+        fixture
+            .launch
+            .publish(&fixture.state, "occupied", 9, &fixture.prior)
+            .unwrap();
+        fs::write(&fixture.config, "candidate-occupied").unwrap();
+        let suffix = backup_suffix(&fs::read(&fixture.metadata).unwrap());
+        let mut occupied = fixture.config.clone().into_os_string();
+        occupied.push(&suffix);
+        fs::write(&occupied, "someone else's file").unwrap();
+        let Err(error) = fixture.launch.boot_revert_check() else {
+            panic!("an occupied backup name must refuse boot");
+        };
+        assert!(error.contains("already taken"), "{error}");
+        assert_eq!(
+            fs::read_to_string(&fixture.config).unwrap(),
+            "candidate-occupied"
+        );
+        assert_eq!(
+            fs::read_to_string(&occupied).unwrap(),
+            "someone else's file"
+        );
+        assert!(fixture.launch.locator_path().exists());
     }
 
     fn fixture() -> Fixture {
@@ -1957,7 +2098,7 @@ log_format = "json"
             }
             assert!(fixture.launch.boot_revert_check().is_err(), "{mutation}");
             assert_eq!(fs::read(&fixture.config).unwrap(), candidate, "{mutation}");
-            assert!(!fixture.config.with_extension("toml.unconfirmed").exists());
+            assert_eq!(unconfirmed_backups(&fixture.config), Vec::<PathBuf>::new());
         }
     }
 
@@ -2015,12 +2156,7 @@ log_format = "json"
                 .is_err()
         );
         assert!(!save_crash.config.exists());
-        assert!(
-            save_crash
-                .config
-                .with_extension("toml.unconfirmed")
-                .exists()
-        );
+        assert_eq!(unconfirmed_backups(&save_crash.config).len(), 1);
         assert!(save_crash.launch.boot_revert_check().unwrap().is_some());
         assert!(save_crash.launch.boot_revert_check().unwrap().is_none());
 
@@ -2145,7 +2281,7 @@ log_format = "json"
                 .collect::<Vec<_>>(),
             before
         );
-        assert!(!fixture.config.with_extension("toml.unconfirmed").exists());
+        assert_eq!(unconfirmed_backups(&fixture.config), Vec::<PathBuf>::new());
     }
 
     /// The v0.75.0 release wrote this pending authority for a confirmed apply.
