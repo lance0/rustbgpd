@@ -216,6 +216,14 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
     fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
         let _ = prior;
     }
+
+    /// ADR-0084 drain GC against the committed `segments`, outside a
+    /// converge. A commit that drops a parked `auto-lacp` bond needs it:
+    /// that segment had no runtime row, so its removal plans as a no-op
+    /// and no converge GCs its drain.
+    fn retain_drained_esis(&self, segments: &[rustbgpd_evpn::EthernetSegment]) {
+        let _ = segments;
+    }
 }
 
 fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
@@ -409,6 +417,21 @@ impl EvpnRuntimeReloadApply {
         match self.committed_config.lock() {
             Ok(mut guard) => *guard = config.clone(),
             Err(poisoned) => *poisoned.into_inner() = config.clone(),
+        }
+        // A bond the config no longer names stops parking its ESI, which
+        // ends that ESI's operator-drain retention.
+        if self
+            .auto_lacp_esis
+            .retain_bonds(&config.auto_lacp_interfaces())
+        {
+            let segments = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model()
+                .ethernet_segments()
+                .to_vec();
+            self.converger.retain_drained_esis(&segments);
         }
         self.publish_es_link_bindings(config);
         self.start_auto_esi_probe_if_needed(config);
@@ -2793,6 +2816,16 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         self.es_drain.restore(prior);
         if let Some(segment) = &self.segment {
             let _ = segment.replace_drained_esis(self.es_drain.snapshot());
+        }
+    }
+
+    fn retain_drained_esis(&self, segments: &[rustbgpd_evpn::EthernetSegment]) {
+        // Best-effort push, as after a converge GC: a closed control is
+        // daemon teardown.
+        if let Some(gc_drained) = self.gc_drained_esis(segments)
+            && let Some(segment) = &self.segment
+        {
+            let _ = segment.replace_drained_esis(gc_drained);
         }
     }
 

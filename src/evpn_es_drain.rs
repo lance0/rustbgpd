@@ -27,7 +27,11 @@
 //! GC contract: when a runtime apply / SIGHUP replaces the segment set,
 //! [`EvpnEsDrainState::retain_configured`] drops drain entries — ALL
 //! reasons — for ESIs that left the config; entries for ESIs the
-//! config keeps survive reloads.
+//! config keeps survive reloads. An `auto-lacp` segment whose bond is
+//! not ready (for example after carrier loss) is still configured: its
+//! last derived ESI is parked in the readiness table, and its
+//! `Operator` reason survives until the bond returns or leaves the
+//! committed config.
 //!
 //! Observability: every committed mutation syncs the
 //! `evpn_es_drained{esi, reason}` gauge when the state was built with
@@ -99,6 +103,9 @@ pub(crate) struct EvpnEsDrainState {
     /// `evpn_es_drained{esi, reason}` gauge sink; `None` in tests that
     /// only exercise the state machine.
     metrics: Option<BgpMetrics>,
+    /// The daemon's `auto-lacp` readiness table, read by the GC for
+    /// parked ESIs. Empty in tests without `auto-lacp` segments.
+    auto_lacp_esis: crate::config::AutoLacpEsis,
 }
 
 /// Committed `set_reason` mutation: rollback token plus the actor
@@ -129,7 +136,15 @@ impl EvpnEsDrainState {
         Self {
             inner: Arc::default(),
             metrics: Some(metrics),
+            auto_lacp_esis: crate::config::AutoLacpEsis::default(),
         }
+    }
+
+    /// Let the GC keep operator drains of parked `auto-lacp` ESIs in
+    /// `esis`, the table the EVPN runtime resolves segments through.
+    pub fn with_auto_lacp_esis(mut self, esis: crate::config::AutoLacpEsis) -> Self {
+        self.auto_lacp_esis = esis;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, DrainSets> {
@@ -227,36 +242,53 @@ impl EvpnEsDrainState {
 
     /// GC on segment-set replace: drop drain entries — all reasons —
     /// for ESIs that are no longer configured (their gauge series are
-    /// removed too). Returns `Some(new_flat)` when entries were
-    /// dropped, `None` when nothing changed.
+    /// removed too). A parked `auto-lacp` ESI (its bond is configured
+    /// but not ready) is still configured: it keeps its `Operator`
+    /// reason and loses only `Link`, which goes with its binding.
+    /// Returns `Some(new_flat)` when entries changed, `None` otherwise.
     pub fn retain_configured(
         &self,
         segments: &[rustbgpd_evpn::EthernetSegment],
     ) -> Option<Arc<BTreeSet<EthernetSegmentIdentifier>>> {
         let configured: BTreeSet<EthernetSegmentIdentifier> =
             segments.iter().map(|seg| seg.esi).collect();
+        let parked = self.auto_lacp_esis.parked_esis();
+        let operator = BTreeSet::from([EsDrainReason::Operator]);
         let mut guard = self.lock();
-        if guard.reasons.keys().all(|esi| configured.contains(esi)) {
-            return None;
-        }
         let prior = guard.reasons.clone();
         let next: EsDrainReasonMap = prior
             .iter()
-            .filter(|(esi, _)| configured.contains(*esi))
-            .map(|(esi, reasons)| (*esi, reasons.clone()))
+            .filter_map(|(esi, reasons)| {
+                if configured.contains(esi) {
+                    Some((*esi, reasons.clone()))
+                } else {
+                    (parked.contains(esi) && reasons.contains(&EsDrainReason::Operator))
+                        .then(|| (*esi, operator.clone()))
+                }
+            })
             .collect();
+        if next == *prior {
+            return None;
+        }
         let next_flat = flat_of(&next);
-        guard.reasons = Arc::new(next);
+        let next = Arc::new(next);
+        guard.reasons = next.clone();
         guard.flat = next_flat.clone();
         drop(guard);
         if let Some(metrics) = self.metrics.as_ref() {
-            for esi in prior.keys().filter(|esi| !configured.contains(esi)) {
+            for esi in prior.keys().filter(|esi| !next.contains_key(esi)) {
                 metrics.remove_evpn_es_drained(
                     &esi.to_string(),
                     &EsDrainReason::ALL.map(EsDrainReason::as_str),
                 );
             }
         }
+        let kept: EsDrainReasonMap = prior
+            .iter()
+            .filter(|(esi, _)| next.contains_key(esi))
+            .map(|(esi, reasons)| (*esi, reasons.clone()))
+            .collect();
+        self.sync_metrics(&kept, &next);
         Some(next_flat)
     }
 }

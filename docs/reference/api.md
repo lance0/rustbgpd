@@ -4831,6 +4831,13 @@ configured state, so re-apply a drain after a restart that happens during
 maintenance. `UNAVAILABLE` means the daemon's Ethernet Segment drain control
 is not running.
 
+An `esi = "auto-lacp"` segment leaves the runtime while its bond has no
+usable LACP partner, for example after carrier loss. Its `operator` reason
+stays on the last derived ESI meanwhile, so a segment that returns under the
+same partner is still drained. While the segment is absent the RPC returns
+`NOT_FOUND` for that ESI. A different partner is a new segment and starts
+undrained. Removing the segment from the config drops the drain.
+
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"esi": "00:11:22:33:44:55:66:77:88:99", "drained": true}' \

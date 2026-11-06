@@ -1441,6 +1441,214 @@ async fn failed_auto_lacp_reconverge_keeps_the_old_esi_binding() {
     );
 }
 
+/// An `auto-lacp` segment that stays configured while its bond is not
+/// ready, with an operator drain on its derived ESI: the rig the
+/// operator-drain-across-flap regressions share.
+struct AutoLacpDrainRig {
+    apply: EvpnRuntimeReloadApply,
+    apply_lock: Arc<tokio::sync::Mutex<()>>,
+    coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
+    es_drain: crate::evpn_es_drain::EvpnEsDrainState,
+    segment: evpn_segment::EvpnSegmentRuntimeControl,
+    segment_handle: evpn_segment::EvpnSegmentHandle,
+    injects: Arc<tokio::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
+    baseline: Config,
+    esi: rustbgpd_wire::EthernetSegmentIdentifier,
+}
+
+impl AutoLacpDrainRig {
+    /// Start with `bond0` ready under `esi`, then operator-drain it.
+    async fn operator_drained() -> Self {
+        let baseline =
+            load_runtime_test_config(l2vni_auto_lacp_es_runtime_candidate_toml(), "baseline");
+        let esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0xaa, 1, 0xc1, 0]);
+        let esis = crate::config::AutoLacpEsis::default();
+        esis.replace(BTreeMap::from([("bond0".to_string(), esi)]));
+        let coordinator = coordinator_from_config(&baseline, &esis);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_responder(rib_rx, injects.clone());
+        let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+        let segment_handle = evpn_segment::spawn(
+            &instances,
+            baseline.resolve_ethernet_segments_with(&esis).unwrap(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("the ready segment starts the actor");
+        let segment = segment_handle.runtime_control();
+        wait_for_es_route(&injects, esi, "startup Type 4 origination").await;
+        let es_drain =
+            crate::evpn_es_drain::EvpnEsDrainState::default().with_auto_lacp_esis(esis.clone());
+        let mut converger = segment_only_converger(rib_tx, segment.clone(), None);
+        converger.es_drain = es_drain.clone();
+        let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let apply = EvpnRuntimeReloadApply::new(
+            coordinator.clone(),
+            apply_lock.clone(),
+            Arc::new(converger),
+            baseline.clone(),
+        )
+        .with_auto_lacp_esis(esis);
+        let rig = Self {
+            apply,
+            apply_lock,
+            coordinator,
+            es_drain,
+            segment,
+            segment_handle,
+            injects,
+            baseline,
+            esi,
+        };
+        let outcome = rig.drain(true).await.expect("operator drain applies");
+        assert!(outcome.drained && outcome.changed);
+        rig
+    }
+
+    async fn drain(
+        &self,
+        drained: bool,
+    ) -> Result<crate::evpn_es_drain::EsDrainOutcome, crate::evpn_es_drain::EsDrainError> {
+        crate::evpn_es_drain::apply_ethernet_segment_drain(
+            self.esi,
+            crate::evpn_es_drain::EsDrainReason::Operator,
+            drained,
+            &self.apply_lock,
+            &self.coordinator,
+            &self.es_drain,
+            Some(&self.segment),
+            None,
+        )
+        .await
+    }
+
+    /// One readiness probe round: `Some(esi)` is a bond with a partner.
+    async fn round(&self, esi: Option<rustbgpd_wire::EthernetSegmentIdentifier>) {
+        let ready = esi
+            .map(|esi| BTreeMap::from([("bond0".to_string(), esi)]))
+            .unwrap_or_default();
+        let round = self.apply.publish_auto_lacp_round(ready, false).await;
+        assert!(
+            round.result.expect("round re-converges").is_some(),
+            "the readiness change re-converges"
+        );
+    }
+
+    fn operator() -> BTreeSet<crate::evpn_es_drain::EsDrainReason> {
+        BTreeSet::from([crate::evpn_es_drain::EsDrainReason::Operator])
+    }
+
+    async fn finish(self) {
+        self.segment_handle.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn operator_drain_survives_an_auto_lacp_bond_losing_and_regaining_its_partner() {
+    let rig = AutoLacpDrainRig::operator_drained().await;
+
+    // Carrier loss: the bond has no partner, its segment leaves the
+    // runtime, but it is still configured, so the operator reason stays.
+    rig.round(None).await;
+    assert!(
+        rig.coordinator
+            .lock()
+            .unwrap()
+            .model()
+            .ethernet_segments()
+            .is_empty(),
+        "an unready bond has no runtime segment"
+    );
+    assert_eq!(
+        rig.es_drain.reasons_for(rig.esi),
+        AutoLacpDrainRig::operator(),
+        "a link flap must not clear the operator drain"
+    );
+
+    // Carrier return under the same partner: the segment comes back
+    // drained and originates nothing until the operator undrains it.
+    let floor = rig.injects.lock().await.len();
+    rig.round(Some(rig.esi)).await;
+    assert!(rig.es_drain.snapshot().contains(&rig.esi));
+    assert_eq!(
+        rig.es_drain.reasons_for(rig.esi),
+        AutoLacpDrainRig::operator()
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let after_return = rig.injects.lock().await[floor..].to_vec();
+    assert!(
+        !after_return.iter().any(|key| matches!(
+            key,
+            rustbgpd_wire::EvpnRouteKey::Es { .. }
+                | rustbgpd_wire::EvpnRouteKey::EadPerEs { .. }
+                | rustbgpd_wire::EvpnRouteKey::EadPerEvi { .. }
+        )),
+        "the returning segment must stay withdrawn while operator-drained; injected {after_return:?}"
+    );
+
+    // The operator undrain is a real transition that re-originates.
+    let outcome = rig.drain(false).await.expect("undrain applies");
+    assert!(outcome.changed && !outcome.drained);
+    wait_for_es_route(&rig.injects, rig.esi, "Type 4 after the operator undrain").await;
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn auto_lacp_flap_still_drops_link_only_drain_and_stale_esis() {
+    let rig = AutoLacpDrainRig::operator_drained().await;
+    let link = crate::evpn_es_drain::EsDrainReason::Link;
+    let _ = rig.es_drain.set_reason(rig.esi, link, true);
+
+    // The link owns its reason: losing the segment drops it, keeping
+    // only the operator's.
+    rig.round(None).await;
+    assert_eq!(
+        rig.es_drain.reasons_for(rig.esi),
+        AutoLacpDrainRig::operator()
+    );
+
+    // A different partner is a new segment identity: the old ESI's
+    // drain goes, and the new ESI starts undrained.
+    let replaced =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0xbb, 1, 0xc1, 0]);
+    rig.round(Some(replaced)).await;
+    assert!(rig.es_drain.reasons_for(rig.esi).is_empty());
+    assert!(rig.es_drain.reasons_for(replaced).is_empty());
+    assert!(rig.es_drain.snapshot().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn removing_an_unready_auto_lacp_segment_drops_its_operator_drain() {
+    let rig = AutoLacpDrainRig::operator_drained().await;
+    rig.round(None).await;
+    assert_eq!(
+        rig.es_drain.reasons_for(rig.esi),
+        AutoLacpDrainRig::operator()
+    );
+
+    // ADR-0084: a config removal GCs the drain, even though removing a
+    // segment that was not in the runtime plans as a no-op.
+    let mut removed = rig.baseline.clone();
+    removed.ethernet_segments.clear();
+    let applied = rig
+        .apply
+        .apply_config(&removed)
+        .await
+        .expect("removal applies");
+    assert_eq!(applied.outcome, EvpnRuntimeReloadOutcome::Noop);
+    assert!(
+        rig.es_drain.reasons_for(rig.esi).is_empty(),
+        "a segment removed from config must not leave its drain behind"
+    );
+    assert!(rig.es_drain.snapshot().is_empty());
+    rig.finish().await;
+}
+
 fn minimal_runtime_candidate_toml() -> &'static str {
     r#"
 [global]

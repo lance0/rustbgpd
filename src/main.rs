@@ -5891,8 +5891,10 @@ async fn run<T>(
     // replace; the gRPC SetEthernetSegmentDrain hook below and the
     // ADR-0085 link coordinator both mutate it under the same apply
     // lock. Built with the metrics handle so every committed mutation
-    // syncs the evpn_es_drained{esi, reason} gauge.
-    let evpn_es_drain_state = evpn_es_drain::EvpnEsDrainState::with_metrics(metrics.clone());
+    // syncs the evpn_es_drained{esi, reason} gauge. The GC reads the
+    // auto-lacp table so a bond that is not ready keeps its operator drain.
+    let evpn_es_drain_state = evpn_es_drain::EvpnEsDrainState::with_metrics(metrics.clone())
+        .with_auto_lacp_esis(evpn_auto_lacp_esis.clone());
     let evpn_runtime_converger = Arc::new(evpn_runtime_converger::EvpnRuntimeActorConverger::new(
         rib_tx.clone(),
         evpn_imet_controller.clone(),

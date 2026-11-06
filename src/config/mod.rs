@@ -7334,8 +7334,14 @@ pub const AUTO_LACP_ESI: &str = "auto-lacp";
 /// Readiness snapshot for `auto-lacp` segments: bond name → the type 1
 /// ESI derived from its current LACP partner. One table per daemon,
 /// owned by the EVPN runtime: the probe (`evpn_auto_esi`) writes it and
-/// the runtime apply resolves segments through it. An absent entry
-/// means not ready.
+/// the runtime apply resolves segments through it. A bond without a
+/// ready entry is not ready.
+///
+/// A bond that drops out of a round keeps its last derived ESI as
+/// [`AutoLacpEsi::Parked`] until it is ready again or leaves the
+/// committed config, so the drain GC can tell a configured segment that
+/// is not ready from one that left the config (ADR-0085 amendment,
+/// 2026-11-05).
 ///
 /// Config validation resolves against an empty table, so it never
 /// depends on the live bond: an `auto-lacp` segment validates by shape
@@ -7343,7 +7349,16 @@ pub const AUTO_LACP_ESI: &str = "auto-lacp";
 /// and re-converges the committed config. Diff classification uses
 /// [`Self::assume_ready`] instead.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AutoLacpEsis(Arc<std::sync::RwLock<BTreeMap<String, EthernetSegmentIdentifier>>>);
+pub(crate) struct AutoLacpEsis(Arc<std::sync::RwLock<BTreeMap<String, AutoLacpEsi>>>);
+
+/// One bond's entry in [`AutoLacpEsis`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoLacpEsi {
+    /// The ESI derived from the bond's current LACP partner.
+    Ready(EthernetSegmentIdentifier),
+    /// The bond is not ready; this was its last derived ESI.
+    Parked(EthernetSegmentIdentifier),
+}
 
 impl AutoLacpEsis {
     /// A table in which every `auto-lacp` bond of `old` or `new` is ready,
@@ -7366,30 +7381,76 @@ impl AutoLacpEsis {
         let mut bonds = old.auto_lacp_interfaces();
         bonds.extend(new.auto_lacp_interfaces());
         Self(Arc::new(std::sync::RwLock::new(
-            bonds.into_iter().zip(stand_ins).collect(),
+            bonds
+                .into_iter()
+                .zip(stand_ins.map(AutoLacpEsi::Ready))
+                .collect(),
         )))
     }
 
-    fn get(&self, interface: &str) -> Option<EthernetSegmentIdentifier> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, AutoLacpEsi>> {
         self.0
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(interface)
-            .copied()
     }
 
-    /// Replace the whole table with one complete probe round. Returns
-    /// whether any bond's derived ESI changed.
-    pub(crate) fn replace(&self, snapshot: BTreeMap<String, EthernetSegmentIdentifier>) -> bool {
-        let mut table = self
-            .0
+    fn table(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, AutoLacpEsi>> {
+        self.0
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *table == snapshot {
-            return false;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn get(&self, interface: &str) -> Option<EthernetSegmentIdentifier> {
+        match self.read().get(interface) {
+            Some(AutoLacpEsi::Ready(esi)) => Some(*esi),
+            Some(AutoLacpEsi::Parked(_)) | None => None,
         }
-        *table = snapshot;
-        true
+    }
+
+    /// Replace the table with one complete probe round: `snapshot` holds
+    /// the ready bonds, and every other bond already in the table parks
+    /// its last ESI. Returns whether any bond's ready ESI changed.
+    pub(crate) fn replace(&self, snapshot: BTreeMap<String, EthernetSegmentIdentifier>) -> bool {
+        let mut table = self.table();
+        let was_ready = table.iter().filter_map(|(bond, entry)| match entry {
+            AutoLacpEsi::Ready(esi) => Some((bond, esi)),
+            AutoLacpEsi::Parked(_) => None,
+        });
+        let changed = !was_ready.eq(snapshot.iter());
+        for entry in table.values_mut() {
+            if let AutoLacpEsi::Ready(esi) = *entry {
+                *entry = AutoLacpEsi::Parked(esi);
+            }
+        }
+        table.extend(
+            snapshot
+                .into_iter()
+                .map(|(bond, esi)| (bond, AutoLacpEsi::Ready(esi))),
+        );
+        changed
+    }
+
+    /// Forget bonds a newly committed config no longer names. Returns
+    /// whether a parked entry went, which ends its ESI's drain retention.
+    pub(crate) fn retain_bonds(&self, configured: &BTreeSet<String>) -> bool {
+        let mut parked_dropped = false;
+        self.table().retain(|bond, entry| {
+            let keep = configured.contains(bond);
+            parked_dropped |= !keep && matches!(entry, AutoLacpEsi::Parked(_));
+            keep
+        });
+        parked_dropped
+    }
+
+    /// Last derived ESIs of configured bonds that are not ready.
+    pub(crate) fn parked_esis(&self) -> BTreeSet<EthernetSegmentIdentifier> {
+        self.read()
+            .values()
+            .filter_map(|entry| match entry {
+                AutoLacpEsi::Parked(esi) => Some(*esi),
+                AutoLacpEsi::Ready(_) => None,
+            })
+            .collect()
     }
 }
 

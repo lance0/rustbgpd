@@ -5884,6 +5884,10 @@ mod tests {
             fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
                 self.inner.restore_link_drain(prior);
             }
+
+            fn retain_drained_esis(&self, segments: &[rustbgpd_evpn::EthernetSegment]) {
+                self.inner.retain_drained_esis(segments);
+            }
         }
 
         let mut baseline_toml = "[global]\nasn=65000\nrouter_id=\"10.0.0.1\"\nlisten_port=179\n\n[global.telemetry]\nlog_format=\"json\"\n".to_string();
