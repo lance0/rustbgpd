@@ -545,10 +545,26 @@ impl SelectionDeferral {
         }
     }
 
-    /// Configuration removed an interface-only neighbor before any session
-    /// bound its roster entry.
-    pub(super) fn retire_interface(&mut self, interface: &str) {
+    /// Configuration removed an interface-only neighbor: its roster entry
+    /// ends whether or not a session bound it. A bound handle can outlive
+    /// the stanza (a retired binding whose cleanup is still unconfirmed), so
+    /// a later session of it must not re-arm the gate.
+    pub(super) fn retire_interface(
+        &mut self,
+        interface: &str,
+        metrics: &BgpMetrics,
+    ) -> Vec<SelectionDeferralTransition> {
         self.unbound_interfaces.remove(interface);
+        let bound: HashSet<PeerId> = self
+            .active
+            .values()
+            .flat_map(|gate| gate.waiters.keys().copied())
+            .filter(|peer| peer.interface().as_deref() == Some(interface))
+            .collect();
+        bound
+            .into_iter()
+            .flat_map(|peer| self.peer_deleted(peer, false, metrics))
+            .collect()
     }
 
     pub(super) fn is_gated(&self, family: (Afi, Safi)) -> bool {

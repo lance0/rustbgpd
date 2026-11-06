@@ -1101,16 +1101,14 @@ fn planned_restart_families(transport: &rustbgpd_transport::TransportConfig) -> 
         .collect()
 }
 
-/// What a marker-backed planned restart derives from its roster, the
-/// startup static and interface-only neighbors.
+/// What the RIB derives from a marker-backed planned restart's roster, the
+/// startup static and interface-only neighbors. The peer manager derives the
+/// interface-only Restart State eligibility from the same roster.
 struct PlannedRestart {
     /// RFC 4724 restarting-speaker selection deferral.
     deferral: rustbgpd_rib::SelectionDeferralConfig,
     /// End-of-RIB grace windows.
     eor_grace: rustbgpd_rib::EorGraceConfig,
-    /// Interface-only neighbors whose bindings inside the window carry
-    /// Restart State (startup static peers carry it by construction).
-    interfaces: Vec<String>,
 }
 
 fn planned_restart(
@@ -1132,9 +1130,6 @@ fn planned_restart(
                 .collect(),
         },
         eor_grace: eor_grace_config(roster(), start_time, restart_deadline, replay_owners),
-        interfaces: planned_restart_neighbors(interface_neighbors)
-            .filter_map(|transport| transport.peer_interface.clone())
-            .collect(),
     }
 }
 
@@ -1164,10 +1159,14 @@ fn eor_grace_config<'a>(
 }
 
 fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
-    match config.resolved_neighbors().and_then(|mut neighbors| {
-        neighbors.extend(config.interface_only_resolved_for_comparison()?);
-        Ok(neighbors)
-    }) {
+    // The comparison resolution needs no live interface index, so a scoped
+    // neighbor whose interface is gone keeps its peer-group GR settings.
+    match config
+        .resolved_neighbors_for_comparison()
+        .and_then(|mut neighbors| {
+            neighbors.extend(config.interface_only_resolved_for_comparison()?);
+            Ok(neighbors)
+        }) {
         Ok(neighbors) => planned_restart_neighbors(&neighbors)
             .map(|transport| u64::from(transport.peer.gr_restart_time))
             .filter(|seconds| *seconds > 0)
@@ -5004,9 +5003,6 @@ async fn run<T>(
     {
         rib_manager = rib_manager.with_eager_dataplane_prefix_index();
     }
-    // Interface-only neighbors that bind inside the window advertise the
-    // Restart State bit only when they belong to the planned restart.
-    let mut planned_restart_interfaces = Vec::new();
     if let Some(deadline) = local_gr_restart_until {
         let interface_configs = config
             .interface_only_resolved_for_comparison()
@@ -5024,7 +5020,6 @@ async fn run<T>(
         rib_manager = rib_manager
             .with_selection_deferral(restart.deferral)
             .with_eor_grace(restart.eor_grace);
-        planned_restart_interfaces = restart.interfaces;
     } else {
         // A cold boot holds nothing, but knowing the listed controllers lets
         // a replay-complete signal answer NOT_HOLDING rather than
@@ -5355,7 +5350,6 @@ async fn run<T>(
     .with_local_forwarding_state(local_forwarding_state.clone())
     .with_readiness_queries(peer_mgr_readiness_rx)
     .with_operator_queries(peer_mgr_operator_rx)
-    .with_planned_restart_interfaces(planned_restart_interfaces)
     .with_rib_peers(peer_configs.iter().map(|neighbor| {
         let transport = &neighbor.transport_config;
         (
@@ -11886,6 +11880,33 @@ peer_group = "plain"
         );
     }
 
+    /// A scoped neighbor whose interface is gone at shutdown keeps its
+    /// peer-group restart time in the marker window: the window needs no
+    /// live interface index, and the raw fallback would read 120.
+    #[test]
+    fn marker_window_keeps_peer_group_restart_time_for_a_missing_interface() {
+        let config: Config = toml::from_str(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.slow]
+gr_restart_time = 300
+[[neighbors]]
+address = "fe80::1"
+interface = "rbgp-definitely-missing0"
+remote_asn = 65002
+peer_group = "slow"
+"#,
+        )
+        .unwrap();
+        assert!(config.resolved_neighbors().is_err());
+        assert_eq!(max_gr_restart_time_secs(&config), Some(300));
+    }
+
     /// The IPv6 listener sends Hop Limit 255 from startup exactly when an
     /// interface-only neighbor runs GTSM, directly or from its peer group.
     #[cfg(target_os = "linux")]
@@ -12112,7 +12133,6 @@ graceful_restart = false
             .map(|peer| &peer.peer)
             .collect();
         assert_eq!(grace, [&target]);
-        assert_eq!(restart.interfaces, ["rbgp-absent0"]);
     }
 
     /// When only an IPv4 neighbor has `tcp_mss = 536`, the IPv4 listener gets

@@ -245,3 +245,37 @@ fn interface_only_waiter_survives_binding_retirement_but_not_neighbor_removal() 
         assert!(peer.release());
     }
 }
+
+/// Removing an interface-only neighbor ends its roster entry even after a
+/// session bound it: a retired binding whose cleanup is still unconfirmed
+/// keeps its handle, and a later session of that handle must not hold the
+/// family the remaining leaves have completed.
+#[test]
+fn interface_only_waiter_ends_with_its_neighbor_after_binding() {
+    let mut manager = interface_roster_manager(&["swp1", "swp2"]);
+    let leaf1 = interface_peer("fe80::1", "swp1");
+    let leaf2 = interface_peer("fe80::2", "swp2");
+    let _leaf2_rx = connect_unicast(&mut manager, leaf2, 22, true, false);
+    let _first_rx = connect_unicast(&mut manager, leaf1, 11, true, false);
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: leaf1,
+        label: None,
+        keep_series: true,
+    });
+    assert!(
+        manager.selection_convergence_held(FAMILY),
+        "leaf2 still blocks"
+    );
+    manager.handle_update(RibUpdate::RetireEorGraceInterface {
+        interface: "swp1".into(),
+    });
+    let _again_rx = connect_unicast(&mut manager, leaf1, 12, true, false);
+    end_of_rib(&mut manager, leaf2, 22);
+    assert!(
+        !manager.selection_convergence_held(FAMILY),
+        "the removed neighbor's handle is no longer awaited"
+    );
+    for peer in [leaf1, leaf2] {
+        assert!(peer.release());
+    }
+}
