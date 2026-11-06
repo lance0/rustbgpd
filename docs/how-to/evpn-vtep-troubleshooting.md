@@ -696,7 +696,11 @@ or installs remote prefixes.
    means no eligible Type 2 MAC/IP route resolved the Gateway Address;
    `ambiguous_overlay_index_gateway` means the Gateway Address resolved
    to multiple distinct MACs at the winning mobility sequence.
-   `l3vni_mismatch`, `missing_router_mac`, `no_matching_ip_vrf`, and
+   `l3vni_mismatch` means the route's label differs from the IP-VRF's
+   L3VNI. An overlay-index route (non-zero ESI or Gateway Address) with
+   label 0 is not a mismatch: RFC 9136 §3.1 lets the sender zero the label,
+   and the route resolves recursively under the IP-VRF's L3VNI.
+   `missing_router_mac`, `no_matching_ip_vrf`, and
    `self_originated` cover the other fail-closed projection gates, and
    the ESI overlay-index gates emit their own reasons
    (`unresolved_esi_overlay_index`, `ambiguous_esi_overlay_index`,
