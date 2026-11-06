@@ -51,11 +51,14 @@ out of alpha.
   VRF, and local acceptance does not prove router installation or traffic
   enforcement. Nonzero IPv6 prefix offsets use RFC 8956 pattern framing and
   do not interoperate with peers that use the older full-prefix framing,
-  including GoBGP 4.11.0 and earlier rustbgpd releases. A rule with a nonzero
-  offset from such a peer fails to decode and resets the whole session with
-  NOTIFICATION 3/9, every time it is sent. Keep IPv6 FlowSpec rules with a
-  nonzero prefix offset (global or VPN) withdrawn on both sides until every
-  peer uses RFC 8956 framing; offset-zero IPv6 and IPv4 rules are unaffected.
+  including GoBGP 4.11.0 and earlier rustbgpd releases. Depending on the
+  length and offset, a nonzero-offset rule from such a peer either fails to
+  decode and resets the whole session with NOTIFICATION 3/9 every time it is
+  sent, or decodes cleanly with a different, bit-shifted match (for example
+  length 32, offset 1). An established session does not prove compatibility.
+  Keep IPv6 FlowSpec rules with a nonzero prefix offset (global or VPN)
+  withdrawn on both sides until every peer uses RFC 8956 framing; offset-zero
+  IPv6 and IPv4 rules are unaffected.
   The [qualification receipt](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
   separates that comparator failure from the passing core checks.
 - Confederations are not implemented.
