@@ -3027,7 +3027,8 @@ records for a later outage.
    session that replaces the waiting one keeps its streak, so a neighbor that
    always reconnects to us escalates the same way.
    The streak clears after the session stays Established for five minutes, on
-   `rbgp neighbor <addr> enable`, or on an administrative reset. TCP misses
+   `rbgp neighbor <addr> enable` while the session is in Idle, or on an
+   administrative reset. TCP misses
    in `Connect` or `Active` keep the fast initial retries followed by the
    existing exponential curve; a TCP loss after `Established` uses the
    configured fixed Idle interval. Neither advances the NOTIFICATION streak.
@@ -3732,7 +3733,8 @@ so the next attempt starts immediately and any later failure streak
 restarts from `connect_retry_secs`. On a peer whose session is already
 connecting or up, `enable` changes nothing. It sends no NOTIFICATION and
 keeps the backoff streak, because RFC 4271 §8.2.2 ignores a start event
-outside Idle.
+outside Idle. To restart a peer that is retrying in `Connect` or `Active`
+right away, run `rbgp neighbor <addr> reset` and then `enable`.
 
 ### Reset a peer session
 

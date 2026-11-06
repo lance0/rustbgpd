@@ -377,8 +377,8 @@ pub(crate) struct PeerSession {
     /// Consecutive falls to Idle caused by a NOTIFICATION (sent or received,
     /// including OPEN exchanges that end in one). Each one doubles the
     /// deferred reconnect wait up to `MAX_NOTIFICATION_IDLE_BACKOFF_SECS`.
-    /// Cleared by an explicit operator start, an administrative reset, or a
-    /// session that stays Established for `HEALTHY_ESTABLISHED`.
+    /// Cleared by an explicit operator start in Idle, an administrative
+    /// reset, or a session that stays Established for `HEALTHY_ESTABLISHED`.
     notification_idle_failures: u32,
     /// The FSM batch being executed tore the session down with a
     /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.

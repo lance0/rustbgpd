@@ -423,12 +423,16 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   (sent or received, including an OPEN exchange that ends in one) doubles
   the Idle reconnect wait from `connect_retry_secs`, capped at 300s and
   never below the configured interval. The streak clears after the session
-  stays Established for five minutes, on an explicit operator enable, or on
-  an administrative reset. TCP connection misses in Connect or Active keep
+  stays Established for five minutes, on an explicit operator enable while
+  the session is in Idle, or on an administrative reset. TCP connection misses in Connect or Active keep
   the fast initial retries followed by the existing exponential curve; a TCP
   loss after Established uses the configured fixed Idle interval. Neither
   advances the NOTIFICATION streak, and there is no configuration knob for
   its curve.
+- Start events (RFC 4271 §8.2.2): `ManualStart` acts only in Idle. In
+  Connect, Active, OpenSent, OpenConfirm and Established it is ignored, so
+  enabling an enabled peer sends no NOTIFICATION and leaves the session and
+  its backoff streak unchanged.
 - Initial hold timer before OPEN negotiation: 240s (RFC 4271 "large
   value"), replaced by negotiated value once OPEN exchange completes.
 - `handle_event` never returns `Result` — every (State, Event) pair

@@ -1486,9 +1486,36 @@ mod tests {
             SessionState::OpenConfirm,
             SessionState::Established,
         ] {
-            let mut s = drive_to(state);
+            // Detour through a TCP failure so the connect-retry counter is
+            // non-zero: a start that reset it would show.
+            let mut s = Session::new(test_config());
+            s.handle_event(Event::ManualStart);
+            s.handle_event(Event::TcpConnectionFails);
+            if state != SessionState::Active {
+                s.handle_event(Event::ConnectRetryTimerExpires);
+            }
+            if !matches!(state, SessionState::Connect | SessionState::Active) {
+                s.handle_event(Event::TcpConnectionConfirmed);
+            }
+            if matches!(state, SessionState::OpenConfirm | SessionState::Established) {
+                s.handle_event(Event::OpenReceived(peer_open()));
+            }
+            if state == SessionState::Established {
+                s.handle_event(Event::KeepaliveReceived);
+            }
+            assert_eq!(s.state(), state);
             let counter = s.connect_retry_counter();
+            assert!(counter >= 1, "{state:?}");
+            let had_negotiated = s.negotiated().is_some();
+            assert_eq!(
+                had_negotiated,
+                matches!(state, SessionState::OpenConfirm | SessionState::Established),
+                "{state:?}"
+            );
             let actions = s.handle_event(Event::ManualStart);
+            if s.negotiated().is_some() != had_negotiated {
+                acted.push((state, actions.clone()));
+            }
             if !actions.is_empty() || s.state() != state || s.connect_retry_counter() != counter {
                 acted.push((state, actions));
             }

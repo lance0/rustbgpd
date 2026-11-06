@@ -2204,3 +2204,69 @@ async fn negotiated_window_counts_our_llgr_time_whatever_the_peers_stale_times()
         );
     }
 }
+
+/// RFC 4271 §8.2.2: an operator Start outside Idle is ignored in every
+/// non-Idle state. The state, the NOTIFICATION backoff streak and the sent
+/// NOTIFICATION count all stay as they were.
+#[tokio::test(start_paused = true)]
+async fn start_outside_idle_keeps_state_streak_and_sends_nothing() {
+    for target in [
+        SessionState::Connect,
+        SessionState::Active,
+        SessionState::OpenSent,
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    ] {
+        let mut session = make_test_session(65001, 65002);
+        notification_cycle(&mut session).await;
+        assert_eq!(notification_cycle(&mut session).await, 60);
+        session.reconnect_timer = None;
+        let mut _peer = None;
+        if matches!(target, SessionState::Connect | SessionState::Active) {
+            session.drive_fsm(Event::ManualStart).await;
+            if let Some(task) = session.connect_task.take() {
+                task.abort();
+            }
+            if target == SessionState::Active {
+                session.drive_fsm(Event::TcpConnectionFails).await;
+            }
+        } else {
+            let (client, server) = connected_stream_pair().await;
+            _peer = Some(server);
+            session.test_install_stream(client);
+            session.drive_fsm(Event::ManualStart).await;
+            if target != SessionState::OpenSent {
+                session.drive_fsm(peer_open(65002)).await;
+            }
+            if target == SessionState::Established {
+                session.drive_fsm(Event::KeepaliveReceived).await;
+            }
+        }
+        assert_eq!(session.fsm.state(), target);
+        let sent = session.config.neighbor_counters.notifications_sent();
+        let _ = session.handle_command(PeerCommand::Start).await;
+        assert_eq!(session.fsm.state(), target, "{target:?}");
+        assert_eq!(session.notification_idle_failures, 2, "{target:?}");
+        assert_eq!(
+            session.config.neighbor_counters.notifications_sent(),
+            sent,
+            "{target:?}"
+        );
+    }
+}
+
+/// An operator Start in Idle while the NOTIFICATION backoff holds the
+/// reconnect starts the session now and clears the streak.
+#[tokio::test(start_paused = true)]
+async fn start_in_idle_during_the_backoff_hold_connects_now() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_some());
+
+    let _ = session.handle_command(PeerCommand::Start).await;
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 0);
+}
