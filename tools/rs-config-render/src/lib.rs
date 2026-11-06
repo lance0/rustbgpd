@@ -99,12 +99,12 @@ pub const EXPECTED_SECTION_NAMES: &[&str] = &[
     "rpki_roas",
 ];
 
-/// Rejects 0, AS_TRANS (23456), the 16-bit documentation / private /
-/// reserved block (64496-65551), and the 32-bit private + reserved
-/// range (4200000000-4294967295; every 10-digit AS number starting
-/// "42" that fits in u32 falls inside it). Static because the IANA
-/// registry is; verified by the in-language tests emitted alongside.
-const INVALID_ASN_REGEX: &str = "_(0|23456|6449[6-9]|64[5-9][0-9][0-9]|65[0-4][0-9][0-9]|655[0-4][0-9]|6555[01]|42[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])_";
+/// Members of the invalid-ASN set: 0, AS_TRANS (23456), the 16-bit
+/// documentation / private / reserved block (64496-65551), and the
+/// 32-bit private + reserved range (4200000000-4294967295). Static
+/// because the IANA registry is; verified by the in-language tests
+/// emitted alongside.
+const INVALID_ASNS: &str = "0, 23456, 64496..65551, 4200000000..4294967295";
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -3231,11 +3231,14 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
     render_scrub_test(&mut tests, scrubbed);
 
     if filtering.reject_invalid_as_in_as_path {
+        let _ = writeln!(sets, "asn-set rs-invalid-asns {{ {INVALID_ASNS} }}");
         let _ = write!(
             terms,
             "    # 0, AS_TRANS, 16-bit doc/private/reserved (64496-65551), and the\n\
-             \x20   # 32-bit private+reserved range (any 10-digit \"42...\" ASN in u32).\n\
-             \x20   term reject-invalid-asn {{ if route.as-path matches \"{INVALID_ASN_REGEX}\" {{ reject }} }}\n"
+             \x20   # 32-bit private+reserved range (4200000000-4294967295).\n\
+             \x20   term reject-invalid-asn {{\n\
+             \x20       for asn in route.as-path {{ if asn in rs-invalid-asns {{ reject }} }}\n\
+             \x20   }}\n"
         );
         tests.push_str(
             "test private-16bit-asn-in-path-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333 64512\" }\n    expect rs-hygiene == reject\n}\n\

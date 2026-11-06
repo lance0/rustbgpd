@@ -71,6 +71,11 @@ pub enum Tok {
     #[regex(r"[0-9A-Fa-f:]*::[0-9A-Fa-f:.]*")]
     #[regex(r"([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}")]
     Ipv6Lit,
+    /// `64512..65534` — an inclusive ASN range, valid only as an asn-set
+    /// or ASN dataset member. One token, like a community pattern; the
+    /// spelling was a lex-then-parse error before (ADR-0103 Decision 2.3).
+    #[regex(r"[0-9]+\.\.[0-9]+")]
+    AsnRange,
     /// Unsigned integer literal.
     #[regex(r"[0-9]+")]
     Int,
@@ -276,6 +281,7 @@ impl Tok {
             Tok::LargeCommunityLit => "large-community literal",
             Tok::StdCommunityLit => "community literal",
             Tok::CommunityPattern => "community pattern",
+            Tok::AsnRange => "ASN range",
             Tok::PrefixLit => "prefix literal",
             Tok::Ipv4Lit | Tok::Ipv6Lit => "IP address literal",
             Tok::Int => "integer",
@@ -448,6 +454,14 @@ mod tests {
             let (_, diags) = lex(bad, 0);
             assert_eq!(diags.len(), 1, "{bad} must be a lex error");
         }
+        // An ASN range is one token; a community pattern range keeps its own.
+        assert_eq!(kinds("64496..64511"), vec![Tok::AsnRange]);
+        assert_eq!(kinds("0..4294967295"), vec![Tok::AsnRange]);
+        assert_eq!(kinds("65000:100..199"), vec![Tok::CommunityPattern]);
+        assert_eq!(
+            kinds("1 .. 2"),
+            vec![Tok::Int, Tok::Dot, Tok::Dot, Tok::Int]
+        );
         // Spaced forms stay separate tokens.
         assert_eq!(kinds("65000 : *"), vec![Tok::Int, Tok::Colon, Tok::Star]);
         assert_eq!(kinds("x: u32"), vec![Tok::Ident, Tok::Colon, Tok::U32Kw]);
