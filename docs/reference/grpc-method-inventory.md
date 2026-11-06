@@ -125,7 +125,7 @@ shape itself does not raise the tier.
 | `ResetNeighbor` | `mutating` | Single-peer; causes one session flap (Cease/Administrative Reset) without changing enable/disable state. Static active-open sessions retry on their normal schedule; accepted dynamic peers are removed on Idle and must reconnect inbound. Same tier as `DisableNeighbor`. |
 | `ListDynamicNeighbors` | `sensitive_read` | Topology disclosure for the dynamic-prefix accepted peers. |
 | `AddDynamicNeighbor` | `mutating` | Adds an accept-prefix range. Wider than `AddNeighbor` (multi-peer effective), but still per-prefix scope. |
-| `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. Deleting a range whose peer group carries `md5_password` or a `ttl_security` policy (including `ttl_security_hops`) is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
+| `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts — established dynamic peers keep running and drain when they next return to Idle, and admin-disabled members are released at once. Deleting a range whose peer group carries `md5_password` or a `ttl_security` policy (including `ttl_security_hops`) is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
 ### PolicyService (25 RPCs)

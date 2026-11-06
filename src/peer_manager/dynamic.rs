@@ -303,7 +303,8 @@ impl PeerManager {
     /// (so a host-bit or formatting variant of the same network still removes
     /// the right entry). Does **not** tear down already-established dynamic
     /// peers — they keep running and auto-remove when they next hit Idle; the
-    /// removal only stops *future* accepts.
+    /// removal stops *future* accepts. Its admin-disabled members, already
+    /// idle, are released by the run loop once the change is committed.
     /// Returns the removed range's config so a failed persist can roll the
     /// mutation back by re-adding the exact range.
     pub(super) fn delete_dynamic_range(
@@ -492,7 +493,18 @@ impl PeerManager {
     /// import-roster publication however many it removes.
     pub(super) async fn reap_dynamic_peers_not_allowed_by_current_ranges(&mut self) -> usize {
         let batch = self.peers.begin_batch();
-        let result = Box::pin(self.reap_dynamic_peers_unbatched()).await;
+        let result = Box::pin(self.reap_dynamic_peers_unbatched(false)).await;
+        self.peers.end_batch(batch);
+        result
+    }
+
+    /// After a range change, release the idle members no range admits any
+    /// more: retained neighbors and admin-disabled peers. An enabled member
+    /// keeps its session and goes when that session next falls to Idle; a
+    /// disabled one is already idle, and `BackToIdle` never reaps it.
+    pub(super) async fn release_unadmitted_idle_dynamic(&mut self) -> usize {
+        let batch = self.peers.begin_batch();
+        let result = Box::pin(self.reap_dynamic_peers_unbatched(true)).await;
         self.peers.end_batch(batch);
         result
     }
@@ -500,13 +512,25 @@ impl PeerManager {
     /// Remove dynamic peers whose accepting range is absent from the current
     /// runtime snapshot. Used after config-transaction rollback: the restored
     /// snapshot is authoritative, so peers born from the abandoned candidate
-    /// must not survive until a later `BackToIdle`.
-    async fn reap_dynamic_peers_unbatched(&mut self) -> usize {
+    /// must not survive until a later `BackToIdle`. With `disabled_only`,
+    /// only admin-disabled peers go; one held as a dampening recovery target
+    /// stays with its owner.
+    async fn reap_dynamic_peers_unbatched(&mut self, disabled_only: bool) -> usize {
         let mut stale: Vec<PeerKey> = self
             .peers
             .iter()
             .filter(|(_, managed)| {
-                managed.is_dynamic && !self.dynamic_peer_still_allowed_by_current_ranges(managed)
+                managed.is_dynamic
+                    && (!disabled_only
+                        || (!managed.enabled
+                            && !managed
+                                .transport_config
+                                .dampening_admission
+                                .as_ref()
+                                .is_some_and(
+                                    rustbgpd_rib::dampening::DampeningAdmission::is_blocked,
+                                )))
+                    && !self.dynamic_peer_still_allowed_by_current_ranges(managed)
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -559,10 +583,17 @@ impl PeerManager {
             self.release_dynamic_bfd(peer_key.address);
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
             self.refresh_dynamic_neighbor_capacity_metrics();
-            info!(
-                peer = %peer_key,
-                "config rollback: removed dynamic peer whose accepting range is no longer present"
-            );
+            if disabled_only {
+                info!(
+                    peer = %peer_key,
+                    "removed disabled dynamic peer whose accepting range is no longer present"
+                );
+            } else {
+                info!(
+                    peer = %peer_key,
+                    "config rollback: removed dynamic peer whose accepting range is no longer present"
+                );
+            }
         }
         reaped.len() + self.release_unadmitted_retained_dynamic()
     }

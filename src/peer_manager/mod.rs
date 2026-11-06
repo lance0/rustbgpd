@@ -3366,7 +3366,7 @@ impl PeerManager {
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             let unnumbered_retry_at = self.unnumbered_retry_at();
             if self.retention.admission_dirty && !self.config_snapshot_staged {
-                self.release_unadmitted_retained_dynamic();
+                self.release_unadmitted_idle_dynamic().await;
             }
             self.reconcile_retained_dynamic_candidates();
             if !self.retention.orphaned.is_empty() {
