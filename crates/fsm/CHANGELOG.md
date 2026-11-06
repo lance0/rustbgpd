@@ -12,6 +12,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   `graceful_restart_preserves_family` includes it, so it joins the Graceful
   Restart and LLGR capability families. There is no state-machine change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These crate
   versions are not published by this change.
+- `TcpConnectionFails` in OpenConfirm or Established now emits
+  `StopTimer(ConnectRetry)` instead of `StartTimer(ConnectRetry)` before
+  entering Idle, as RFC 4271 §8.2.2 sets the timer to zero. A ConnectRetry
+  left armed fired later in Idle as a stale tick.
 
 ## 0.14.0 - 2026-11-01
 
