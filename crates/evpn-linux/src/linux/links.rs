@@ -295,6 +295,57 @@ pub(crate) fn unique_fdb_vxlan_target_for_vni(
     }
 }
 
+/// Re-read the target VXLAN from the kernel before an FDB write.
+///
+/// The target comes from the link cache taken at the start of the
+/// reconcile pass. If that VXLAN was deleted and its ifindex recycled by
+/// another device in between, writing to the cached ifindex would put
+/// the row for `vni` on the wrong device. One `RTM_GETLINK` by index
+/// confirms the ifindex still names a VXLAN of the cached shape: the
+/// same fixed VNI, or collect-metadata for an SVD target. Otherwise the
+/// op fails transiently and retries after the next dump.
+pub(crate) async fn confirm_fdb_vxlan_target(
+    handle: &Handle,
+    target: FdbVxlanTarget,
+    vni: EvpnInstanceId,
+) -> Result<(), DataplaneError> {
+    let stale = |detail: &str| {
+        DataplaneError::Other(format!(
+            "VXLAN target ifindex {} for VNI {vni} changed since the last link dump \
+             ({detail}); retrying after the next dump",
+            target.ifindex
+        ))
+    };
+    let mut links = handle.link().get().match_index(target.ifindex).execute();
+    let msg = match links.try_next().await {
+        Ok(Some(msg)) => msg,
+        Ok(None) => return Err(stale("link gone")),
+        Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::ENODEV => {
+            return Err(stale("link gone"));
+        }
+        Err(e) => {
+            return Err(DataplaneError::Other(format!(
+                "VXLAN target ifindex {} read: {e}",
+                target.ifindex
+            )));
+        }
+    };
+    let (kind, name) = link_kind_and_name(&msg);
+    if kind != Some(InfoKind::Vxlan) {
+        return Err(stale("no longer a VXLAN device"));
+    }
+    let live = parse_vxlan_link(&msg, name.unwrap_or_default()).info;
+    let same_shape = match target.source_vni {
+        None => !live.collect_metadata && live.vni == Some(vni.as_u32()),
+        Some(_) => live.collect_metadata,
+    };
+    if same_shape {
+        Ok(())
+    } else {
+        Err(stale("now a different VXLAN"))
+    }
+}
+
 fn record_vxlan_match<'a>(
     found: &mut Option<&'a KernelVxlanInfo>,
     candidate: &'a KernelVxlanInfo,

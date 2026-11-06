@@ -576,6 +576,85 @@ async fn l2_foreign_pvid_stale_operations_are_rechecked_before_apply() {
 /// LAN-283 L2: a foreign `static` FDB row that replaces the owned row
 /// under the same `(vni, mac)` blocks repair, survives withdrawal,
 /// and survives the shutdown drain.
+/// LAN-2909 L-E3: FDB apply resolves the VXLAN target from the link
+/// cache taken at the start of the pass. vxlan100 is deleted and a
+/// different-VNI VXLAN is created with its ifindex before the apply.
+/// The remote-MAC row for VNI 100 must not land on that device.
+#[tokio::test]
+async fn l2_foreign_vxlan_on_a_recycled_ifindex_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-vxlan");
+        setup_l2_topology(&ns);
+        run_inner(
+            &ns,
+            "l2_foreign_vxlan_on_a_recycled_ifindex_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan100/ifindex")
+        .expect("vxlan100 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan100"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxlan200",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "id",
+            "200",
+            "local",
+            L2_LOCAL_IP,
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run("ip", &["link", "set", "vxlan200", "master", "br100"]);
+    run("ip", &["link", "set", "vxlan200", "up"]);
+
+    let result = dp.apply(&add.ops[0]).await;
+    let mac = mac_str(l2_mac());
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxlan200"])
+        .lines()
+        .filter(|row| row.starts_with(&mac))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "VNI 100 row programmed on the recycled VNI 200 device ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("stale target must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
 #[tokio::test]
 async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     if !netns_gate() {
