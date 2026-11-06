@@ -241,7 +241,10 @@ blackhole_discard_install_burst = 20
 
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
 non-root deployments, override the default to a mounted writable path (for
-example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
+example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`). The daemon
+creates a missing directory with mode `0700`. It refuses to start, with exit
+code 1, unless the directory is a real directory (not a symlink) owned by the
+daemon user and not group- or world-writable.
 
 The **directory holding the config file** must also be writable by the
 rustbgpd process if you use runtime mutation. Every accepted `rbgp neighbor

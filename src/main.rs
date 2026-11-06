@@ -3511,7 +3511,7 @@ fn write_panic_report_at(
     // Staged under `<name>.toml.tmp` and renamed into place, so a process
     // that dies mid-write leaves no empty or truncated report; the prune
     // below and `rbgp doctor` only read `*.toml`.
-    confirm_journal::write_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
+    confirm_journal::write_state_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
     prune_panic_reports(crash_dir);
     Ok(())
 }
@@ -4317,17 +4317,18 @@ async fn run<T>(
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
     let runtime_state_path = config.runtime_state_dir();
-    // Pin the shared authority before either marker or bundle access. Unsafe
-    // owner/mode or a final symlink disables both paths fail closed.
+    // Pin the shared authority before any marker, receipt, or bundle access.
+    // Every daemon-owned state file lives here, so an unusable directory, an
+    // unsafe owner or mode, or a final symlink refuses boot.
     let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
         Ok(directory) => Some(Arc::new(directory)),
         Err(error) => {
-            warn!(
+            error!(
                 path = %runtime_state_path.display(),
                 %error,
-                "runtime-state marker/checkpoint storage unavailable"
+                "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
             );
-            None
+            process::exit(1);
         }
     };
     let gr_restart_marker_store = runtime_state_directory
