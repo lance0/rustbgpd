@@ -436,7 +436,12 @@ impl RtrPdu {
                 }
                 let err_code = session_id; // In Error Report, bytes 2-3 are the error code
                 let encap_len = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
-                if 16 + encap_len > length {
+                // Peer-supplied 32-bit lengths can overflow a 32-bit
+                // `usize` once the fixed octets are added.
+                if encap_len
+                    .checked_add(16)
+                    .is_none_or(|needed| needed > length)
+                {
                     return Err(RtrDecodeError::InvalidLength);
                 }
                 let encap_pdu = buf[12..12 + encap_len].to_vec();
@@ -447,7 +452,11 @@ impl RtrPdu {
                     buf[text_len_offset + 2],
                     buf[text_len_offset + 3],
                 ]) as usize;
-                if text_len_offset + 4 + text_len != length {
+                if text_len_offset
+                    .checked_add(4)
+                    .and_then(|start| start.checked_add(text_len))
+                    != Some(length)
+                {
                     return Err(RtrDecodeError::InvalidLength);
                 }
                 let text =
@@ -713,7 +722,8 @@ fn der_element_len(der: &[u8]) -> Option<usize> {
     let content = rest[..octets]
         .iter()
         .fold(0usize, |len, &byte| (len << 8) | usize::from(byte));
-    Some(2 + octets + content)
+    // A 4-octet length plus the header overflows a 32-bit `usize`.
+    content.checked_add(2 + octets)
 }
 
 #[cfg(test)]
@@ -784,6 +794,35 @@ mod tests {
             RtrPdu::decode(&frame[..frame.len() - 1]),
             Err(RtrDecodeError::Incomplete)
         );
+    }
+
+    /// Peer-supplied lengths at the 32-bit maximum must be refused, not
+    /// overflow `usize` on a 32-bit target: a complete 38-octet Router Key
+    /// whose SPKI claims a 0xffffffff-octet body, and Error Reports whose
+    /// encapsulated-PDU or text length is 0xffffffff.
+    #[test]
+    fn maximum_peer_lengths_are_refused_without_overflow() {
+        let router_key = router_key_frame(RTR_VERSION, &[0x30, 0x84, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(router_key.len(), 38);
+        assert_eq!(
+            RtrPdu::decode(&router_key),
+            Err(RtrDecodeError::InvalidLength)
+        );
+
+        let error_report = |encap: u32, text: u32| {
+            let mut frame = vec![RTR_VERSION, PDU_ERROR_REPORT, 0, 0];
+            frame.extend_from_slice(&16u32.to_be_bytes());
+            frame.extend_from_slice(&encap.to_be_bytes());
+            frame.extend_from_slice(&text.to_be_bytes());
+            frame
+        };
+        for frame in [error_report(u32::MAX, 0), error_report(0, u32::MAX)] {
+            assert_eq!(
+                RtrPdu::decode(&frame),
+                Err(RtrDecodeError::InvalidLength),
+                "{frame:02x?}"
+            );
+        }
     }
 
     fn roundtrip(pdu: &RtrPdu) -> RtrPdu {
