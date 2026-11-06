@@ -7506,8 +7506,8 @@ impl RibManager {
             "an ORF-receive peer must never be registered in an update group"
         );
         let family = (afi, safi);
-        // At most `MAX_ORF_ENTRIES` per ORF message, so only a real filter
-        // change advances the export-settings generation.
+        // The filter generation moves only when the installed list changes,
+        // so only a real filter change advances the export-settings generation.
         let installed = self
             .orf_filter(peer, family)
             .map(crate::orf::OrfFilterSet::generation);

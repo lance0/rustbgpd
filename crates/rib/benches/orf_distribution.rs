@@ -129,10 +129,58 @@ fn orf_entries() -> Vec<AddressPrefixOrf> {
         .collect()
 }
 
+fn entry(sequence: u32, match_: OrfMatch, prefix: Ipv4Prefix, max_len: u8) -> AddressPrefixOrf {
+    AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_,
+        sequence,
+        min_len: 0,
+        max_len,
+        prefix: Some(Prefix::V4(prefix)),
+    }
+}
+
+/// Entries at every prefix length 8..=32 under 172.16.0.0 that cover no
+/// distributed prefix, /32 fillers, and `0.0.0.0/0 le 32` permit last: every
+/// lookup checks keys at many lengths.
+fn orf_entries_many_lengths() -> Vec<AddressPrefixOrf> {
+    let mut entries: Vec<_> = (8..=32u8)
+        .zip(0u32..)
+        .map(|(len, seq)| {
+            entry(
+                seq,
+                OrfMatch::Deny,
+                Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), len),
+                0,
+            )
+        })
+        .collect();
+    let first_filler = u32::try_from(entries.len()).expect("fits");
+    entries.extend((first_filler..ORF_ENTRIES - 1).map(|seq| {
+        entry(
+            seq,
+            OrfMatch::Permit,
+            Ipv4Prefix::new(Ipv4Addr::from(0xac11_0000 + seq), 32),
+            0,
+        )
+    }));
+    entries.push(entry(
+        ORF_ENTRIES - 1,
+        OrfMatch::Permit,
+        Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        32,
+    ));
+    entries
+}
+
 fn bench_orf_distribution(c: &mut Criterion) {
     let mut group = c.benchmark_group("orf_distribution");
     group.sample_size(10);
-    for (name, orf) in [("orf_off", None), ("orf_4096", Some(orf_entries()))] {
+    for (name, orf) in [
+        ("orf_off", None),
+        ("orf_4096", Some(orf_entries())),
+        ("orf_4096_lengths", Some(orf_entries_many_lengths())),
+    ] {
         let (_tx, rx) = mpsc::channel(8);
         let (_query_tx, query_rx) = mpsc::channel(8);
         let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
@@ -165,5 +213,46 @@ fn bench_orf_distribution(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_orf_distribution);
+/// One DEFER ORF message toggling the first entry's action, through the
+/// production `PeerOrfUpdate` path, with the full list installed. No lookup
+/// follows, as for a DEFER push that waits for a later refresh.
+fn bench_orf_apply(c: &mut Criterion) {
+    let mut group = c.benchmark_group("orf_apply_defer");
+    group.sample_size(20);
+    for (name, entries) in [
+        ("orf_4096", orf_entries()),
+        ("orf_4096_lengths", orf_entries_many_lengths()),
+    ] {
+        let (_tx, rx) = mpsc::channel(8);
+        let (_query_tx, query_rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+        manager.bench_seed_loc_rib(routes(0));
+        let _out = manager.bench_register_orf_peer(
+            0,
+            1 << 16,
+            Some(entries.clone()),
+            Arc::new(PermissiveExactExport),
+        );
+        let mut toggle = entries[0];
+        group.bench_function(BenchmarkId::new(name, ORF_ENTRIES), |b| {
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    toggle.match_ = match toggle.match_ {
+                        OrfMatch::Permit => OrfMatch::Deny,
+                        _ => OrfMatch::Permit,
+                    };
+                    let message = vec![toggle];
+                    let start = Instant::now();
+                    manager.bench_push_orf_defer(0, message);
+                    elapsed += start.elapsed();
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_orf_distribution, bench_orf_apply);
 criterion_main!(benches);

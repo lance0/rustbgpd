@@ -13,11 +13,13 @@
 //! lifted (see the manager's `peer_orf_pending`).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustbgpd_wire::{AddressPrefixOrf, Ipv4Prefix, Ipv6Prefix, OrfAction, OrfMatch, Prefix};
 
-use crate::fast_hash::FastMap;
+use smallvec::SmallVec;
+
+use crate::prefix_map::FamilyPrefixMap;
 
 /// Fixed retained-entry bound per peer and address family, including DEFER pushes.
 pub(crate) const MAX_ORF_ENTRIES: usize = 4096;
@@ -42,7 +44,8 @@ pub(crate) struct OrfFilterEntry {
 }
 
 /// A per-`(peer, AFI, SAFI)` ORF prefix filter: a sequence-ordered entry list
-/// with prefix-list match semantics, plus a lookup index rebuilt on change.
+/// with prefix-list match semantics, plus a lookup index built on the first
+/// lookup after a change.
 ///
 /// Cloning shares the installed state, so a distribution pass can snapshot a
 /// peer's filters without copying them.
@@ -56,7 +59,9 @@ pub(crate) struct OrfFilterSet {
 struct OrfFilterState {
     /// Sequence order also supports replacements/removals without a list scan.
     entries: BTreeMap<u32, OrfFilterEntry>,
-    index: OrfIndex,
+    /// Built on first use, so a message that no lookup follows (a DEFER
+    /// push, say) pays only its staging.
+    index: OnceLock<OrfIndex>,
 }
 
 impl PartialEq for OrfFilterSet {
@@ -141,15 +146,13 @@ impl OrfFilterSet {
                 }
             }
         }
-        let effective = (cleared && !installed.is_empty())
-            || changes.iter().any(|(sequence, change)| {
-                let current = if cleared {
-                    None
-                } else {
-                    installed.get(sequence)
-                };
-                current != change.as_ref()
-            });
+        // After REMOVE-ALL the result is exactly the staged ADDs, so it equals
+        // the installed list when the count matches and no staged change
+        // differs from what is installed at its sequence.
+        let effective = (cleared && len != installed.len())
+            || changes
+                .iter()
+                .any(|(sequence, change)| change.as_ref() != installed.get(sequence));
         if !effective {
             return Ok(());
         }
@@ -167,7 +170,7 @@ impl OrfFilterSet {
                 }
             }
         }
-        state.index = OrfIndex::build(&state.entries);
+        state.index = OnceLock::new();
         self.generation += 1;
         Ok(())
     }
@@ -192,111 +195,118 @@ impl OrfFilterSet {
     /// prefix contains `prefix` and whose length window matches decides;
     /// no match ⇒ deny (implicit deny).
     pub(crate) fn permits(&self, prefix: &Prefix) -> bool {
-        self.is_empty() || self.inner.index.first_match(prefix) == Some(OrfMatch::Permit)
+        self.is_empty()
+            || self
+                .inner
+                .index
+                .get_or_init(|| OrfIndex::build(&self.inner.entries))
+                .first_match(prefix)
+                == Some(OrfMatch::Permit)
     }
 }
 
-/// First-match verdicts precomputed per entry prefix. Only entries whose
-/// prefix contains a route can match it, and at most one such prefix exists
-/// per length, so a lookup probes one key per distinct installed length up to
-/// the route's own length instead of scanning every entry.
+/// First-match verdicts precomputed per entry prefix, in a prefix trie. Only
+/// entries whose prefix covers a route can match it, so a lookup walks the
+/// trie path to the route and checks each covering key's verdict runs.
 #[derive(Debug, Clone, Default)]
 struct OrfIndex {
-    /// Distinct installed entry-prefix lengths, ascending: `[IPv4, IPv6]`.
-    lengths: [Vec<u8>; 2],
-    /// Entry prefix → the lowest-sequence entry matching each route length.
-    keys: FastMap<Prefix, LengthVerdicts>,
+    keys: FamilyPrefixMap<Verdicts>,
 }
 
-#[derive(Debug, Clone)]
-struct LengthVerdicts {
-    /// Route length that `verdicts[0]` describes.
-    first_len: u8,
-    /// `(sequence, action)` of the lowest-sequence entry at this prefix whose
-    /// length window holds the route length, if any.
-    verdicts: Box<[Option<(u32, OrfMatch)>]>,
+/// Non-overlapping route-length runs in ascending order, each naming the
+/// lowest-sequence entry at its prefix whose window holds those lengths.
+/// An entry prefix usually has one run, which stays inline.
+type Verdicts = SmallVec<[Run; 1]>;
+
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    first: u8,
+    last: u8,
+    sequence: u32,
+    action: OrfMatch,
 }
 
 impl OrfIndex {
     fn build(entries: &BTreeMap<u32, OrfFilterEntry>) -> Self {
         // Iterating in sequence order keeps each key's windows sorted by
         // sequence, so the first window to claim a length is the first match.
-        let mut windows: FastMap<Prefix, Vec<(u8, u8, u32, OrfMatch)>> = FastMap::default();
+        let mut windows: BTreeMap<Prefix, Vec<(u8, u8, u32, OrfMatch)>> = BTreeMap::new();
         for (&sequence, entry) in entries {
             let (lo, hi) = length_window(&entry.prefix, entry.min_len, entry.max_len);
             if lo <= hi {
-                windows
-                    .entry(truncate(&entry.prefix, entry.prefix.prefix_len()))
-                    .or_default()
-                    .push((lo, hi, sequence, entry.match_));
+                windows.entry(canonical(&entry.prefix)).or_default().push((
+                    lo,
+                    hi,
+                    sequence,
+                    entry.match_,
+                ));
             }
         }
         let mut index = Self::default();
         for (prefix, windows) in windows {
-            let first_len = windows.iter().map(|w| w.0).min().unwrap_or(0);
-            let last_len = windows.iter().map(|w| w.1).max().unwrap_or(0);
-            let mut verdicts = vec![None; usize::from(last_len - first_len) + 1];
+            let mut painted: [Option<(u32, OrfMatch)>; 129] = [None; 129];
             for (lo, hi, sequence, action) in windows {
-                let range = usize::from(lo - first_len)..=usize::from(hi - first_len);
-                for verdict in &mut verdicts[range] {
+                for verdict in &mut painted[usize::from(lo)..=usize::from(hi)] {
                     verdict.get_or_insert((sequence, action));
                 }
             }
-            index.lengths[family_index(&prefix)].push(prefix.prefix_len());
-            index.keys.insert(
-                prefix,
-                LengthVerdicts {
-                    first_len,
-                    verdicts: verdicts.into_boxed_slice(),
-                },
-            );
-        }
-        for lengths in &mut index.lengths {
-            lengths.sort_unstable();
-            lengths.dedup();
+            let runs = index.keys.entry_or_default(prefix);
+            for (len, verdict) in (0u8..=128).zip(painted) {
+                let Some((sequence, action)) = verdict else {
+                    continue;
+                };
+                match runs.last_mut() {
+                    Some(run) if run.last + 1 == len && run.sequence == sequence => run.last = len,
+                    _ => runs.push(Run {
+                        first: len,
+                        last: len,
+                        sequence,
+                        action,
+                    }),
+                }
+            }
         }
         index
     }
 
     /// The action of the lowest-sequence entry matching `route`, if any.
     fn first_match(&self, route: &Prefix) -> Option<OrfMatch> {
-        let route_len = route.prefix_len();
-        let mut best: Option<(u32, OrfMatch)> = None;
-        for &len in &self.lengths[family_index(route)] {
-            if len > route_len {
-                break;
-            }
-            let Some(key) = self.keys.get(&truncate(route, len)) else {
-                continue;
-            };
-            let hit = route_len
-                .checked_sub(key.first_len)
-                .and_then(|offset| key.verdicts.get(usize::from(offset)))
-                .copied()
-                .flatten();
-            if let Some(hit) = hit
-                && best.is_none_or(|best| hit.0 < best.0)
-            {
-                best = Some(hit);
-            }
-        }
-        best.map(|(_, action)| action)
+        let len = route.prefix_len();
+        self.keys
+            .cover(route)
+            .filter_map(|runs| runs.iter().find(|run| run.first <= len && len <= run.last))
+            .min_by_key(|run| run.sequence)
+            .map(|run| run.action)
     }
 }
 
-fn family_index(prefix: &Prefix) -> usize {
+/// `prefix` with its host bits zeroed, as the trie requires.
+fn canonical(prefix: &Prefix) -> Prefix {
     match prefix {
-        Prefix::V4(_) => 0,
-        Prefix::V6(_) => 1,
+        Prefix::V4(p) => Prefix::V4(Ipv4Prefix::new(p.addr, p.len)),
+        Prefix::V6(p) => Prefix::V6(Ipv6Prefix::new(p.addr, p.len)),
     }
 }
 
-/// `prefix` shortened to `len` bits, host bits zeroed.
-fn truncate(prefix: &Prefix, len: u8) -> Prefix {
-    match prefix {
-        Prefix::V4(p) => Prefix::V4(Ipv4Prefix::new(p.addr, len)),
-        Prefix::V6(p) => Prefix::V6(Ipv6Prefix::new(p.addr, len)),
+/// Build a filter from `entries` and hand it back type-erased, so memory
+/// probes can measure what one installed filter retains. With `probe`, the
+/// lazily built lookup index is forced by one lookup.
+///
+/// # Panics
+///
+/// Panics if `entries` is not an installable batch.
+#[cfg(feature = "bench-internals")]
+#[must_use]
+pub fn bench_orf_filter(
+    entries: &[AddressPrefixOrf],
+    probe: Option<Prefix>,
+) -> Box<dyn std::any::Any> {
+    let mut set = OrfFilterSet::default();
+    set.apply(entries).expect("benchmark ORF entries install");
+    if let Some(prefix) = probe {
+        let _ = set.permits(&prefix);
     }
+    Box::new(set)
 }
 
 /// Family-maximum prefix length.
@@ -522,6 +532,173 @@ mod tests {
         .unwrap();
         assert!(f.is_empty());
         assert!(f.permits(&v4([10, 0, 0, 0], 8)), "cleared ⇒ permit-all");
+    }
+
+    fn remove_all() -> AddressPrefixOrf {
+        AddressPrefixOrf {
+            action: OrfAction::RemoveAll,
+            match_: OrfMatch::Permit,
+            sequence: 0,
+            min_len: 0,
+            max_len: 0,
+            prefix: None,
+        }
+    }
+
+    /// REMOVE-ALL followed by the identical installed list leaves the filter
+    /// unchanged, so the generation (and any paged export walk) must not move.
+    /// A different re-add, or a shorter one, does move it.
+    #[test]
+    fn remove_all_then_identical_readd_keeps_the_generation() {
+        let entry = add(14, OrfMatch::Permit, 0, 0, v4([10, 0, 0, 0], 8));
+        let mut f = OrfFilterSet::default();
+        f.apply(&[entry]).unwrap();
+        let installed = f.generation();
+        f.apply(&[remove_all(), entry]).unwrap();
+        assert_eq!(
+            f.generation(),
+            installed,
+            "identical re-add is not a change"
+        );
+
+        let mut other = entry;
+        other.match_ = OrfMatch::Deny;
+        f.apply(&[remove_all(), other]).unwrap();
+        assert_ne!(f.generation(), installed, "a different re-add is a change");
+        let changed = f.generation();
+        f.apply(&[remove_all()]).unwrap();
+        assert_ne!(f.generation(), changed, "emptying the list is a change");
+    }
+
+    /// 4,096 IPv4 /32 and /31 keys whose `FxHash` agrees in the low 13 bits
+    /// (bucket index) and top 7 bits (control byte): the worst case for a
+    /// hash-table index keyed by entry prefix.
+    fn fx_colliding_v4(n: usize) -> Vec<Prefix> {
+        use std::hash::BuildHasher;
+        let hash = |p: &Prefix| rustc_hash::FxBuildHasher.hash_one(p);
+        let mask = |h: u64| (h & 0x1fff, h >> 57);
+        let target = mask(hash(&v4([0, 0, 0, 0], 32)));
+        let threads = 16u64;
+        let mut out: Vec<Prefix> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    s.spawn(move || {
+                        let span = (1u64 << 32) / threads;
+                        let mut hits = Vec::new();
+                        for a in (t * span)..((t + 1) * span) {
+                            let a = u32::try_from(a).expect("within the IPv4 space");
+                            for len in [32, 31] {
+                                let p = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(a), len));
+                                if mask(hash(&p)) == target {
+                                    hits.push(p);
+                                }
+                            }
+                        }
+                        hits
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("search thread"))
+                .collect()
+        });
+        out.sort_unstable();
+        out.dedup();
+        out.truncate(n);
+        out
+    }
+
+    /// Per-message cost of a DEFER toggle (no lookup follows) and of the
+    /// index rebuild the next lookup pays, for ordinary and hash-crafted keys.
+    ///
+    /// `cargo test -p rustbgpd-rib --release --lib -- --ignored --nocapture
+    /// orf::tests::defer_and_rebuild_cost_probe`
+    #[test]
+    #[ignore = "manual timing receipt"]
+    fn defer_and_rebuild_cost_probe() {
+        let crafted = fx_colliding_v4(4096);
+        assert_eq!(crafted.len(), 4096);
+        let plain: Vec<Prefix> = (0..4096u32)
+            .map(|i| {
+                Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0xac10_0000u32.wrapping_add(i.wrapping_mul(7919))),
+                    32,
+                ))
+            })
+            .collect();
+        let route = v4([10, 0, 0, 0], 24);
+        for (name, keys) in [
+            ("ordinary /32 keys", plain),
+            ("crafted colliding keys", crafted),
+        ] {
+            let entries: Vec<_> = (0u32..)
+                .zip(&keys)
+                .map(|(seq, p)| add(seq, OrfMatch::Permit, 0, 0, *p))
+                .collect();
+            let mut set = OrfFilterSet::default();
+            set.apply(&entries).unwrap();
+            let _ = set.permits(&route);
+            let rounds = 200u32;
+            let mut toggle = entries[0];
+            let (mut defer, mut rebuild) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+            for round in 0..rounds {
+                toggle.match_ = if round % 2 == 0 {
+                    OrfMatch::Deny
+                } else {
+                    OrfMatch::Permit
+                };
+                let start = std::time::Instant::now();
+                set.apply(std::slice::from_ref(&toggle)).unwrap();
+                defer += start.elapsed();
+                let start = std::time::Instant::now();
+                std::hint::black_box(set.permits(&route));
+                rebuild += start.elapsed();
+            }
+            // DEFER messages that no lookup follows: the index stays unbuilt.
+            let start = std::time::Instant::now();
+            for round in 0..rounds {
+                toggle.match_ = if round % 2 == 0 {
+                    OrfMatch::Deny
+                } else {
+                    OrfMatch::Permit
+                };
+                set.apply(std::slice::from_ref(&toggle)).unwrap();
+            }
+            let defer_only = start.elapsed() / rounds;
+            println!(
+                "{name:24} DEFER apply alone {defer_only:>8.2?}  apply after a lookup (drops the index) {:>8.2?}  first lookup after it (rebuild) {:>8.2?}",
+                defer / rounds,
+                rebuild / rounds
+            );
+        }
+    }
+
+    /// The cap counts the list after REMOVE-ALL, and a batch that would
+    /// exceed it leaves the installed list untouched.
+    #[test]
+    fn capacity_counts_after_remove_all_and_rejects_cap_plus_one() {
+        let cap = u32::try_from(MAX_ORF_ENTRIES).unwrap();
+        let fill = |start: u32| -> Vec<AddressPrefixOrf> {
+            (start..start + cap)
+                .map(|seq| add(seq, OrfMatch::Permit, 0, 32, v4([10, 0, 0, 0], 8)))
+                .collect()
+        };
+        let mut f = OrfFilterSet::default();
+        f.apply(&fill(0)).unwrap();
+        let mut replace = vec![remove_all()];
+        replace.extend(fill(cap));
+        f.apply(&replace).unwrap();
+        assert_eq!(f.len(), MAX_ORF_ENTRIES);
+        assert!(f.inner.entries.contains_key(&cap));
+        let before = f.clone();
+        let generation = f.generation();
+        let mut over = vec![remove_all()];
+        over.extend(fill(0));
+        over.push(add(2 * cap, OrfMatch::Deny, 0, 32, v4([10, 0, 0, 0], 8)));
+        assert_eq!(f.apply(&over), Err(OrfApplyError::Capacity));
+        assert_eq!(f, before);
+        assert_eq!(f.generation(), generation);
     }
 
     #[test]

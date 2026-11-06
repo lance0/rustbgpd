@@ -2257,6 +2257,36 @@ impl RibManager {
         rx
     }
 
+    /// Push one IPv4-unicast ORF message with When-to-refresh DEFER to the
+    /// peer registered by [`Self::bench_register_orf_peer`] at `index`,
+    /// through the production `PeerOrfUpdate` path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` exceeds `u32::MAX` or the ORF update is refused.
+    pub fn bench_push_orf_defer(
+        &mut self,
+        index: usize,
+        entries: Vec<rustbgpd_wire::AddressPrefixOrf>,
+    ) {
+        let peer = Self::bench_peer_address(index);
+        let session_id = u64::from(u32::try_from(index).expect("bench peer index fits u32")) + 1;
+        let (reply, mut response) = oneshot::channel();
+        self.handle_update(crate::update::RibUpdate::PeerOrfUpdate {
+            peer,
+            session_id,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            when: rustbgpd_wire::WhenToRefresh::Defer,
+            entries,
+            reply,
+        });
+        response
+            .try_recv()
+            .expect("synchronous ORF reply")
+            .expect("benchmark ORF update installs");
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the bench seam keeps each production PeerUp grouping dimension explicit"
