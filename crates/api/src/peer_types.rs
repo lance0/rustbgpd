@@ -527,6 +527,8 @@ pub enum RuntimeConfigDiffError {
     InvalidCandidate(String),
     /// Internal diff rendering or serialization failed.
     Internal(String),
+    /// The daemon could not take the request now; retrying can succeed.
+    Unavailable(String),
 }
 
 /// Validate-only classification for the config transaction model.

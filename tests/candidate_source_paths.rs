@@ -209,7 +209,7 @@ rpol_files = ["{policy}/edge.rpol"]
         }
         Some(_) => {}
     };
-    let outside = "outside the accepted config's policy directories";
+    let outside = "is not a file under the accepted config's policy directories";
 
     // Disclosure: the observer names the listener's own token file. An
     // operator may name it, and still gets no file text back.

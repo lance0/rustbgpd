@@ -304,27 +304,40 @@ pub(crate) struct CandidateSourceLimits {
     /// The gRPC credential files (TLS material, tokens) the candidate may
     /// name. Validation reads them, so a candidate may not name others.
     credential_files: Vec<String>,
+    /// Files no source may resolve to even inside a root: the running
+    /// config file (it can hold inline secrets) and its credential files.
+    /// The packaged layout keeps them in the same directory as the policy.
+    protected_files: Vec<PathBuf>,
+    /// The running config's `[policy] rpol_max_graph_bytes`; a candidate
+    /// cannot raise its own read budget.
+    max_graph_bytes: usize,
 }
 
 /// Check that an external source named by an RPC candidate resolves under
-/// one of `confine` (canonical directories). A path that cannot be resolved
-/// is reported as outside unless it lies under a root lexically, so the
-/// error does not say whether an arbitrary path exists.
-fn confined_source_path(path: &std::path::Path, confine: &[PathBuf]) -> Result<(), String> {
-    let outside = || {
-        format!(
-            "{} is outside the accepted config's policy directories ([policy] rpol_roots and \
-             the directories of its .rpol and dataset files); add new locations through the \
-             on-disk config and a reload",
-            path.display()
-        )
-    };
+/// one of the limits' canonical roots, and is not a protected file.
+///
+/// Every refusal is the same message, whatever stopped the path: missing,
+/// unreadable, not a directory, outside every root, or protected. A caller
+/// learns only that the path is not an admissible source, never whether
+/// or what it names. `Path::starts_with` compares components without
+/// collapsing `..`, so only the canonical path is ever compared.
+fn confined_source_path(
+    path: &std::path::Path,
+    limits: &CandidateSourceLimits,
+) -> Result<(), String> {
     match path.canonicalize() {
-        Ok(canonical) if confine.iter().any(|root| canonical.starts_with(root)) => Ok(()),
-        Err(error) if confine.iter().any(|root| path.starts_with(root)) => {
-            Err(format!("cannot resolve {}: {error}", path.display()))
+        Ok(canonical)
+            if limits.roots.iter().any(|root| canonical.starts_with(root))
+                && !limits.protected_files.contains(&canonical) =>
+        {
+            Ok(())
         }
-        _ => Err(outside()),
+        _ => Err(format!(
+            "{} is not a file under the accepted config's policy directories \
+             ([policy] rpol_roots and the directories of its .rpol and dataset files); \
+             add new locations through the on-disk config and a reload",
+            path.display()
+        )),
     }
 }
 
@@ -548,9 +561,13 @@ impl Config {
     /// *confinement*: a `base.join(entry)` that escapes `base_dir` is
     /// intended behavior, not a traversal to reject. Each entry is,
     /// however, `canonicalize()`d immediately before it is read
-    /// (LAN-218), closing the symlink TOCTOU window between path
-    /// resolution and open — canonicalization resolves the target, it
-    /// does not confine it. That trust model covers the on-disk config
+    /// (LAN-218), which narrows the window between path resolution and
+    /// open to the time between two syscalls; canonicalization resolves
+    /// the target, it does not confine it. The window is not closed: a
+    /// local user who can write inside a policy directory could swap a
+    /// path component in between. Remote callers cannot act in it, and
+    /// that local race is accepted (`openat2` with `RESOLVE_BENEATH`
+    /// would close it). That trust model covers the on-disk config
     /// and operator API callers only: other API callers' candidates are
     /// held under the accepted config's policy directories (see
     /// [`Self::load_rpc_candidate`]).
@@ -577,7 +594,7 @@ impl Config {
         // `validate()`: this method runs first and consumes the value.
         const MIN_RPOL_GRAPH_BYTES: usize = 1024 * 1024;
         const MAX_RPOL_GRAPH_BYTES: usize = 4 * 1024 * 1024 * 1024;
-        let max_graph_bytes = self.policy.rpol_max_graph_bytes;
+        let mut max_graph_bytes = self.policy.rpol_max_graph_bytes;
         if !(MIN_RPOL_GRAPH_BYTES..=MAX_RPOL_GRAPH_BYTES).contains(&max_graph_bytes) {
             return Err(ConfigError::InvalidPolicyEntry {
                 reason: format!(
@@ -585,6 +602,10 @@ impl Config {
                      {MIN_RPOL_GRAPH_BYTES}..={MAX_RPOL_GRAPH_BYTES} (1 MiB..=4 GiB)"
                 ),
             });
+        }
+
+        if let SourceRules::Api(Some(limits)) = sources {
+            max_graph_bytes = max_graph_bytes.min(limits.max_graph_bytes);
         }
 
         // Policy roots for `import` resolution (LAN-300): absolutize
@@ -597,7 +618,7 @@ impl Config {
                 path = base.join(path);
             }
             if let SourceRules::Api(Some(limits)) = sources {
-                confined_source_path(&path, &limits.roots).map_err(|reason| {
+                confined_source_path(&path, limits).map_err(|reason| {
                     ConfigError::InvalidPolicyEntry {
                         reason: format!("[policy] rpol_roots: {reason}"),
                     }
@@ -617,7 +638,7 @@ impl Config {
             }
             let display = path.display().to_string();
             if let SourceRules::Api(Some(limits)) = sources {
-                confined_source_path(&path, &limits.roots).map_err(|reason| {
+                confined_source_path(&path, limits).map_err(|reason| {
                     ConfigError::InvalidRpolFile {
                         path: display.clone(),
                         reason,
@@ -794,7 +815,7 @@ impl Config {
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
             if let SourceRules::Api(Some(limits)) = sources {
-                confined_source_path(&path, &limits.roots).map_err(|reason| {
+                confined_source_path(&path, limits).map_err(|reason| {
                     ConfigError::InvalidPolicyEntry {
                         reason: format!("dataset {name:?}: {reason}"),
                     }
@@ -1019,6 +1040,13 @@ impl Config {
         CandidateSourceLimits {
             roots,
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
+            protected_files: self
+                .file_path
+                .iter()
+                .cloned()
+                .chain(self.grpc_credential_files().map(PathBuf::from))
+                .collect(),
+            max_graph_bytes: self.policy.rpol_max_graph_bytes,
         }
     }
 
@@ -1066,13 +1094,17 @@ impl Config {
         capture_external_inputs: bool,
         limits: Option<&CandidateSourceLimits>,
     ) -> Result<Self, String> {
-        let canonical = limits.map(|limits| CandidateSourceLimits {
-            roots: limits
-                .roots
+        let canonicalize = |paths: &[PathBuf]| -> Vec<PathBuf> {
+            paths
                 .iter()
-                .filter_map(|root| root.canonicalize().ok())
-                .collect(),
+                .filter_map(|path| path.canonicalize().ok())
+                .collect()
+        };
+        let canonical = limits.map(|limits| CandidateSourceLimits {
+            roots: canonicalize(&limits.roots),
             credential_files: limits.credential_files.clone(),
+            protected_files: canonicalize(&limits.protected_files),
+            max_graph_bytes: limits.max_graph_bytes,
         });
         Self::load_candidate(
             content,

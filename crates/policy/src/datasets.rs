@@ -507,6 +507,8 @@ pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result
     if !std::fs::metadata(path)?.is_file() {
         return Err(not_regular());
     }
+    #[cfg(test)]
+    tests::run_after_stat_hook();
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -572,6 +574,56 @@ pub fn load_dataset_file_captured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Runs once between the path `stat` and the `open` of the next
+        /// bounded read on this thread, to swap the file underneath it.
+        static AFTER_STAT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn run_after_stat_hook() {
+        if let Some(hook) = AFTER_STAT.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// A FIFO renamed over a regular file between the `stat` and the `open`
+    /// must not block the open (`O_NONBLOCK`) and must be refused by the
+    /// `fstat` of the opened descriptor, not read as an empty file.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_the_stat_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("swapped.rpol");
+        std::fs::write(&path, "policy p { term t { accept } }\n").expect("write");
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        let (source, swap_from) = (path.clone(), fifo.clone());
+        let read = within_deadline(move || {
+            let swap_to = source.clone();
+            AFTER_STAT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    std::fs::rename(&swap_from, &swap_to).expect("swap the FIFO in");
+                }));
+            });
+            read_regular_file_bounded(&source, 1024).map_err(|error| error.kind())
+        });
+        // Release a reader blocked in open(2) so a failing run exits.
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path);
+        }
+        let read = read.expect("the open must not block on the swapped-in FIFO");
+        assert_eq!(read, Err(std::io::ErrorKind::InvalidInput));
+    }
 
     /// Run `load` on its own thread and wait at most five seconds, so a
     /// reader that blocks or never finishes fails the test instead of

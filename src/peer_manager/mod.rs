@@ -1801,12 +1801,14 @@ impl PeerManager {
         operator_sources: bool,
         pending: PendingCandidate,
     ) {
-        if self.candidate_loads.len() >= MAX_CANDIDATE_LOADS {
+        // Operators are not counted against the cap: their applies plan
+        // through here, and observer diffs must not be able to refuse them.
+        if !operator_sources && self.candidate_loads.len() >= MAX_CANDIDATE_LOADS {
             let busy =
                 format!("{MAX_CANDIDATE_LOADS} config candidates are already loading; retry");
             match pending {
                 PendingCandidate::Diff { reply } => {
-                    let _ = reply.send(Err(RuntimeConfigDiffError::Internal(busy)));
+                    let _ = reply.send(Err(RuntimeConfigDiffError::Unavailable(busy)));
                 }
                 PendingCandidate::Plan { reply, .. } => {
                     let _ = reply.send(Err(RuntimeConfigTransactionPlanError::Unavailable(busy)));
@@ -1827,27 +1829,40 @@ impl PeerManager {
     }
 
     async fn finish_candidate_load(&mut self, loaded: LoadedCandidate) {
-        match loaded.pending {
+        let LoadedCandidate {
+            mut candidate,
+            pending,
+        } = loaded;
+        match pending {
             PendingCandidate::Diff { reply } => {
-                let _ = reply.send(self.diff_loaded_runtime_config(loaded.candidate));
+                if !reply.is_closed() {
+                    let _ = reply.send(self.diff_loaded_runtime_config(&candidate));
+                }
             }
             PendingCandidate::Plan {
                 expected_runtime_snapshot_token,
                 mut reply,
             } => {
-                let planning = self.plan_loaded_config_transaction(
-                    loaded.candidate,
-                    expected_runtime_snapshot_token.as_deref(),
-                );
-                tokio::pin!(planning);
-                let result = tokio::select! {
-                    biased;
-                    () = reply.closed() => return,
-                    result = &mut planning => result,
-                };
-                let _ = reply.send(result);
+                if !reply.is_closed() {
+                    let planning = self.plan_loaded_config_transaction(
+                        &mut candidate,
+                        expected_runtime_snapshot_token.as_deref(),
+                    );
+                    tokio::pin!(planning);
+                    let result = tokio::select! {
+                        biased;
+                        () = reply.closed() => None,
+                        result = &mut planning => Some(result),
+                    };
+                    if let Some(result) = result {
+                        let _ = reply.send(result);
+                    }
+                }
             }
         }
+        // A loaded candidate can carry large compiled policy; free it on the
+        // blocking pool rather than on this actor.
+        drop(tokio::task::spawn_blocking(move || drop(candidate)));
     }
 
     #[expect(

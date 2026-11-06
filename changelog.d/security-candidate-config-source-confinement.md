@@ -12,7 +12,10 @@
   resolve under the running config's policy directories: its
   `[policy] rpol_roots` and the directories of its `.rpol` and dataset
   files. gRPC credential paths must be ones the running config already
-  uses. `ApplyEvpnRuntime` candidates are held to the same limits. Operator
+  uses. The running config file and its credential files are never sources,
+  a candidate cannot raise `rpol_max_graph_bytes` above the running value,
+  and every refusal is the same message, so it reveals nothing about what a
+  path names. `ApplyEvpnRuntime` candidates are held to the same limits. Operator
   callers can still stage candidate sources elsewhere, as `rs-config-render`
   does. For every API caller, errors for those files give the path, line
   and column and the compiler stage, without file text. Every `.rpol`,

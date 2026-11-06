@@ -282,6 +282,7 @@ fn diff_error_to_status(error: RuntimeConfigDiffError) -> Status {
     match error {
         RuntimeConfigDiffError::InvalidCandidate(message) => Status::invalid_argument(message),
         RuntimeConfigDiffError::Internal(message) => Status::internal(message),
+        RuntimeConfigDiffError::Unavailable(message) => Status::unavailable(message),
     }
 }
 

@@ -157,7 +157,7 @@ async fn candidate_rpol_outside_policy_directories_is_refused_without_its_conten
 
     assert!(!error.contains(SECRET), "{error}");
     assert!(
-        error.contains("outside the accepted config's policy directories"),
+        error.contains("is not a file under the accepted config's policy directories"),
         "{error}"
     );
 }
@@ -181,7 +181,7 @@ async fn candidate_dataset_and_root_outside_policy_directories_are_refused() {
     assert!(!error.contains(SECRET), "{error}");
     assert!(error.contains("dataset \"customers\""), "{error}");
     assert!(
-        error.contains("outside the accepted config's policy directories"),
+        error.contains("is not a file under the accepted config's policy directories"),
         "{error}"
     );
 
@@ -197,7 +197,7 @@ async fn candidate_dataset_and_root_outside_policy_directories_are_refused() {
     .await;
     assert!(error.contains("rpol_roots"), "{error}");
     assert!(
-        error.contains("outside the accepted config's policy directories"),
+        error.contains("is not a file under the accepted config's policy directories"),
         "{error}"
     );
 }
@@ -328,7 +328,7 @@ async fn plan_candidate_outside_policy_directories_is_refused_without_its_conten
     };
     assert!(!error.contains(SECRET), "{error}");
     assert!(
-        error.contains("outside the accepted config's policy directories"),
+        error.contains("is not a file under the accepted config's policy directories"),
         "{error}"
     );
     responder.await.unwrap();
@@ -398,4 +398,159 @@ async fn candidate_credential_files_are_held_to_the_running_config() {
         };
         assert!(error.contains(expected), "{error}");
     }
+}
+
+/// Below `operator_only`, a path that is not admissible gets one answer
+/// whatever it names: `..` cannot turn the refusal into an existence,
+/// permission or type probe of the filesystem.
+#[tokio::test]
+async fn inadmissible_paths_get_one_answer_whatever_they_name() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let policy_dir = tempfile::tempdir().unwrap();
+    let other_dir = tempfile::tempdir().unwrap();
+    std::fs::write(other_dir.path().join("exists"), POLICY).unwrap();
+    let locked = other_dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("inside"), POLICY).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let up = "../".repeat(policy_dir.path().components().count());
+    let other = other_dir
+        .path()
+        .strip_prefix("/")
+        .unwrap()
+        .display()
+        .to_string();
+    let mut answers = Vec::new();
+    for name in ["exists", "missing", "locked/inside", "exists/not-a-dir"] {
+        let probe = policy_dir.path().join(format!("{up}{other}/{name}"));
+        let manager = manager_with_policy_dir(policy_dir.path());
+        let error = diff_error(manager, candidate(&[&probe], "")).await;
+        answers.push(error.replace(&probe.display().to_string(), "<probe>"));
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        answers.windows(2).all(|pair| pair[0] == pair[1]),
+        "{answers:#?}"
+    );
+    assert!(answers[0].contains("is not a file under"), "{}", answers[0]);
+}
+
+/// Below `operator_only`, the running config file itself is not a source,
+/// even when it sits in a policy directory (as in the packaged layout).
+#[tokio::test]
+async fn the_running_config_file_is_not_a_candidate_source() {
+    let policy_dir = tempfile::tempdir().unwrap();
+    let running = policy_dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, format!("# {SECRET}\n")).unwrap();
+    let mut manager = manager_with_policy_dir(policy_dir.path());
+    manager.current_config.file_path = Some(running.clone());
+    let error = diff_error(manager, candidate(&[&running], "")).await;
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(error.contains("is not a file under"), "{error}");
+}
+
+/// Loads run off the actor and, below `operator_only`, at most
+/// `MAX_CANDIDATE_LOADS` at a time, with operators exempt. A latch holds
+/// four observer loads in flight; the actor still answers `Ping`, a fifth
+/// observer diff is refused as unavailable, and an operator plan still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_loads_leave_the_actor_free_and_operators_admitted() {
+    use crate::peer_manager::reconcile::load_latch;
+
+    /// Releases the latch even when an assertion fails first.
+    struct Release;
+    impl Drop for Release {
+        fn drop(&mut self) {
+            load_latch::release();
+        }
+    }
+
+    load_latch::arm();
+    let _release = Release;
+    let policy_dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(policy_dir.path());
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    manager.rib_tx = rib_tx;
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryUpdateGroupSnapshot { reply } = update {
+                let _ = reply.send(rustbgpd_rib::UpdateGroupSnapshot::default());
+            }
+        }
+    });
+    let (tx, rx) = mpsc::channel(16);
+    manager.rx = rx;
+    let task = tokio::spawn(manager.run());
+    let edge = policy_dir.path().join("edge.rpol");
+    let latched = format!("{}\n{}\n", candidate(&[&edge], ""), load_latch::MARKER);
+
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let (reply, response) = oneshot::channel();
+        tx.send(PeerManagerCommand::DiffRuntimeConfig {
+            candidate_toml: latched.clone(),
+            operator_sources: false,
+            reply,
+        })
+        .await
+        .unwrap();
+        held.push(response);
+    }
+    let all_held =
+        tokio::task::spawn_blocking(|| load_latch::wait_held(4, Duration::from_secs(10)))
+            .await
+            .unwrap();
+
+    let (reply, ping) = oneshot::channel();
+    tx.send(PeerManagerCommand::Ping { reply }).await.unwrap();
+    let pinged = tokio::time::timeout(Duration::from_secs(5), ping).await;
+
+    let (reply, fifth) = oneshot::channel();
+    tx.send(PeerManagerCommand::DiffRuntimeConfig {
+        candidate_toml: latched.clone(),
+        operator_sources: false,
+        reply,
+    })
+    .await
+    .unwrap();
+    let fifth = tokio::time::timeout(Duration::from_secs(5), fifth).await;
+
+    let (reply, plan) = oneshot::channel();
+    tx.send(PeerManagerCommand::PlanConfigTransaction {
+        candidate_toml: candidate(&[&edge], ""),
+        expected_runtime_snapshot_token: None,
+        verify_external_inputs: false,
+        operator_sources: true,
+        reply,
+    })
+    .await
+    .unwrap();
+    let plan = tokio::time::timeout(Duration::from_secs(10), plan).await;
+
+    load_latch::release();
+    assert!(all_held, "four observer loads must be in flight at once");
+    assert!(pinged.is_ok(), "the actor must answer while loads are held");
+    assert!(
+        matches!(
+            fifth,
+            Ok(Ok(Err(
+                rustbgpd_api::peer_types::RuntimeConfigDiffError::Unavailable(_)
+            )))
+        ),
+        "a fifth observer load must be refused as unavailable: {fifth:?}"
+    );
+    assert!(
+        matches!(plan, Ok(Ok(Ok(_)))),
+        "an operator plan must run while observer loads hold the cap: {plan:?}"
+    );
+    for response in held {
+        let diffed = tokio::time::timeout(Duration::from_secs(10), response)
+            .await
+            .expect("held diffs answer once released")
+            .unwrap();
+        assert!(diffed.is_ok(), "{diffed:?}");
+    }
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    task.await.unwrap();
 }
