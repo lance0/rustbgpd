@@ -161,8 +161,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
-          sbom: false
+          provenance: mode=min,version=v1
+          sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
       - name: Record native digest
         if: github.event_name == 'push'
         env:
@@ -250,10 +250,23 @@ jobs:
           canonical="$(docker buildx imagetools inspect "${tags[0]}" --format '{{json .Manifest}}' | jq -r '.digest')"
           [[ "$canonical" =~ ^sha256:[0-9a-f]{64}$ ]]
           manifest="$(docker buildx imagetools inspect "${tags[0]}" --format '{{json .Manifest}}')"
-          test "$(jq -r '.manifests | length' <<< "$manifest")" -eq 2
           test "$(jq -r '.annotations["org.opencontainers.image.description"]' <<< "$manifest")" = "$INDEX_DESCRIPTION"
-          platforms="$(jq -r '[.manifests[].platform | (.os + "/" + .architecture)] | sort | join("\n")' <<< "$manifest")"
-          test "$platforms" = $'linux/amd64\nlinux/arm64'
+          # Attestations are non-runnable descriptors bound to the two images.
+          jq -e '
+            .manifests as $all |
+            [$all[] | select(.platform.os == "linux")] as $images |
+            [$all[] | select(.platform.os == "unknown" and .platform.architecture == "unknown"
+              and .annotations["vnd.docker.reference.type"] == "attestation-manifest")] as $attestations |
+            ($all | length) == 4 and ($attestations | length) == 2 and
+            ([$images[].platform.architecture] | sort) == ["amd64", "arm64"] and
+            ([$all[].digest] | unique | length) == 4 and
+            all($all[]; .digest | test("^sha256:[0-9a-f]{64}$")) and
+            ([$attestations[].annotations["vnd.docker.reference.digest"]] | sort) == ([$images[].digest] | sort)
+          ' <<< "$manifest"
+          for digest in $(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' <<< "$manifest"); do
+            docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}@${digest}" --raw |
+              jq -e '[.layers[].annotations["in-toto.io/predicate-type"]] | sort == ["https://slsa.dev/provenance/v1", "https://spdx.dev/Document"]'
+          done
           for tag in "${tags[@]}"; do
             digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
