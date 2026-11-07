@@ -140,21 +140,26 @@ fn entry(sequence: u32, match_: OrfMatch, prefix: Ipv4Prefix, max_len: u8) -> Ad
     }
 }
 
-/// Entries at every prefix length 8..=32 under 172.16.0.0 that cover no
-/// distributed prefix, /32 fillers, and `0.0.0.0/0 le 32` permit last: every
-/// lookup checks keys at many lengths.
+/// Exact-length deny entries at every length 8..=21 that tile the distributed
+/// /24s under 10.0.0.0/8, /32 fillers, and `0.0.0.0/0 le 32` permit last.
+/// Every distributed prefix has one covering key at each of the 14 lengths,
+/// and no exact window matches a /24, so each lookup walks all 14 nested
+/// ancestors before the final entry decides.
 fn orf_entries_many_lengths() -> Vec<AddressPrefixOrf> {
-    let mut entries: Vec<_> = (8..=32u8)
-        .zip(0u32..)
-        .map(|(len, seq)| {
-            entry(
-                seq,
-                OrfMatch::Deny,
-                Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), len),
-                0,
-            )
+    let end = 0x0a00_0000 + (PREFIXES << 8);
+    let mut entries: Vec<_> = (8..=21u8)
+        .flat_map(|len| {
+            (0x0a00_0000..end)
+                .step_by(1 << (32 - len))
+                .map(move |start| Ipv4Prefix::new(Ipv4Addr::from(start), len))
         })
+        .zip(0u32..)
+        .map(|(prefix, seq)| entry(seq, OrfMatch::Deny, prefix, 0))
         .collect();
+    assert!(
+        entries.len() < ORF_ENTRIES as usize,
+        "the nested ancestors fit under the cap"
+    );
     let first_filler = u32::try_from(entries.len()).expect("fits");
     entries.extend((first_filler..ORF_ENTRIES - 1).map(|seq| {
         entry(
