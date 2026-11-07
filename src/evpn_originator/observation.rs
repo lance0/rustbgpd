@@ -448,13 +448,20 @@ pub(super) async fn handle_learned(
                             .any(|ip| state.remote_mac_ip_view.contains_key(&(vni, mac, *ip)))
                     });
                 let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
+                // The MAC view selects the highest-sequence route for the
+                // MAC across MAC-only and MAC/IP contenders.
+                let mac_contender_seq = state
+                    .remote_mac_view
+                    .get(&(vni, mac))
+                    .map(|view| view.mobility_sequence.unwrap_or(0));
                 let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
                     return;
                 };
-                let actions = mac_ip_orig.on_local_mac_moved(mac);
+                let actions = mac_ip_orig.on_local_mac_moved(mac, mac_contender_seq);
                 apply_actions_with_duplicate_policy(
                     actions,
                     view_present,
+                    true,
                     preexisting_keys,
                     vni,
                     mac,
@@ -493,6 +500,7 @@ pub(super) async fn handle_learned(
         apply_actions_with_duplicate_policy(
             actions,
             view.is_some(),
+            prior_ifindex.is_some_and(|prior| prior != ifindex),
             preexisting_keys,
             vni,
             mac,
@@ -565,6 +573,7 @@ pub(super) async fn handle_learned(
         apply_actions_with_duplicate_policy(
             actions,
             view_present,
+            false,
             preexisting_keys,
             vni,
             mac,
@@ -728,6 +737,7 @@ pub(super) async fn handle_ip_added(
     apply_actions_with_duplicate_policy(
         actions,
         view_present,
+        false,
         preexisting_keys,
         vni,
         mac,
@@ -850,6 +860,7 @@ pub(super) async fn handle_ip_removed(
         apply_actions_with_duplicate_policy(
             actions,
             view_present,
+            false,
             preexisting_keys,
             vni,
             mac,

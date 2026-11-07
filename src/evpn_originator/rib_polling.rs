@@ -162,6 +162,14 @@ pub(super) async fn repoll_rib(
         }
     }
     let mut suppressed_remote_diffs: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
+    // RFC 7432 §15 decisions for every MAC-only and MAC/IP route of a MAC
+    // are staged here first, and peer-sync sequences are adopted only
+    // once all of that MAC's contenders reflect this snapshot. Adopting
+    // after the first changed binding would weigh a sibling binding
+    // against its stale contender: it could be re-advertised and then
+    // withdrawn again by its own diff in the same poll.
+    let mut staged: BTreeMap<(EvpnInstanceId, MacAddress), Vec<rustbgpd_evpn::OriginationAction>> =
+        BTreeMap::new();
 
     // --- MAC-only contender diff ---
     let mut mac_affected: Vec<(EvpnInstanceId, MacAddress)> = Vec::new();
@@ -190,21 +198,9 @@ pub(super) async fn repoll_rib(
             };
             orig.on_remote_changed(mac, view, inst.local_vtep_ip)
         };
-        if actions.is_empty() {
-            continue;
+        if !actions.is_empty() {
+            staged.entry((vni, mac)).or_default().extend(actions);
         }
-        apply_remote_driven_actions(
-            actions,
-            vni,
-            mac,
-            state,
-            inst,
-            rib_tx,
-            metrics,
-            originated_local_mac_counts,
-            vni_to_esi,
-        )
-        .await;
     }
 
     // --- MAC+IP contender diff ---
@@ -234,21 +230,9 @@ pub(super) async fn repoll_rib(
             };
             orig.on_remote_ip_changed(mac, ip, view, inst.local_vtep_ip)
         };
-        if actions.is_empty() {
-            continue;
+        if !actions.is_empty() {
+            staged.entry((vni, mac)).or_default().extend(actions);
         }
-        apply_remote_driven_actions(
-            actions,
-            vni,
-            mac,
-            state,
-            inst,
-            rib_tx,
-            metrics,
-            originated_local_mac_counts,
-            vni_to_esi,
-        )
-        .await;
     }
 
     for (vni, mac) in suppressed_remote_diffs {
@@ -271,16 +255,19 @@ pub(super) async fn repoll_rib(
 
     super::duplicate_ip::observe_remote(&new_mac_ip_view, state, instances, metrics);
     for (vni, mac) in peer_sync_changed {
-        if remote_route_processing_suppressed(state, vni, mac) {
-            continue;
+        if !remote_route_processing_suppressed(state, vni, mac) {
+            staged.entry((vni, mac)).or_default();
         }
+    }
+    for ((vni, mac), actions) in staged {
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        let actions = state.prepare_peer_sync_actions(vni, mac, Vec::new());
-        super::rib_write::apply_actions(
-            &mut state.pending_rib_ops,
+        apply_remote_driven_actions(
             actions,
+            vni,
+            mac,
+            state,
             inst,
             rib_tx,
             metrics,

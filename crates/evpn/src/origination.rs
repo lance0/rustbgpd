@@ -521,6 +521,23 @@ impl LocalMacOriginator {
             }
         };
 
+        // RFC 7432 §15: a local move bumps a yielded entry above the
+        // contender it yielded to. At the u32::MAX ceiling the bump
+        // saturates, and a lower-IP contender still wins the tie. Record
+        // the new port and sequence but stay withdrawn; the yield is
+        // re-decided when the contender changes or leaves.
+        if let Some(contender) = prior.as_ref().and_then(|s| s.yielded_to)
+            && contender.still_wins(new_seq, sticky)
+        {
+            if let Some(entry) = self.by_mac.get_mut(&mac) {
+                entry.ifindex = ifindex;
+                entry.our_seq = new_seq;
+                entry.last_seen_remote_seq = new_last_seen;
+                entry.sticky = sticky;
+            }
+            return Vec::new();
+        }
+
         // Step 3: idempotence — same observed state, no-op.
         if was_advertising
             && !port_changed
@@ -924,6 +941,36 @@ mod tests {
         assert_eq!(comeback.len(), 1);
         assert_eq!(o.on_local_learned(mac(0xAA), 10, false, None), Vec::new());
         assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(0));
+    }
+
+    // RFC 7432 §15 at the u32::MAX ceiling: yielded to a lower-IP PE at
+    // u32::MAX, a local port move saturates at the same sequence and the
+    // contender still wins the lowest-IP tie. The route must stay
+    // withdrawn; the new port is still recorded.
+    #[test]
+    fn port_move_that_still_loses_at_max_stays_withdrawn() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, None);
+        let lower_at_max = RemoteMacView {
+            next_hop: "9.9.9.9".parse().unwrap(),
+            ..remote(Some(u32::MAX))
+        };
+        let actions = o.on_remote_changed(mac(0xAA), Some(&lower_at_max), local_ip());
+        assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
+
+        assert_eq!(
+            o.on_local_learned(mac(0xAA), 11, false, Some(&lower_at_max)),
+            Vec::new()
+        );
+        assert_eq!(o.advertised_count(), 0);
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(u32::MAX));
+        // The move was recorded: a learn back on port 11 is not a move.
+        assert_eq!(
+            o.on_local_learned(mac(0xAA), 11, false, Some(&lower_at_max)),
+            Vec::new()
+        );
+        // The yield still stands: the contender leaving brings it back.
+        assert_eq!(o.on_remote_changed(mac(0xAA), None, local_ip()).len(), 1);
     }
 
     // RFC 7432 §15.2: a static (sticky) MAC is not subject to MAC moves.
