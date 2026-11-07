@@ -13,6 +13,7 @@ use super::{
     RtcRibRoute, VpnRibRoute,
 };
 use rustbgpd_wire::VpnFlowSpecRule;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -602,14 +603,16 @@ impl PendingOutbound {
         if rows <= available / export.max_message_len() {
             return SliceBudget::Ready(rows);
         }
+        let mut previous_attrs = None;
         macro_rules! announce {
             ($routes:expr, $offset:expr, $kind:ident) => {
                 fit_wire_lengths(
-                    $routes
-                        .iter()
-                        .skip($offset)
-                        .take(rows)
-                        .map(|route| export.announcement_wire_bound(ExportCandidate::$kind(route))),
+                    $routes.iter().skip($offset).take(rows).map(|route| {
+                        export.announcement_wire_bound(
+                            ExportCandidate::$kind(route),
+                            &mut previous_attrs,
+                        )
+                    }),
                     available,
                 )
             };
@@ -642,12 +645,15 @@ impl PendingOutbound {
                     .skip(self.offset)
                     .take(rows)
                     .map(|route| {
-                        export.announcement_wire_bound(ExportCandidate::Unicast {
-                            route,
-                            // The bound reserves maximum next-hop framing,
-                            // independent of the row's actual override.
-                            next_hop_override: None,
-                        })
+                        export.announcement_wire_bound(
+                            ExportCandidate::Unicast {
+                                route,
+                                // The bound reserves maximum next-hop framing,
+                                // independent of the row's actual override.
+                                next_hop_override: None,
+                            },
+                            &mut previous_attrs,
+                        )
                     }),
                 available,
             ),
@@ -1406,6 +1412,66 @@ impl MpGroupIndex {
         }
     }
 }
+
+type FlowSpecGroup<T> = (Afi, Vec<PathAttribute>, Vec<T>);
+type FlowSpecGroupIndex = Option<HashMap<(Afi, u64), Vec<usize>>>;
+
+/// Keep small sets on the existing linear path. On the fifth distinct
+/// (family, value) group, index the existing ordered groups by content hash.
+/// Collision buckets still compare the full values. Equal owned Vecs are
+/// dropped immediately rather than pinned for a pointer-key fast path.
+fn push_flowspec_group<T>(
+    groups: &mut Vec<FlowSpecGroup<T>>,
+    index: &mut FlowSpecGroupIndex,
+    afi: Afi,
+    attrs: Vec<PathAttribute>,
+    nlri: T,
+) {
+    const LINEAR_GROUPS: usize = 4;
+    if index.is_none() {
+        if let Some((_, _, routes)) = groups
+            .iter_mut()
+            .find(|(group_afi, group_attrs, _)| *group_afi == afi && *group_attrs == attrs)
+        {
+            routes.push(nlri);
+            return;
+        }
+        if groups.len() < LINEAR_GROUPS {
+            groups.push((afi, attrs, vec![nlri]));
+            return;
+        }
+        let mut promoted: HashMap<(Afi, u64), Vec<usize>> = HashMap::default();
+        for (position, (group_afi, group_attrs, _)) in groups.iter().enumerate() {
+            let hash = promoted.hasher().hash_one(group_attrs);
+            promoted
+                .entry((*group_afi, hash))
+                .or_default()
+                .push(position);
+        }
+        *index = Some(promoted);
+    }
+    // Avoid an extra hash for consecutive equal values after
+    // promotion. The small linear path above retains its original comparisons.
+    if let Some((last_afi, last_attrs, routes)) = groups.last_mut()
+        && *last_afi == afi
+        && *last_attrs == attrs
+    {
+        routes.push(nlri);
+        return;
+    }
+    let index = index
+        .as_mut()
+        .expect("a fifth distinct group promotes the index");
+    let hash = index.hasher().hash_one(&attrs);
+    let bucket = index.entry((afi, hash)).or_default();
+    if let Some(&position) = bucket.iter().find(|&&position| groups[position].1 == attrs) {
+        groups[position].2.push(nlri);
+    } else {
+        bucket.push(groups.len());
+        groups.push((afi, attrs, vec![nlri]));
+    }
+}
+
 impl PeerSession {
     pub(super) fn otc_egress_blocks_unicast(&self, route: &Route) -> bool {
         has_otc(&route.attributes)
@@ -2370,26 +2436,27 @@ impl PeerSession {
         // attributes) in typed lists: one UPDATE never mixes SAFI 133 and 134.
         if !update.flowspec_announce.is_empty() {
             use super::export::FlowSpecNlri;
-            type Group<T> = (Afi, Vec<PathAttribute>, Vec<T>);
-            fn push<T>(groups: &mut Vec<Group<T>>, afi: Afi, attrs: Vec<PathAttribute>, nlri: T) {
-                if let Some(group) = groups
-                    .iter_mut()
-                    .find(|(a, ga, _)| *a == afi && *ga == attrs)
-                {
-                    group.2.push(nlri);
-                } else {
-                    groups.push((afi, attrs, vec![nlri]));
-                }
-            }
-            let mut global: Vec<Group<FlowSpecRule>> = Vec::new();
-            let mut vpn: Vec<Group<VpnFlowSpecRule>> = Vec::new();
+            let mut global: Vec<FlowSpecGroup<FlowSpecRule>> = Vec::new();
+            let mut vpn: Vec<FlowSpecGroup<VpnFlowSpecRule>> = Vec::new();
+            let mut global_index = None;
+            let mut vpn_index = None;
             for fs_route in &update.flowspec_announce {
                 let prepared = export.prepare_flowspec_candidate(fs_route);
                 match prepared.nlri {
-                    FlowSpecNlri::Global(rule) => {
-                        push(&mut global, prepared.afi, prepared.attrs, rule);
-                    }
-                    FlowSpecNlri::Vpn(rule) => push(&mut vpn, prepared.afi, prepared.attrs, rule),
+                    FlowSpecNlri::Global(rule) => push_flowspec_group(
+                        &mut global,
+                        &mut global_index,
+                        prepared.afi,
+                        prepared.attrs,
+                        rule,
+                    ),
+                    FlowSpecNlri::Vpn(rule) => push_flowspec_group(
+                        &mut vpn,
+                        &mut vpn_index,
+                        prepared.afi,
+                        prepared.attrs,
+                        rule,
+                    ),
                 }
             }
             let max_len = export.max_message_len();
@@ -3589,5 +3656,138 @@ mod attr_group_index_tests {
         assert_eq!(index.group(&twin, None, None, 2), Ok(1));
         assert_eq!(index.pinned.len(), 1);
         assert_eq!(index.by_ptr.len(), 3);
+    }
+
+    #[test]
+    fn flowspec_two_and_four_alternating_values_keep_the_linear_path() {
+        for count in [2_u32, 4] {
+            let mut groups = Vec::new();
+            let mut index = None;
+            for row in 0..64_u32 {
+                push_flowspec_group(
+                    &mut groups,
+                    &mut index,
+                    Afi::Ipv4,
+                    vec![PathAttribute::Med(row % count)],
+                    row,
+                );
+            }
+            assert!(index.is_none());
+            assert_eq!(groups.len(), usize::try_from(count).unwrap());
+            for (group, (_, attrs, rows)) in groups.iter().enumerate() {
+                let group = u32::try_from(group).unwrap();
+                assert_eq!(attrs, &[PathAttribute::Med(group)]);
+                assert_eq!(
+                    rows,
+                    &(0..64)
+                        .filter(|row| row % count == group)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flowspec_promotion_preserves_family_value_and_arrival_order() {
+        let inputs = [
+            (Afi::Ipv4, 1),
+            (Afi::Ipv6, 1),
+            (Afi::Ipv4, 2),
+            (Afi::Ipv6, 2),
+            (Afi::Ipv4, 3),
+            (Afi::Ipv4, 1),
+            (Afi::Ipv6, 1),
+            (Afi::Ipv4, 3),
+            (Afi::Ipv6, 3),
+            (Afi::Ipv4, 2),
+        ];
+        let mut groups = Vec::new();
+        let mut index = None;
+        for (row, (afi, med)) in inputs.into_iter().enumerate() {
+            push_flowspec_group(
+                &mut groups,
+                &mut index,
+                afi,
+                vec![PathAttribute::Med(med)],
+                row,
+            );
+            assert_eq!(index.is_some(), row >= 4);
+        }
+        assert_eq!(
+            groups,
+            vec![
+                (Afi::Ipv4, vec![PathAttribute::Med(1)], vec![0, 5]),
+                (Afi::Ipv6, vec![PathAttribute::Med(1)], vec![1, 6]),
+                (Afi::Ipv4, vec![PathAttribute::Med(2)], vec![2, 9]),
+                (Afi::Ipv6, vec![PathAttribute::Med(2)], vec![3]),
+                (Afi::Ipv4, vec![PathAttribute::Med(3)], vec![4, 7]),
+                (Afi::Ipv6, vec![PathAttribute::Med(3)], vec![8]),
+            ]
+        );
+    }
+
+    #[test]
+    fn flowspec_hash_collision_still_compares_full_attribute_values() {
+        let mut groups = vec![
+            (Afi::Ipv4, vec![PathAttribute::Med(1)], vec![0]),
+            (Afi::Ipv6, vec![PathAttribute::Med(9)], vec![1]),
+        ];
+        let incoming = vec![PathAttribute::Med(2)];
+        let mut map = HashMap::default();
+        let hash = map.hasher().hash_one(&incoming);
+        // Place a different value in the incoming hash's collision bucket.
+        // This makes full equality, rather than hash identity, load-bearing.
+        map.insert((Afi::Ipv4, hash), vec![0]);
+        let mut index = Some(map);
+        push_flowspec_group(&mut groups, &mut index, Afi::Ipv4, incoming.clone(), 2);
+        push_flowspec_group(
+            &mut groups,
+            &mut index,
+            Afi::Ipv6,
+            vec![PathAttribute::Med(3)],
+            3,
+        );
+        push_flowspec_group(&mut groups, &mut index, Afi::Ipv4, incoming, 4);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].2, vec![0]);
+        assert_eq!(groups[2].2, vec![2, 4]);
+        assert_eq!(index.unwrap()[&(Afi::Ipv4, hash)], vec![0, 2]);
+    }
+
+    #[test]
+    fn flowspec_index_drops_nonadjacent_equal_attribute_owners() {
+        struct OwnedBytes {
+            _owner: Arc<()>,
+            bytes: [u8; 2_048],
+        }
+        impl AsRef<[u8]> for OwnedBytes {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+        let owner = Arc::new(());
+        let mut groups = Vec::new();
+        let mut index = None;
+        for row in 0..100_u32 {
+            let attrs = vec![
+                PathAttribute::Med(row % 5),
+                PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+                    flags: 0xc0,
+                    type_code: 200,
+                    data: bytes::Bytes::from_owner(OwnedBytes {
+                        _owner: Arc::clone(&owner),
+                        bytes: [0; 2_048],
+                    }),
+                }),
+            ];
+            push_flowspec_group(&mut groups, &mut index, Afi::Ipv4, attrs, row);
+            assert_eq!(Arc::strong_count(&owner), groups.len() + 1);
+        }
+        assert!(index.is_some());
+        assert_eq!(groups.len(), 5);
+        assert!(groups.iter().all(|(_, _, rows)| rows.len() == 20));
+        drop(groups);
+        drop(index);
+        assert_eq!(Arc::strong_count(&owner), 1);
     }
 }

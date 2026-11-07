@@ -137,9 +137,16 @@ fn attribute_wire_bound_with_selection(
                     AsPathSegment::AsSet(asns) => (asns, 1),
                 };
                 path_len = path_len.saturating_add(count);
+                // Ordinary paths fit one segment header. Keep the exact
+                // split count without division on that common path.
+                let chunks = if asns.len() <= 255 {
+                    usize::from(!asns.is_empty())
+                } else {
+                    asns.len().div_ceil(255)
+                };
                 bound = bound
                     .saturating_add(asns.len().saturating_mul(6))
-                    .saturating_add(asns.len().div_ceil(255).saturating_mul(4));
+                    .saturating_add(chunks.saturating_mul(4));
             }
             if let Some(selection) = selection {
                 selection
@@ -464,6 +471,33 @@ mod tests {
             assert_wire_bound(vec![PathAttribute::PmsiTunnel(tunnel.clone())]);
             assert_wire_bound(vec![PathAttribute::PmsiTunnelPartial(tunnel)]);
         }
+    }
+
+    #[test]
+    fn as_path_wire_bound_keeps_exact_segment_split_counts() {
+        for count in [0_usize, 1, 254, 255, 256, 510, 511, 4_096] {
+            for segment in [
+                AsPathSegment::AsSequence(vec![70_000; count]),
+                AsPathSegment::AsSet(vec![70_000; count]),
+            ] {
+                let attr = PathAttribute::AsPath(rustbgpd_wire::AsPath {
+                    segments: vec![segment],
+                });
+                assert_eq!(
+                    attribute_wire_bound(&attr),
+                    8 + count * 6 + count.div_ceil(255) * 4
+                );
+            }
+        }
+        let set = AttrSet::new(vec![PathAttribute::AsPath(rustbgpd_wire::AsPath {
+            segments: vec![
+                AsPathSegment::AsSet(vec![]),
+                AsPathSegment::AsSequence(vec![70_000; 255]),
+                AsPathSegment::AsSequence(vec![70_001; 256]),
+            ],
+        })]);
+        assert_eq!(set.summary().as_path_len, 512);
+        assert_eq!(attribute_wire_bound(&set[0]), 8 + 511 * 6 + 3 * 4);
     }
 
     #[test]

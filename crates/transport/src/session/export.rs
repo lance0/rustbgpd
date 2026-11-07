@@ -1388,7 +1388,7 @@ impl SessionExportProfile {
         result
     }
 
-    fn announcement_bound_from_attrs(&self, raw: usize, count: usize, framing: usize) -> usize {
+    fn announcement_attr_bound(raw: usize, count: usize) -> usize {
         // Per stored attribute, 16 covers an AS prepend even when it adds
         // segment headers to both AS_PATH and AS4_PATH (at most 10), or
         // GSHUT plus NO_EXPORT community growth (at most 8). Count every
@@ -1400,15 +1400,17 @@ impl SessionExportProfile {
         // CLUSTER_LIST, and communities (five times 8). Filtering only shrinks.
         raw.saturating_add(count.saturating_mul(16))
             .saturating_add(64)
-            .saturating_add(framing)
-            .min(self.max_message_len())
     }
 
     /// Reserve a complete single-entry frame without preparing or encoding it
     /// twice. The live sender remains the validator, including malformed or
     /// oversized rows: clamping lets it run once a full frame's credit exists.
     #[inline]
-    pub(super) fn announcement_wire_bound(&self, candidate: ExportCandidate<'_>) -> usize {
+    pub(super) fn announcement_wire_bound<'a>(
+        &self,
+        candidate: ExportCandidate<'a>,
+        previous: &mut Option<(&'a rustbgpd_rib::AttrSet, usize)>,
+    ) -> usize {
         let (attrs, framing) =
             match candidate {
                 // MP framing is at most 32 octets before next-hop/NLRI: BGP
@@ -1444,7 +1446,21 @@ impl SessionExportProfile {
                     return self.flowspec_announcement_wire_bound(route);
                 }
             };
-        self.announcement_bound_from_attrs(attrs.non_mp_wire_size_bound(), attrs.len(), framing)
+        // The envelope keeps these borrowed sets alive for this one sizing
+        // call. Cache only the attribute term: shared attributes can still
+        // accompany different EVPN types or BGP-LS payload lengths.
+        let attr_bound = match *previous {
+            Some((last, bound)) if std::ptr::eq(last, attrs.as_ref()) => bound,
+            _ => {
+                let bound =
+                    Self::announcement_attr_bound(attrs.non_mp_wire_size_bound(), attrs.len());
+                *previous = Some((attrs, bound));
+                bound
+            }
+        };
+        attr_bound
+            .saturating_add(framing)
+            .min(self.max_message_len())
     }
 
     // Keep the variable-length FlowSpec scan separate so fixed-family
@@ -1456,11 +1472,11 @@ impl SessionExportProfile {
         let raw = route.attributes.iter().fold(0_usize, |sum, attr| {
             sum.saturating_add(rustbgpd_rib::attr_set::attribute_wire_bound(attr))
         });
-        self.announcement_bound_from_attrs(
-            raw,
-            route.attributes.len(),
-            flowspec_nlri_wire_bound(&route.rule, route.rd.is_some()).saturating_add(32),
-        )
+        Self::announcement_attr_bound(raw, route.attributes.len())
+            .saturating_add(
+                flowspec_nlri_wire_bound(&route.rule, route.rd.is_some()).saturating_add(32),
+            )
+            .min(self.max_message_len())
     }
 
     /// Complete single-entry withdrawal frame bound without reconstructing
@@ -3679,7 +3695,7 @@ mod tests {
                         .build_ipv4_body(std::slice::from_ref(&entry), &[], &attrs)
                         .unwrap();
                     let bytes = encoded(message);
-                    let bound = profile.announcement_wire_bound(candidate);
+                    let bound = profile.announcement_wire_bound(candidate, &mut None);
                     assert!(
                         bytes.len() <= bound,
                         "eBGP={is_ebgp}, path={path_len}, list={list_len}: {} > {bound}",
@@ -3751,10 +3767,13 @@ mod tests {
         let mut route = prepared_attr_cache_test_route();
         route.attributes = AttrSet::new(stored);
         assert_eq!(route.attributes.non_mp_wire_size_bound(), 0);
-        let bound = profile.announcement_wire_bound(ExportCandidate::Unicast {
-            route: &route,
-            next_hop_override: None,
-        });
+        let bound = profile.announcement_wire_bound(
+            ExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: None,
+            },
+            &mut None,
+        );
         let PreparedUnicastCandidate::Ipv4Body { attrs, entry } =
             profile.prepare_unicast_candidate(&route, None).unwrap()
         else {

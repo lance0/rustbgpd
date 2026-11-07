@@ -1358,6 +1358,55 @@ async fn envelope_wakes(session: &PeerSession) -> bool {
 
 const BYTE_BUDGET: u64 = super::super::writer::WRITER_BYTE_BUDGET;
 
+#[tokio::test]
+async fn shared_attribute_bound_keeps_each_rows_framing() {
+    use super::super::export::{ExportCandidate, SessionExportProfile};
+
+    let session = make_test_session(65001, 65002);
+    let profile = SessionExportProfile::capture(&session);
+    let smet = make_smet_route(2);
+    let mut imet = smet.clone();
+    imet.route = EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+        rd: "65000:100".parse().unwrap(),
+        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+        originator_ip: "192.0.2.10".parse().unwrap(),
+    });
+    let mut short = make_bgpls_route(1);
+    short.attributes = Arc::clone(&smet.attributes);
+    let mut long = short.clone();
+    long.nlri.payload = Bytes::from(vec![0; 1_000]);
+    long.nlri.route_distinguisher = Some([0, 0, 0, 0, 0, 0, 0, 1]);
+    let mut oversized = long.clone();
+    oversized.nlri.payload = Bytes::from(vec![0; 65_535]);
+    let mut different = imet.clone();
+    AttrSet::edit(&mut different.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities((0..64).collect()));
+    });
+    let candidates = [
+        ExportCandidate::Evpn(&imet),
+        ExportCandidate::Evpn(&smet),
+        ExportCandidate::BgpLs(&short),
+        ExportCandidate::BgpLs(&long),
+        ExportCandidate::BgpLs(&oversized),
+        ExportCandidate::Evpn(&different),
+        ExportCandidate::Evpn(&imet),
+    ];
+    let mut previous = None;
+    let bounds: Vec<_> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let bound = profile.announcement_wire_bound(candidate, &mut previous);
+            assert_eq!(bound, profile.announcement_wire_bound(candidate, &mut None));
+            bound
+        })
+        .collect();
+    assert_eq!(bounds[1] - bounds[0], 66 - 31);
+    assert_eq!(bounds[3] - bounds[2], 1_000 - short.nlri.payload.len() + 8);
+    assert_eq!(bounds[4], profile.max_message_len());
+    assert!(bounds[5] > bounds[0]);
+    assert_eq!(bounds[6], bounds[0]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn extended_message_admission_stays_within_writer_byte_budget() {
     large_frame_admission_stays_within_budget(true).await;
@@ -1886,10 +1935,13 @@ fn single_row_wire_bound(
     update: &OutboundRouteUpdate,
 ) -> usize {
     if let Some(route) = update.announce.first() {
-        return profile.announcement_wire_bound(ExportCandidate::Unicast {
-            route,
-            next_hop_override: update.next_hop_override.first().and_then(Option::as_ref),
-        });
+        return profile.announcement_wire_bound(
+            ExportCandidate::Unicast {
+                route,
+                next_hop_override: update.next_hop_override.first().and_then(Option::as_ref),
+            },
+            &mut None,
+        );
     }
     if let Some((prefix, path_id)) = update.unicast_withdrawals().next() {
         return profile.withdrawal_wire_bound(ExportWithdrawal::Unicast {
@@ -1900,7 +1952,7 @@ fn single_row_wire_bound(
     macro_rules! family {
         ($announce:ident, $withdraw:ident, $kind:ident) => {
             if let Some(route) = update.$announce.first() {
-                return profile.announcement_wire_bound(ExportCandidate::$kind(route));
+                return profile.announcement_wire_bound(ExportCandidate::$kind(route), &mut None);
             }
             if let Some(key) = update.$withdraw.first() {
                 return profile.withdrawal_wire_bound(ExportWithdrawal::$kind(key));
@@ -2127,10 +2179,13 @@ fn uniform_announcement_reservation(update: &OutboundRouteUpdate) -> u64 {
         .downcast_ref::<export::SessionExportProfile>()
         .unwrap();
     let bound = |route| {
-        profile.announcement_wire_bound(ExportCandidate::Unicast {
-            route,
-            next_hop_override: None,
-        })
+        profile.announcement_wire_bound(
+            ExportCandidate::Unicast {
+                route,
+                next_hop_override: None,
+            },
+            &mut None,
+        )
     };
     let reservation = bound(&update.announce[0]);
     assert!(
