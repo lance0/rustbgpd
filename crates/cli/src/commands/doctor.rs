@@ -8173,27 +8173,33 @@ paths = ["x"]
             config_freshness_check(1, "config.toml", Duration::new(2_000, 100), reference);
         assert_eq!(unchanged.status, CheckStatus::Ok, "{}", unchanged.detail);
 
-        // The same edit on a real file, made within one second of the
-        // marker the daemon would have written for it.
-        loop {
-            fs::write(&config, "a = 1\n").unwrap();
-            let read = mtime_since_epoch(&config).unwrap();
-            fs::write(
-                dir.path().join(LAST_PERSIST_FILE),
-                format!("{}.{:09}\n", read.as_secs(), read.subsec_nanos()),
-            )
-            .unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-            fs::write(&config, "a = 2\n").unwrap();
-            let edited = mtime_since_epoch(&config).unwrap();
-            if edited.as_secs() != read.as_secs() {
-                continue; // crossed a second boundary; retry inside one second
-            }
-            let reference = config_freshness_reference(dir.path(), u32::MAX).unwrap();
-            let check = config_freshness_check(1, "config.toml", edited, reference);
-            assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
-            break;
-        }
+        // The same edit on a real file, 400 ms after the marker the daemon
+        // would have written for it. The mtimes are set explicitly, so the
+        // filesystem's timestamp tick cannot make the two writes equal.
+        let set_mtime = |contents: &str, mtime: Duration| {
+            fs::write(&config, contents).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&config)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + mtime)
+                .unwrap();
+            mtime_since_epoch(&config).unwrap()
+        };
+        let read = set_mtime("a = 1\n", Duration::new(1_800_000_000, 100));
+        fs::write(
+            dir.path().join(LAST_PERSIST_FILE),
+            format!("{}.{:09}\n", read.as_secs(), read.subsec_nanos()),
+        )
+        .unwrap();
+        let edited = set_mtime("a = 2\n", Duration::new(1_800_000_000, 400_000_100));
+        assert!(
+            edited.as_secs() == read.as_secs() && edited > read,
+            "the filesystem kept sub-second mtimes: read {read:?}, edited {edited:?}"
+        );
+        let reference = config_freshness_reference(dir.path(), u32::MAX).unwrap();
+        let check = config_freshness_check(1, "config.toml", edited, reference);
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
     }
 
     /// An older daemon's whole-second marker keeps the second-resolution
