@@ -1409,52 +1409,57 @@ impl SessionExportProfile {
     /// oversized rows: clamping lets it run once a full frame's credit exists.
     #[inline]
     pub(super) fn announcement_wire_bound(&self, candidate: ExportCandidate<'_>) -> usize {
-        let (attrs, framing) = match candidate {
-            // MP framing is at most 32 octets before next-hop/NLRI: BGP
-            // header 19, UPDATE lengths 4, attribute header 4, AFI/SAFI 3,
-            // next-hop length and reserved octets 2. Classic IPv4 is smaller.
-            ExportCandidate::Unicast { route, .. } => (&route.attributes, 32 + 32 + 21),
-            ExportCandidate::Evpn(route) => {
-                let nlri = match route.route {
-                    EvpnRoute::EadPerEs(_) | EvpnRoute::EadPerEvi(_) => 27,
-                    EvpnRoute::MacIp(_) => 54,
-                    EvpnRoute::Imet(_) => 31,
-                    EvpnRoute::Es(_) => 37,
-                    EvpnRoute::IpPrefix(_) => 60,
-                    EvpnRoute::Smet(_) => 66,
-                    _ => return self.max_message_len(),
-                };
-                (&route.attributes, 32 + 16 + nlri)
-            }
-            ExportCandidate::BgpLs(route) => {
-                let nlri = route
-                    .nlri
-                    .payload
-                    .len()
-                    .saturating_add(4)
-                    .saturating_add(usize::from(route.nlri.route_distinguisher.is_some()) * 8);
-                (&route.attributes, nlri.saturating_add(32 + 40))
-            }
-            // VPN next-hop: up to two RD-prefixed IPv6 addresses (48).
-            // NLRI: Add-Path 4, bit length 1, one label 3, RD 8, prefix 16.
-            // Multiple-label candidates are refused by the live preparation.
-            ExportCandidate::Vpn(route) => (&route.attributes, 32 + 48 + 32),
-            ExportCandidate::Labeled(route) => (&route.attributes, 32 + 32 + 24),
-            ExportCandidate::Rtc(route) => (&route.attributes, 32 + 16 + 13),
-            ExportCandidate::FlowSpec(route) => {
-                // FlowSpec has plain Vec attributes, so reuse the same
-                // bound without allocation or a second maintained summary.
-                let raw = route.attributes.iter().fold(0_usize, |sum, attr| {
-                    sum.saturating_add(rustbgpd_rib::attr_set::attribute_wire_bound(attr))
-                });
-                return self.announcement_bound_from_attrs(
-                    raw,
-                    route.attributes.len(),
-                    flowspec_nlri_wire_bound(&route.rule, route.rd.is_some()).saturating_add(32),
-                );
-            }
-        };
+        let (attrs, framing) =
+            match candidate {
+                // MP framing is at most 32 octets before next-hop/NLRI: BGP
+                // header 19, UPDATE lengths 4, attribute header 4, AFI/SAFI 3,
+                // next-hop length and reserved octets 2. Classic IPv4 is smaller.
+                ExportCandidate::Unicast { route, .. } => (&route.attributes, 32 + 32 + 21),
+                ExportCandidate::Evpn(route) => {
+                    let nlri = match route.route {
+                        EvpnRoute::EadPerEs(_) | EvpnRoute::EadPerEvi(_) => 27,
+                        EvpnRoute::MacIp(_) => 54,
+                        EvpnRoute::Imet(_) => 31,
+                        EvpnRoute::Es(_) => 37,
+                        EvpnRoute::IpPrefix(_) => 60,
+                        EvpnRoute::Smet(_) => 66,
+                        _ => return self.max_message_len(),
+                    };
+                    (&route.attributes, 32 + 16 + nlri)
+                }
+                ExportCandidate::BgpLs(route) => {
+                    let nlri =
+                        route.nlri.payload.len().saturating_add(4).saturating_add(
+                            usize::from(route.nlri.route_distinguisher.is_some()) * 8,
+                        );
+                    (&route.attributes, nlri.saturating_add(32 + 40))
+                }
+                // VPN next-hop: up to two RD-prefixed IPv6 addresses (48).
+                // NLRI: Add-Path 4, bit length 1, one label 3, RD 8, prefix 16.
+                // Multiple-label candidates are refused by the live preparation.
+                ExportCandidate::Vpn(route) => (&route.attributes, 32 + 48 + 32),
+                ExportCandidate::Labeled(route) => (&route.attributes, 32 + 32 + 24),
+                ExportCandidate::Rtc(route) => (&route.attributes, 32 + 16 + 13),
+                ExportCandidate::FlowSpec(route) => {
+                    return self.flowspec_announcement_wire_bound(route);
+                }
+            };
         self.announcement_bound_from_attrs(attrs.non_mp_wire_size_bound(), attrs.len(), framing)
+    }
+
+    // Keep the variable-length FlowSpec scan separate so fixed-family
+    // admission can inline its attribute-summary and framing arithmetic.
+    fn flowspec_announcement_wire_bound(&self, route: &FlowSpecRoute) -> usize {
+        // FlowSpec has plain Vec attributes, so reuse the same bound without
+        // allocation or a second maintained summary.
+        let raw = route.attributes.iter().fold(0_usize, |sum, attr| {
+            sum.saturating_add(rustbgpd_rib::attr_set::attribute_wire_bound(attr))
+        });
+        self.announcement_bound_from_attrs(
+            raw,
+            route.attributes.len(),
+            flowspec_nlri_wire_bound(&route.rule, route.rd.is_some()).saturating_add(32),
+        )
     }
 
     /// Complete single-entry withdrawal frame bound without reconstructing
