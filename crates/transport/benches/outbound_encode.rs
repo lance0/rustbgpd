@@ -25,17 +25,20 @@
 
 use rustbgpd_rib::PeerId;
 use std::hint::black_box;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rustbgpd_rib::AttrSet;
-use rustbgpd_rib::{EvpnRibRoute, OutboundRouteUpdate, Route, RouteOrigin, VpnRibRoute};
+use rustbgpd_rib::{
+    EvpnRibRoute, FlowSpecRoute, OutboundRouteUpdate, Route, RouteOrigin, VpnRibRoute,
+};
 use rustbgpd_transport::{OutboundEncodeBench, OutboundGroupBench};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute,
-    EvpnIpPrefixValue, EvpnRoute, Ipv4Prefix, MplsLabel, MplsLabelEntry, Origin, PathAttribute,
-    Prefix, Safi, VpnNlri, VpnPrefix,
+    EvpnIpPrefixValue, EvpnRoute, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
+    Ipv6Prefix, Ipv6PrefixOffset, MplsLabel, MplsLabelEntry, Origin, PathAttribute, Prefix, Safi,
+    VpnNlri, VpnPrefix,
 };
 
 /// Benches link the allocator the daemon ships with, so allocation-heavy
@@ -289,6 +292,92 @@ fn family_admission(c: &mut Criterion) {
     group.finish();
 }
 
+fn flowspec_routes(count: u32, distinct: bool, vpn_v6: bool) -> Vec<FlowSpecRoute> {
+    let rd = vpn_v6.then(|| "65000:1".parse().unwrap());
+    (0..count)
+        .map(|index| {
+            let prefix = if vpn_v6 {
+                FlowSpecPrefix::V6(Ipv6PrefixOffset {
+                    prefix: Ipv6Prefix::new(
+                        Ipv6Addr::from((0x2001_0db8_u128 << 96) | u128::from(index)),
+                        128,
+                    ),
+                    offset: 0,
+                })
+            } else {
+                FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32))
+            };
+            FlowSpecRoute {
+                rule: FlowSpecRule {
+                    components: vec![FlowSpecComponent::DestinationPrefix(prefix)],
+                },
+                afi: if vpn_v6 { Afi::Ipv6 } else { Afi::Ipv4 },
+                rd,
+                peer: PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 2).into()),
+                attributes: attrs(distinct.then_some(index)),
+                received_at: std::time::Instant::now(),
+                origin_type: RouteOrigin::Ebgp,
+                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+            }
+        })
+        .collect()
+}
+
+fn flowspec_admission(c: &mut Criterion) {
+    let mut group = c.benchmark_group("outbound_admission");
+    group.throughput(Throughput::Elements(10_000));
+    for (name, vpn_v6, family) in [
+        ("flowspec_v4", false, (Afi::Ipv4, Safi::FlowSpec)),
+        ("vpn_flowspec_v6", true, (Afi::Ipv6, Safi::FlowSpecVpn)),
+    ] {
+        for (shape, distinct) in [("equal_values", false), ("distinct_values", true)] {
+            let routes = flowspec_routes(10_000, distinct, vpn_v6);
+            let mut bench = OutboundEncodeBench::new(4_096);
+            group.bench_function(format!("{name}_{shape}"), |b| {
+                b.iter_custom(|iterations| {
+                    (0..iterations)
+                        .map(|_| {
+                            bench.send_paced_update(
+                                OutboundRouteUpdate {
+                                    flowspec_announce: black_box(&routes).clone(),
+                                    ..OutboundRouteUpdate::default()
+                                },
+                                family,
+                                false,
+                            )
+                        })
+                        .sum()
+                });
+            });
+        }
+        let keys: Vec<_> = flowspec_routes(10_000, false, vpn_v6)
+            .iter()
+            .map(FlowSpecRoute::selection_key)
+            .collect();
+        let mut bench = OutboundEncodeBench::new(4_096);
+        group.bench_function(format!("{name}_withdraw"), |b| {
+            b.iter_custom(|iterations| {
+                (0..iterations)
+                    .map(|_| {
+                        bench.send_paced_update(
+                            OutboundRouteUpdate {
+                                flowspec_withdraw: black_box(&keys).clone(),
+                                ..OutboundRouteUpdate::default()
+                            },
+                            family,
+                            false,
+                        )
+                    })
+                    .sum()
+            });
+        });
+    }
+    group.finish();
+}
+
 /// 50 sources x 40 prefixes, one interned attribute set per source.
 fn failover_announce() -> Arc<Vec<Route>> {
     let template = routes(1, "shared_arc")[0].clone();
@@ -354,6 +443,7 @@ fn run_benches(c: &mut Criterion) {
     bench(c);
     admission(c);
     family_admission(c);
+    flowspec_admission(c);
     failover(c);
 }
 

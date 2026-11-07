@@ -585,6 +585,9 @@ impl PendingOutbound {
             OutboundPhase::Eor => Some(30),
             // Header, UPDATE lengths, MP_UNREACH header/family, IPv6 /128 + path ID.
             OutboundPhase::Withdraw => Some(52),
+            OutboundPhase::VpnWithdraw => Some(62),
+            OutboundPhase::LabeledWithdraw => Some(54),
+            OutboundPhase::RtcWithdraw => Some(43),
             _ => None,
         };
         if let Some(length) = fixed_length {
@@ -602,13 +605,11 @@ impl PendingOutbound {
         macro_rules! announce {
             ($routes:expr, $offset:expr, $kind:ident) => {
                 fit_wire_lengths(
-                    export.announcement_wire_lengths(
-                        $routes
-                            .iter()
-                            .skip($offset)
-                            .take(rows)
-                            .map(ExportCandidate::$kind),
-                    ),
+                    $routes
+                        .iter()
+                        .skip($offset)
+                        .take(rows)
+                        .map(|route| export.announcement_wire_bound(ExportCandidate::$kind(route))),
                     available,
                 )
             };
@@ -616,13 +617,11 @@ impl PendingOutbound {
         macro_rules! withdraw {
             ($routes:expr, $kind:ident) => {
                 fit_wire_lengths(
-                    $routes.iter().skip(self.offset).take(rows).map(|route| {
-                        export
-                            .probe_withdrawal(ExportWithdrawal::$kind(route))
-                            .map_or(export.max_message_len(), |probe| {
-                                probe.encoded_len.min(export.max_message_len())
-                            })
-                    }),
+                    $routes
+                        .iter()
+                        .skip(self.offset)
+                        .take(rows)
+                        .map(|route| export.withdrawal_wire_bound(ExportWithdrawal::$kind(route))),
                     available,
                 )
             };
@@ -632,24 +631,27 @@ impl PendingOutbound {
             | OutboundPhase::Begin
             | OutboundPhase::End
             | OutboundPhase::Eor
-            | OutboundPhase::Withdraw => unreachable!("fixed-length phases handled above"),
+            | OutboundPhase::Withdraw
+            | OutboundPhase::VpnWithdraw
+            | OutboundPhase::LabeledWithdraw
+            | OutboundPhase::RtcWithdraw => unreachable!("fixed-length phases handled above"),
             OutboundPhase::Announce => fit_wire_lengths(
-                export.announcement_wire_lengths(
-                    self.update
-                        .announce
-                        .iter()
-                        .enumerate()
-                        .skip(self.offset)
-                        .take(rows)
-                        .map(|(index, route)| ExportCandidate::Unicast {
+                self.update
+                    .announce
+                    .iter()
+                    .enumerate()
+                    .skip(self.offset)
+                    .take(rows)
+                    .map(|(index, route)| {
+                        export.announcement_wire_bound(ExportCandidate::Unicast {
                             route,
                             next_hop_override: self
                                 .update
                                 .next_hop_override
                                 .get(index)
                                 .and_then(Option::as_ref),
-                        }),
-                ),
+                        })
+                    }),
                 available,
             ),
             OutboundPhase::FlowspecAnnounce => {
@@ -673,9 +675,6 @@ impl PendingOutbound {
             OutboundPhase::FlowspecWithdraw => withdraw!(self.update.flowspec_withdraw, FlowSpec),
             OutboundPhase::EvpnWithdraw => withdraw!(self.update.evpn_withdraw, Evpn),
             OutboundPhase::BgplsWithdraw => withdraw!(self.update.bgpls_withdraw, BgpLs),
-            OutboundPhase::VpnWithdraw => withdraw!(self.update.vpn_withdraw, Vpn),
-            OutboundPhase::LabeledWithdraw => withdraw!(self.update.labeled_withdraw, Labeled),
-            OutboundPhase::RtcWithdraw => withdraw!(self.update.rtc_withdraw, Rtc),
         }
     }
 

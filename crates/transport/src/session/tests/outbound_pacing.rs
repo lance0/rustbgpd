@@ -1401,35 +1401,37 @@ async fn marker_only_envelope_waits_for_complete_frame_capacity() {
 
 #[tokio::test(start_paused = true)]
 async fn oversized_route_resumes_to_existing_post_commit_failure() {
-    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
-    let (client, _server) = connected_stream_pair().await;
-    session.test_install_stream(client);
-    establish_test_session(&mut session, 65002).await;
-    session.timers.hold = None;
-    let (mut frames, completed) = hand_writer(&mut session);
-    session.writer_bulk_admitted = BYTE_BUDGET - 1;
-    let mut route = pacing_routes(1, true).pop().unwrap();
-    AttrSet::edit(&mut route.attributes, |attrs| {
-        attrs.push(PathAttribute::Communities((0..1_100).collect()));
-    });
-    session
-        .handle_outbound_route_update(pacing_update(&session, vec![route]))
-        .await;
-    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
-    assert!(
-        session.writer_priority_tx.is_some(),
-        "waiting is not an error"
-    );
-    completed.send_replace(session.writer_bulk_admitted);
-    admit_until_blocked(&mut session);
-    assert!(
-        session.writer_priority_tx.is_none(),
-        "the live encoder rejects the oversized route"
-    );
-    assert!(
-        frames.try_recv().is_err(),
-        "no oversized frame or successful EoR"
-    );
+    for communities in [1_100, 20_000] {
+        let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        session.timers.hold = None;
+        let (mut frames, completed) = hand_writer(&mut session);
+        session.writer_bulk_admitted = BYTE_BUDGET - 1;
+        let mut route = pacing_routes(1, true).pop().unwrap();
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities((0..communities).collect()));
+        });
+        session
+            .handle_outbound_route_update(pacing_update(&session, vec![route]))
+            .await;
+        assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+        assert!(
+            session.writer_priority_tx.is_some(),
+            "waiting is not an error"
+        );
+        completed.send_replace(session.writer_bulk_admitted);
+        admit_until_blocked(&mut session);
+        assert!(
+            session.writer_priority_tx.is_none(),
+            "the live encoder rejects the oversized route"
+        );
+        assert!(
+            frames.try_recv().is_err(),
+            "no oversized frame or successful EoR"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1558,7 +1560,367 @@ async fn every_family_waits_for_complete_announcement_and_withdrawal_frames() {
     }
 }
 
-async fn assert_family_frame_wait(family: (Afi, Safi), mut update: OutboundRouteUpdate) {
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one wire-bound matrix covers every maximum NLRI shape and both directions"
+)]
+async fn maximum_family_shapes_fit_reserved_frames_and_keep_the_cursor() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
+        EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnSmet, MacAddress, MplsLabel,
+    };
+    macro_rules! family {
+        ($family:expr, $route:expr, $announce:ident, $withdraw:ident) => {{
+            let route = $route;
+            let key = route.key();
+            for update in [
+                OutboundRouteUpdate {
+                    $announce: vec![route].into(),
+                    ..OutboundRouteUpdate::default()
+                },
+                OutboundRouteUpdate {
+                    $withdraw: vec![key],
+                    ..OutboundRouteUpdate::default()
+                },
+            ] {
+                assert_family_frame_bound($family, update, true).await;
+            }
+        }};
+    }
+    let rd = "65000:100".parse().unwrap();
+    let v6 = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+    let esi = EthernetSegmentIdentifier([1; 10]);
+    let tag = EthernetTagId(100);
+    let label = MplsLabel::new(100);
+    for nlri in [
+        EvpnRoute::EadPerEs(EvpnEadPerEs {
+            rd,
+            esi,
+            ethernet_tag: EthernetTagId(u32::MAX),
+            label,
+        }),
+        EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+            rd,
+            esi,
+            ethernet_tag: tag,
+            label,
+        }),
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi,
+            ethernet_tag: tag,
+            mac: MacAddress([1; 6]),
+            ip: Some(v6.into()),
+            label1: label,
+            label2: Some(label),
+        }),
+        EvpnRoute::Imet(EvpnImet {
+            rd,
+            ethernet_tag: tag,
+            originator_ip: v6.into(),
+        }),
+        EvpnRoute::Es(EvpnEs {
+            rd,
+            esi,
+            originator_ip: v6.into(),
+        }),
+        EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: tag,
+            prefix: EvpnIpPrefixValue::V6(Ipv6Prefix::new(v6, 128)),
+            gateway: Ipv6Addr::UNSPECIFIED.into(),
+            label,
+        }),
+        EvpnRoute::Smet(EvpnSmet {
+            rd,
+            ethernet_tag: tag,
+            source_ip: Some(v6.into()),
+            group_ip: Some("ff3e::1".parse().unwrap()),
+            originator_ip: v6.into(),
+            flags: 2,
+        }),
+    ] {
+        let mut route = make_smet_route(2);
+        route.route = nlri;
+        route.next_hop = v6.into();
+        family!(
+            (Afi::L2Vpn, Safi::Evpn),
+            route,
+            evpn_announce,
+            evpn_withdraw
+        );
+    }
+    let scope = Box::new(rustbgpd_rib::NextHopScope {
+        interface: "writer-bound".into(),
+        ifindex: 7,
+    });
+    let mut vpn = make_vpn_rib_route(100);
+    vpn.nlri.prefix = VpnPrefix::v6(v6, 128).unwrap();
+    vpn.next_hop = v6.into();
+    vpn.link_local_next_hop = Some("fe80::1".parse().unwrap());
+    vpn.next_hop_scope = Some(scope.clone());
+    vpn.path_id = u32::MAX;
+    family!((Afi::Ipv6, Safi::MplsVpn), vpn, vpn_announce, vpn_withdraw);
+    let mut labeled = make_labeled_rib_route(100);
+    labeled.nlri.prefix = Prefix::V6(Ipv6Prefix::new(v6, 128));
+    labeled.next_hop = v6.into();
+    labeled.link_local_next_hop = Some("fe80::1".parse().unwrap());
+    labeled.next_hop_scope = Some(scope.clone());
+    labeled.path_id = u32::MAX;
+    family!(
+        (Afi::Ipv6, Safi::LabeledUnicast),
+        labeled,
+        labeled_announce,
+        labeled_withdraw
+    );
+    let mut rtc = make_rtc_rib_route(100);
+    rtc.next_hop = v6.into();
+    family!(
+        (Afi::Ipv4, Safi::RtConstrain),
+        rtc,
+        rtc_announce,
+        rtc_withdraw
+    );
+    let mut bgpls = make_bgpls_route(1);
+    bgpls.family = rustbgpd_rib::BgpLsFamily::LinkStateVpn;
+    bgpls.nlri.route_distinguisher = Some(rd.0);
+    bgpls.nlri.payload = vec![0; 4_096].into();
+    bgpls.next_hop = v6.into();
+    family!(
+        (Afi::BgpLs, Safi::BgpLsVpn),
+        bgpls,
+        bgpls_announce,
+        bgpls_withdraw
+    );
+    let mut unicast = make_v6_unicast_route(v6);
+    unicast.prefix = Prefix::V6(Ipv6Prefix::new(v6, 128));
+    unicast.link_local_next_hop = Some("fe80::1".parse().unwrap());
+    unicast.next_hop_scope = Some(scope);
+    unicast.path_id = u32::MAX;
+    for update in [
+        OutboundRouteUpdate {
+            announce: vec![unicast.clone()].into(),
+            ..OutboundRouteUpdate::default()
+        },
+        OutboundRouteUpdate {
+            withdraw: vec![(unicast.prefix, unicast.path_id)],
+            ..OutboundRouteUpdate::default()
+        },
+    ] {
+        assert_family_frame_bound((Afi::Ipv6, Safi::Unicast), update, true).await;
+    }
+    for rd in [None, Some(rd)] {
+        let mut route = make_flowspec_route();
+        route.afi = Afi::Ipv6;
+        route.rd = rd;
+        // Type byte + two bytes per numeric term, plus optional RD: 4095.
+        let terms = if rd.is_some() { 2_043 } else { 2_047 };
+        route.rule = FlowSpecRule {
+            components: vec![FlowSpecComponent::Port(
+                (0..terms)
+                    .map(|index| NumericMatch {
+                        end_of_list: index + 1 == terms,
+                        and_bit: false,
+                        lt: false,
+                        gt: false,
+                        eq: true,
+                        value: 80,
+                    })
+                    .collect(),
+            )],
+        };
+        assert_eq!(
+            route.rule.encoded_len(Afi::Ipv6) + usize::from(rd.is_some()) * 8,
+            4_095
+        );
+        let key = FlowSpecKey {
+            afi: route.afi,
+            rd,
+            rule: route.rule.clone(),
+        };
+        let family = key.family();
+        for update in [
+            OutboundRouteUpdate {
+                flowspec_announce: vec![route],
+                ..OutboundRouteUpdate::default()
+            },
+            OutboundRouteUpdate {
+                flowspec_withdraw: vec![key],
+                ..OutboundRouteUpdate::default()
+            },
+        ] {
+            assert_family_frame_bound(family, update, true).await;
+        }
+    }
+}
+
+fn small_flowspec_route(index: usize, vpn_v6: bool, distinct: bool) -> FlowSpecRoute {
+    let mut route = make_flowspec_route();
+    route.afi = if vpn_v6 { Afi::Ipv6 } else { Afi::Ipv4 };
+    route.rd = vpn_v6.then(|| "65000:1".parse().unwrap());
+    route.rule.components = vec![FlowSpecComponent::DestinationPrefix(if vpn_v6 {
+        FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+            prefix: Ipv6Prefix::new(
+                Ipv6Addr::from((0x2001_0db8_u128 << 96) | u128::try_from(index).unwrap()),
+                128,
+            ),
+            offset: 0,
+        })
+    } else {
+        FlowSpecPrefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(0x1400_0000 | u32::try_from(index).unwrap()),
+            32,
+        ))
+    })];
+    route.attributes.extend([
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65_002, 64_600, 64_700])],
+        }),
+        PathAttribute::Communities(vec![100, 200]),
+        PathAttribute::Med(if distinct {
+            u32::try_from(index).unwrap()
+        } else {
+            0
+        }),
+    ]);
+    route
+}
+
+#[tokio::test(start_paused = true)]
+async fn small_flowspec_rules_admit_a_full_slice_with_available_credit() {
+    const SLICE: usize = super::super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    for vpn_v6 in [false, true] {
+        for mode in 0..3 {
+            let (mut session, _commands, _rib_rx) =
+                make_test_session_with_channels(65001, 65002, 64);
+            let (client, _server) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            establish_test_session(&mut session, 65002).await;
+            let family = if vpn_v6 {
+                (Afi::Ipv6, Safi::FlowSpecVpn)
+            } else {
+                (Afi::Ipv4, Safi::FlowSpec)
+            };
+            Arc::make_mut(session.negotiated.as_mut().unwrap())
+                .negotiated_families
+                .push(family);
+            session.timers.hold = None;
+            let (mut frames, completed) =
+                hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+            let routes: Vec<_> = (0..=SLICE)
+                .map(|index| small_flowspec_route(index, vpn_v6, mode == 1))
+                .collect();
+            let expected: Vec<_> = routes.iter().map(|route| route.rule.clone()).collect();
+            let mut update = OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                end_of_rib: vec![family],
+                ..OutboundRouteUpdate::default()
+            };
+            if mode == 2 {
+                update.flowspec_withdraw =
+                    routes.iter().map(FlowSpecRoute::selection_key).collect();
+            } else {
+                update.flowspec_announce = routes;
+            }
+            session.handle_outbound_route_update(update).await;
+            let mut seen = Vec::new();
+            let mut eors = 0;
+            for step in 0..2 {
+                while let Ok(mut frame) = frames.try_recv() {
+                    let Message::Update(update) =
+                        rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN)
+                            .unwrap()
+                    else {
+                        panic!("UPDATE")
+                    };
+                    let parsed = update.parse(true, false, &[]).unwrap();
+                    for attr in parsed.attributes {
+                        match attr {
+                            PathAttribute::MpReachNlri(mp) => {
+                                seen.extend(mp.flowspec_announced);
+                                seen.extend(
+                                    mp.vpn_flowspec_announced.into_iter().map(|nlri| nlri.rule),
+                                );
+                            }
+                            PathAttribute::MpUnreachNlri(mp) => {
+                                if mp.flowspec_withdrawn.is_empty()
+                                    && mp.vpn_flowspec_withdrawn.is_empty()
+                                {
+                                    eors += 1;
+                                }
+                                seen.extend(mp.flowspec_withdrawn);
+                                seen.extend(
+                                    mp.vpn_flowspec_withdrawn.into_iter().map(|nlri| nlri.rule),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if step == 0 {
+                    assert_eq!(seen.len(), SLICE, "first slice, vpn={vpn_v6}, mode={mode}");
+                    assert_eq!(seen, expected[..SLICE]);
+                    assert_eq!(eors, 0);
+                    assert!(session.pending_outbound.is_some());
+                    completed.send_replace(session.writer_bulk_admitted);
+                    admit_until_blocked(&mut session);
+                }
+            }
+            assert_eq!(seen, expected);
+            assert_eq!(eors, 1);
+            assert!(session.pending_outbound.is_none());
+            assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+            assert!(session.writer_priority_tx.is_some());
+        }
+    }
+}
+
+async fn assert_family_frame_wait(family: (Afi, Safi), update: OutboundRouteUpdate) {
+    assert_family_frame_bound(family, update, false).await;
+}
+
+fn single_row_wire_bound(
+    profile: &export::SessionExportProfile,
+    update: &OutboundRouteUpdate,
+) -> usize {
+    if let Some(route) = update.announce.first() {
+        return profile.announcement_wire_bound(ExportCandidate::Unicast {
+            route,
+            next_hop_override: update.next_hop_override.first().and_then(Option::as_ref),
+        });
+    }
+    if let Some((prefix, path_id)) = update.unicast_withdrawals().next() {
+        return profile.withdrawal_wire_bound(ExportWithdrawal::Unicast {
+            prefix: *prefix,
+            path_id: *path_id,
+        });
+    }
+    macro_rules! family {
+        ($announce:ident, $withdraw:ident, $kind:ident) => {
+            if let Some(route) = update.$announce.first() {
+                return profile.announcement_wire_bound(ExportCandidate::$kind(route));
+            }
+            if let Some(key) = update.$withdraw.first() {
+                return profile.withdrawal_wire_bound(ExportWithdrawal::$kind(key));
+            }
+        };
+    }
+    family!(flowspec_announce, flowspec_withdraw, FlowSpec);
+    family!(evpn_announce, evpn_withdraw, Evpn);
+    family!(bgpls_announce, bgpls_withdraw, BgpLs);
+    family!(vpn_announce, vpn_withdraw, Vpn);
+    family!(labeled_announce, labeled_withdraw, Labeled);
+    family!(rtc_announce, rtc_withdraw, Rtc);
+    panic!("a single route fixture is required");
+}
+
+async fn assert_family_frame_bound(
+    family: (Afi, Safi),
+    mut update: OutboundRouteUpdate,
+    extended_and_add_path: bool,
+) {
     let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
@@ -1567,16 +1929,42 @@ async fn assert_family_frame_wait(family: (Afi, Safi), mut update: OutboundRoute
     if !negotiated.negotiated_families.contains(&family) {
         negotiated.negotiated_families.push(family);
     }
+    let add_path = extended_and_add_path
+        && matches!(
+            family.1,
+            Safi::Unicast | Safi::MplsVpn | Safi::LabeledUnicast
+        );
+    if extended_and_add_path {
+        negotiated.peer_extended_message = true;
+        if add_path {
+            negotiated
+                .add_path_families
+                .insert(family, AddPathMode::Send);
+        }
+        for safi in [Safi::Unicast, Safi::MplsVpn, Safi::LabeledUnicast] {
+            negotiated
+                .extended_nexthop_families
+                .insert((Afi::Ipv4, safi), Afi::Ipv6);
+        }
+        session.config.route_server_client = true;
+        session.link_local_next_hop_scope = Some(rustbgpd_rib::NextHopScope {
+            interface: "writer-bound".into(),
+            ifindex: 7,
+        });
+    }
     session.timers.hold = None;
-    update.exact_export_snapshot = Some(session.publish_export_profile());
+    let profile = session.publish_export_profile();
+    let bound = single_row_wire_bound(&profile, &update);
+    update.exact_export_snapshot = Some(profile);
     update.end_of_rib = vec![family];
     let (mut frames, completed) = hand_writer(&mut session);
-    session.writer_bulk_admitted = BYTE_BUDGET - 1;
+    session.writer_bulk_admitted = BYTE_BUDGET - u64::try_from(bound).unwrap() + 1;
+    let held = session.writer_bulk_admitted;
     session.handle_outbound_route_update(update).await;
     for _ in 0..8 {
         session.advance_pending_outbound();
     }
-    assert_eq!(session.writer_bytes_held(), BYTE_BUDGET - 1, "{family:?}");
+    assert_eq!(session.writer_bytes_held(), held, "{family:?}");
     assert!(
         frames.try_recv().is_err(),
         "{family:?}: the frame cannot fit"
@@ -1594,13 +1982,33 @@ async fn assert_family_frame_wait(family: (Afi, Safi), mut update: OutboundRoute
         2,
         "{family:?}: route frame then EoR, each once"
     );
+    let mut first = true;
     while let Ok(mut frame) = frames.try_recv() {
-        let Message::Update(update) =
-            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        if first {
+            assert!(
+                frame.len() <= bound,
+                "{family:?}: actual frame {} > bound {bound}",
+                frame.len()
+            );
+            first = false;
+        }
+        let max_len = if extended_and_add_path {
+            rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN
+        } else {
+            rustbgpd_wire::MAX_MESSAGE_LEN
+        };
+        let Message::Update(update) = rustbgpd_wire::decode_message(&mut frame, max_len).unwrap()
         else {
             panic!("{family:?}: non-UPDATE")
         };
-        update.parse(true, false, &[]).unwrap();
+        let families = if add_path { vec![family] } else { vec![] };
+        update
+            .parse(
+                true,
+                add_path && family == (Afi::Ipv4, Safi::Unicast),
+                &families,
+            )
+            .unwrap();
     }
     assert!(
         session.writer_priority_tx.is_some(),
@@ -1710,6 +2118,30 @@ async fn large_frame_admission_stays_within_budget(extended: bool) {
     assert!(session.pending_outbound.is_none());
 }
 
+fn uniform_announcement_reservation(update: &OutboundRouteUpdate) -> u64 {
+    let profile = update
+        .exact_export_snapshot
+        .as_ref()
+        .unwrap()
+        .as_any()
+        .downcast_ref::<export::SessionExportProfile>()
+        .unwrap();
+    let bound = |route| {
+        profile.announcement_wire_bound(ExportCandidate::Unicast {
+            route,
+            next_hop_override: None,
+        })
+    };
+    let reservation = bound(&update.announce[0]);
+    assert!(
+        update
+            .announce
+            .iter()
+            .all(|route| bound(route) == reservation)
+    );
+    u64::try_from(reservation).unwrap()
+}
+
 /// A reader that stops draining holds the writer at its byte budget, not at
 /// its frame count: admission stops with the cursor kept, and with send hold
 /// enabled no deadline runs and no Cease is queued. Completing the backlog
@@ -1727,9 +2159,9 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
 
     let mut routes = heavy_routes(ROUTES + 1);
     let last = routes.split_off(ROUTES as usize);
-    session
-        .handle_outbound_route_update(pacing_update(&session, routes))
-        .await;
+    let update = pacing_update(&session, routes);
+    let reservation = uniform_announcement_reservation(&update);
+    session.handle_outbound_route_update(update).await;
     session
         .outbound_tx
         .try_send(pacing_update(&session, last))
@@ -1741,9 +2173,10 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     assert!(pending.bytes_blocked(), "admission waits on bytes");
     let first = frames.try_recv().unwrap();
     let frame = u64::try_from(first.len()).unwrap();
+    assert!(frame <= reservation);
     assert!(
-        held <= BYTE_BUDGET && held + frame > BYTE_BUDGET,
-        "stops before the next complete frame exceeds the budget: {held}"
+        held <= BYTE_BUDGET && held + reservation > BYTE_BUDGET,
+        "stops before the next complete-frame reservation exceeds the budget: {held}"
     );
     assert!(
         frames.len() < frames.max_capacity() / 4,
@@ -1812,28 +2245,32 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     );
 }
 
-/// Wake only when the next complete frame fits, so a short completion cannot
-/// spin the session on a frame it still cannot admit.
+/// Wake only when the next complete-frame reservation fits, so a short
+/// completion cannot spin the session on a row it still cannot admit.
 #[tokio::test(start_paused = true)]
-async fn byte_wait_wakes_exactly_when_the_next_frame_fits() {
+async fn byte_wait_wakes_exactly_when_the_next_frame_reservation_fits() {
     let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
     let (mut frames, completed) = hand_writer(&mut session);
-    session
-        .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
-        .await;
+    let update = pacing_update(&session, heavy_routes(6_000));
+    let reservation = uniform_announcement_reservation(&update);
+    session.handle_outbound_route_update(update).await;
     admit_until_blocked(&mut session);
     let next_frame = frames.try_recv().unwrap().len() as u64;
-    let needed = session.writer_bulk_admitted + next_frame - BYTE_BUDGET;
+    assert!(next_frame <= reservation);
+    let needed = session.writer_bulk_admitted + reservation - BYTE_BUDGET;
     completed.send_replace(needed - 1);
-    assert!(!envelope_wakes(&session).await, "one byte short of a frame");
+    assert!(
+        !envelope_wakes(&session).await,
+        "one byte short of its reservation"
+    );
     completed.send_replace(needed);
     assert!(
         envelope_wakes(&session).await,
-        "the complete frame now fits"
+        "the complete-frame reservation now fits"
     );
 }
 
