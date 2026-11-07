@@ -3372,62 +3372,193 @@ fn vpn_labeled_add_path_session(
     (session, rib_rx)
 }
 
-fn vpn_nlri() -> rustbgpd_wire::VpnNlri {
+/// An IPv4 VPN NLRI for 10.0.`octet`.0/24 under RD 65000:`rd`.
+fn vpn_nlri_at(rd: u8, octet: u8, label: u32) -> rustbgpd_wire::VpnNlri {
     rustbgpd_wire::VpnNlri {
-        labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
-        route_distinguisher: rustbgpd_wire::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
-        prefix: rustbgpd_wire::VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+        labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+        route_distinguisher: rustbgpd_wire::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, rd]),
+        prefix: rustbgpd_wire::VpnPrefix::v4(Ipv4Addr::new(10, 0, octet, 0), 24).unwrap(),
     }
 }
 
-fn labeled_nlri() -> rustbgpd_wire::LabeledNlri {
+/// An IPv4 labeled-unicast NLRI for 10.0.`octet`.0/24.
+fn labeled_nlri_at(octet: u8, label: u32) -> rustbgpd_wire::LabeledNlri {
     rustbgpd_wire::LabeledNlri {
-        labels: vec![MplsLabelEntry::try_new(4094, 0, true).unwrap()],
-        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)),
+        labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24)),
     }
 }
 
-/// One `MP_REACH_NLRI` UPDATE announcing `path_ids` for one VPN or labeled NLRI.
-fn vpn_or_labeled_update(vpn: bool, path_ids: impl Iterator<Item = u32>) -> UpdateMessage {
-    let (mut vpn_announced, mut labeled_announced) = (Vec::new(), Vec::new());
-    for path_id in path_ids {
-        if vpn {
-            vpn_announced.push(rustbgpd_wire::VpnNlriEntry {
+/// One VPN or labeled path: `(rd, octet, path_id, label)`. The RD is
+/// ignored for labeled unicast, and reads back as 0.
+type KeyedPath = (u8, u8, u32, u32);
+
+/// The identity the cap counts: `(rd, octet, path_id)`.
+type KeyedId = (u8, u8, u32);
+
+/// One UPDATE announcing and withdrawing VPN or labeled paths. An
+/// `as_path` containing the local AS makes the announcements a loop.
+fn vpn_labeled_update(
+    vpn: bool,
+    announced: &[KeyedPath],
+    withdrawn: &[KeyedPath],
+    as_path: Vec<u32>,
+) -> UpdateMessage {
+    let safi = if vpn {
+        Safi::MplsVpn
+    } else {
+        Safi::LabeledUnicast
+    };
+    let vpn_entries = |paths: &[KeyedPath]| -> Vec<rustbgpd_wire::VpnNlriEntry> {
+        paths
+            .iter()
+            .filter(|_| vpn)
+            .map(|&(rd, octet, path_id, label)| rustbgpd_wire::VpnNlriEntry {
                 path_id,
-                nlri: vpn_nlri(),
-            });
-        } else {
-            labeled_announced.push(rustbgpd_wire::LabeledNlriEntry {
-                path_id,
-                nlri: labeled_nlri(),
-            });
-        }
-    }
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002])],
-        }),
-        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+                nlri: vpn_nlri_at(rd, octet, label),
+            })
+            .collect()
+    };
+    let labeled_entries = |paths: &[KeyedPath]| -> Vec<rustbgpd_wire::LabeledNlriEntry> {
+        paths
+            .iter()
+            .filter(|_| !vpn)
+            .map(
+                |&(_, octet, path_id, label)| rustbgpd_wire::LabeledNlriEntry {
+                    path_id,
+                    nlri: labeled_nlri_at(octet, label),
+                },
+            )
+            .collect()
+    };
+    let mut attrs = Vec::new();
+    if !announced.is_empty() {
+        attrs.push(PathAttribute::Origin(Origin::Igp));
+        attrs.push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(as_path)],
+        }));
+        attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
-            safi: if vpn {
-                Safi::MplsVpn
-            } else {
-                Safi::LabeledUnicast
-            },
+            safi,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
             link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
-            labeled_announced,
-            vpn_announced,
+            labeled_announced: labeled_entries(announced),
+            vpn_announced: vpn_entries(announced),
             rtc_announced: vec![],
             vpn_flowspec_announced: vec![],
-        })),
-    ];
+        })));
+    }
+    if !withdrawn.is_empty() {
+        attrs.push(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
+            afi: Afi::Ipv4,
+            safi,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
+            vpn_withdrawn: vpn_entries(withdrawn),
+            labeled_withdrawn: labeled_entries(withdrawn),
+            rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
+        })));
+    }
     UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body)
+}
+
+/// One `MP_REACH_NLRI` UPDATE announcing `path_ids` for one VPN or labeled NLRI.
+fn vpn_or_labeled_update(vpn: bool, path_ids: impl Iterator<Item = u32>) -> UpdateMessage {
+    let paths: Vec<KeyedPath> = path_ids.map(|path_id| (1, 1, path_id, 4093)).collect();
+    vpn_labeled_update(vpn, &paths, &[], vec![65002])
+}
+
+fn vpn_octet(prefix: rustbgpd_wire::VpnPrefix) -> u8 {
+    match prefix {
+        rustbgpd_wire::VpnPrefix::V4 { addr, .. } => addr.octets()[2],
+        rustbgpd_wire::VpnPrefix::V6 { .. } => unreachable!("the tests use IPv4 VPN"),
+    }
+}
+
+fn labeled_octet(prefix: Prefix) -> u8 {
+    match prefix {
+        Prefix::V4(prefix) => prefix.addr.octets()[2],
+        Prefix::V6(_) => unreachable!("the tests use IPv4 labeled unicast"),
+    }
+}
+
+/// Identities the RIB received as announced and as withdrawn, in order.
+fn drained_vpn_labeled_paths(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+) -> (Vec<KeyedId>, Vec<KeyedId>) {
+    let (mut announced_ids, mut withdrawn_ids) = (Vec::new(), Vec::new());
+    while let Ok(update) = rib_rx.try_recv() {
+        match update {
+            RibUpdate::VpnRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => {
+                announced_ids.extend(announced.iter().map(|route| {
+                    (
+                        route.nlri.route_distinguisher.0[7],
+                        vpn_octet(route.nlri.prefix),
+                        route.path_id,
+                    )
+                }));
+                withdrawn_ids.extend(withdrawn.iter().map(|key| {
+                    (
+                        key.nlri_key.route_distinguisher.0[7],
+                        vpn_octet(key.nlri_key.prefix),
+                        key.path_id,
+                    )
+                }));
+            }
+            RibUpdate::LabeledRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => {
+                announced_ids.extend(
+                    announced
+                        .iter()
+                        .map(|route| (0, labeled_octet(route.nlri.prefix), route.path_id)),
+                );
+                withdrawn_ids.extend(
+                    withdrawn
+                        .iter()
+                        .map(|key| (0, labeled_octet(key.prefix), key.path_id)),
+                );
+            }
+            _ => {}
+        }
+    }
+    (announced_ids, withdrawn_ids)
+}
+
+/// The VPN and labeled identities the session holds, sorted.
+fn known_vpn_labeled_paths(session: &PeerSession) -> Vec<KeyedId> {
+    let mut known: Vec<KeyedId> = session
+        .known_vpn
+        .iter()
+        .map(|key| {
+            (
+                key.nlri_key.route_distinguisher.0[7],
+                vpn_octet(key.nlri_key.prefix),
+                key.path_id,
+            )
+        })
+        .chain(
+            session
+                .known_labeled
+                .iter()
+                .map(|key| (0, labeled_octet(key.prefix), key.path_id)),
+        )
+        .collect();
+    known.sort_unstable();
+    known
 }
 
 /// Path IDs the RIB received in VPN or labeled route updates.
@@ -3487,6 +3618,28 @@ async fn add_path_receive_default_cap_covers_vpn_and_labeled() {
             vec![0],
             "{family}"
         );
+        // An MP_UNREACH withdrawal frees exactly one slot.
+        session
+            .process_update(vpn_labeled_update(vpn, &[], &[(1, 1, 5, 4093)], vec![]))
+            .await;
+        let rd = u8::from(vpn);
+        assert_eq!(
+            drained_vpn_labeled_paths(&mut rib_rx),
+            (vec![], vec![(rd, 1, 5)]),
+            "{family}"
+        );
+        session
+            .process_update(vpn_or_labeled_update(vpn, [cap + 9, cap + 10].into_iter()))
+            .await;
+        assert_eq!(
+            delivered_vpn_labeled_path_ids(&mut rib_rx),
+            vec![cap + 9],
+            "{family}"
+        );
+        assert!(
+            (add_path_receive_attempts(&session, family, "block") - 4.0).abs() < f64::EPSILON,
+            "{family}: each withheld attempt is counted once"
+        );
     }
 }
 
@@ -3530,5 +3683,264 @@ async fn add_path_receive_warning_blocks_at_a_cap_of_the_ceiling() {
     );
     assert!(
         add_path_receive_attempts(&session, "l3vpn_ipv4_unicast", "warning").abs() < f64::EPSILON
+    );
+}
+
+/// The VPN cap key is RD + prefix: the same /24 under two RDs counts
+/// separately, and a label change replaces a path without taking a slot.
+/// Labeled unicast keys on the prefix alone, so a new label for a held ID
+/// is a replacement too. The log key prints the RD in `ASN:nn` form.
+#[tokio::test]
+async fn add_path_receive_cap_keys_vpn_by_rd_and_prefix() {
+    let (mut session, mut rib_rx) =
+        vpn_labeled_add_path_session(crate::config::MaxPrefixAction::Block, 2);
+    // Distinct path IDs per RD, so a key that dropped the RD would withhold
+    // every RD 2 path rather than pass them as already-admitted IDs.
+    let both_rds = [
+        (1, 1, 0, 100),
+        (1, 1, 1, 101),
+        (1, 1, 2, 102),
+        (2, 1, 10, 100),
+        (2, 1, 11, 101),
+        (2, 1, 12, 102),
+    ];
+    session
+        .process_update(vpn_labeled_update(true, &both_rds, &[], vec![65002]))
+        .await;
+    assert_eq!(
+        drained_vpn_labeled_paths(&mut rib_rx).0,
+        vec![(1, 1, 0), (1, 1, 1), (2, 1, 10), (2, 1, 11)]
+    );
+    session
+        .process_update(vpn_labeled_update(
+            true,
+            &[(1, 1, 0, 999), (1, 1, 7, 999)],
+            &[],
+            vec![65002],
+        ))
+        .await;
+    assert_eq!(drained_vpn_labeled_paths(&mut rib_rx).0, vec![(1, 1, 0)]);
+    session
+        .process_update(vpn_labeled_update(
+            false,
+            &[
+                (0, 1, 0, 100),
+                (0, 1, 1, 200),
+                (0, 1, 0, 300),
+                (0, 1, 2, 400),
+            ],
+            &[],
+            vec![65002],
+        ))
+        .await;
+    assert_eq!(
+        drained_vpn_labeled_paths(&mut rib_rx).0,
+        vec![(0, 1, 0), (0, 1, 1), (0, 1, 0)]
+    );
+    let nlri = vpn_nlri_at(1, 1, 100);
+    let key = PathCapKey::Vpn(rustbgpd_wire::VpnRouteKey {
+        route_distinguisher: nlri.route_distinguisher,
+        prefix: nlri.prefix,
+    });
+    assert_eq!(key.to_string(), "65000:1 10.0.1.0/24");
+}
+
+/// Under `"warning"` with `receive_max` below 1024, IDs between the cap and
+/// the 1024 ceiling are admitted and counted as warnings; one UPDATE cannot
+/// carry a key past the ceiling, where the excess is withheld as `"block"`.
+#[tokio::test]
+async fn add_path_receive_warning_admits_up_to_the_ceiling_for_vpn_and_labeled() {
+    let ceiling = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    for (vpn, family) in [
+        (true, "l3vpn_ipv4_unicast"),
+        (false, "ipv4_labeled_unicast"),
+    ] {
+        let (mut session, mut rib_rx) =
+            vpn_labeled_add_path_session(crate::config::MaxPrefixAction::Warning, 2);
+        session
+            .process_update(vpn_or_labeled_update(vpn, 0..ceiling + 6))
+            .await;
+        assert!(!session.stop_requested, "{family}");
+        assert_eq!(
+            delivered_vpn_labeled_path_ids(&mut rib_rx),
+            (0..ceiling).collect::<Vec<_>>(),
+            "{family}"
+        );
+        let warning = add_path_receive_attempts(&session, family, "warning");
+        let block = add_path_receive_attempts(&session, family, "block");
+        assert!(
+            (warning - f64::from(ceiling - 2)).abs() < f64::EPSILON,
+            "{family}: warning {warning}"
+        );
+        assert!(
+            (block - 6.0).abs() < f64::EPSILON,
+            "{family}: block {block}"
+        );
+        session
+            .process_update(vpn_or_labeled_update(vpn, ceiling + 100..ceiling + 103))
+            .await;
+        assert!(
+            delivered_vpn_labeled_path_ids(&mut rib_rx).is_empty(),
+            "{family}"
+        );
+    }
+}
+
+/// Deterministic per-key cap model for VPN and labeled unicast. Random
+/// announce, withdraw, label-change replacement, AS-loop treat-as-withdraw
+/// and BoRR/EoRR refresh sweeps must match a reference model step by step,
+/// so a sweep or withdrawal that drops an identity without releasing its
+/// cap slot (or the reverse) diverges within a few hundred UPDATEs.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one model loop keeps the session and reference state in step"
+)]
+async fn add_path_receive_cap_vpn_labeled_matches_a_per_key_model() {
+    struct Lcg(u64);
+    impl Lcg {
+        fn below(&mut self, n: u32) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            u32::try_from(self.0 >> 33).unwrap() % n
+        }
+        fn below_u8(&mut self, n: u8) -> u8 {
+            u8::try_from(self.below(u32::from(n))).unwrap()
+        }
+    }
+    let cap = 3usize;
+    let mut updates = 0;
+    let mut withheld_total = 0;
+    for seed in 1..=2u64 {
+        let (mut session, mut rib_rx) =
+            vpn_labeled_add_path_session(crate::config::MaxPrefixAction::Block, 3);
+        let mut rng = Lcg(seed);
+        let mut known: std::collections::HashSet<KeyedId> = std::collections::HashSet::new();
+        let mut window: [Option<std::collections::HashSet<KeyedId>>; 2] = [None, None];
+        let mut withheld = [0u32; 2];
+        let sorted = |set: &std::collections::HashSet<KeyedId>| {
+            let mut ids: Vec<KeyedId> = set.iter().copied().collect();
+            ids.sort_unstable();
+            ids
+        };
+        for step in 0..400 {
+            let vpn = rng.below(2) == 0;
+            let family = usize::from(!vpn);
+            let op = rng.below(20);
+            if op == 0 {
+                let safi = if vpn {
+                    Safi::MplsVpn
+                } else {
+                    Safi::LabeledUnicast
+                };
+                if let Some(stale) = window[family].take() {
+                    session.end_refresh_accounting(Afi::Ipv4, safi);
+                    for id in stale {
+                        known.remove(&id);
+                    }
+                } else {
+                    session.begin_refresh_accounting(Afi::Ipv4, safi);
+                    window[family] = Some(
+                        known
+                            .iter()
+                            .copied()
+                            .filter(|id| (id.0 != 0) == vpn)
+                            .collect(),
+                    );
+                }
+                assert_eq!(
+                    known_vpn_labeled_paths(&session),
+                    sorted(&known),
+                    "seed {seed} step {step} refresh"
+                );
+                continue;
+            }
+            let looped = op <= 3;
+            let pick = |rng: &mut Lcg| -> KeyedPath {
+                let (rd, octet) = if vpn {
+                    (1 + rng.below_u8(2), 1 + rng.below_u8(2))
+                } else {
+                    (0, 1 + rng.below_u8(3))
+                };
+                (rd, octet, rng.below(7), 16 + rng.below(1000))
+            };
+            let withdrawn: Vec<KeyedPath> = (0..rng.below(4)).map(|_| pick(&mut rng)).collect();
+            let announced: Vec<KeyedPath> = (0..rng.below(8)).map(|_| pick(&mut rng)).collect();
+            if withdrawn.is_empty() && announced.is_empty() {
+                continue;
+            }
+            let as_path = if looped {
+                vec![65002, 65001]
+            } else {
+                vec![65002]
+            };
+            session
+                .process_update(vpn_labeled_update(vpn, &announced, &withdrawn, as_path))
+                .await;
+            assert!(!session.stop_requested);
+            let (got_announced, mut got_withdrawn) = drained_vpn_labeled_paths(&mut rib_rx);
+
+            let mut want_announced = Vec::new();
+            let mut want_withdrawn: Vec<KeyedId> = withdrawn
+                .iter()
+                .map(|&(rd, octet, id, _)| (rd, octet, id))
+                .collect();
+            for id in &want_withdrawn {
+                known.remove(id);
+            }
+            for &(rd, octet, path_id, _) in &announced {
+                let id = (rd, octet, path_id);
+                if looped {
+                    if known.remove(&id) {
+                        want_withdrawn.push(id);
+                    }
+                } else if known.contains(&id) {
+                    want_announced.push(id);
+                } else if known.iter().filter(|k| (k.0, k.1) == (rd, octet)).count() < cap {
+                    known.insert(id);
+                    want_announced.push(id);
+                } else {
+                    withheld[family] += 1;
+                }
+            }
+            if let Some(stale) = window[family].as_mut() {
+                for id in want_announced.iter().chain(&want_withdrawn) {
+                    stale.remove(id);
+                }
+            }
+            assert_eq!(
+                got_announced, want_announced,
+                "seed {seed} step {step} announced"
+            );
+            got_withdrawn.sort_unstable();
+            want_withdrawn.sort_unstable();
+            assert_eq!(
+                got_withdrawn, want_withdrawn,
+                "seed {seed} step {step} withdrawn"
+            );
+            assert_eq!(
+                known_vpn_labeled_paths(&session),
+                sorted(&known),
+                "seed {seed} step {step} known"
+            );
+            updates += 1;
+        }
+        for (family, count) in [
+            ("l3vpn_ipv4_unicast", withheld[0]),
+            ("ipv4_labeled_unicast", withheld[1]),
+        ] {
+            assert!(
+                (add_path_receive_attempts(&session, family, "block") - f64::from(count)).abs()
+                    < f64::EPSILON,
+                "seed {seed} {family}: metric vs model {count}"
+            );
+            withheld_total += count;
+        }
+    }
+    assert!(
+        updates > 600 && withheld_total > 30,
+        "{updates} updates, {withheld_total} withheld"
     );
 }
