@@ -45,8 +45,17 @@ pub(crate) enum RecordOutcome {
     Deduplicated { evicted: usize },
 }
 
+#[cfg(test)]
 pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Result<RecordOutcome> {
-    v2::record_snapshot(dir, snapshot).map(|(recorded, evicted)| {
+    record_accepted_at(dir, None, snapshot)
+}
+
+pub(crate) fn record_accepted_at(
+    dir: &Path,
+    parent: Option<&std::fs::File>,
+    snapshot: &AcceptedConfigSnapshot,
+) -> io::Result<RecordOutcome> {
+    v2::record_snapshot(dir, parent, snapshot).map(|(recorded, evicted)| {
         if recorded {
             RecordOutcome::Recorded { evicted }
         } else {
@@ -97,8 +106,16 @@ pub(crate) fn stored_manifest(snapshot: &AcceptedConfigSnapshot) -> v2::Manifest
     }
 }
 
+#[cfg(test)]
 pub fn list_mixed(dir: &Path) -> io::Result<Vec<MixedHistoryEntry>> {
-    v2::scan_mixed(dir).map(|rows| {
+    list_mixed_at(dir, None)
+}
+
+pub(crate) fn list_mixed_at(
+    dir: &Path,
+    parent: Option<&std::fs::File>,
+) -> io::Result<Vec<MixedHistoryEntry>> {
+    v2::scan_mixed_at(dir, parent).map(|rows| {
         rows.into_iter()
             .map(|row| MixedHistoryEntry {
                 index: row.index,
@@ -132,11 +149,20 @@ pub(crate) enum RollbackPayload {
     },
 }
 
-/// Reopen the exact row captured by [`list_mixed`]. The v2 codec verifies the
+/// Reopen the exact row captured by [`list_mixed_at`]. The v2 codec verifies the
 /// pinned identity, envelope, TOML digest, manifest, and source digest before
 /// returning this payload.
+#[cfg(test)]
 pub(crate) fn read_mixed_rollback(
     dir: &Path,
+    entry: &MixedHistoryEntry,
+) -> io::Result<RollbackPayload> {
+    read_mixed_rollback_at(dir, None, entry)
+}
+
+pub(crate) fn read_mixed_rollback_at(
+    dir: &Path,
+    parent: Option<&std::fs::File>,
     entry: &MixedHistoryEntry,
 ) -> io::Result<RollbackPayload> {
     if entry.status == HistoryStatus::MetadataOnly {
@@ -145,7 +171,7 @@ pub(crate) fn read_mixed_rollback(
             "metadata-only history has no rollback payload",
         ));
     }
-    match v2::read_mixed(dir, &entry.row)? {
+    match v2::read_mixed_at(dir, parent, &entry.row)? {
         v2::StoredPayload::V2(envelope) => Ok(RollbackPayload::V2 {
             normalized_toml: envelope.normalized_toml,
             manifest: envelope.manifest,

@@ -24,6 +24,55 @@ use crate::fib::FibRouteKey;
 
 const TEST_GRPC_OPERATOR_PRINCIPAL: &str = "rustbgpd://operator/test-only";
 
+/// A hidden writable hop that neither the lexical nor canonical ancestors
+/// include: `safe/alias -> shared/hop -> safe/original`.
+pub(crate) struct RuntimeStateRedirect {
+    _root: tempfile::TempDir,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) original: std::path::PathBuf,
+    pub(crate) replacement: std::path::PathBuf,
+    hop: std::path::PathBuf,
+}
+
+impl RuntimeStateRedirect {
+    pub(crate) fn new() -> Self {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let safe = root.path().join("safe");
+        let shared = root.path().join("shared");
+        let original = safe.join("original/state");
+        let replacement = safe.join("replacement/state");
+        for dir in [
+            &safe,
+            &shared,
+            original.parent().unwrap(),
+            &original,
+            replacement.parent().unwrap(),
+            &replacement,
+        ] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let hop = shared.join("hop");
+        symlink(original.parent().unwrap(), &hop).unwrap();
+        symlink(&hop, safe.join("alias")).unwrap();
+        Self {
+            path: safe.join("alias/state"),
+            _root: root,
+            original,
+            replacement,
+            hop,
+        }
+    }
+
+    pub(crate) fn redirect(&self) {
+        std::fs::remove_file(&self.hop).unwrap();
+        std::os::unix::fs::symlink(self.replacement.parent().unwrap(), &self.hop).unwrap();
+    }
+}
+
 /// Add production-valid Tier authorization to a test config that does not exercise gRPC itself.
 ///
 /// Callers opt in so production config loaders always see exactly the text they were given.

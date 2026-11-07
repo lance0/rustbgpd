@@ -53,13 +53,14 @@ const PLANNING_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime config resolved from `[[fib_tables]]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FibRuntimeConfig {
     /// Explicit tables the daemon may write.
     pub tables: Vec<FibTableConfig>,
     /// Optional persisted owned-state file used to recover exact route
     /// ownership after an ungraceful process restart.
     pub owned_state_path: Option<PathBuf>,
+    pub owned_state_directory: Option<std::sync::Arc<crate::PinnedRuntimeStateDirectory>>,
     /// ADR-0066 multipath-relax (global `[global].multipath_relax`): group
     /// equal-cost ECMP candidates by `AS_PATH` length rather than exact match.
     pub multipath_relax: bool,
@@ -67,6 +68,20 @@ pub struct FibRuntimeConfig {
     /// weight ECMP next-hops by their Link Bandwidth Extended Community when the
     /// whole group carries one; otherwise equal-cost.
     pub link_bandwidth_weighted: bool,
+}
+
+impl PartialEq for FibRuntimeConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.tables == other.tables
+            && self.owned_state_path == other.owned_state_path
+            && self.multipath_relax == other.multipath_relax
+            && self.link_bandwidth_weighted == other.link_bandwidth_weighted
+            && match (&self.owned_state_directory, &other.owned_state_directory) {
+                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 impl FibRuntimeConfig {
@@ -2180,7 +2195,13 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
     let Some(path) = &config.owned_state_path else {
         return FibOwnedState::default();
     };
-    let bytes = match read_owned_state_file(path) {
+    let bytes = match read_owned_state_file(
+        path,
+        config
+            .owned_state_directory
+            .as_deref()
+            .map(|directory| &directory.file),
+    ) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FibOwnedState::default(),
         Err(e) => {
@@ -2332,7 +2353,16 @@ fn persist_owned_state(
     let Some(path) = &config.owned_state_path else {
         return Ok(());
     };
-    write_owned_state(path, &config.tables, owned).inspect_err(|e| {
+    write_owned_state_at(
+        path,
+        config
+            .owned_state_directory
+            .as_deref()
+            .map(|directory| &directory.file),
+        &config.tables,
+        owned,
+    )
+    .inspect_err(|e| {
         metrics.record_fib_owned_state_persist_failure();
         warn!(
             path = %path.display(),
@@ -2347,8 +2377,18 @@ fn quarantine_owned_state_file(config: &FibRuntimeConfig, reason: &'static str) 
         return;
     };
     let stale_path = stale_owned_state_path(path);
-    let _ = std::fs::remove_file(&stale_path);
-    if let Err(e) = std::fs::rename(path, &stale_path) {
+    let result = if let Some(directory) = &config.owned_state_directory {
+        nix::fcntl::renameat(
+            &directory.file,
+            path.file_name().expect("owned state name"),
+            &directory.file,
+            stale_path.file_name().expect("stale state name"),
+        )
+        .map_err(io::Error::from)
+    } else {
+        std::fs::rename(path, &stale_path)
+    };
+    if let Err(e) = result {
         warn!(
             path = %path.display(),
             stale_path = %stale_path.display(),
@@ -2376,7 +2416,12 @@ fn preserve_stale_owned_state_copy(config: &FibRuntimeConfig, bytes: &[u8], reas
         return;
     };
     let stale_path = stale_owned_state_path(path);
-    if let Err(e) = crate::confirm_journal::write_state_atomic(&stale_path, bytes) {
+    let result = if let Some(directory) = &config.owned_state_directory {
+        crate::confirm_journal::write_state_at(&directory.file, &stale_path, bytes, true)
+    } else {
+        crate::confirm_journal::write_state_atomic(&stale_path, bytes)
+    };
+    if let Err(e) = result {
         warn!(
             path = %path.display(),
             stale_path = %stale_path.display(),
@@ -2398,14 +2443,30 @@ fn preserve_stale_owned_state_copy(config: &FibRuntimeConfig, bytes: &[u8], reas
 /// user and not group- or world-writable. It decides which kernel routes the
 /// daemon may replace or delete, so a symlink, a FIFO, or a file another user
 /// could have written is refused rather than trusted.
-fn read_owned_state_file(path: &Path) -> io::Result<Vec<u8>> {
+fn read_owned_state_file(path: &Path, directory: Option<&std::fs::File>) -> io::Result<Vec<u8>> {
     use std::io::Read as _;
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)?;
+    let mut file = if let Some(directory) = directory {
+        std::fs::File::from(
+            nix::fcntl::openat(
+                directory,
+                path.file_name()
+                    .ok_or_else(|| io::Error::other("owned state has no name"))?,
+                nix::fcntl::OFlag::O_RDONLY
+                    | nix::fcntl::OFlag::O_NOFOLLOW
+                    | nix::fcntl::OFlag::O_NONBLOCK
+                    | nix::fcntl::OFlag::O_CLOEXEC,
+                nix::sys::stat::Mode::empty(),
+            )
+            .map_err(io::Error::from)?,
+        )
+    } else {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)?
+    };
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.uid() != nix::unistd::geteuid().as_raw()
@@ -2425,8 +2486,18 @@ fn stale_owned_state_path(path: &Path) -> PathBuf {
     path.with_extension("json.stale")
 }
 
+#[cfg(test)]
 fn write_owned_state(
     path: &Path,
+    tables: &[FibTableConfig],
+    owned: &FibOwnedState,
+) -> Result<(), AtomicPublishError> {
+    write_owned_state_at(path, None, tables, owned)
+}
+
+fn write_owned_state_at(
+    path: &Path,
+    directory: Option<&std::fs::File>,
     tables: &[FibTableConfig],
     owned: &FibOwnedState,
 ) -> Result<(), AtomicPublishError> {
@@ -2445,14 +2516,20 @@ fn write_owned_state(
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|e| not_published(format!("serialize owned-state: {e}")))?;
-    if let Some(parent) = path.parent() {
+    if directory.is_none()
+        && let Some(parent) = path.parent()
+    {
         std::fs::create_dir_all(parent)
             .map_err(|e| not_published(format!("create state dir: {e}")))?;
     }
     // Temp file, file fsync, rename, directory fsync; a failed attempt
     // removes its temp file and leaves the previous file intact. The rename
     // replaces a planted symlink instead of writing through it.
-    crate::confirm_journal::write_state_atomic(path, &bytes)
+    if let Some(directory) = directory {
+        crate::confirm_journal::write_state_at(directory, path, &bytes, true)
+    } else {
+        crate::confirm_journal::write_state_atomic(path, &bytes)
+    }
 }
 
 fn table_signatures(tables: &[FibTableConfig]) -> Vec<PersistedFibTableSignature> {
@@ -3513,9 +3590,37 @@ mod tests {
         FibRuntimeConfig {
             tables: vec![table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"])],
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         }
+    }
+
+    #[test]
+    fn owned_state_stays_in_the_pinned_directory_after_a_chained_symlink_swap() {
+        let state = crate::test_support::RuntimeStateRedirect::new();
+        let pinned =
+            std::sync::Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&state.path).unwrap());
+        let mut config = config();
+        config.owned_state_path = Some(state.path.join("fib-owned.json"));
+        config.owned_state_directory = Some(pinned);
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+        persist_owned_state(&config, &owned, &BgpMetrics::new()).unwrap();
+        state.redirect();
+
+        assert_eq!(load_owned_state(&config), owned);
+        persist_owned_state(&config, &owned, &BgpMetrics::new()).unwrap();
+        preserve_stale_owned_state_copy(&config, b"retained evidence", "test");
+        assert_eq!(
+            std::fs::read(state.original.join("fib-owned.json.stale")).unwrap(),
+            b"retained evidence"
+        );
+        quarantine_owned_state_file(&config, "test");
+        assert!(!state.original.join("fib-owned.json").exists());
+        assert!(state.original.join("fib-owned.json.stale").exists());
+        assert_eq!(std::fs::read_dir(&state.replacement).unwrap().count(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4413,6 +4518,7 @@ mod tests {
         FibRuntimeConfig {
             tables,
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         }
@@ -4535,6 +4641,7 @@ mod tests {
             !FibRuntimeConfig {
                 tables: vec![],
                 owned_state_path: None,
+                owned_state_directory: None,
                 multipath_relax: false,
                 link_bandwidth_weighted: false,
             }
@@ -4552,6 +4659,7 @@ mod tests {
             FibRuntimeConfig {
                 tables: vec![],
                 owned_state_path: None,
+                owned_state_directory: None,
                 multipath_relax: false,
                 link_bandwidth_weighted: false,
             },
@@ -4927,6 +5035,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: released.fib_tables,
             owned_state_path: Some(path.clone()),
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         };
@@ -8632,6 +8741,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: vec![table],
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         };
@@ -8658,6 +8768,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: vec![table],
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         };
@@ -8696,6 +8807,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: vec![table],
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         };
@@ -9586,6 +9698,7 @@ mod tests {
             &FibRuntimeConfig {
                 tables: vec![],
                 owned_state_path: None,
+                owned_state_directory: None,
                 multipath_relax: false,
                 link_bandwidth_weighted: false,
             },
@@ -10027,6 +10140,7 @@ mod tests {
                 table
             }],
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
         };
@@ -10151,6 +10265,7 @@ mod tests {
                 table
             }],
             owned_state_path: None,
+            owned_state_directory: None,
             multipath_relax: false,
             link_bandwidth_weighted: true,
         };

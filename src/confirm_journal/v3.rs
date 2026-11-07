@@ -55,6 +55,7 @@ pub(crate) struct LaunchIdentity {
     #[cfg(test)]
     fail_publish_step: Option<PublishStep>,
     max_raw_bytes: usize,
+    pending_directory: Option<Arc<crate::PinnedRuntimeStateDirectory>>,
 }
 
 impl LaunchIdentity {
@@ -74,7 +75,17 @@ impl LaunchIdentity {
             #[cfg(test)]
             fail_publish_step: None,
             max_raw_bytes: MAX_RAW_BYTES,
+            pending_directory: None,
         })
+    }
+
+    #[must_use]
+    pub(crate) fn with_pending_directory(
+        mut self,
+        directory: Arc<crate::PinnedRuntimeStateDirectory>,
+    ) -> Self {
+        self.pending_directory = Some(directory);
+        self
     }
 
     pub(crate) fn normalized_prior_limit_bytes(&self) -> usize {
@@ -273,7 +284,18 @@ impl LaunchIdentity {
             )));
         }
 
-        let pending = Directory::pin(pending_dir).map_err(PublishError::ordinary)?;
+        let pending = if let Some(directory) = &self.pending_directory {
+            Arc::new(Directory {
+                file: directory.file.try_clone().map_err(PublishError::ordinary)?,
+                real_path: directory.real_path.clone(),
+            })
+        } else {
+            Directory::pin_unchecked(pending_dir).map_err(PublishError::ordinary)?
+        };
+        pending.validate_private().map_err(PublishError::ordinary)?;
+        pending
+            .validate_durable_path()
+            .map_err(PublishError::ordinary)?;
         let raw = Entry::fixed(Arc::clone(&pending), RAW_FILE_NAME);
         let metadata = Entry::fixed(Arc::clone(&pending), METADATA_FILE_NAME);
         cleanup_locator_absent_residue_pinned(&pending).map_err(PublishError::ordinary)?;
@@ -851,6 +873,21 @@ impl Directory {
             file: File::from(fd),
             real_path,
         }))
+    }
+
+    /// The locator must still find this authority after a process restart.
+    fn validate_durable_path(&self) -> io::Result<()> {
+        if std::fs::canonicalize(&self.real_path)? != self.real_path {
+            return Err(invalid("pending directory path is no longer canonical"));
+        }
+        let current = std::fs::metadata(&self.real_path)?;
+        let retained = self.file.metadata()?;
+        if (current.dev(), current.ino()) != (retained.dev(), retained.ino()) {
+            return Err(invalid(
+                "pending directory path no longer names its retained authority",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_private(&self) -> io::Result<()> {
@@ -1698,6 +1735,108 @@ log_format = "json"
             "someone else's file"
         );
         assert!(fixture.launch.locator_path().exists());
+    }
+
+    #[test]
+    fn pending_authority_stays_in_the_pinned_directory_after_a_chained_symlink_swap() {
+        let fixture = fixture();
+        let state = crate::test_support::RuntimeStateRedirect::new();
+        let pinned = Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&state.path).unwrap());
+        state.redirect();
+        let pending = fixture
+            .launch
+            .clone()
+            .with_pending_directory(pinned)
+            .publish(&state.path, "pinned-pending", 9, &fixture.prior)
+            .unwrap();
+
+        assert!(state.original.join(RAW_FILE_NAME).is_file());
+        assert!(state.original.join(METADATA_FILE_NAME).is_file());
+        assert_eq!(fs::read_dir(&state.replacement).unwrap().count(), 0);
+        let locator = decode_locator(&fs::read(fixture.launch.locator_path()).unwrap()).unwrap();
+        assert_eq!(
+            path_from_wire(&locator.metadata_path).unwrap(),
+            state.original.join(METADATA_FILE_NAME)
+        );
+        drop(pending);
+    }
+
+    #[test]
+    fn pinned_pending_publication_rejects_a_directory_made_writable_after_boot() {
+        let fixture = fixture();
+        let pinned = Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&fixture.state).unwrap());
+        let launch = fixture.launch.with_pending_directory(pinned);
+        fs::write(&fixture.raw, fixture.prior.normalized_toml()).unwrap();
+        fs::set_permissions(&fixture.raw, fs::Permissions::from_mode(0o600)).unwrap();
+        let residue_inode = fs::metadata(&fixture.raw).unwrap().ino();
+        fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = launch
+            .publish(&fixture.state, "unsafe-parent", 9, &fixture.prior)
+            .unwrap_err();
+        assert!(!error.authority_retained());
+        assert!(!launch.locator_path().exists());
+        assert_eq!(
+            fs::read(&fixture.raw).unwrap(),
+            fixture.prior.normalized_toml().as_bytes()
+        );
+        assert_eq!(fs::metadata(&fixture.raw).unwrap().ino(), residue_inode);
+        assert!(!fixture.metadata.exists());
+    }
+
+    #[test]
+    fn pinned_pending_publication_rejects_a_replaced_durable_directory_path() {
+        let fixture = fixture();
+        let pinned = Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&fixture.state).unwrap());
+        let launch = fixture.launch.with_pending_directory(pinned);
+        fs::write(&fixture.raw, fixture.prior.normalized_toml()).unwrap();
+        fs::set_permissions(&fixture.raw, fs::Permissions::from_mode(0o600)).unwrap();
+        let residue_inode = fs::metadata(&fixture.raw).unwrap().ino();
+        let retained = fixture.state.with_file_name("retained-state");
+        fs::rename(&fixture.state, &retained).unwrap();
+        fs::create_dir(&fixture.state).unwrap();
+        private(&fixture.state);
+        let error = launch
+            .publish(&fixture.state, "replaced-parent", 9, &fixture.prior)
+            .unwrap_err();
+        assert!(!error.authority_retained());
+        assert!(!launch.locator_path().exists());
+        assert_eq!(fs::read_dir(&fixture.state).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(retained.join(RAW_FILE_NAME)).unwrap(),
+            fixture.prior.normalized_toml().as_bytes()
+        );
+        assert_eq!(
+            fs::metadata(retained.join(RAW_FILE_NAME)).unwrap().ino(),
+            residue_inode
+        );
+        assert!(!retained.join(METADATA_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn pinned_pending_publication_rejects_a_noncanonical_durable_directory_path() {
+        let fixture = fixture();
+        let pinned = Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&fixture.state).unwrap());
+        let launch = fixture.launch.with_pending_directory(pinned);
+        fs::write(&fixture.raw, fixture.prior.normalized_toml()).unwrap();
+        fs::set_permissions(&fixture.raw, fs::Permissions::from_mode(0o600)).unwrap();
+        let residue_inode = fs::metadata(&fixture.raw).unwrap().ino();
+        let retained = fixture.state.with_file_name("retained-state");
+        fs::rename(&fixture.state, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &fixture.state).unwrap();
+        let error = launch
+            .publish(&fixture.state, "aliased-parent", 9, &fixture.prior)
+            .unwrap_err();
+        assert!(!error.authority_retained());
+        assert!(!launch.locator_path().exists());
+        assert_eq!(
+            fs::metadata(retained.join(RAW_FILE_NAME)).unwrap().ino(),
+            residue_inode
+        );
+        assert_eq!(
+            fs::read(retained.join(RAW_FILE_NAME)).unwrap(),
+            fixture.prior.normalized_toml().as_bytes()
+        );
+        assert!(!retained.join(METADATA_FILE_NAME).exists());
     }
 
     fn fixture() -> Fixture {
