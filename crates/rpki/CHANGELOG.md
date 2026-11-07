@@ -49,8 +49,9 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   while a reconnect is connecting. Previously the expiry was checked only while
   the session sat idle and between retries, so a cache that accepted a query and
   stalled kept expired data published until the 5-minute transaction deadline,
- 
-  and a hung connect kept it indefinitely.
+  and a hung connect kept it indefinitely. The bound covers query writes as
+  well as reads, so a cache that stops reading cannot hold a query write, and
+  the expired data, past the deadline.
 - A v1 session that the client fell back to from v2 now reconnects to probe
   v2 again at its first refresh at least an hour after the fallback (8210bis
   §7: each session opens at the highest version, and the version changes only

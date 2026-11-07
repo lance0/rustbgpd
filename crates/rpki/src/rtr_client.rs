@@ -1315,9 +1315,19 @@ impl RtrClient {
         let deadline = TokioInstant::now() + self.transaction_deadline;
         // §6: the held data expires on time even while a query is in
         // flight; a transaction still running then ends and the data is
-        // flushed.
+        // flushed. The bound covers every read and every query write: a
+        // cache that stops reading can fill the socket buffers and stall a
+        // write as long as one that stops sending stalls a read.
         let expires_at = self.data_expires_at;
-        let read_deadline = expires_at.map_or(deadline, |at| at.min(deadline));
+        let io_deadline = expires_at.map_or(deadline, |at| at.min(deadline));
+        let expired = || expires_at.is_some_and(|at| TokioInstant::now() >= at);
+        let timed_out = || {
+            if expired() {
+                RtrError::Expired
+            } else {
+                RtrError::TransactionTimeout
+            }
+        };
         let mut bytes: usize = 0;
         let mut restarts: u8 = 0;
 
@@ -1357,7 +1367,9 @@ impl RtrClient {
             let mut aspa_withdrawn: Vec<AspaRecord> = Vec::new();
             // Announcements charged to the record caps as they decode.
             let mut reservation = Reservation::new(Arc::clone(&self.record_budget));
-            let is_reset = self.send_query(stream, query).await?;
+            let is_reset = tokio::time::timeout_at(io_deadline, self.send_query(stream, query))
+                .await
+                .map_err(|_| timed_out())??;
 
             loop {
                 while let Some(pdu) = self.next_pdu(parse_buf)? {
@@ -1752,19 +1764,12 @@ impl RtrClient {
                     }
                 }
 
-                let expired = || expires_at.is_some_and(|at| TokioInstant::now() >= at);
                 if expired() {
                     return Err(RtrError::Expired);
                 }
-                let n = tokio::time::timeout_at(read_deadline, stream.read(read_buf))
+                let n = tokio::time::timeout_at(io_deadline, stream.read(read_buf))
                     .await
-                    .map_err(|_| {
-                        if expired() {
-                            RtrError::Expired
-                        } else {
-                            RtrError::TransactionTimeout
-                        }
-                    })?
+                    .map_err(|_| timed_out())?
                     .map_err(RtrError::Io)?;
                 if n == 0 {
                     return Err(RtrError::ConnectionClosed);
@@ -4045,6 +4050,59 @@ mod tests {
             "flushed {:?} after End of Data, past the 120 s expire",
             accepted.elapsed()
         );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: held data expires on time while a query write is blocked. A cache
+    /// that never reads lets the socket buffers fill, and the next query
+    /// write must not wait past the expire interval.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_expires_during_a_blocked_query_write() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dials);
+        // The first connection is ordinary. Every later one arrives with its
+        // send path already full, as after a cache stopped reading.
+        let client = zero_retry_client(addr, vrp_tx).with_dialer(move |_| {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                let stream = TcpStream::connect(addr).await?;
+                if !first {
+                    let filler = vec![0u8; 65_536];
+                    loop {
+                        match stream.try_write(&filler) {
+                            Ok(_) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                Ok(stream)
+            }
+        });
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 120).await;
+        let accepted = TokioInstant::now();
+        drop(stream);
+        // Held open and never read.
+        let (_silent, _) = listener.accept().await.unwrap();
+
+        let update = timeout(Duration::from_secs(1000), vrp_rx.recv())
+            .await
+            .expect("held data outlived its expire interval behind a blocked query write")
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        assert!(accepted.elapsed() <= Duration::from_secs(120));
+        assert!(dials.load(Ordering::SeqCst) >= 2);
 
         client_handle.abort();
         let _ = client_handle.await;
