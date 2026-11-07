@@ -1358,53 +1358,337 @@ async fn envelope_wakes(session: &PeerSession) -> bool {
 
 const BYTE_BUDGET: u64 = super::super::writer::WRITER_BYTE_BUDGET;
 
-#[tokio::test]
-async fn shared_attribute_bound_keeps_each_rows_framing() {
-    use super::super::export::{ExportCandidate, SessionExportProfile};
+/// A1, B1, A2 groups as A1/A2 then B1. Byte pressure inside A must keep
+/// that membership order instead of rewinding the already-advanced source.
+#[tokio::test(start_paused = true)]
+async fn partial_attribute_group_resumes_before_later_groups_and_eor() {
+    let (mut session, _wire) = shared_group_member(65001).await;
+    let (mut frames, completed) = hand_writer(&mut session);
+    let profile = session.publish_export_profile();
+    let mut routes = pacing_routes(3, false);
+    let mut attrs = routes[0].attributes.to_vec();
+    attrs.push(PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+        flags: 0xc0,
+        type_code: 200,
+        data: Bytes::from(vec![0; 4_000]),
+    }));
+    routes[0].attributes = AttrSet::new(attrs);
+    let prepared = profile.prepare_unicast_candidate(&routes[0], None).unwrap();
+    let export::PreparedUnicastCandidate::Ipv4Body { attrs, entry } = prepared else {
+        panic!("IPv4 body fixture")
+    };
+    let initial = profile
+        .build_ipv4_body(&[entry], &[], &attrs)
+        .unwrap()
+        .encoded_len();
+    let payload = 4_000 + profile.max_message_len() - initial;
+    AttrSet::edit(&mut routes[0].attributes, |attrs| {
+        let PathAttribute::Unknown(raw) = attrs.last_mut().unwrap() else {
+            panic!("raw attr")
+        };
+        raw.data = Bytes::from(vec![0; payload]);
+    });
+    routes[2].attributes = Arc::clone(&routes[0].attributes);
+    routes[1].attributes = Arc::clone(&routes[0].attributes);
+    AttrSet::edit(&mut routes[1].attributes, |attrs| {
+        let PathAttribute::Unknown(raw) = attrs.last_mut().unwrap() else {
+            panic!("raw attr")
+        };
+        raw.data = Bytes::from(vec![1; payload]);
+    });
+    session.writer_bulk_admitted = BYTE_BUDGET - u64::try_from(profile.max_message_len()).unwrap();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    let first = frames.try_recv().unwrap();
+    assert_eq!(first.len(), profile.max_message_len());
+    assert_eq!(delivered(vec![first]), vec![Some(0)]);
+    assert!(frames.try_recv().is_err());
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    for _ in 0..4 {
+        session.advance_pending_outbound();
+    }
+    assert!(frames.try_recv().is_err(), "no duplicate A1 while blocked");
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    let mut rest = Vec::new();
+    while let Ok(frame) = frames.try_recv() {
+        rest.push(frame);
+    }
+    assert_eq!(delivered(rest), vec![Some(2), Some(1), None]);
+    assert!(session.pending_outbound.is_none());
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+}
 
-    let session = make_test_session(65001, 65002);
-    let profile = SessionExportProfile::capture(&session);
-    let smet = make_smet_route(2);
-    let mut imet = smet.clone();
-    imet.route = EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
-        rd: "65000:100".parse().unwrap(),
-        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
-        originator_ip: "192.0.2.10".parse().unwrap(),
-    });
-    let mut short = make_bgpls_route(1);
-    short.attributes = Arc::clone(&smet.attributes);
-    let mut long = short.clone();
-    long.nlri.payload = Bytes::from(vec![0; 1_000]);
-    long.nlri.route_distinguisher = Some([0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut oversized = long.clone();
-    oversized.nlri.payload = Bytes::from(vec![0; 65_535]);
-    let mut different = imet.clone();
-    AttrSet::edit(&mut different.attributes, |attrs| {
-        attrs.push(PathAttribute::Communities((0..64).collect()));
-    });
-    let candidates = [
-        ExportCandidate::Evpn(&imet),
-        ExportCandidate::Evpn(&smet),
-        ExportCandidate::BgpLs(&short),
-        ExportCandidate::BgpLs(&long),
-        ExportCandidate::BgpLs(&oversized),
-        ExportCandidate::Evpn(&different),
-        ExportCandidate::Evpn(&imet),
-    ];
-    let mut previous = None;
-    let bounds: Vec<_> = candidates
-        .into_iter()
-        .map(|candidate| {
-            let bound = profile.announcement_wire_bound(candidate, &mut previous);
-            assert_eq!(bound, profile.announcement_wire_bound(candidate, &mut None));
-            bound
-        })
-        .collect();
-    assert_eq!(bounds[1] - bounds[0], 66 - 31);
-    assert_eq!(bounds[3] - bounds[2], 1_000 - short.nlri.payload.len() + 8);
-    assert_eq!(bounds[4], profile.max_message_len());
-    assert!(bounds[5] > bounds[0]);
-    assert_eq!(bounds[6], bounds[0]);
+#[tokio::test(start_paused = true)]
+async fn resumed_groups_keep_original_override_indices_after_filtering_and_slicing() {
+    let (mut session, _wire) = shared_group_member(65001).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .extended_nexthop_families
+        .insert((Afi::Ipv4, Safi::Unicast), Afi::Ipv6);
+    let (mut frames, completed) = hand_writer(&mut session);
+    let mut routes = pacing_routes(7, false);
+    routes[1] = make_v6_unicast_route("2001:db8::1".parse().unwrap());
+    let excluded = PeerId::from_addr("192.0.2.99".parse().unwrap());
+    routes[3].peer = excluded;
+    let v4 = "192.0.2.20".parse::<IpAddr>().unwrap();
+    let other_v4 = "192.0.2.30".parse::<IpAddr>().unwrap();
+    let mp4 = "2001:db8::40".parse::<IpAddr>().unwrap();
+    let v6 = "2001:db8::60".parse::<IpAddr>().unwrap();
+    let prefixes: Vec<_> = routes.iter().map(|route| route.prefix).collect();
+    let profile = session.publish_export_profile();
+    let maximum = u64::try_from(profile.max_message_len()).unwrap();
+    let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(profile),
+        announce: routes.into(),
+        announce_source_exclusion: Some(excluded),
+        next_hop_override: vec![
+            None,
+            Some(rustbgpd_policy::NextHopAction::Specific(v6)),
+            Some(rustbgpd_policy::NextHopAction::Specific(v4)),
+            None,
+            Some(rustbgpd_policy::NextHopAction::Specific(mp4)),
+            Some(rustbgpd_policy::NextHopAction::Specific(v4)),
+            Some(rustbgpd_policy::NextHopAction::Specific(other_v4)),
+        ]
+        .into(),
+        exempt_announce: 1,
+        end_of_rib: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        ..OutboundRouteUpdate::default()
+    };
+    session.writer_bulk_admitted = BYTE_BUDGET - maximum;
+    session.handle_outbound_route_update(update).await;
+    assert_eq!(delivered(vec![frames.try_recv().unwrap()]), vec![Some(0)]);
+    completed.send_replace(session.writer_bulk_admitted);
+    // A second slice starts at source index 1, with one frame's headroom.
+    session.writer_bulk_admitted += BYTE_BUDGET - maximum;
+    session.advance_pending_outbound();
+    assert_eq!(
+        delivered(vec![frames.try_recv().unwrap()]),
+        vec![Some(2), Some(5)]
+    );
+    assert!(frames.try_recv().is_err());
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    let mut seen = Vec::new();
+    let mut eors = 0;
+    while let Ok(mut frame) = frames.try_recv() {
+        let Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("UPDATE")
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        for entry in parsed.announced {
+            let next_hop = parsed
+                .attributes
+                .iter()
+                .find_map(|attr| match attr {
+                    PathAttribute::NextHop(ip) => Some(IpAddr::V4(*ip)),
+                    _ => None,
+                })
+                .expect("body NEXT_HOP");
+            seen.push((Prefix::V4(entry.prefix), next_hop));
+        }
+        for attr in parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    for entry in mp.announced {
+                        seen.push((entry.prefix, mp.next_hop));
+                    }
+                }
+                PathAttribute::MpUnreachNlri(mp) if mp.withdrawn.is_empty() => eors += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![
+            (prefixes[6], other_v4),
+            (prefixes[4], mp4),
+            (prefixes[1], v6)
+        ]
+    );
+    assert_eq!(
+        eors, 1,
+        "extended next hop suppresses the IPv4 empty-body EoR"
+    );
+    assert!(session.pending_outbound.is_none());
+}
+
+/// Private families move source rows into the active slice. A paused slice
+/// must retain those originals, release them under the same retirement budget,
+/// and keep its credit/latch until both that slice and the remainder are gone.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ownership regression compares complete drain and abort for all moved source families"
+)]
+async fn moved_partial_slices_resume_and_retire_before_releasing_credit() {
+    const ROWS: usize = 3 * QUEUE_SLICE;
+    for family in [
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ] {
+        for abort in [false, true] {
+            let (mut session, _wire) = shared_group_member(65001).await;
+            Arc::make_mut(session.negotiated.as_mut().unwrap())
+                .negotiated_families
+                .push(family);
+            let (mut frames, completed) = hand_writer(&mut session);
+            let attrs = make_smet_route(2).attributes;
+            let credit = Arc::new(rustbgpd_rib::OutboundCredit::default());
+            let latch = Arc::new(rustbgpd_rib::OperationLatch::new(Arc::default()));
+            let weak = Arc::downgrade(&latch);
+            let mut update = OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                credit: Some(rustbgpd_rib::OutboundCharge::new(&credit, 7)),
+                latch: Some(latch),
+                end_of_rib: vec![family],
+                ..OutboundRouteUpdate::default()
+            };
+            match family.1 {
+                Safi::Evpn => {
+                    update.evpn_announce = (0..ROWS)
+                        .map(|row| {
+                            let mut route = make_smet_route(2);
+                            route.attributes = Arc::clone(&attrs);
+                            let EvpnRoute::Smet(nlri) = &mut route.route else {
+                                panic!("SMET")
+                            };
+                            nlri.originator_ip = IpAddr::V4(Ipv4Addr::from(
+                                0xc633_0000 | u32::try_from(row).unwrap(),
+                            ));
+                            route
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                }
+                Safi::MplsVpn => {
+                    update.vpn_announce = (0..ROWS)
+                        .map(|row| {
+                            let mut route = make_vpn_rib_route(100 + u32::try_from(row).unwrap());
+                            route.attributes = Arc::clone(&attrs);
+                            route.nlri.prefix = VpnPrefix::v4(
+                                Ipv4Addr::from(0x1400_0000 | u32::try_from(row).unwrap()),
+                                32,
+                            )
+                            .unwrap();
+                            route
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                }
+                Safi::LabeledUnicast => {
+                    update.labeled_announce = (0..ROWS)
+                        .map(|row| {
+                            let mut route =
+                                make_labeled_rib_route(100 + u32::try_from(row).unwrap());
+                            route.attributes = Arc::clone(&attrs);
+                            route.nlri.prefix = Prefix::V4(Ipv4Prefix::new(
+                                Ipv4Addr::from(0x1400_0000 | u32::try_from(row).unwrap()),
+                                32,
+                            ));
+                            route
+                        })
+                        .collect();
+                }
+                _ => unreachable!(),
+            }
+            let live = || Arc::strong_count(&attrs) - 1;
+            session.writer_bulk_admitted = BYTE_BUDGET - u64::from(rustbgpd_wire::MAX_MESSAGE_LEN);
+            session.handle_outbound_route_update(update).await;
+            assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+            assert_eq!(frames.len(), 1, "{family:?}: first chunk sent");
+            assert_eq!(
+                live(),
+                ROWS,
+                "{family:?}: only original source owners remain parked"
+            );
+            assert_eq!(credit.rows(), 7);
+            assert_eq!(weak.strong_count(), 1);
+            if abort {
+                let mut before = live();
+                session.retire_pending_outbound();
+                assert_eq!(
+                    before - live(),
+                    QUEUE_SLICE,
+                    "moved and remaining rows share one release budget"
+                );
+                while session.pending_outbound.is_some() {
+                    assert_eq!(credit.rows(), 7);
+                    assert_eq!(weak.strong_count(), 1);
+                    before = live();
+                    session.advance_pending_outbound();
+                    assert!(before - live() <= QUEUE_SLICE);
+                }
+                assert_eq!(frames.len(), 1, "teardown never resumes the partial group");
+            } else {
+                let mut seen = Vec::new();
+                let mut eors = 0;
+                for _ in 0..16 {
+                    while let Ok(mut frame) = frames.try_recv() {
+                        let Message::Update(message) = rustbgpd_wire::decode_message(
+                            &mut frame,
+                            rustbgpd_wire::MAX_MESSAGE_LEN,
+                        )
+                        .unwrap() else {
+                            panic!("UPDATE")
+                        };
+                        for attr in message.parse(true, false, &[]).unwrap().attributes {
+                            match attr {
+                                PathAttribute::MpReachNlri(mp) => {
+                                    for nlri in mp.evpn_announced {
+                                        let EvpnRoute::Smet(nlri) = nlri else {
+                                            panic!("SMET")
+                                        };
+                                        let IpAddr::V4(ip) = nlri.originator_ip else {
+                                            panic!("v4 originator")
+                                        };
+                                        seen.push(u32::from(ip) & 0xffff);
+                                    }
+                                    seen.extend(
+                                        mp.vpn_announced
+                                            .into_iter()
+                                            .map(|entry| entry.nlri.labels[0].label - 100),
+                                    );
+                                    seen.extend(
+                                        mp.labeled_announced
+                                            .into_iter()
+                                            .map(|entry| entry.nlri.labels[0].label - 100),
+                                    );
+                                }
+                                PathAttribute::MpUnreachNlri(_) => eors += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    if session.pending_outbound.is_none() {
+                        break;
+                    }
+                    assert_eq!(credit.rows(), 7);
+                    assert_eq!(weak.strong_count(), 1);
+                    completed.send_replace(session.writer_bulk_admitted);
+                    admit_until_blocked(&mut session);
+                }
+                assert_eq!(
+                    seen,
+                    (0..u32::try_from(ROWS).unwrap()).collect::<Vec<_>>(),
+                    "{family:?}"
+                );
+                assert_eq!(eors, 1);
+            }
+            assert!(session.pending_outbound.is_none());
+            assert_eq!(live(), 0);
+            assert_eq!(credit.rows(), 0);
+            assert_eq!(weak.strong_count(), 0);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1930,44 +2214,6 @@ async fn assert_family_frame_wait(family: (Afi, Safi), update: OutboundRouteUpda
     assert_family_frame_bound(family, update, false).await;
 }
 
-fn single_row_wire_bound(
-    profile: &export::SessionExportProfile,
-    update: &OutboundRouteUpdate,
-) -> usize {
-    if let Some(route) = update.announce.first() {
-        return profile.announcement_wire_bound(
-            ExportCandidate::Unicast {
-                route,
-                next_hop_override: update.next_hop_override.first().and_then(Option::as_ref),
-            },
-            &mut None,
-        );
-    }
-    if let Some((prefix, path_id)) = update.unicast_withdrawals().next() {
-        return profile.withdrawal_wire_bound(ExportWithdrawal::Unicast {
-            prefix: *prefix,
-            path_id: *path_id,
-        });
-    }
-    macro_rules! family {
-        ($announce:ident, $withdraw:ident, $kind:ident) => {
-            if let Some(route) = update.$announce.first() {
-                return profile.announcement_wire_bound(ExportCandidate::$kind(route), &mut None);
-            }
-            if let Some(key) = update.$withdraw.first() {
-                return profile.withdrawal_wire_bound(ExportWithdrawal::$kind(key));
-            }
-        };
-    }
-    family!(flowspec_announce, flowspec_withdraw, FlowSpec);
-    family!(evpn_announce, evpn_withdraw, Evpn);
-    family!(bgpls_announce, bgpls_withdraw, BgpLs);
-    family!(vpn_announce, vpn_withdraw, Vpn);
-    family!(labeled_announce, labeled_withdraw, Labeled);
-    family!(rtc_announce, rtc_withdraw, Rtc);
-    panic!("a single route fixture is required");
-}
-
 async fn assert_family_frame_bound(
     family: (Afi, Safi),
     mut update: OutboundRouteUpdate,
@@ -2006,7 +2252,7 @@ async fn assert_family_frame_bound(
     }
     session.timers.hold = None;
     let profile = session.publish_export_profile();
-    let bound = single_row_wire_bound(&profile, &update);
+    let bound = profile.max_message_len();
     update.exact_export_snapshot = Some(profile);
     update.end_of_rib = vec![family];
     let (mut frames, completed) = hand_writer(&mut session);
@@ -2178,23 +2424,7 @@ fn uniform_announcement_reservation(update: &OutboundRouteUpdate) -> u64 {
         .as_any()
         .downcast_ref::<export::SessionExportProfile>()
         .unwrap();
-    let bound = |route| {
-        profile.announcement_wire_bound(
-            ExportCandidate::Unicast {
-                route,
-                next_hop_override: None,
-            },
-            &mut None,
-        )
-    };
-    let reservation = bound(&update.announce[0]);
-    assert!(
-        update
-            .announce
-            .iter()
-            .all(|route| bound(route) == reservation)
-    );
-    u64::try_from(reservation).unwrap()
+    u64::try_from(profile.max_message_len()).unwrap()
 }
 
 /// A reader that stops draining holds the writer at its byte budget, not at

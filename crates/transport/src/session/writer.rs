@@ -163,8 +163,9 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// RFC 8654 extended message): 2 × (256 KiB + 65,535 B) = 655,358 B. A
 /// larger budget adds memory per paused peer and no throughput.
 ///
-/// Ordinary slices reserve their single-entry wire lengths before consuming
-/// routes; grouped encoding can only reduce that total. Shared chunks reserve
+/// Every ordinary frame requires room for the negotiated maximum message
+/// length before it is built and admitted. A paused group retains source
+/// indices and resumes its first unsent row. Shared chunks require room for
 /// their actual length. Neither admission path crosses this byte budget.
 ///
 /// Separate allowance, not counted against the budget:

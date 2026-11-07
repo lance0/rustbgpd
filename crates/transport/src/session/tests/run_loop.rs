@@ -207,7 +207,7 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
         production
             .matches("trigger_outbound_out_of_resources_teardown(")
             .count(),
-        18
+        19
     );
     assert_eq!(
         production
@@ -231,7 +231,7 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
         production
             .matches("SessionFailureCause::PostCommitInvariant")
             .count(),
-        14
+        15
     );
     let (before_expiry, expiry_and_after) = production
         .split_once("pub(super) fn expire_outbound_admission(")

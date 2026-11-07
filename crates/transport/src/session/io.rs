@@ -238,16 +238,19 @@ impl PeerSession {
         })
     }
 
-    /// Whether the writer holds its whole byte budget
-    /// ([`super::writer::WRITER_BYTE_BUDGET`]), so no further outbound
-    /// work is admitted until a completed write frees some.
-    pub(super) fn writer_bytes_exhausted(&self) -> bool {
-        self.writer_bytes_held() >= super::writer::WRITER_BYTE_BUDGET
-    }
-
     pub(super) fn writer_bytes_available(&self) -> usize {
         usize::try_from(super::writer::WRITER_BYTE_BUDGET.saturating_sub(self.writer_bytes_held()))
             .unwrap_or(usize::MAX)
+    }
+
+    pub(super) fn writer_frame_room(&self, max_len: usize) -> Result<bool, ()> {
+        let Some(writer) = &self.writer_bulk_tx else {
+            return Err(());
+        };
+        if writer.is_closed() {
+            return Err(());
+        }
+        Ok(writer.capacity() > 0 && max_len <= self.writer_bytes_available())
     }
 
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
