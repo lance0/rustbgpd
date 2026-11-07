@@ -393,6 +393,21 @@ impl PinnedRuntimeStateDirectory {
         use nix::sys::stat::Mode;
         use nix::unistd::geteuid;
 
+        // `dir/` and `dir/.` name the same entry as `dir`, but O_NOFOLLOW
+        // would judge their final `.` and follow a symlink at `dir`. Pin the
+        // spelling without them, so a symlinked directory is refused however
+        // it is written. A final `..` cannot be judged that way at all.
+        let normalized: PathBuf = path.components().collect();
+        if matches!(
+            normalized.components().next_back(),
+            None | Some(std::path::Component::ParentDir)
+        ) {
+            return Err(format!(
+                "runtime-state directory {} must name a directory, not end in `..`",
+                path.display()
+            ));
+        }
+        let path = normalized.as_path();
         match std::fs::symlink_metadata(path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -444,6 +459,7 @@ impl PinnedRuntimeStateDirectory {
                 metadata.mode() & 0o7777
             ));
         }
+        verify_runtime_state_ancestors(path, geteuid().as_raw(), nix::unistd::getegid().as_raw())?;
         Ok(Self {
             file,
             display_path: path.to_path_buf(),
@@ -471,6 +487,67 @@ impl PinnedRuntimeStateDirectory {
         WarmBundleDirectory::open_at(&self.file, &self.display_path, WARM_BUNDLE_DIRECTORY)
             .map_err(|error| error.to_string())
     }
+}
+
+/// Refuse a runtime-state directory reachable through a directory another
+/// user could rewrite. Some state writers still use the pathname, so after
+/// `prepare` an ancestor swap must not be able to redirect them elsewhere.
+/// Every directory traversed is checked, sshd `StrictModes` style: those
+/// along the path as written and along its canonical form. Each must be owned
+/// by root or the daemon user, and must not be world-writable, or writable by
+/// a group other than the daemon's, unless it has the sticky bit (as `/tmp`
+/// does). The daemon's own group is trusted as it is for credential files, so
+/// a `umask 002` user-private group stays usable.
+fn verify_runtime_state_ancestors(
+    path: &Path,
+    daemon_user: u32,
+    daemon_group: u32,
+) -> Result<(), String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("failed to resolve the current directory: {error}"))?
+            .join(path)
+    };
+    let canonical = std::fs::canonicalize(&absolute).map_err(|error| {
+        format!(
+            "failed to resolve runtime-state directory {}: {error}",
+            path.display()
+        )
+    })?;
+    // `ancestors()` of the directory itself start with the directory; skip
+    // it, as `prepare` already holds it to the stricter owner-only rule.
+    for ancestor in absolute
+        .ancestors()
+        .skip(1)
+        .chain(canonical.ancestors().skip(1))
+    {
+        let metadata = std::fs::metadata(ancestor).map_err(|error| {
+            format!(
+                "failed to inspect {} above runtime-state directory {}: {error}",
+                ancestor.display(),
+                path.display()
+            )
+        })?;
+        let mode = metadata.mode();
+        let foreign_owner = metadata.uid() != 0 && metadata.uid() != daemon_user;
+        let shared_writable = (mode & 0o002 != 0
+            || (mode & 0o020 != 0 && metadata.gid() != daemon_group))
+            && mode & 0o1000 == 0;
+        if foreign_owner || shared_writable {
+            return Err(format!(
+                "runtime-state directory {} is reachable through {} (uid={}, mode={:o}), which a \
+                 user other than root or the daemon user could replace; it must be owned by root \
+                 or the daemon user and not writable by others unless sticky",
+                path.display(),
+                ancestor.display(),
+                metadata.uid(),
+                mode & 0o7777
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn stream_plan_runtime_state_authority(
@@ -1568,6 +1645,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     cert_file: paths.cert_file.clone(),
                     key_file: paths.key_file.clone(),
                     client_ca_file: paths.client_ca_file.clone(),
+                    client_crl_file: paths.client_crl_file.clone(),
                 }),
             },
             GrpcListener::Uds { token_file, .. } => CredentialSource {
@@ -1647,6 +1725,36 @@ fn check_tls_expiry_warnings(listeners: &[GrpcListenerConfig]) -> usize {
         }
     }
     warnings
+}
+
+/// `--check` warnings for credential files readable beyond the daemon.
+fn check_credential_file_warnings(listeners: &[GrpcListenerConfig]) -> usize {
+    let Some(listener) = listeners.first() else {
+        return 0;
+    };
+    let generation = listener.credential_store.load();
+    for warning in generation.file_warnings() {
+        print_framed_warning(
+            "gRPC credential file is readable beyond the daemon",
+            &format!(
+                "{warning}.\nA bearer token or private key grants operator access to whoever can read it."
+            ),
+        );
+    }
+    generation.file_warnings().len()
+}
+
+/// Log the staged generation's credential-file warnings, once per load or
+/// reload.
+fn warn_grpc_credential_files(credentials: &rustbgpd_api::credentials::CredentialStore) {
+    let generation = credentials.load();
+    for warning in generation.file_warnings() {
+        warn!(
+            event = "grpc_credential_file_permissions",
+            generation = generation.sequence(),
+            "{warning}"
+        );
+    }
 }
 
 fn warn_grpc_tls_expiry(
@@ -2029,7 +2137,9 @@ fn listener_mss_clamps(
 /// not a defect in the operator's config, so gating on it would make a
 /// correct deployment unshippable.
 fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
-    let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
+    let mut warnings = warn_unpoliced_ebgp(config)
+        + check_tls_expiry_warnings(listeners)
+        + check_credential_file_warnings(listeners);
     #[cfg(target_os = "linux")]
     {
         warnings += host_ipv6_runtime::check(config);
@@ -3512,7 +3622,7 @@ fn write_panic_report_at(
     // Staged under `<name>.toml.tmp` and renamed into place, so a process
     // that dies mid-write leaves no empty or truncated report; the prune
     // below and `rbgp doctor` only read `*.toml`.
-    confirm_journal::write_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
+    confirm_journal::write_state_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
     prune_panic_reports(crash_dir);
     Ok(())
 }
@@ -4318,17 +4428,18 @@ async fn run<T>(
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
     let runtime_state_path = config.runtime_state_dir();
-    // Pin the shared authority before either marker or bundle access. Unsafe
-    // owner/mode or a final symlink disables both paths fail closed.
+    // Pin the shared authority before any marker, receipt, or bundle access.
+    // Every daemon-owned state file lives here, so an unusable directory, an
+    // unsafe owner or mode, or a final symlink refuses boot.
     let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
         Ok(directory) => Some(Arc::new(directory)),
         Err(error) => {
-            warn!(
+            error!(
                 path = %runtime_state_path.display(),
                 %error,
-                "runtime-state marker/checkpoint storage unavailable"
+                "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
             );
-            None
+            process::exit(1);
         }
     };
     let gr_restart_marker_store = runtime_state_directory
@@ -4544,6 +4655,9 @@ async fn run<T>(
     let grpc_credentials = grpc_listeners
         .first()
         .map(GrpcListenerConfig::credential_store);
+    if let Some(credentials) = &grpc_credentials {
+        warn_grpc_credential_files(credentials);
+    }
     let grpc_tls_expiry_warning = grpc_listeners.iter().find_map(|listener| {
         matches!(listener.endpoint, ListenerEndpoint::Tcp(_)).then_some((
             listener.credential_index,
@@ -5184,6 +5298,13 @@ async fn run<T>(
             RpkiTaskKind::AspaForwarder,
         );
 
+        // One record budget shared by every cache's client.
+        let max_cache_records =
+            usize::try_from(rpki_config.max_records_per_cache()).unwrap_or(usize::MAX);
+        let record_budget = rustbgpd_rpki::RecordBudget::new(
+            usize::try_from(rpki_config.max_records_total()).unwrap_or(usize::MAX),
+        );
+
         // Spawn one RTR client per configured cache server
         for (cache_ordinal, server) in rpki_config.cache_servers.iter().enumerate() {
             let addr: std::net::SocketAddr = match server.address.parse() {
@@ -5207,6 +5328,7 @@ async fn run<T>(
             let expire_metrics = metrics.clone();
             let cache_label = addr.to_string();
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
+                .with_record_limits(max_cache_records, Arc::clone(&record_budget))
                 .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
@@ -7178,6 +7300,7 @@ async fn run<T>(
                                         operation.mark_sighup_accepted_effect();
                                         reload_metrics.record_grpc_credential_reload("success");
                                         info!(generation, "gRPC credential generation reloaded");
+                                        warn_grpc_credential_files(&credentials);
                                         if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
                                             warn_grpc_tls_expiry(&credentials, index, warning_seconds);
                                         }
@@ -10908,6 +11031,90 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         std::fs::set_permissions(unsafe_dir.path(), std::fs::Permissions::from_mode(0o777))
             .unwrap();
         assert!(PinnedRuntimeStateDirectory::prepare(unsafe_dir.path()).is_err());
+    }
+
+    /// Load-bearing: a directory above the runtime-state directory that
+    /// another user could rewrite is refused, along the path as written and
+    /// along its canonical form; a sticky shared directory such as `/tmp`
+    /// is accepted.
+    #[test]
+    fn runtime_state_directory_with_a_replaceable_ancestor_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let private = |path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let shared = base.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let state = shared.join("state");
+        private(&state);
+        let error = PinnedRuntimeStateDirectory::prepare(&state).err().unwrap();
+        assert!(error.contains("reachable through"), "{error}");
+        assert!(error.contains(&shared.display().to_string()), "{error}");
+
+        // Reached through a symlink planted in the writable directory: the
+        // canonical target is private, but the path as written is not.
+        let real = base.path().join("real");
+        private(&real);
+        let link = shared.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let error = PinnedRuntimeStateDirectory::prepare(&link.join("state"))
+            .err()
+            .unwrap();
+        assert!(error.contains("reachable through"), "{error}");
+
+        // Writable by a group other than the daemon's, when this user has one.
+        let other_group = nix::unistd::getgroups()
+            .unwrap()
+            .into_iter()
+            .find(|gid| *gid != nix::unistd::getegid());
+        if let Some(gid) = other_group {
+            nix::unistd::chown(&shared, None, Some(gid)).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o770)).unwrap();
+            let error = PinnedRuntimeStateDirectory::prepare(&state).err().unwrap();
+            assert!(error.contains("reachable through"), "{error}");
+            // The daemon's own group may write.
+            nix::unistd::chown(&shared, None, Some(nix::unistd::getegid())).unwrap();
+            PinnedRuntimeStateDirectory::prepare(&state).unwrap();
+        }
+
+        // Sticky shared directories are accepted, as `/tmp` is.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        PinnedRuntimeStateDirectory::prepare(&state).unwrap();
+        // The tempdir base itself sits under sticky /tmp.
+        let direct = base.path().join("direct");
+        private(&direct);
+        PinnedRuntimeStateDirectory::prepare(&direct).unwrap();
+    }
+
+    /// Load-bearing: a trailing `/` or `/.` must not let a symlinked
+    /// runtime-state directory through `O_NOFOLLOW`, and a final `..` is
+    /// refused. The real directory still prepares under any spelling.
+    #[test]
+    fn runtime_state_directory_symlink_is_refused_under_every_spelling() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let spell =
+            |path: &Path, suffix: &str| PathBuf::from(format!("{}{suffix}", path.display()));
+        for suffix in ["", "/", "/.", "/./", "//", "/./."] {
+            let spelled = spell(&link, suffix);
+            let error = PinnedRuntimeStateDirectory::prepare(&spelled)
+                .err()
+                .unwrap_or_else(|| panic!("{} was accepted", spelled.display()));
+            assert!(error.contains("failed to pin"), "{suffix:?}: {error}");
+            let directory = PinnedRuntimeStateDirectory::prepare(&spell(&real, suffix))
+                .unwrap_or_else(|error| panic!("{suffix:?}: {error}"));
+            assert_eq!(directory.display_path, real);
+        }
+        let error = PinnedRuntimeStateDirectory::prepare(&spell(&link, "/.."))
+            .err()
+            .unwrap();
+        assert!(error.contains("not end in `..`"), "{error}");
     }
 
     #[test]

@@ -82,6 +82,17 @@ pub fn refuse_retired_journal(path: &Path) -> Result<(), String> {
     }
 }
 
+/// [`write_atomic`] for daemon-owned runtime state. The destination is the
+/// directory entry at `path`, never what it resolves to: a symlink planted
+/// there is replaced by the new file, and its target is left untouched. The
+/// stage beside it is opened `O_NOFOLLOW`. Config-file writes keep
+/// [`write_atomic`], which deliberately writes through an operator's symlink.
+pub(crate) fn write_state_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
+    stage_target(path.to_path_buf(), bytes)
+        .map_err(|error| AtomicPublishError::NotPublished(name_write_failure(path, &error)))?
+        .commit()
+}
+
 /// Write temp file + fsync + rename + fsync dir. Shared with the config
 /// persister so every durable config write goes through the same primitive.
 ///
@@ -286,6 +297,10 @@ fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
         }
         Err(error) => return Err(error),
     };
+    stage_target(target, bytes)
+}
+
+fn stage_target(target: PathBuf, bytes: &[u8]) -> io::Result<StagedWrite> {
     let mut tmp = target.clone().into_os_string();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);

@@ -1265,6 +1265,11 @@ Each RTR client reconnects independently after a fixed `retry_interval`
 arrives, both capped by `max_expire_interval` when set), cached VRPs for that
 server are discarded. Routes are re-validated against the remaining VRP table.
 
+A cache that sends more records than `max_records_per_cache` allows, or
+that would take all caches past `max_records_total`, is refused the same way:
+its last accepted data stays, and it reconnects to ask for a full table. See
+[record limits](configuration.md#record-limits).
+
 When all caches are down, the VRP table is empty and all routes have
 validation state `NotFound`. If your policy denies `NotFound` routes, this
 will cause route drops. The recommended policy is to deny `Invalid` and
@@ -1455,19 +1460,24 @@ accepting. Neither mode latches the peer or sends a NOTIFICATION, and
 unset.
 
 For negotiated IPv4/IPv6-unicast Add-Path receive, a nonzero
-`add_path.receive_max` also caps retained path IDs **per prefix**. It counts
-accepted IDs plus rejected IDs only when that family's
+`add_path.receive_max` also caps retained path IDs **per prefix**. Unset or
+zero, a default cap of 1024 path IDs per prefix applies and always behaves
+as `"block"`, independent of `max_prefix_action`; it advertises no
+Paths-Limit capability. Either cap counts accepted IDs plus rejected IDs
+only when that family's
 `max_prefixes_received_*` bound enables rejected-identity tracking. Without
 that bound, a denied path does not occupy a receive-cap slot; rejected-route
 diagnostics remain separately capacity-bounded. An existing ID can be
 replaced at the cap, and a withdrawal releases its slot. Under `"block"`, a
 net-new over-limit ID is withheld; recovery requires peer reannouncement or
 a session reset. Under `"shutdown"`, the peer receives Cease/1 and is latched
-off as above. Under `"warning"`, the excess is observed but accepted, so
-the cap does not bound memory. `bgp_add_path_receive_limit_attempts_total`
+off as above. Under `"warning"`, a configured cap observes the excess and
+accepts it up to a safety ceiling of `max(receive_max, 1024)` path IDs per
+prefix; past the ceiling the excess is withheld and counted as `"block"`. `bgp_add_path_receive_limit_attempts_total`
 counts net-new ID admission attempts beyond the cap, including repeated
 attempts to send a withheld ID. Replacing an already admitted ID does not
-count. The counter is labeled by peer, family and action. The
+count. The counter is labeled by peer, family and action; the default cap
+records `action="block"`. The
 `bgp_max_prefix_*` gauges and counters continue to describe
 unique-prefix bounds, not this path count. A `receive_max` config edit
 rebuilds the session; a lower cap applies to the replacement session, not as
@@ -2207,8 +2217,8 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_evpn_nlri_discarded_total{peer}` | Unrecognized or unsupported EVPN typed NLRIs discarded under RFC 7606 §5.4 while supported routes in the same MP attribute and the session are preserved. This existing counter remains the peer aggregate across announcements and withdrawals. Malformed EVPN framing and malformed payloads for supported types are not counted here and retain their existing decode-error handling. |
 | `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` | The same discards separated by decimal wire route type (bounded to one octet). One WARN per type per TCP connection identifies the peer, `family=evpn`, `route_type`, and initial `discarded` count; DEBUG records retain every per-type count per UPDATE. Repeated discards continue incrementing both counters. Ordinary reconnects preserve counters and re-arm warnings; configured-peer deletion reaps all type series. Use this counter to identify unsupported routes sent by a peer, such as multicast types 7–8; these routes do not enter the RIB or get reflected. |
 | `bgp_path_attribute_discarded_total{peer,type_code}` | Surviving decoded attributes removed by effective `discard_path_attributes`, plus well-formed ORIGINATOR_ID (`9`) and CLUSTER_LIST (`10`) received from an external neighbor, which RFC 7606 §7.9/§7.10 discard without any configuration (an attribute matching both counts once); `type_code` is the decimal wire type. Increments once per removed attribute occurrence in an UPDATE, not once per NLRI, and each peer/type/update produces one bounded DEBUG record. RFC 7606-removed malformed attributes do not increment it; their reported causes appear in `bgp_update_malformed_causes_total`. Ordinary session resets preserve the counter; configured-peer deletion reaps all of its type-code series. |
-| `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
-| `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}` | Causes reported while processing malformed UPDATEs, with the final applied disposition on every cause. `type_code` is decimal 0–255 or `none` when no attribute type is attributable. Multiple independent causes can occur in one UPDATE or attribute; this is neither an UPDATE nor an NLRI count. Each prohibited AS-set attribute occurrence contributes one `as_set_prohibited` cause. A missing mandatory attribute caused by the decoder removing that same malformed attribute adds no second cause. Counters survive session resets; configured-peer deletion reaps them. |
+| `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). A malformed UPDATE logs one WARN, once its final action is known, with that action (`disposition`), the decoder's strongest disposition and cause, the record count, and repeated duplicates, at the 1st, 2nd, 4th, 8th, … such UPDATE per TCP connection; DEBUG carries one line per cause and the §6 full-message hex capture |
+| `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}` | Causes reported while processing malformed UPDATEs, with the final applied disposition on every cause. `type_code` is decimal 0–255 or `none` when no attribute type is attributable. Multiple independent causes can occur in one UPDATE or attribute; this is neither an UPDATE nor an NLRI count. A prohibited AS-set contributes one `as_set_prohibited` cause per attribute type in an UPDATE, and a duplicated attribute type contributes one duplicate cause, however many times either repeats. A missing mandatory attribute caused by the decoder removing that same malformed attribute adds no second cause. Counters survive session resets; configured-peer deletion reaps them. |
 | `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a canonical configuration family label (BGP-LS is `linkstate` / `linkstate_vpn`); `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, `message_too_long`, or `multiple_labels_not_negotiated`. `multiple_labels_not_negotiated` counts a labeled-unicast or VPN route whose NLRI binds more than one MPLS label: rustbgpd does not advertise the RFC 8277 Multiple Labels Capability, so such a route is withheld from every peer and a copy already sent is withdrawn. Its zero series exists only for those four families. `missing_ipv6_next_hop` also counts a link-local next hop withheld because the destination is not on the interface where it was learned (warning detail: `link-local next hop cannot be advertised outside its interface scope`), with or without capability 77. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_export_family_suppressed_total{peer,family,reason}` | Session establishments at which a negotiated family was withheld from export, counted once per establishment rather than per route. The family stays withheld until a reload supplies what it lacks; that restores export on the live session, so the counter records that suppression began, not that it is still in effect. Part of the v1 RS/RR metric floor: the labels and the values below are stable, and further bounded `family` and `reason` values may be added. Today the only series is `family="ipv6_unicast"`, `reason="missing_ipv6_next_hop"`: an eBGP session (not a route-server client) with no `local_ipv6_nexthop` and no usable local IPv6 address, typically IPv6 unicast over IPv4 transport. No IPv6 unicast route, local or learned, reaches that peer, and `bgp_exact_export_rejections_total` does not count them because they never reach the exact-export probe. The zero series exists for every peer configured with `ipv6_unicast`. Alert on `increase(...) > 0`. To fix, set `local_ipv6_nexthop` and reload: an established session then exports the family without a reset, and the counter does not move again. `rustbgpd --check` names the affected static neighbors. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
@@ -2895,7 +2905,7 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_local_observations_dropped_total{reason="channel_closed"}` | Kernel local-MAC observations classified by the netlink notify loop after the originator receiver was gone |
 | `evpn_duplicate_ip_moves_total{vni}` | Conflicting IPv4/IPv6 ownership observations counted by the optional detect-only IP detector |
 | `evpn_duplicate_ip_threshold_exceeded_total{vni}` | Per-IP M/N threshold crossings; each crossing logs the VNI, IP, observed MAC, threshold, and window without changing routes |
-| `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator |
+| `evpn_duplicate_mac_moves_total{vni,mac}` | MAC moves detected by local learning (RFC 7432 §15.1): a local learn or local port move of a MAC that another segment advertises. Remote announcements and withdrawals alone do not count |
 | `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
 | `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` | RFC 7432 §15.1 M/N threshold crossings. `action` is `detect` or `suppress_local` from the per-instance config |
 | `evpn_duplicate_mac_quarantine_active{vni,mac}` | `1` while `action = "suppress_local"` is actively suppressing local Type 2 originations for that key; returns to `0` after timed recovery |
@@ -3271,6 +3281,7 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, and crash reports write there |
+| `credentials.<listener>.<field>` | For a Unix-socket daemon address, each configured gRPC `token_file`, `tls_cert_file`, `tls_key_file` and `tls_client_ca_file`, judged by the daemon's [credential file rules](configuration.md#grpc-credential-file-permissions). A verified local daemon supplies its mount namespace and effective user and group; without one, only the mode is judged | red: the daemon refuses the file (not a regular file, or a world-writable token or key); yellow: a token or key readable beyond the daemon, or a file doctor could not inspect |
 | `host.run_context` | systemd / container / unknown from pid-1 facts | tailors remediation lines (e.g. `LimitNOFILE=` vs container ulimits) |
 | `daemon.config_freshness.<pid>` | whether config file mtime is newer than the daemon's last config-file marker (process start fallback) | yellow means on-disk changes may be pending; green does not prove effective runtime agreement |
 
@@ -4717,7 +4728,12 @@ Two complementary origination paths exist:
   EoR marker. (This was not always the case — see commit history for
   the regression test.)
 - **MAC mobility selection.** Local MAC moves increment the advertised
-  MAC Mobility sequence, saturating at `u32::MAX`. Same-segment peer
+  MAC Mobility sequence, saturating at `u32::MAX`. Remote routes never
+  raise it: a route from another segment with a higher sequence, or with
+  an equal sequence from a lower PE IP, makes the originator withdraw its
+  own Type 2 (RFC 7432 §15). The originator advertises the MAC again when
+  that contender is gone, or bumps above it when the kernel learns the MAC
+  on another local port. A sticky MAC never withdraws. Same-segment peer
   synchronization can adopt a higher sequence without incrementing it.
   EVPN selection also considers freshness, sticky status, and the remaining
   tie-breaks; a higher sequence alone does not guarantee a path change.
