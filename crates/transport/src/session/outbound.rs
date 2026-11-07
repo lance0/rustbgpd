@@ -1,7 +1,7 @@
 use super::export::{
-    DroppedIpv6NextHops, ExportProbeError, ExportWithdrawal, MpAttrCache, PreparedAttrCache,
-    PreparedMpCandidate, PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri,
-    SessionExportProfile, UnreachNlri, has_otc,
+    DroppedIpv6NextHops, ExportCandidate, ExportProbeError, ExportWithdrawal, MpAttrCache,
+    PreparedAttrCache, PreparedMpCandidate, PreparedUnicastCandidate, PreparedWithdrawal,
+    ReachNlri, SessionExportProfile, UnreachNlri, has_otc,
 };
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
@@ -23,6 +23,27 @@ pub(super) const SLICE_TIME_BUDGET: Duration = Duration::from_millis(4);
 /// Floor for a shrunken slice, so per-slice overhead stays amortized.
 const MIN_SLICE_ROUTES: usize = 64;
 
+enum SliceBudget {
+    Ready(usize),
+    AwaitBytes(usize),
+}
+
+fn fit_wire_lengths(lengths: impl Iterator<Item = usize>, mut available: usize) -> SliceBudget {
+    let mut rows = 0;
+    for length in lengths {
+        if length > available {
+            return if rows == 0 {
+                SliceBudget::AwaitBytes(length)
+            } else {
+                SliceBudget::Ready(rows)
+            };
+        }
+        available -= length;
+        rows += 1;
+    }
+    SliceBudget::Ready(rows)
+}
+
 /// One envelope remains owned until its final marker is admitted. Slices
 /// reuse the exact export snapshot, without growing the bounded writer queue.
 pub(super) struct PendingOutbound {
@@ -31,8 +52,8 @@ pub(super) struct PendingOutbound {
     phase: usize,
     offset: usize,
     capacity_blocked: bool,
-    /// Set while the writer holds its whole byte budget: the completion
-    /// watermark at which the backlog is back under it. The cursor stays
+    /// Set while the next frame cannot fit: the completion watermark that
+    /// leaves enough room within the byte budget. The cursor stays
     /// where it is. A paused peer is not a failed one: with RFC 9687 send
     /// hold enabled no admission deadline runs, since the writer's send hold
     /// bounds the write in flight; with it disabled the admission deadline
@@ -337,7 +358,9 @@ impl PendingOutbound {
     /// budget.
     #[cfg(test)]
     pub(super) fn bytes_blocked(&self) -> bool {
-        self.bytes_wait.is_some()
+        self.bytes_wait
+            .as_ref()
+            .is_some_and(|(completed, target)| *completed.borrow() < *target)
     }
 
     /// Only a completed or abandoned envelope retires: before that, the
@@ -549,6 +572,111 @@ impl PendingOutbound {
             }
         }
         None
+    }
+
+    /// Reserve each row's complete single-entry wire size before consuming it.
+    /// Batching can only remove repeated headers and attributes from this bound.
+    fn byte_limited_rows(&mut self, rows: usize, available: usize) -> SliceBudget {
+        if self.finish_empty_phases() {
+            return SliceBudget::Ready(rows);
+        }
+        let fixed_length = match OUTBOUND_PHASES[self.phase] {
+            OutboundPhase::Requests | OutboundPhase::Begin | OutboundPhase::End => Some(23),
+            OutboundPhase::Eor => Some(30),
+            // Header, UPDATE lengths, MP_UNREACH header/family, IPv6 /128 + path ID.
+            OutboundPhase::Withdraw => Some(52),
+            _ => None,
+        };
+        if let Some(length) = fixed_length {
+            return fit_wire_lengths(std::iter::repeat_n(length, rows), available);
+        }
+        let export = self
+            .update
+            .exact_export_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.as_any().downcast_ref::<SessionExportProfile>())
+            .expect("outbound snapshot validated before cursor admission");
+        if rows <= available / export.max_message_len() {
+            return SliceBudget::Ready(rows);
+        }
+        macro_rules! announce {
+            ($routes:expr, $offset:expr, $kind:ident) => {
+                fit_wire_lengths(
+                    export.announcement_wire_lengths(
+                        $routes
+                            .iter()
+                            .skip($offset)
+                            .take(rows)
+                            .map(ExportCandidate::$kind),
+                    ),
+                    available,
+                )
+            };
+        }
+        macro_rules! withdraw {
+            ($routes:expr, $kind:ident) => {
+                fit_wire_lengths(
+                    $routes.iter().skip(self.offset).take(rows).map(|route| {
+                        export
+                            .probe_withdrawal(ExportWithdrawal::$kind(route))
+                            .map_or(export.max_message_len(), |probe| {
+                                probe.encoded_len.min(export.max_message_len())
+                            })
+                    }),
+                    available,
+                )
+            };
+        }
+        match OUTBOUND_PHASES[self.phase] {
+            OutboundPhase::Requests
+            | OutboundPhase::Begin
+            | OutboundPhase::End
+            | OutboundPhase::Eor
+            | OutboundPhase::Withdraw => unreachable!("fixed-length phases handled above"),
+            OutboundPhase::Announce => fit_wire_lengths(
+                export.announcement_wire_lengths(
+                    self.update
+                        .announce
+                        .iter()
+                        .enumerate()
+                        .skip(self.offset)
+                        .take(rows)
+                        .map(|(index, route)| ExportCandidate::Unicast {
+                            route,
+                            next_hop_override: self
+                                .update
+                                .next_hop_override
+                                .get(index)
+                                .and_then(Option::as_ref),
+                        }),
+                ),
+                available,
+            ),
+            OutboundPhase::FlowspecAnnounce => {
+                announce!(self.update.flowspec_announce, self.offset, FlowSpec)
+            }
+            OutboundPhase::BgplsAnnounce => {
+                announce!(self.update.bgpls_announce, self.offset, BgpLs)
+            }
+            OutboundPhase::RtcAnnounce => announce!(self.update.rtc_announce, self.offset, Rtc),
+            OutboundPhase::EvpnAnnounce if self.update.evpn_announce.is_empty() => {
+                announce!(self.evpn_announce.as_slice(), 0, Evpn)
+            }
+            OutboundPhase::EvpnAnnounce => announce!(self.update.evpn_announce, self.offset, Evpn),
+            OutboundPhase::VpnAnnounce if self.update.vpn_announce.is_empty() => {
+                announce!(self.vpn_announce.as_slice(), 0, Vpn)
+            }
+            OutboundPhase::VpnAnnounce => announce!(self.update.vpn_announce, self.offset, Vpn),
+            OutboundPhase::LabeledAnnounce => {
+                announce!(self.labeled_announce.as_slice(), 0, Labeled)
+            }
+            OutboundPhase::FlowspecWithdraw => withdraw!(self.update.flowspec_withdraw, FlowSpec),
+            OutboundPhase::EvpnWithdraw => withdraw!(self.update.evpn_withdraw, Evpn),
+            OutboundPhase::BgplsWithdraw => withdraw!(self.update.bgpls_withdraw, BgpLs),
+            OutboundPhase::VpnWithdraw => withdraw!(self.update.vpn_withdraw, Vpn),
+            OutboundPhase::LabeledWithdraw => withdraw!(self.update.labeled_withdraw, Labeled),
+            OutboundPhase::RtcWithdraw => withdraw!(self.update.rtc_withdraw, Rtc),
+        }
     }
 
     /// Unicast withdraw rows `offset..end`: the group's shared rows, then
@@ -861,7 +989,7 @@ impl PeerSession {
         // Every valid payload entry contributes at most one UPDATE frame;
         // grouping can only reduce that count. Requests and terminal markers
         // consume their own exact frame budget in separate phases.
-        let budget = if self.writer_bytes_exhausted() {
+        let mut budget = if self.writer_bytes_exhausted() {
             0
         } else {
             writer
@@ -870,8 +998,25 @@ impl PeerSession {
         };
         let before = self.writer_bulk_admitted;
         let mut finished = false;
+        let mut bytes_needed = 1;
+        let started = Instant::now();
         pending.capacity_blocked = budget == 0;
         let shared_ready = pending.shared.is_some() && pending.withdrawals_admitted();
+        if !shared_ready && budget > 0 {
+            let available = self.writer_bytes_available();
+            let sized = if pending.update.replay.is_some() {
+                fit_wire_lengths(std::iter::repeat_n(30, budget), available)
+            } else {
+                pending.byte_limited_rows(budget.min(pending.slice_routes), available)
+            };
+            match sized {
+                SliceBudget::Ready(rows) => budget = rows,
+                SliceBudget::AwaitBytes(needed) => {
+                    budget = 0;
+                    bytes_needed = needed;
+                }
+            }
+        }
         if shared_ready && let Some((shared, next)) = &mut pending.shared {
             let (chunks, terminal) =
                 shared.snapshot_from(*next, super::shared_group::PROGRESSIVE_SLICE_ROUTES);
@@ -884,8 +1029,9 @@ impl PeerSession {
                         pending.capacity_blocked = true;
                         break;
                     }
-                    if self.writer_bytes_exhausted() {
+                    if chunk.bytes.len() > self.writer_bytes_available() {
                         // Resumes from this chunk once the writer drains.
+                        bytes_needed = chunk.bytes.len();
                         break;
                     }
                     if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
@@ -937,7 +1083,6 @@ impl PeerSession {
                     pending.offset = 0;
                 }
                 if let Some(slice) = pending.next_slice(budget.min(pending.slice_routes)) {
-                    let started = Instant::now();
                     self.send_route_update_slice(slice, &mut pending.dropped_ipv6_next_hops);
                     let cost = started.elapsed();
                     // Tests pin the cost so slice sizes never follow host speed.
@@ -961,7 +1106,7 @@ impl PeerSession {
         if self.writer_bulk_admitted != before {
             self.outbound_admission_timer = None;
         }
-        pending.bytes_wait = self.writer_bytes_wait();
+        pending.bytes_wait = self.writer_bytes_wait(bytes_needed);
         if !finished
             && self
                 .writer_bulk_tx
@@ -1037,14 +1182,15 @@ impl PeerSession {
         }
     }
 
-    /// While the writer holds its whole byte budget, the completion
-    /// watermark that brings the backlog back under it.
-    fn writer_bytes_wait(&self) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
+    /// The completion watermark that leaves room for the next complete frame.
+    fn writer_bytes_wait(&self, needed: usize) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
         let completed = self.writer_completed.as_ref()?;
-        self.writer_bytes_exhausted().then(|| {
+        (needed > self.writer_bytes_available()).then(|| {
             (
                 completed.clone(),
-                self.writer_bulk_admitted - super::writer::WRITER_BYTE_BUDGET + 1,
+                self.writer_bulk_admitted.saturating_sub(
+                    super::writer::WRITER_BYTE_BUDGET.saturating_sub(needed as u64),
+                ),
             )
         })
     }

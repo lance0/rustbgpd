@@ -245,6 +245,11 @@ impl PeerSession {
         self.writer_bytes_held() >= super::writer::WRITER_BYTE_BUDGET
     }
 
+    pub(super) fn writer_bytes_available(&self) -> usize {
+        usize::try_from(super::writer::WRITER_BYTE_BUDGET.saturating_sub(self.writer_bytes_held()))
+            .unwrap_or(usize::MAX)
+    }
+
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
     /// (`UPDATE`, `RouteRefresh` `BoRR`/`EoRR` markers, `EoR` markers). Returns
     /// `OutboundChannelFull` when the writer hasn't drained the bounded

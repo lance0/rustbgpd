@@ -24,6 +24,7 @@ use crate::config::TransportConfig;
 pub struct OutboundEncodeBench {
     session: PeerSession,
     bulk_rx: mpsc::Receiver<Bytes>,
+    completed: tokio::sync::watch::Sender<u64>,
     _priority_rx: mpsc::UnboundedReceiver<Bytes>,
 }
 
@@ -66,12 +67,15 @@ impl OutboundEncodeBench {
         negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
         session.negotiated = Some(Arc::new(negotiated));
         let (bulk_tx, bulk_rx) = mpsc::channel(queue);
+        let (completed, writer_completed) = tokio::sync::watch::channel(0);
         let (priority_tx, priority_rx) = mpsc::unbounded_channel();
         session.writer_bulk_tx = Some(bulk_tx);
+        session.writer_completed = Some(writer_completed);
         session.writer_priority_tx = Some(priority_tx);
         Self {
             session,
             bulk_rx,
+            completed,
             _priority_rx: priority_rx,
         }
     }
@@ -98,8 +102,60 @@ impl OutboundEncodeBench {
             self.session.writer_bulk_tx.is_some(),
             "bench writer queue saturated"
         );
-        while self.bulk_rx.try_recv().is_ok() {}
+        self.complete();
         elapsed
+    }
+
+    /// Deliver through the production admission cursor, including its byte
+    /// budget. Complete writes between steps outside the returned duration.
+    ///
+    /// # Panics
+    ///
+    /// If the fixed benchmark session is missing negotiation or tears down.
+    pub fn send_paced(
+        &mut self,
+        announce: &Arc<Vec<Route>>,
+        extended_messages: bool,
+    ) -> std::time::Duration {
+        let update = OutboundRouteUpdate {
+            announce: Arc::clone(announce),
+            next_hop_override: vec![None; announce.len()].into(),
+            ..OutboundRouteUpdate::default()
+        };
+        self.send_paced_update(update, (Afi::Ipv4, Safi::Unicast), extended_messages)
+    }
+
+    /// Deliver a family-specific envelope through the same admission cursor.
+    /// Negotiation and snapshot capture remain outside the timed interval.
+    ///
+    /// # Panics
+    ///
+    /// If negotiation is missing, the session tears down, or no frame is emitted.
+    pub fn send_paced_update(
+        &mut self,
+        mut update: OutboundRouteUpdate,
+        family: (Afi, Safi),
+        extended_messages: bool,
+    ) -> std::time::Duration {
+        let negotiated = Arc::make_mut(self.session.negotiated.as_mut().unwrap());
+        negotiated.peer_extended_message = extended_messages;
+        if !negotiated.negotiated_families.contains(&family) {
+            negotiated.negotiated_families.push(family);
+        }
+        update.exact_export_snapshot = Some(self.session.publish_export_profile());
+        let before = self.session.writer_bulk_admitted;
+        let elapsed = self.deliver(update);
+        assert!(
+            self.session.writer_bulk_admitted > before,
+            "empty benchmark delivery"
+        );
+        elapsed
+    }
+
+    fn complete(&mut self) {
+        while self.bulk_rx.try_recv().is_ok() {}
+        self.completed
+            .send_replace(self.session.writer_bulk_admitted);
     }
 }
 
@@ -113,15 +169,15 @@ impl OutboundEncodeBench {
         {
             // This producer future only suspends to yield between encoded
             // slices; writer admission never awaits capacity or I/O. Poll it
-            // directly so this synchronous microbench continues to measure
-            // session work without adding a runtime or writer-drain work.
+            // directly so this synchronous microbench measures session work
+            // without executor scheduling or writer-drain work.
             let mut delivery = std::pin::pin!(self.session.handle_outbound_route_update(update));
             let mut cx = Context::from_waker(Waker::noop());
             while delivery.as_mut().poll(&mut cx).is_pending() {}
         }
         let mut elapsed = start.elapsed();
         while self.session.pending_outbound.is_some() {
-            while self.bulk_rx.try_recv().is_ok() {}
+            self.complete();
             let start = std::time::Instant::now();
             self.session.advance_pending_outbound();
             elapsed += start.elapsed();
@@ -130,7 +186,7 @@ impl OutboundEncodeBench {
             self.session.writer_bulk_tx.is_some(),
             "bench writer queue saturated"
         );
-        while self.bulk_rx.try_recv().is_ok() {}
+        self.complete();
         elapsed
     }
 }

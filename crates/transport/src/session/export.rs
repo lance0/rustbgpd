@@ -1352,6 +1352,44 @@ impl SessionExportProfile {
         result
     }
 
+    /// Single-entry wire lengths, stopping without preparing the unused tail.
+    /// The temporary caches retain attributes only for visited candidates.
+    pub(super) fn announcement_wire_lengths<'a>(
+        &'a self,
+        candidates: impl Iterator<Item = ExportCandidate<'a>> + 'a,
+    ) -> impl Iterator<Item = usize> + 'a {
+        let mut prepared = PreparedAttrCache::default();
+        let mut lengths = FastMap::default();
+        candidates.map(move |candidate| {
+            let result = match candidate {
+                ExportCandidate::Unicast {
+                    route,
+                    next_hop_override,
+                } => {
+                    let attrs = self
+                        .prepared_unicast_attributes_cached(
+                            &mut prepared,
+                            route,
+                            self.local_ipv4(),
+                            next_hop_override,
+                        )
+                        .clone();
+                    self.probe_unicast_with_length_cache(
+                        route,
+                        next_hop_override,
+                        attrs,
+                        &mut lengths,
+                    )
+                    .map(|probe| probe.encoded_len)
+                }
+                _ => exact_export_result(self.probe_announcement(candidate))
+                    .map(|probe| probe.encoded_len),
+            };
+            // The live sender retains its existing handling of an invalid route.
+            result.unwrap_or(self.max_message_len())
+        })
+    }
+
     pub(crate) fn probe_announcement(
         &self,
         candidate: ExportCandidate<'_>,

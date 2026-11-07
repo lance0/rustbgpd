@@ -1298,7 +1298,7 @@ fn heavy_routes(count: u32) -> Vec<Route> {
 fn admit_until_blocked(session: &mut PeerSession) {
     for _ in 0..10_000 {
         match session.pending_outbound.as_ref() {
-            Some(pending) if !pending.bytes_blocked() || !session.writer_bytes_exhausted() => {
+            Some(pending) if !pending.bytes_blocked() => {
                 session.advance_pending_outbound();
             }
             _ => return,
@@ -1358,10 +1358,362 @@ async fn envelope_wakes(session: &PeerSession) -> bool {
 
 const BYTE_BUDGET: u64 = super::super::writer::WRITER_BYTE_BUDGET;
 
+#[tokio::test(start_paused = true)]
+async fn extended_message_admission_stays_within_writer_byte_budget() {
+    large_frame_admission_stays_within_budget(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_message_admission_stays_within_writer_byte_budget() {
+    large_frame_admission_stays_within_budget(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn marker_only_envelope_waits_for_complete_frame_capacity() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - 22;
+    session
+        .handle_outbound_route_update(OutboundRouteUpdate {
+            end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await;
+    assert!(frames.try_recv().is_err(), "the 23-byte EoR cannot fit");
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    for _ in 0..8 {
+        session.advance_pending_outbound();
+    }
+    assert!(
+        frames.try_recv().is_err(),
+        "waiting does not consume the marker"
+    );
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(session.pending_outbound.is_none());
+    assert_eq!(delivered(vec![frames.try_recv().unwrap()]), vec![None]);
+    assert!(frames.try_recv().is_err(), "the marker is admitted once");
+}
+
+#[tokio::test(start_paused = true)]
+async fn oversized_route_resumes_to_existing_post_commit_failure() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - 1;
+    let mut route = pacing_routes(1, true).pop().unwrap();
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities((0..1_100).collect()));
+    });
+    session
+        .handle_outbound_route_update(pacing_update(&session, vec![route]))
+        .await;
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    assert!(
+        session.writer_priority_tx.is_some(),
+        "waiting is not an error"
+    );
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(
+        session.writer_priority_tx.is_none(),
+        "the live encoder rejects the oversized route"
+    );
+    assert!(
+        frames.try_recv().is_err(),
+        "no oversized frame or successful EoR"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn oversized_withdrawal_resumes_to_existing_post_commit_failure() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    Arc::make_mut(session.negotiated.as_mut().unwrap())
+        .negotiated_families
+        .push((Afi::BgpLs, Safi::BgpLs));
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - 1;
+    let mut route = make_bgpls_route(1);
+    route.nlri.payload = Bytes::from(vec![0; 5_000]);
+    session
+        .handle_outbound_route_update(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            bgpls_withdraw: vec![route.key()],
+            end_of_rib: vec![(Afi::BgpLs, Safi::BgpLs)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await;
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(
+        session.writer_priority_tx.is_none(),
+        "the live encoder rejects the oversized withdrawal"
+    );
+    assert!(
+        frames.try_recv().is_err(),
+        "no oversized frame or successful EoR"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_family_waits_for_complete_announcement_and_withdrawal_frames() {
+    macro_rules! family {
+        ($family:expr, $route:expr, $announce:ident, $withdraw:ident) => {{
+            let route = $route;
+            let key = route.key();
+            for update in [
+                OutboundRouteUpdate {
+                    $announce: vec![route].into(),
+                    ..OutboundRouteUpdate::default()
+                },
+                OutboundRouteUpdate {
+                    $withdraw: vec![key],
+                    ..OutboundRouteUpdate::default()
+                },
+            ] {
+                assert_family_frame_wait($family, update).await;
+            }
+        }};
+    }
+    family!(
+        (Afi::L2Vpn, Safi::Evpn),
+        make_smet_route(2),
+        evpn_announce,
+        evpn_withdraw
+    );
+    family!(
+        (Afi::BgpLs, Safi::BgpLs),
+        make_bgpls_route(1),
+        bgpls_announce,
+        bgpls_withdraw
+    );
+    family!(
+        (Afi::Ipv4, Safi::MplsVpn),
+        make_vpn_rib_route(100),
+        vpn_announce,
+        vpn_withdraw
+    );
+    family!(
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        make_labeled_rib_route(100),
+        labeled_announce,
+        labeled_withdraw
+    );
+    family!(
+        (Afi::Ipv4, Safi::RtConstrain),
+        make_rtc_rib_route(100),
+        rtc_announce,
+        rtc_withdraw
+    );
+    for rd in [None, Some("65000:1".parse().unwrap())] {
+        let mut route = make_flowspec_route();
+        route.rd = rd;
+        let key = FlowSpecKey {
+            afi: route.afi,
+            rd,
+            rule: route.rule.clone(),
+        };
+        let family = key.family();
+        for update in [
+            OutboundRouteUpdate {
+                flowspec_announce: vec![route],
+                ..OutboundRouteUpdate::default()
+            },
+            OutboundRouteUpdate {
+                flowspec_withdraw: vec![key],
+                ..OutboundRouteUpdate::default()
+            },
+        ] {
+            assert_family_frame_wait(family, update).await;
+        }
+    }
+    for route in [
+        make_route(100),
+        make_v6_unicast_route("2001:db8::1".parse().unwrap()),
+    ] {
+        let afi = match route.prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        assert_family_frame_wait(
+            (afi, Safi::Unicast),
+            OutboundRouteUpdate {
+                withdraw: vec![(route.prefix, 0)],
+                ..OutboundRouteUpdate::default()
+            },
+        )
+        .await;
+    }
+}
+
+async fn assert_family_frame_wait(family: (Afi, Safi), mut update: OutboundRouteUpdate) {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    if !negotiated.negotiated_families.contains(&family) {
+        negotiated.negotiated_families.push(family);
+    }
+    session.timers.hold = None;
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.end_of_rib = vec![family];
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - 1;
+    session.handle_outbound_route_update(update).await;
+    for _ in 0..8 {
+        session.advance_pending_outbound();
+    }
+    assert_eq!(session.writer_bytes_held(), BYTE_BUDGET - 1, "{family:?}");
+    assert!(
+        frames.try_recv().is_err(),
+        "{family:?}: the frame cannot fit"
+    );
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(
+        session.pending_outbound.is_none(),
+        "{family:?}: cursor completed"
+    );
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+    assert_eq!(
+        frames.len(),
+        2,
+        "{family:?}: route frame then EoR, each once"
+    );
+    while let Ok(mut frame) = frames.try_recv() {
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("{family:?}: non-UPDATE")
+        };
+        update.parse(true, false, &[]).unwrap();
+    }
+    assert!(
+        session.writer_priority_tx.is_some(),
+        "{family:?}: session remains up"
+    );
+}
+
+async fn large_frame_admission_stays_within_budget(extended: bool) {
+    const ROUTES: u32 = 2_049;
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    let mut capabilities = vec![
+        Capability::MultiProtocol {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        },
+        Capability::FourOctetAs { asn: 65002 },
+    ];
+    if extended {
+        capabilities.push(Capability::ExtendedMessage);
+    }
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities,
+        }))
+        .await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+    let communities = if extended { 16_350 } else { 1_000 };
+    let routes = pacing_routes(ROUTES, true)
+        .into_iter()
+        .map(|mut route| {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities((0..communities).collect()));
+            });
+            route
+        })
+        .collect();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    let admitted = session.writer_bulk_admitted;
+    eprintln!(
+        "extended={extended} first_step_bytes={admitted} frames={} budget={BYTE_BUDGET}",
+        frames.len()
+    );
+    assert!(admitted > 0, "the production cursor admitted frames");
+    assert!(
+        admitted <= BYTE_BUDGET,
+        "one admission step exceeded the writer byte budget: {admitted} > {BYTE_BUDGET}"
+    );
+    assert!(
+        session.pending_outbound.is_some(),
+        "unsent rows retain their cursor"
+    );
+    assert!(
+        session.writer_priority_tx.is_some(),
+        "backpressure keeps the session up"
+    );
+    admit_until_blocked(&mut session);
+    let plateau = session.writer_bulk_admitted;
+    for _ in 0..8 {
+        session.advance_pending_outbound();
+    }
+    assert_eq!(
+        session.writer_bulk_admitted, plateau,
+        "a paused reader stays bounded"
+    );
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+
+    let mut seen = Vec::new();
+    let mut eors = 0;
+    for _ in 0..=ROUTES {
+        while let Ok(mut frame) = frames.try_recv() {
+            let Message::Update(update) =
+                rustbgpd_wire::decode_message(&mut frame, session.outbound_max_message_len())
+                    .unwrap()
+            else {
+                panic!("expected UPDATE");
+            };
+            let parsed = update.parse(true, false, &[]).unwrap();
+            if parsed.announced.is_empty() {
+                eors += 1;
+                assert_eq!(seen.len(), ROUTES as usize, "EoR follows every route");
+            }
+            for route in parsed.announced {
+                seen.push(u32::from(route.prefix.addr) & 0x00ff_ffff);
+            }
+        }
+        completed.send_replace(session.writer_bulk_admitted);
+        if session.pending_outbound.is_none() {
+            break;
+        }
+        admit_until_blocked(&mut session);
+        assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+    }
+    assert_eq!(seen, (0..ROUTES).collect::<Vec<_>>());
+    assert_eq!(eors, 1);
+    assert!(session.pending_outbound.is_none());
+}
+
 /// A reader that stops draining holds the writer at its byte budget, not at
 /// its frame count: admission stops with the cursor kept, and with send hold
-/// enabled no deadline runs and no Cease is queued. Completing the backlog wakes and resumes the same
-/// envelope, and the peer receives every route exactly once, in order, each
+/// enabled no deadline runs and no Cease is queued. Completing the backlog
+/// wakes and resumes the same envelope, and the peer receives every route once, in order, each
 /// envelope's End-of-RIB after its routes.
 #[tokio::test(start_paused = true)]
 async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
@@ -1387,12 +1739,11 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     let held = session.writer_bytes_held();
     let pending = session.pending_outbound.as_ref().expect("cursor retained");
     assert!(pending.bytes_blocked(), "admission waits on bytes");
-    assert!(held >= BYTE_BUDGET, "stopped below the budget: {held}");
     let first = frames.try_recv().unwrap();
     let frame = u64::try_from(first.len()).unwrap();
     assert!(
-        held < BYTE_BUDGET + 2_048 * frame,
-        "at most one admission step past the budget: {held}"
+        held <= BYTE_BUDGET && held + frame > BYTE_BUDGET,
+        "stops before the next complete frame exceeds the budget: {held}"
     );
     assert!(
         frames.len() < frames.max_capacity() / 4,
@@ -1461,27 +1812,29 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     );
 }
 
-/// The waiting envelope wakes on the first completed byte that brings the
-/// backlog under the budget, not before: at exactly the budget it is still
-/// held, so an earlier wake would only spin the session.
+/// Wake only when the next complete frame fits, so a short completion cannot
+/// spin the session on a frame it still cannot admit.
 #[tokio::test(start_paused = true)]
-async fn byte_wait_wakes_exactly_when_the_backlog_drops_under_the_budget() {
+async fn byte_wait_wakes_exactly_when_the_next_frame_fits() {
     let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
-    let (_frames, completed) = hand_writer(&mut session);
+    let (mut frames, completed) = hand_writer(&mut session);
     session
         .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
         .await;
     admit_until_blocked(&mut session);
-    let at_budget = session.writer_bulk_admitted - BYTE_BUDGET;
-    completed.send_replace(at_budget);
-    assert!(session.writer_bytes_exhausted());
-    assert!(!envelope_wakes(&session).await, "still at the budget");
-    completed.send_replace(at_budget + 1);
-    assert!(envelope_wakes(&session).await, "one byte under the budget");
+    let next_frame = frames.try_recv().unwrap().len() as u64;
+    let needed = session.writer_bulk_admitted + next_frame - BYTE_BUDGET;
+    completed.send_replace(needed - 1);
+    assert!(!envelope_wakes(&session).await, "one byte short of a frame");
+    completed.send_replace(needed);
+    assert!(
+        envelope_wakes(&session).await,
+        "the complete frame now fits"
+    );
 }
 
 /// Ask the running session for its state, so that every event it was
@@ -1510,8 +1863,8 @@ fn assert_cease_out_of_resources(mut encoded: Bytes) {
 
 /// With RFC 9687 send hold disabled, a byte wait still has the documented
 /// finite resource deadline. Each completed write re-arms it, even one that
-/// leaves the backlog over the budget, so a reader that keeps reading is
-/// never torn down; once writes stop completing, the deadline sends
+/// still leaves too little room for the next frame. A reader that keeps reading
+/// is never torn down; once writes stop completing, the deadline sends
 /// Cease/Out-of-Resources one interval after the last of them.
 #[tokio::test(start_paused = true)]
 async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
@@ -1529,7 +1882,8 @@ async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
         .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
         .await;
     admit_until_blocked(&mut session);
-    assert!(session.writer_bytes_held() >= BYTE_BUDGET + 3);
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
     let interval = Duration::from_secs(u64::from(rustbgpd_fsm::default_send_hold_time(0)));
     let armed = session
         .outbound_admission_timer
@@ -1560,7 +1914,7 @@ async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
 }
 
 /// With send hold enabled a byte wait runs no admission deadline, even when
-/// the step that crossed the budget also filled the frame queue: a write is
+/// the final byte reservation also filled the frame queue: a write is
 /// in flight and the writer's send hold bounds it, while a peer that keeps
 /// completing writes, however slowly, is not sent Cease/8. With send hold
 /// disabled the same state runs the deadline.
@@ -1666,7 +2020,7 @@ async fn small_buffer_pair() -> (TcpStream, TcpStream) {
 }
 
 /// Through the real run loop and writer: a peer that stops reading leaves
-/// the writer holding its byte budget plus at most one admission step, the
+/// the writer holding no more than its byte budget, the
 /// envelope behind stays in the RIB channel, and the session stays up. Once
 /// the peer reads, every route arrives exactly once, in order, each
 /// envelope's End-of-RIB after its routes.
@@ -1720,12 +2074,12 @@ async fn a_paused_reader_holds_the_real_writer_at_its_budget_and_resumes_in_orde
     }
     let held = metrics.peer_outbound_writer_bytes(&label);
     assert!(
-        held >= i64::try_from(BYTE_BUDGET).unwrap(),
-        "settled below the budget: {held}"
+        held >= i64::try_from(BYTE_BUDGET).unwrap() - 4096,
+        "settled with room for another complete frame: {held}"
     );
     assert!(
-        held < i64::try_from(BYTE_BUDGET).unwrap() + 64 * 1024,
-        "at most one admission step past the budget: {held}"
+        held <= i64::try_from(BYTE_BUDGET).unwrap(),
+        "no admission step crosses the byte budget: {held}"
     );
     assert_eq!(
         outbound.max_capacity() - outbound.capacity(),
@@ -1780,7 +2134,7 @@ async fn a_lagging_peer_held_by_bytes_is_flagged_slow_at_production_queue_capaci
         .handle_outbound_route_update(pacing_update(&session, pacing_routes(140_000, false)))
         .await;
     admit_until_blocked(&mut session);
-    assert!(session.writer_bytes_exhausted());
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
     let frame_threshold = (super::super::OUTBOUND_BUFFER
         * usize::from(session.config.slow_peer_threshold_pct))
     .div_ceil(100);
@@ -1843,10 +2197,9 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
     while let Ok(frame) = encoder_frames.try_recv() {
         encoder_sink.push(frame);
     }
-    let chunk = encoder_sink.iter().map(Bytes::len).max().unwrap() as u64;
     assert!(encoder.pending_outbound.as_ref().unwrap().bytes_blocked());
     assert!(
-        encoder.writer_bytes_held() < BYTE_BUDGET + chunk,
+        encoder.writer_bytes_held() <= BYTE_BUDGET,
         "the encoder's own copy stops at the budget"
     );
 
@@ -1860,7 +2213,7 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
     admit_until_blocked(&mut follower);
     assert!(follower.pending_outbound.as_ref().unwrap().bytes_blocked());
     assert!(
-        follower.writer_bytes_held() < BYTE_BUDGET + chunk,
+        follower.writer_bytes_held() <= BYTE_BUDGET,
         "the follower's snapshot stops at its budget"
     );
     let mut follower_sink = Vec::new();
