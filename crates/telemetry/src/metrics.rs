@@ -1809,9 +1809,11 @@ impl BgpMetrics {
                  made sendable mid-session) discarded \
                  because their session id did not match the registered \
                  session for the peer — a message from a superseded session \
-                 (collision loser) queued behind the replacement's PeerUp. \
-                 The registered session's state is untouched. `kind` is one \
-                 of: {}.",
+                 (collision loser) queued behind the replacement's PeerUp — \
+                 and End-of-RIB or route-refresh begin/end/timeout markers \
+                 from a peer with no registered session, such as one whose \
+                 routes are retained under Graceful Restart. The registered \
+                 session's state is untouched. `kind` is one of: {}.",
                     StaleSessionMessageKind::ALL
                         .iter()
                         .map(|kind| kind.as_str())

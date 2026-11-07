@@ -817,6 +817,7 @@ async fn rtc_gr_eor_clears_stale() {
     .unwrap();
 
     // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: source,

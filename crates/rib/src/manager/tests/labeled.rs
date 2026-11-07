@@ -1107,6 +1107,7 @@ fn labeled_peer_down_during_refresh_clears_stale_state() {
         vec![make_labeled_rib_route(peer_addr, 26, 100, 100)],
         vec![],
     );
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.handle_update(RibUpdate::BeginRouteRefresh {
         session_id: 0,
         peer,
@@ -1373,6 +1374,7 @@ async fn labeled_gr_eor_clears_stale() {
     assert!(stale.iter().all(|r| r.is_stale));
 
     // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1693,6 +1695,7 @@ async fn labeled_llgr_eor_clears_llgr_stale() {
     );
 
     // Peer re-establishes during LLGR: re-advertises only `kept`, then EoR.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,

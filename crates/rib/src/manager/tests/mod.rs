@@ -499,6 +499,32 @@ fn ipv4_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::Unicast)]
 }
 
+/// A `PeerUp` that registers `session_id` for `peer` and exports nothing to
+/// it. The RIB refuses End-of-RIB and route-refresh markers from a peer with
+/// no registered session, so a test that sends them registers first, as
+/// transport does when the session reaches Established.
+fn registering_peer_up(peer: PeerId, session_id: u64) -> RibUpdate {
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: Vec::new(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    }
+}
+
 /// Sendable families for dual-stack test peers.
 fn dual_stack_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
