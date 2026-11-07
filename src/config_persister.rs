@@ -5,9 +5,10 @@
 //! and atomically written (temp file + rename) to the config path.
 //! The filesystem work for each mutation, and the discard of a stage still
 //! outstanding when the channel closes, runs on the blocking pool, off the
-//! runtime workers. Two paths stay on the calling thread: the boot history
-//! record in [`ConfigPersister::new_accepted`], and the best-effort temp-file
-//! removal in `StagedWrite`'s drop if this task is aborted mid-stage.
+//! runtime workers. Boot prepares directory ownership synchronously, then
+//! records history on the blocking pool before releasing mutation admission.
+//! Best-effort temp-file removal in `StagedWrite`'s drop stays on the calling
+//! thread if this task is aborted mid-stage.
 
 #![deny(unsafe_code)]
 
@@ -21,6 +22,7 @@ use crate::config::AcceptedConfigSnapshot;
 #[cfg(test)]
 use crate::config::{Config, Neighbor};
 use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
+use rustbgpd_api::server::RuntimeConfigCoordinatorPermit;
 
 /// File under `runtime_state_dir` recording the config file's mtime as of the
 /// daemon's last read or write of it.
@@ -116,10 +118,14 @@ impl ConfigPersister {
             state_dir,
             staged: None,
         };
-        // The v2 writer owns the one-time legacy-directory permission
-        // tightening. Do it synchronously so read-only services can never
-        // observe the directory before that ownership boundary is established.
-        persister.record_current_history(persister.current.read_mtime());
+        persister.record_last_persist(persister.current.read_mtime());
+        // Readers may start before boot recording, but never before the
+        // writer has established the directory's ownership and permissions.
+        if let Some(dir) = persister.history_dir()
+            && let Err(error) = crate::config_history::v2::open_or_create_writer_directory(&dir)
+        {
+            warn!(%error, "failed to prepare the config history directory");
+        }
         persister
     }
 
@@ -138,11 +144,15 @@ impl ConfigPersister {
         )
     }
 
-    pub async fn run(self) {
-        // Boot recording already happened synchronously in `new_accepted` so
-        // readers cannot race directory migration. This task handles later
-        // accepted mutations without rereading external sources.
-        let mut persister = self;
+    pub async fn run(self, boot_permit: RuntimeConfigCoordinatorPermit) {
+        // The blocking job owns admission even if its async waiter is dropped.
+        // History remains best-effort; the accepted config file is authority.
+        let (mut persister, ()) = self
+            .off_runtime(move |p| {
+                p.record_current_history(p.current.read_mtime());
+                drop(boot_permit);
+            })
+            .await;
         while let Some(mutation) = persister.rx.recv().await {
             match mutation {
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
@@ -241,8 +251,8 @@ impl ConfigPersister {
         result
     }
 
-    /// Run one mutation's filesystem work (write, fsync, rename, history) on
-    /// the blocking pool, so a slow or hung config filesystem stalls this
+    /// Run boot recording or mutation filesystem work on the blocking pool,
+    /// so a slow or hung config filesystem stalls this
     /// actor rather than a runtime worker thread.
     ///
     /// The persister moves into the closure and back, so mutations stay
@@ -507,6 +517,105 @@ mod tests {
     use super::*;
     use crate::config::persisted_config_document;
 
+    fn boot_permit() -> RuntimeConfigCoordinatorPermit {
+        rustbgpd_api::server::RuntimeConfigCoordinator::new()
+            .try_acquire()
+            .unwrap()
+    }
+
+    #[test]
+    fn boot_history_precedes_mutations_without_blocking_readers() {
+        boot_history_admission(false);
+    }
+
+    #[test]
+    fn cancelled_boot_waiter_retains_admission_until_history_finishes() {
+        boot_history_admission(true);
+    }
+
+    fn boot_history_admission(cancel_waiter: bool) {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let config = minimal_config();
+            std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let history = crate::config_history::history_dir(dir.path());
+            let (tx, rx) = mpsc::channel(1);
+            let persister = ConfigPersister::new(
+                rx,
+                path.clone(),
+                config.clone(),
+                Some(dir.path().to_path_buf()),
+            );
+            assert!(
+                crate::config_history::list_mixed(&history)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            // Occupy the only blocking worker, so the real boot writer queues.
+            let (started, start) = oneshot::channel();
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = held.recv();
+            });
+            start.await.unwrap();
+            let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+            let mut run = Box::pin(persister.run(coordinator.try_acquire().unwrap()));
+            let poll = std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(poll.is_pending());
+            assert!(coordinator.try_acquire().is_none());
+            assert!(
+                crate::config_history::list_mixed(&history)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+
+            if cancel_waiter {
+                drop(run);
+                assert!(coordinator.try_acquire().is_none());
+                release.send(()).unwrap();
+                let _permit = coordinator.acquire().await.unwrap();
+                assert_eq!(
+                    crate::config_history::list_mixed(&history).unwrap().len(),
+                    1
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            } else {
+                let mut replacement = config;
+                replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+                let (ack, mut acked) = oneshot::channel();
+                tx.try_send(ConfigMutation::ReplaceConfigAck(
+                    AcceptedConfigSnapshot::from_config_for_test(replacement),
+                    ack,
+                ))
+                .unwrap();
+                assert_eq!(acked.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+                drop(tx);
+                release.send(()).unwrap();
+                run.await;
+                assert!(matches!(
+                    acked.await.unwrap(),
+                    ConfigPersistCommitOutcome::PublishedDurable
+                ));
+                assert!(coordinator.try_acquire().is_some());
+                let rows = crate::config_history::list_mixed(&history).unwrap();
+                assert_eq!(rows.len(), 2);
+            }
+            blocker.await.unwrap();
+        });
+    }
+
     fn minimal_config() -> Config {
         let toml_str = r#"
 [global]
@@ -629,7 +738,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -652,7 +761,7 @@ log_format = "json"
         assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
     }
 
-    /// Red proof: removing constructor recording, routing persistence back to
+    /// Red proof: removing boot recording, routing persistence back to
     /// the legacy writer, or removing exact v2 dedupe changes the asserted
     /// two-row roster or its byte-identical payloads after restart.
     #[tokio::test]
@@ -667,7 +776,7 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister =
             ConfigPersister::new(rx, path.clone(), config.clone(), Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = config.clone();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -704,7 +813,7 @@ log_format = "json"
         let restarted: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), restarted, Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         drop(tx);
         handle.await.unwrap();
         assert_eq!(
@@ -728,7 +837,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
 
         let (adopted, adopted_rx) = oneshot::channel();
         tx.send(ConfigMutation::AdoptReloadSnapshot {
@@ -776,7 +885,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         // Two durable writes, so a second header would have somewhere to land.
         let mut first = minimal_config();
         first.neighbors.push(test_neighbor("10.0.0.2", 65002));
@@ -835,7 +944,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config.clone(), None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = config;
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -855,7 +964,7 @@ log_format = "json"
         // Restart over the persisted file and persist it again unchanged.
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), reloaded.clone(), None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         persist_replacement(&tx, AcceptedConfigSnapshot::from_config_for_test(reloaded)).await;
         drop(tx);
         handle.await.unwrap();
@@ -882,7 +991,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -924,7 +1033,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -993,7 +1102,7 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister =
             ConfigPersister::new(rx, path.clone(), minimal_config(), Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
 
         // The operator saves again while the reload is still applying.
         let saved_again = read_at + 60;
@@ -1074,11 +1183,10 @@ log_format = "json"
     }
 
     #[cfg(unix)]
-    /// Red proof: moving boot recording from `new_accepted` into `run`, removing
-    /// the writer's 0700 tightening, or making the reader chmod turns one of
-    /// the pre-run mode/row assertions red.
-    #[test]
-    fn constructor_tightens_history_directory_and_retains_ignored_toml() {
+    /// Directory permissions precede readers; recording precedes mutation
+    /// admission. The reader must never tighten permissions itself.
+    #[tokio::test]
+    async fn constructor_tightens_history_directory_and_retains_ignored_toml() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1097,8 +1205,8 @@ log_format = "json"
 
         let snapshot = AcceptedConfigSnapshot::from_config_for_test(minimal_config());
         let exact = snapshot.normalized_toml().as_bytes().to_vec();
-        let (_tx, rx) = mpsc::channel(1);
-        let _persister = ConfigPersister::new_accepted(
+        let (tx, rx) = mpsc::channel(1);
+        let persister = ConfigPersister::new_accepted(
             rx,
             dir.path().join("config.toml"),
             Arc::clone(&snapshot),
@@ -1106,6 +1214,13 @@ log_format = "json"
         );
 
         assert_eq!(std::fs::metadata(&history).unwrap().mode() & 0o777, 0o700);
+        assert!(
+            crate::config_history::list_mixed(&history)
+                .unwrap()
+                .is_empty()
+        );
+        drop(tx);
+        persister.run(boot_permit()).await;
         let rows = crate::config_history::v2::scan_mixed(&history).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(std::fs::read(retired).unwrap(), retired_bytes);
@@ -1173,12 +1288,13 @@ log_format = "json"
         tracing::subscriber::with_default(subscriber, || {
             let construct = || {
                 let (_tx, rx) = mpsc::channel(1);
-                drop(ConfigPersister::new_accepted(
+                let persister = ConfigPersister::new_accepted(
                     rx,
                     dir.path().join("config.toml"),
                     Arc::clone(&changed),
                     Some(state_dir.clone()),
-                ));
+                );
+                persister.record_current_history(persister.current.read_mtime());
             };
             // A sibling test can cache this callsite's interest as never;
             // warm it, rebuild the cache, then observe a clean run.
@@ -1198,7 +1314,7 @@ log_format = "json"
         assert_eq!(contents(), before, "history must be untouched");
     }
 
-    /// Red proof: propagating either the constructor-time or post-persist
+    /// Red proof: propagating either the boot-time or post-persist
     /// best-effort history failure rejects the acknowledgement; adopting any
     /// snapshot other than the exact accepted Arc breaks pointer or disk-byte
     /// identity.
@@ -1229,7 +1345,7 @@ log_format = "json"
         changed.neighbors.push(test_neighbor("10.0.0.2", 65002));
         let changed = snapshot.derive_config(changed).unwrap();
         let (ack_tx, ack_rx) = oneshot::channel();
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         tx.send(ConfigMutation::ReplaceConfigAck(
             Arc::clone(&changed),
             ack_tx,
@@ -1283,7 +1399,8 @@ log_format = "json"
         let original = std::fs::read(&path).unwrap();
 
         let (tx, rx) = mpsc::channel(1);
-        let handle = tokio::spawn(ConfigPersister::new(rx, path.clone(), config, None).run());
+        let handle =
+            tokio::spawn(ConfigPersister::new(rx, path.clone(), config, None).run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         let (ack, staged) = oneshot::channel();
@@ -1341,7 +1458,8 @@ log_format = "json"
         };
         let (tx, rx) = mpsc::channel(4);
         let handle = tokio::spawn(
-            ConfigPersister::new_accepted(rx, path.clone(), Arc::clone(&booted), None).run(),
+            ConfigPersister::new_accepted(rx, path.clone(), Arc::clone(&booted), None)
+                .run(boot_permit()),
         );
         let stage = |snapshot| {
             let tx = tx.clone();
@@ -1436,7 +1554,8 @@ log_format = "json"
         let candidate = booted.derive_config(config).unwrap();
         let (tx, rx) = mpsc::channel(4);
         let handle = tokio::spawn(
-            ConfigPersister::new_accepted(rx, link.clone(), Arc::clone(&booted), None).run(),
+            ConfigPersister::new_accepted(rx, link.clone(), Arc::clone(&booted), None)
+                .run(boot_permit()),
         );
         let (ack, staged) = oneshot::channel();
         tx.send(ConfigMutation::StageConfigAck(candidate, ack))
@@ -1495,11 +1614,22 @@ log_format = "json"
             .worker_threads(1)
             .build()
             .unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let mut run =
+            Box::pin(ConfigPersister::new(rx, path.clone(), config, None).run(boot_permit()));
+        let (inspected, inspection) = oneshot::channel();
+        tx.try_send(ConfigMutation::InspectCurrent(inspected))
+            .unwrap();
+        runtime.block_on(async {
+            tokio::select! {
+                () = &mut run => panic!("persister exited before boot finished"),
+                result = inspection => { result.unwrap(); }
+            }
+        });
         let handle = runtime.handle().clone();
         runtime.shutdown_background();
         let _entered = handle.enter();
 
-        let (tx, rx) = mpsc::channel(1);
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         let (ack, mut acked) = oneshot::channel();
@@ -1508,8 +1638,6 @@ log_format = "json"
             ack,
         ))
         .unwrap();
-        let mut run = Box::pin(ConfigPersister::new(rx, path.clone(), config, None).run());
-
         let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run.as_mut().poll(&mut Context::from_waker(Waker::noop()))
         }));

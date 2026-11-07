@@ -501,6 +501,21 @@ rbgp config rollback "$HISTORY_INDEX" --confirm-id undo-1 --confirm-timeout 120
 rbgp config confirm undo-1
 ```
 
+At boot, history directory ownership and private permissions are checked before
+gRPC starts serving. Recording then runs on the blocking pool, so a slow history
+`fsync` does not delay the gRPC bind. Persisted config mutations and SIGHUP wait
+for that recording attempt to finish under the shared config coordinator.
+The blocking job retains admission ownership even if its async waiter is
+canceled. History failures still warn and release admission; history is
+best-effort, and the config file remains authoritative.
+
+During this interval, history readers can see the previous retained rows, an
+empty history, or a complete newly renamed row whose final directory sync has
+not finished. Staging files are never history rows. A crash may lose the new
+row; startup still loads the config file and any pending commit-confirm
+authority, then attempts to record that accepted snapshot again. History index
+0 is not a promise that boot recording is durable or that mutations are ready.
+
 `config diff --history N` previews a retained rollback without changing runtime,
 persisted config, history, or confirmed-commit state. Choose either a candidate
 file or `--history`, with an index of 1 or higher. The preview uses the rollback

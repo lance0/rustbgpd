@@ -286,6 +286,55 @@ Run these from a clean build (`cargo build --workspace --release`) before
 tagging. The `--workspace` flag is required to build both `rustbgpd` and
 `rbgp`.
 
+### Slow config storage
+
+- [ ] Once before release, run the representative boot/member-activation,
+      config-persistence/restart, and config-transaction publication tests below
+      with a **two-second delay on every `fsync` and `fdatasync`**. This is a
+      manual diagnostic, not an additional CI job. Build first so compilation
+      does not contribute injected filesystem delays:
+
+```bash
+cargo build --locked -p rustbgpctl --bin rbgp
+cargo test --locked --no-run \
+  --test rs_config_render_member_churn \
+  --test config_persistence_lifecycle \
+  --test config_publication_fence
+for slow_case in \
+  rs_config_render_member_churn:real_daemon_md5_member_join_and_leave_through_activate \
+  config_persistence_lifecycle:config_persistence_history_rollback_and_commit_confirm_hold_on_the_wire \
+  config_publication_fence:transaction_publication_keeps_an_edit_made_during_the_apply
+do
+  slow_target=${slow_case%%:*}
+  slow_test=${slow_case#*:}
+  slow_result=0
+  strace -f -tt -T -yy -o "slow-$slow_target.trace" \
+    -e trace=fsync,fdatasync,bind \
+    -e inject=fsync:delay_exit=2000000 \
+    -e inject=fdatasync:delay_exit=2000000 \
+    cargo test --locked --test "$slow_target" "$slow_test" \
+      -- --exact --test-threads=1 >"slow-$slow_target.log" 2>&1 \
+    || slow_result=$?
+  printf '%s\n' "$slow_result" >"slow-$slow_target.exit"
+done
+```
+
+Run as a non-root user: the persistence lifecycle target verifies a permission
+failure that root bypasses. Keep the trace, test output, exit status, source
+commit, and ordinary test results, including failed runs. Each invocation must
+run exactly one test; zero matches are invalid. `delay_exit` delays
+syscall completion as observed by the process; it does not simulate a power
+loss or a failed write.
+
+Compare boot `bind` ordering and config mutation acknowledgements with the
+delayed sync calls. A target that fails only under injection needs a tracked
+disposition: either production waits on storage in a boot or mutation path,
+or the test imposes a wall-clock bound on filesystem work. Record the precise
+assertion and syscall timing, check for an existing issue, and file remaining
+work. Do not increase a timeout, weaken durability, or rerun until green to
+clear this item. A passing run demonstrates only these targets at the stated
+delay, not general slow-disk or crash qualification.
+
 ### CLI smoke
 
 The minimal example binds BGP port 179, and the daemon exits when the

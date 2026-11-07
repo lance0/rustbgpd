@@ -188,7 +188,11 @@ hold_time = 90
                 config.clone(),
                 None,
             )
-            .run(),
+            .run(
+                crate::RuntimeConfigCoordinator::new()
+                    .try_acquire()
+                    .unwrap(),
+            ),
         );
         let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
         let (_replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
@@ -230,7 +234,7 @@ hold_time = 90
             peer_mgr_tx.clone(),
             rib_tx,
             Some(event_tx),
-            rustbgpd_api::server::RuntimeConfigCoordinator::new(),
+            crate::RuntimeConfigCoordinator::new(),
             None,
         );
 
