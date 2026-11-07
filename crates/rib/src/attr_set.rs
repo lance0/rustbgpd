@@ -257,8 +257,8 @@ impl AttrSet {
     /// Build a shared attribute set and its selection summary.
     #[must_use]
     pub fn new(attrs: Vec<PathAttribute>) -> Arc<Self> {
-        let summary = SelectionSummary::compute(&attrs);
         let hash = content_hash(&attrs);
+        let summary = SelectionSummary::compute(&attrs);
         Arc::new(Self {
             attrs,
             summary,
@@ -302,8 +302,10 @@ impl AttrSet {
 
         impl Drop for RebuildSummary<'_> {
             fn drop(&mut self) {
-                self.0.summary = SelectionSummary::compute(&self.0.attrs);
-                self.0.hash = content_hash(&self.0.attrs);
+                let hash = content_hash(&self.0.attrs);
+                let summary = SelectionSummary::compute(&self.0.attrs);
+                self.0.hash = hash;
+                self.0.summary = summary;
             }
         }
 

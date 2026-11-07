@@ -29,6 +29,16 @@ enum SliceBudget {
     AwaitBytes(usize),
 }
 
+fn fit_fixed_wire_length(length: usize, rows: usize, available: usize) -> SliceBudget {
+    if rows == 0 {
+        SliceBudget::Ready(0)
+    } else if length > available {
+        SliceBudget::AwaitBytes(length)
+    } else {
+        SliceBudget::Ready(rows.min(available / length))
+    }
+}
+
 fn fit_wire_lengths(lengths: impl Iterator<Item = usize>, mut available: usize) -> SliceBudget {
     let mut rows = 0;
     for length in lengths {
@@ -592,7 +602,7 @@ impl PendingOutbound {
             _ => None,
         };
         if let Some(length) = fixed_length {
-            return fit_wire_lengths(std::iter::repeat_n(length, rows), available);
+            return fit_fixed_wire_length(length, rows, available);
         }
         let export = self
             .update
@@ -1007,7 +1017,7 @@ impl PeerSession {
         if !shared_ready && budget > 0 {
             let available = self.writer_bytes_available();
             let sized = if pending.update.replay.is_some() {
-                fit_wire_lengths(std::iter::repeat_n(30, budget), available)
+                fit_fixed_wire_length(30, budget, available)
             } else {
                 pending.byte_limited_rows(budget.min(pending.slice_routes), available)
             };
@@ -1307,6 +1317,13 @@ impl AttrGroupIndex {
         link_local_next_hop: Option<Ipv6Addr>,
         next: usize,
     ) -> Result<usize, usize> {
+        if let Some(((first, first_nh, first_ll), first_idx)) = &self.first
+            && Arc::ptr_eq(first, attrs)
+            && *first_nh == next_hop
+            && *first_ll == link_local_next_hop
+        {
+            return Ok(*first_idx);
+        }
         let key = AttrGroupKey {
             attrs_ptr: Arc::as_ptr(attrs) as usize,
             next_hop,
@@ -3611,6 +3628,36 @@ mod tests {
 }
 
 #[cfg(test)]
+mod slice_budget_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_length_fit_keeps_empty_wait_and_native_size_boundaries() {
+        for (length, rows, available, expected) in [
+            (23, 0, 0, Some(0)),
+            (23, 4, 0, None),
+            (23, 4, 22, None),
+            (23, 4, 23, Some(1)),
+            (23, 4, 91, Some(3)),
+            (23, 4, 92, Some(4)),
+            (23, 4, usize::MAX, Some(4)),
+            (1, usize::MAX, usize::MAX, Some(usize::MAX)),
+            (usize::MAX, 0, 0, Some(0)),
+            (usize::MAX, usize::MAX, usize::MAX - 1, None),
+            (usize::MAX, usize::MAX, usize::MAX, Some(1)),
+        ] {
+            match (fit_fixed_wire_length(length, rows, available), expected) {
+                (SliceBudget::Ready(actual), Some(expected)) => assert_eq!(actual, expected),
+                (SliceBudget::AwaitBytes(needed), None) => assert_eq!(needed, length),
+                _ => {
+                    panic!("unexpected fixed fit for {length} bytes, {rows} rows, {available} free")
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod attr_group_index_tests {
     use super::*;
 
@@ -3635,6 +3682,28 @@ mod attr_group_index_tests {
         let shared = attrs(3);
         assert_eq!(index.group(&shared, nh, None, 3), Err(3));
         assert_eq!(index.group(&shared, nh, None, 4), Ok(3));
+    }
+
+    #[test]
+    fn first_pointer_shortcut_checks_both_next_hops_and_identity() {
+        let nh = Some(IpAddr::V6("2001:db8::1".parse().unwrap()));
+        let ll = Some("fe80::1".parse().unwrap());
+        for (other_nh, other_ll) in [
+            (Some(IpAddr::V6("2001:db8::2".parse().unwrap())), ll),
+            (nh, Some("fe80::2".parse().unwrap())),
+        ] {
+            let mut index = AttrGroupIndex::default();
+            let first = attrs(1);
+            assert_eq!(index.group(&first, nh, ll, 0), Err(0));
+            assert_eq!(index.group(&first, nh, ll, 1), Ok(0));
+            assert_eq!(index.group(&first, other_nh, other_ll, 1), Err(1));
+            assert_eq!(index.group(&attrs(2), nh, ll, 2), Err(2));
+            assert_eq!(index.group(&first, nh, ll, 3), Ok(0));
+            assert_eq!(index.group(&first, other_nh, other_ll, 3), Ok(1));
+            let twin = attrs(1);
+            assert_eq!(index.group(&twin, nh, ll, 3), Ok(0));
+            assert!(index.pinned.iter().any(|pin| Arc::ptr_eq(pin, &twin)));
+        }
     }
 
     /// Once the value map exists, a group-opening pointer is indexed by
