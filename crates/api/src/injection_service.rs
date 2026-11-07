@@ -5124,6 +5124,10 @@ mod tests {
     /// holds a managed-peer roster, as the daemon's does: `0.0.0.0` names the
     /// synthetic local peer, which no roster lists.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one real RIB fixture covers local injection outcomes against a registered remote competitor"
+    )]
     async fn flowspec_injection_reports_local_outcomes_and_reconciles() {
         use proto::rib_service_server::RibService as _;
 
@@ -5161,6 +5165,28 @@ mod tests {
         let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let components = parse_flowspec_components(&flowspec_rule_components(), Afi::Ipv4)
             .expect("valid test rule");
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        rib_tx
+            .send(RibUpdate::PeerUp {
+                peer: source,
+                session_id: 0,
+                peer_asn: 65001,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![],
+                is_ebgp: false,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            })
+            .await
+            .unwrap();
         rib_tx
             .send(RibUpdate::RoutesReceived {
                 session_id: 0,
