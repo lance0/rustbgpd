@@ -468,7 +468,22 @@ async fn ensure_svd_vxlan_converged(
     };
     ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, &fresh.bridges)?;
     ensure_svd_vlan_bindings_observed(name, vxlan, spec, &fresh.bridges)
-        .map_err(retryable_completion)
+        .map_err(retryable_completion)?;
+    // LAN-2951: raise an exactly-ours SVD VXLAN that is administratively
+    // down; see [`adopt_existing_bridge`].
+    if vxlan.up {
+        return Ok(());
+    }
+    set_link_up(handle, vxlan.ifindex, "managed SVD VXLAN set up")
+        .await
+        .map_err(retryable_completion)?;
+    let fresh = fresh_vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan.as_ref() else {
+        return Err(transient_link_race(format!(
+            "managed SVD VXLAN {name} vanished after set up"
+        )));
+    };
+    ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, &fresh.bridges)
 }
 
 async fn ensure_svd_vlan_bindings(

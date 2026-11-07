@@ -5510,10 +5510,11 @@ fn compute_managed_netdev_create_ops(
 }
 
 /// A desired SVD VXLAN that exists, is exclusively ours (exactly one
-/// rustbgpd stamp, equal to the expected one), and whose link attrs
-/// all match — but whose bridge VLAN/tunnel bindings are not fully
-/// observed. This is stamped-but-incomplete state from a partial
-/// creation; it is safe to re-run the convergent Create against it.
+/// rustbgpd stamp, equal to the expected one), and whose protected link
+/// attrs all match — but which is administratively down (LAN-2951) or
+/// whose bridge VLAN/tunnel bindings are not fully observed (a partial
+/// creation). Admin state is not a protected attribute, so it is safe to
+/// re-run the convergent Create, whose adopt path raises the link.
 fn svd_stamped_ours_incomplete(
     svd_vxlan: &ManagedSvdVxlanNetdev,
     link: &KernelVxlanLinkInfo,
@@ -5523,15 +5524,21 @@ fn svd_stamped_ours_incomplete(
     if stamps.len() != 1 || stamps[0] != svd_vxlan.ownership_stamp {
         return false;
     }
-    if classify_svd_link_attrs(svd_vxlan, link).is_some() {
+    if classify_svd_protected_attrs(svd_vxlan, link).is_some() {
         return false;
     }
-    !snapshot
-        .links
-        .get(&svd_vxlan.spec.bridge)
-        .is_some_and(|bridge| {
-            svd_vlan_bindings_present(bridge, link.ifindex, &link.name, &svd_vxlan.spec.bindings)
-        })
+    !link.up
+        || !snapshot
+            .links
+            .get(&svd_vxlan.spec.bridge)
+            .is_some_and(|bridge| {
+                svd_vlan_bindings_present(
+                    bridge,
+                    link.ifindex,
+                    &link.name,
+                    &svd_vxlan.spec.bindings,
+                )
+            })
 }
 
 /// A desired VLAN upper that exists with exactly our stamp and matching
@@ -6202,6 +6209,21 @@ fn classify_svd_link_attrs(
     svd_vxlan: &ManagedSvdVxlanNetdev,
     link: &KernelVxlanLinkInfo,
 ) -> Option<(ManagedNetdevState, String)> {
+    if let Some(result) = classify_svd_protected_attrs(svd_vxlan, link) {
+        return Some(result);
+    }
+    (!link.up).then(|| {
+        (
+            ManagedNetdevState::OwnedUnsafe,
+            "SVD VXLAN is administratively down; managed lifecycle requires UP".to_string(),
+        )
+    })
+}
+
+fn classify_svd_protected_attrs(
+    svd_vxlan: &ManagedSvdVxlanNetdev,
+    link: &KernelVxlanLinkInfo,
+) -> Option<(ManagedNetdevState, String)> {
     if !link.has_no_fixed_vni() {
         return Some((
             ManagedNetdevState::OwnedUnsafe,
@@ -6257,12 +6279,6 @@ fn classify_svd_link_attrs(
                 "bridge attachment mismatch: observed {:?}, desired {}",
                 link.bridge, svd_vxlan.spec.bridge
             ),
-        ));
-    }
-    if !link.up {
-        return Some((
-            ManagedNetdevState::OwnedUnsafe,
-            "SVD VXLAN is administratively down; managed lifecycle requires UP".to_string(),
         ));
     }
     None
@@ -9703,9 +9719,37 @@ mod managed_netdev_tests {
                 }],
             });
         let mut complete = KernelSnapshot::new();
-        complete.insert_link(bridge);
+        complete.insert_link(bridge.clone());
         complete.insert_vxlan(svd.clone());
         assert_eq!(compute_managed_netdev_ops(&table, &complete).len(), 0);
+
+        // LAN-2951: a complete link that is administratively down is
+        // reported owned-unsafe and gets the convergent Create, whose
+        // adopt path raises it; a down link whose protected attrs drifted
+        // is reported but never raised.
+        let mut down_svd = svd.clone();
+        down_svd.up = false;
+        let mut down = KernelSnapshot::new();
+        down.insert_link(bridge.clone());
+        down.insert_vxlan(down_svd.clone());
+        let rows = build_managed_netdev_status(&table, Some(&down));
+        assert_eq!(rows[0].state, ManagedNetdevState::OwnedUnsafe, "{rows:?}");
+        assert!(rows[0].reason.contains("administratively down"), "{rows:?}");
+        assert_eq!(
+            compute_managed_netdev_ops(&table, &down),
+            vec![DataplaneOp::CreateManagedSvdVxlan {
+                name: "vxlan-svd".to_string(),
+                spec: spec.clone(),
+                ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxlan-svd".to_string(),
+            }]
+        );
+        down_svd.dstport = Some(4790);
+        let mut drifted = KernelSnapshot::new();
+        drifted.insert_link(bridge);
+        drifted.insert_vxlan(down_svd);
+        assert_eq!(compute_managed_netdev_ops(&table, &drifted), Vec::new());
+        let rows = build_managed_netdev_status(&table, Some(&drifted));
+        assert!(rows[0].reason.contains("dstport mismatch"), "{rows:?}");
 
         // A foreign (unstamped) incomplete link must NOT be touched.
         let mut foreign_snapshot = KernelSnapshot::new();

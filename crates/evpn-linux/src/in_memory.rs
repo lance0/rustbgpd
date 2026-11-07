@@ -715,6 +715,9 @@ impl InMemoryDataplane {
                     // `ensure_svd_vlan_bindings` completion steps.
                     Some((ifindex, true)) => {
                         svd_populate_bridge_bindings(&mut state.kernel, spec, ifindex, name);
+                        if let Some(link) = state.kernel.vxlans.get_mut(name) {
+                            link.up = true;
+                        }
                     }
                     Some((_, false)) => {
                         return Err(crate::error::DataplaneError::InvalidArgument(format!(
