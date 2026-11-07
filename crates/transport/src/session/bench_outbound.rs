@@ -95,9 +95,13 @@ impl OutboundEncodeBench {
             next_hop_override: vec![None; announce.len()].into(),
             ..OutboundRouteUpdate::default()
         };
+        // This encode-only sink drains after the complete call. Its byte
+        // watermark belongs to the paced fixtures, which model writer progress.
+        let completion = self.session.writer_completed.take();
         let start = std::time::Instant::now();
         self.session.send_route_update(update);
         let elapsed = start.elapsed();
+        self.session.writer_completed = completion;
         assert!(
             self.session.writer_bulk_tx.is_some(),
             "bench writer queue saturated"
