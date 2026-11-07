@@ -901,11 +901,17 @@ fn shared_fairness_member() -> (
     (member, commands, frames)
 }
 
-/// The synchronous benchmark must drive real slice yields without a runtime.
+/// The synchronous benchmark must drive real slice yields without polling an executor.
 #[cfg(feature = "bench-internals")]
 #[test]
-fn shared_group_benchmark_drives_slice_yields_without_runtime() {
+fn shared_group_benchmark_drives_slice_yields_without_executor_polling() {
     assert!(tokio::runtime::Handle::try_current().is_err());
+    // Match the benchmark's timer context without scheduling its delivery future.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
     let mut bench = crate::OutboundGroupBench::new(2, 1 << 16);
     let _ = bench.send(&Arc::new(shared_fairness_routes()), &[]);
 }
