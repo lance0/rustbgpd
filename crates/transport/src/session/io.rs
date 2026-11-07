@@ -877,8 +877,10 @@ impl PeerSession {
                         data,
                     );
                     self.drive_fsm_with_notification(
-                        Event::DecodeError(rustbgpd_wire::DecodeError::InvalidLength {
+                        Event::DecodeError(rustbgpd_wire::DecodeError::InvalidTypeLength {
+                            message_type: rustbgpd_wire::MessageType::RouteRefresh,
                             length: received_length,
+                            expected: "23",
                         }),
                         Some(notification),
                     )

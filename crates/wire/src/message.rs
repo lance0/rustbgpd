@@ -316,11 +316,63 @@ mod tests {
 
         // Mutation-red: removing the header's per-type receive cap changes
         // this from Bad Message Length to a later OPEN-body decode result.
-        assert_eq!(err, DecodeError::InvalidLength { length: 4097 });
+        assert_eq!(
+            err.to_string(),
+            "invalid OPEN length 4097 (expected at most 4096)"
+        );
         let (code, subcode, data) = err.to_notification();
         assert_eq!(code, NotificationCode::MessageHeader);
         assert_eq!(subcode, 2);
         assert_eq!(data.as_ref(), &4097_u16.to_be_bytes());
+    }
+
+    #[test]
+    fn per_type_length_errors_display_the_violated_bound() {
+        for (kind, length, expected) in [
+            (
+                MessageType::Keepalive,
+                20,
+                "invalid keepalive length 20 (expected 19)",
+            ),
+            (
+                MessageType::Open,
+                28,
+                "invalid OPEN length 28 (expected at least 29)",
+            ),
+            (
+                MessageType::Update,
+                22,
+                "invalid UPDATE length 22 (expected at least 23)",
+            ),
+            (
+                MessageType::Notification,
+                20,
+                "invalid NOTIFICATION length 20 (expected at least 21)",
+            ),
+            (
+                MessageType::RouteRefresh,
+                22,
+                "invalid ROUTE-REFRESH length 22 (expected at least 23)",
+            ),
+        ] {
+            let mut bytes = framed(kind, length, &[]);
+            let err = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap_err();
+            assert_eq!(err.to_string(), expected);
+            assert_eq!(
+                err.to_notification(),
+                (
+                    NotificationCode::MessageHeader,
+                    2,
+                    Bytes::copy_from_slice(&length.to_be_bytes())
+                )
+            );
+            if kind != MessageType::RouteRefresh {
+                let err =
+                    crate::header::peek_message_length(&framed(kind, length, &[]), MAX_MESSAGE_LEN)
+                        .unwrap_err();
+                assert_eq!(err.to_string(), expected);
+            }
+        }
     }
 
     /// One message of `message_type` whose header claims `length`, with
