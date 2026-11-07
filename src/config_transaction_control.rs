@@ -2577,18 +2577,24 @@ async fn apply_config_transaction_locked_with_preloaded(
         // The config-transaction path loads the candidate with external-source
         // capture so the typed plan below can verify identity against the
         // accepted snapshot (ADR-0130); the gNMI Set bridge loads plain and
-        // stays behind the presence fence.
-        let candidate = if verify_external_inputs {
-            Config::load_toml_candidate_captured(
-                &request.candidate_toml,
+        // stays behind the presence fence. Apply is operator-only, so the
+        // candidate may name new source paths; reading them stays off the
+        // async workers, and errors quote no file text.
+        let candidate_toml = request.candidate_toml.clone();
+        let candidate = tokio::task::spawn_blocking(move || {
+            Config::load_rpc_candidate(
+                &candidate_toml,
                 "candidate runtime config transaction",
+                verify_external_inputs,
+                None,
             )
-        } else {
-            Config::load_toml_with_diagnostics(
-                &request.candidate_toml,
-                "candidate runtime config transaction",
-            )
-        }
+        })
+        .await
+        .map_err(|error| {
+            ConfigTransactionApplyError::Unavailable(format!(
+                "config candidate load failed: {error}; nothing was applied"
+            ))
+        })?
         .map_err(ConfigTransactionApplyError::InvalidArgument)?;
         let plan = before_pre_effect_deadline(
             progress.pre_effect_deadline(),
@@ -3334,6 +3340,8 @@ async fn plan_candidate(
             candidate_toml,
             expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
             verify_external_inputs,
+            // Apply (and the gNMI Set bridge) are operator-only RPCs.
+            operator_sources: true,
             reply: reply_tx,
         })
         .await

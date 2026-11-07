@@ -124,7 +124,25 @@ impl RpolFile {
     /// unreadable; [`LoadError::Compile`] with multi-file diagnostics
     /// otherwise.
     pub fn load(path: &Path, roots: &[PathBuf], max_graph_bytes: usize) -> Result<Self, LoadError> {
-        let graph = modules::resolve(path, roots, max_graph_bytes)?;
+        Self::load_excluding(path, roots, max_graph_bytes, &[])
+    }
+
+    /// [`Self::load`], refusing every module whose canonical path is in
+    /// `excluded` (canonical paths) as if it lay outside the roots, imports
+    /// included. A caller that confines a load keeps files such as its own
+    /// config out of the graph even when they share a directory with the
+    /// policy.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load`].
+    pub fn load_excluding(
+        path: &Path,
+        roots: &[PathBuf],
+        max_graph_bytes: usize,
+        excluded: &[PathBuf],
+    ) -> Result<Self, LoadError> {
+        let graph = modules::resolve(path, roots, max_graph_bytes, excluded)?;
         let type_diags = typeck::typecheck(&graph.merged);
         if !type_diags.is_empty() {
             return Err(LoadError::Compile {

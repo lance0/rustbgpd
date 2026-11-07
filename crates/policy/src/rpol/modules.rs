@@ -70,6 +70,9 @@ pub const DEFAULT_MAX_GRAPH_BYTES: usize = 256 * 1024 * 1024;
 /// Maximum number of files in a resolved module graph.
 pub const MAX_MODULE_FILES: usize = 64;
 
+/// Diagnostics listed by [`LoadError::render_locations`].
+const MAX_LOCATION_LINES: usize = 20;
+
 /// One resolved module of a compile: its display path, source text,
 /// resolved import edges, and content digest. Index in
 /// [`crate::rpol::RpolFile::modules`] = the `file` index spans carry.
@@ -108,13 +111,37 @@ fn digest_hex(digest: &[u8; 32]) -> String {
     hex
 }
 
-fn read_source(path: &Path) -> std::io::Result<(String, u64, [u8; 32])> {
-    let bytes = std::fs::read(path)?;
+/// Read one module of at most `budget` bytes. `Ok(None)` means the file
+/// is larger than `budget`: the caller reports the graph budget.
+fn read_source(path: &Path, budget: usize) -> std::io::Result<Option<(String, u64, [u8; 32])>> {
+    let budget = u64::try_from(budget).unwrap_or(u64::MAX);
+    let bytes = match crate::datasets::read_regular_file_bounded(path, budget) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let raw_len = u64::try_from(bytes.len()).expect("source length fits u64");
     let raw_sha256 = Sha256::digest(&bytes).into();
     let text = String::from_utf8(bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    Ok((text, raw_len, raw_sha256))
+    Ok(Some((text, raw_len, raw_sha256)))
+}
+
+/// The diagnostic for a module graph that outgrew `max_graph_bytes`.
+fn graph_budget_diagnostic(span: Span, max_graph_bytes: usize) -> Diagnostic {
+    Diagnostic::coded(
+        DiagnosticCode::Resolve,
+        span,
+        format!(
+            "resolved module graph exceeds {max_graph_bytes} total source bytes \
+             (~{} MiB) at this file; if this graph is intended, \
+             raise `[policy] rpol_max_graph_bytes` in the daemon \
+             config (`rbgp policy check --max-graph-bytes` for the \
+             offline checker)",
+            max_graph_bytes / (1024 * 1024)
+        ),
+        "graph source budget exhausted here",
+    )
 }
 
 /// Why a file-based `.rpol` load failed.
@@ -151,6 +178,49 @@ impl LoadError {
         }
     }
 
+    /// Render the error without any source text: one
+    /// `path:line:column: stage` line per diagnostic (at most
+    /// 20). Diagnostic messages can quote the
+    /// source, so they are left out too. This is the form for callers
+    /// that did not supply the file contents themselves.
+    #[must_use]
+    pub fn render_locations(&self) -> String {
+        match self {
+            LoadError::Io { path, reason } => format!("{path}: {reason}"),
+            LoadError::Compile {
+                sources,
+                diagnostics,
+            } => {
+                use std::fmt::Write as _;
+
+                let mut out = String::new();
+                for diag in diagnostics.0.iter().take(MAX_LOCATION_LINES) {
+                    let span = diag
+                        .labels
+                        .first()
+                        .map_or(Span::new(0..0), |(span, _)| *span);
+                    let (path, text) = sources
+                        .get(span.file as usize)
+                        .map_or(("", ""), |(path, text)| (path.as_str(), text.as_str()));
+                    let before = text.get(..span.start).unwrap_or(text);
+                    let line = before.matches('\n').count() + 1;
+                    let column = before
+                        .rsplit('\n')
+                        .next()
+                        .map_or(0, |tail| tail.chars().count())
+                        + 1;
+                    let _ = writeln!(out, "{path}:{line}:{column}: {}", diag.code.label());
+                }
+                if let Some(more) = diagnostics.len().checked_sub(MAX_LOCATION_LINES)
+                    && more > 0
+                {
+                    let _ = writeln!(out, "... and {more} more");
+                }
+                out
+            }
+        }
+    }
+
     /// The diagnostics of a compile failure, if that is what this is.
     #[must_use]
     pub fn diagnostics(&self) -> Option<&Diagnostics> {
@@ -182,11 +252,13 @@ pub(super) struct ModuleFingerprint {
 /// `max_graph_bytes` is the total-source-byte budget for the whole
 /// graph ([`DEFAULT_MAX_GRAPH_BYTES`] when no configuration provides
 /// one). Returns the resolved graph, or an error for unreadable
-/// inputs / resolution and parse diagnostics.
+/// inputs / resolution and parse diagnostics. A module whose canonical path
+/// is in `excluded` is refused like one outside the roots.
 pub(super) fn resolve(
     main_path: &Path,
     roots: &[PathBuf],
     max_graph_bytes: usize,
+    excluded: &[PathBuf],
 ) -> Result<ResolvedGraph, LoadError> {
     let io = |path: &Path, reason: String| LoadError::Io {
         path: path.display().to_string(),
@@ -195,6 +267,12 @@ pub(super) fn resolve(
     let main_canon = main_path
         .canonicalize()
         .map_err(|e| io(main_path, format!("failed to read: {e}")))?;
+    if excluded.contains(&main_canon) {
+        return Err(io(
+            main_path,
+            "is not an admissible policy source".to_string(),
+        ));
+    }
     let main_dir = main_canon
         .parent()
         .map(Path::to_path_buf)
@@ -214,6 +292,7 @@ pub(super) fn resolve(
 
     let mut resolver = Resolver {
         confine,
+        excluded,
         modules: Vec::new(),
         fingerprints: Vec::new(),
         asts: Vec::new(),
@@ -225,8 +304,17 @@ pub(super) fn resolve(
         max_graph_bytes,
         diags: Vec::new(),
     };
-    let (text, raw_len, raw_sha256) =
-        read_source(&main_canon).map_err(|e| io(main_path, format!("failed to read: {e}")))?;
+    let Some((text, raw_len, raw_sha256)) = read_source(&main_canon, max_graph_bytes)
+        .map_err(|e| io(main_path, format!("failed to read: {e}")))?
+    else {
+        return Err(LoadError::Compile {
+            sources: vec![(main_canon.display().to_string(), String::new())],
+            diagnostics: Diagnostics(vec![graph_budget_diagnostic(
+                Span::in_file(0..0, 0),
+                max_graph_bytes,
+            )]),
+        });
+    };
     resolver.visit(main_canon, text, raw_len, raw_sha256, 0);
 
     let sources: Vec<(String, String)> = resolver
@@ -264,9 +352,11 @@ pub(super) fn resolve(
     })
 }
 
-struct Resolver {
+struct Resolver<'e> {
     /// Canonicalized confinement roots (main dir + configured roots).
     confine: Vec<PathBuf>,
+    /// Canonical paths refused even under a root.
+    excluded: &'e [PathBuf],
     /// Per-module metadata, indexed by module (`file`) id.
     modules: Vec<ModuleSource>,
     /// Same-read lossless identities, indexed by module id.
@@ -289,7 +379,7 @@ struct Resolver {
     diags: Vec<Diagnostic>,
 }
 
-impl Resolver {
+impl Resolver<'_> {
     /// Load, parse, and recurse into one module whose canonical path
     /// and text are already in hand. Returns its module id.
     fn visit(
@@ -322,28 +412,6 @@ impl Resolver {
         });
         self.asts.push(ast::SourceFile::default());
         self.in_progress.push(true);
-
-        // A single oversized file trips this too — the graph total
-        // includes the file just loaded, so no separate per-file limit
-        // is needed (the pre-configurable-budget per-file cap was
-        // strictly subsumed by this check once the budget had to fit
-        // IRR-scale single-file renders).
-        if self.total_bytes > self.max_graph_bytes {
-            self.diags.push(Diagnostic::coded(
-                DiagnosticCode::Resolve,
-                Span::in_file(0..0, id),
-                format!(
-                    "resolved module graph exceeds {} total source bytes \
-                     (~{} MiB) at this file; if this graph is intended, \
-                     raise `[policy] rpol_max_graph_bytes` in the daemon \
-                     config (`rbgp policy check --max-graph-bytes` for the \
-                     offline checker)",
-                    self.max_graph_bytes,
-                    self.max_graph_bytes / (1024 * 1024)
-                ),
-                "graph source budget exhausted here",
-            ));
-        }
 
         // Resolve this module's imports in declaration order.
         let imports = ast.imports.clone();
@@ -419,7 +487,10 @@ impl Resolver {
             ));
             return None;
         };
-        if !self.confine.iter().any(|root| canon.starts_with(root)) {
+        // An excluded file reads exactly like one outside the roots.
+        if !self.confine.iter().any(|root| canon.starts_with(root))
+            || self.excluded.contains(&canon)
+        {
             self.diags.push(
                 Diagnostic::coded(
                     DiagnosticCode::Resolve,
@@ -470,8 +541,14 @@ impl Resolver {
             ));
             return None;
         }
-        let (text, raw_len, raw_sha256) = match read_source(&canon) {
-            Ok(source) => source,
+        let remaining = self.max_graph_bytes.saturating_sub(self.total_bytes);
+        let (text, raw_len, raw_sha256) = match read_source(&canon, remaining) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                self.diags
+                    .push(graph_budget_diagnostic(import.span, self.max_graph_bytes));
+                return None;
+            }
             Err(e) => {
                 self.diags.push(Diagnostic::coded(
                     DiagnosticCode::Resolve,
@@ -790,6 +867,29 @@ mod tests {
             Ok(_) => panic!("load unexpectedly succeeded"),
             Err(err) => err.render(false),
         }
+    }
+
+    #[test]
+    fn render_locations_names_positions_without_source_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "lib.rpol",
+            "prefix-set p { 10.0.0.0/8 }\nSECRET-IN-IMPORT !\n",
+        );
+        write(
+            dir.path(),
+            "main.rpol",
+            "import \"lib.rpol\"\npolicy q {\n  SECRET-IN-MAIN !\n}\n",
+        );
+        let err = load(dir.path(), "main.rpol").expect_err("parse errors");
+        let rendered = err.render_locations();
+        assert!(!rendered.contains("SECRET"), "{rendered}");
+        assert!(rendered.contains("lib.rpol:2:1: parse-error"), "{rendered}");
+        assert!(
+            rendered.contains("main.rpol:3:3: parse-error"),
+            "{rendered}"
+        );
     }
 
     #[test]

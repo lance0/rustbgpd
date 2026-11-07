@@ -1874,6 +1874,7 @@ fn spawn_rfc8212_rib_stub(
 mod admin_down;
 mod bfd;
 mod bmp_periodic;
+mod candidate_sources;
 mod cohort_budgets;
 mod cohort_handoff;
 mod collision;

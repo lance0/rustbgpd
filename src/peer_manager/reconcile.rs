@@ -13,6 +13,32 @@ use crate::policy_admin::fib_table_snapshot_to_config;
 
 use super::PeerManager;
 
+/// Load a `DiffRuntimeConfig` / `PlanConfigTransaction` candidate. This
+/// reads the candidate's external policy sources, so the actor runs it on
+/// the blocking pool (see `PeerManager::spawn_candidate_load`).
+///
+/// Only the config-transaction path captures the candidate's external
+/// sources for identity verification (ADR-0130). The gNMI Set bridge plans
+/// without capture, so its candidates classify as `Unverified` and keep the
+/// #1370 presence fence.
+///
+/// `limits` confines the candidate's external sources (callers below
+/// `operator_only`); `None` is for operator callers.
+pub(super) fn load_runtime_candidate(
+    candidate_toml: &str,
+    capture_external_inputs: bool,
+    limits: Option<&crate::config::CandidateSourceLimits>,
+) -> Result<Config, String> {
+    #[cfg(test)]
+    load_latch::hold_if_marked(candidate_toml);
+    Config::load_rpc_candidate(
+        candidate_toml,
+        "candidate runtime config",
+        capture_external_inputs,
+        limits,
+    )
+}
+
 impl PeerManager {
     /// Reconcile the peer set as one operation: one import-roster
     /// publication however many peers it adds, removes or replaces.
@@ -219,44 +245,68 @@ impl PeerManager {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn diff_runtime_config(
         &self,
         candidate_toml: &str,
     ) -> Result<RuntimeConfigDiff, RuntimeConfigDiffError> {
-        let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-                .map_err(RuntimeConfigDiffError::InvalidCandidate)?;
-        let diff = crate::config::diff_config(&self.current_config, &candidate);
+        self.diff_loaded_runtime_config(&load_runtime_candidate(
+            candidate_toml,
+            false,
+            Some(&self.current_config.candidate_source_limits()),
+        ))
+    }
+
+    /// Diff a candidate loaded off the actor by [`load_runtime_candidate`].
+    pub(super) fn diff_loaded_runtime_config(
+        &self,
+        candidate: &Result<Config, String>,
+    ) -> Result<RuntimeConfigDiff, RuntimeConfigDiffError> {
+        let candidate = candidate
+            .as_ref()
+            .map_err(|error| RuntimeConfigDiffError::InvalidCandidate(error.clone()))?;
+        let diff = crate::config::diff_config(&self.current_config, candidate);
         runtime_config_diff_from_config_diff(&diff, None).map_err(RuntimeConfigDiffError::Internal)
     }
 
+    #[cfg(test)]
     pub(super) async fn plan_config_transaction(
         &mut self,
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
         verify_external_inputs: bool,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let mut candidate = load_runtime_candidate(
+            candidate_toml,
+            verify_external_inputs,
+            Some(&self.current_config.candidate_source_limits()),
+        );
+        self.plan_loaded_config_transaction(&mut candidate, expected_runtime_snapshot_token)
+            .await
+    }
+
+    /// Plan a candidate loaded off the actor by [`load_runtime_candidate`].
+    /// A stale snapshot token is reported ahead of a candidate load error.
+    /// The candidate is borrowed so the caller can drop it off the actor.
+    pub(super) async fn plan_loaded_config_transaction(
+        &mut self,
+        candidate: &mut Result<Config, String>,
+        expected_runtime_snapshot_token: Option<&str>,
+    ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
-        // Only the config-transaction path captures the candidate's external
-        // sources for identity verification (ADR-0130). The gNMI Set bridge
-        // plans with the plain loader, so its candidates classify as
-        // `Unverified` and keep the #1370 presence fence.
-        let mut candidate = if verify_external_inputs {
-            Config::load_toml_candidate_captured(candidate_toml, "candidate runtime config")
-        } else {
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-        }
-        .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
-        let external_inputs = self.verified_external_inputs(&mut candidate);
+        let candidate = candidate
+            .as_mut()
+            .map_err(|error| RuntimeConfigTransactionPlanError::InvalidCandidate(error.clone()))?;
+        let external_inputs = self.verified_external_inputs(candidate);
         let materialization = crate::config::materialize_rfc8212_transaction_candidate(
             &self.current_config,
-            &mut candidate,
+            candidate,
             external_inputs,
         );
         self.finish_config_transaction_plan(
-            &mut candidate,
+            candidate,
             materialization.as_ref(),
             external_inputs,
             live_snapshot,
@@ -612,4 +662,50 @@ fn format_transaction_plan_text(
         }
     }
     out
+}
+
+/// Test latch: a load whose candidate carries [`load_latch::MARKER`] blocks
+/// until [`load_latch::release`], so a test can hold loads in flight for as
+/// long as it needs. Only candidates with the marker are affected.
+#[cfg(test)]
+pub(super) mod load_latch {
+    use std::sync::{Condvar, Mutex};
+
+    pub(crate) const MARKER: &str = "# candidate-load-latch";
+
+    /// (loads currently held, released)
+    static STATE: Mutex<(usize, bool)> = Mutex::new((0, false));
+    static CHANGED: Condvar = Condvar::new();
+
+    pub(super) fn hold_if_marked(candidate_toml: &str) {
+        if !candidate_toml.contains(MARKER) {
+            return;
+        }
+        let mut state = STATE.lock().unwrap();
+        state.0 += 1;
+        CHANGED.notify_all();
+        while !state.1 {
+            state = CHANGED.wait(state).unwrap();
+        }
+        state.0 -= 1;
+        CHANGED.notify_all();
+    }
+
+    pub(crate) fn arm() {
+        *STATE.lock().unwrap() = (0, false);
+    }
+
+    /// Wait until `count` marked loads are held, at most `limit`.
+    pub(crate) fn wait_held(count: usize, limit: std::time::Duration) -> bool {
+        let state = STATE.lock().unwrap();
+        let (state, _) = CHANGED
+            .wait_timeout_while(state, limit, |state| state.0 < count)
+            .unwrap();
+        state.0 >= count
+    }
+
+    pub(crate) fn release() {
+        STATE.lock().unwrap().1 = true;
+        CHANGED.notify_all();
+    }
 }

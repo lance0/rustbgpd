@@ -607,6 +607,7 @@ log_format = "json"
         candidate_toml: candidate,
         expected_runtime_snapshot_token: None,
         verify_external_inputs: true,
+        operator_sources: false,
         reply: plan_reply,
     })
     .await

@@ -34,6 +34,7 @@ SHARDS = {
                 "atomic_aggregate_passthrough",
                 "bgpkit_differential",
                 "bmp_buffer_receipt_check",
+                "candidate_source_paths",
                 "check_strict",
                 "cli_invocation",
                 "commit_confirm_binary",

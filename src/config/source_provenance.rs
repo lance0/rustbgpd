@@ -5,13 +5,12 @@
     reason = "accepted ownership is active while digest and v2 exposure remain private"
 )]
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustbgpd_policy::datasets::{
     DatasetData, DatasetFileFingerprint, DatasetHandle, DatasetKind, DatasetSnapshot,
-    MAX_DATASET_BYTES,
+    MAX_DATASET_BYTES, read_regular_file_bounded,
 };
 use rustbgpd_policy::rpol::RpolFile;
 use sha2::{Digest, Sha256};
@@ -201,28 +200,8 @@ pub(super) fn load_dataset_captured(
     let canonical_path = path
         .canonicalize()
         .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
-    let file = std::fs::File::open(&canonical_path)
+    let bytes = read_regular_file_bounded(&canonical_path, MAX_DATASET_BYTES)
         .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
-    if metadata.len() > MAX_DATASET_BYTES {
-        return Err(failure(format!(
-            "{} is {} bytes — larger than the {MAX_DATASET_BYTES}-byte dataset bound",
-            path.display(),
-            metadata.len()
-        )));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.take(MAX_DATASET_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
-    if bytes.len() as u64 > MAX_DATASET_BYTES {
-        return Err(failure(format!(
-            "{} grew larger than the {MAX_DATASET_BYTES}-byte dataset bound while reading",
-            path.display()
-        )));
-    }
     let source = DatasetFileFingerprint {
         canonical_path,
         raw_len: u64::try_from(bytes.len()).expect("bounded source length fits u64"),
@@ -363,6 +342,7 @@ impl AcceptedConfigSnapshot {
             Some(&mut capture),
             None,
             None,
+            super::SourceRules::OnDisk,
         )?;
         config.file_path = Some(config_path);
         after_capture();
@@ -455,6 +435,7 @@ impl AcceptedConfigSnapshot {
             Some(&mut capture),
             prior.map(|snapshot| &snapshot.manifest),
             prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
+            super::SourceRules::OnDisk,
         )?;
         config.file_path = Some(file_path);
         after_capture();

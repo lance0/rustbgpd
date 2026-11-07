@@ -3927,6 +3927,10 @@ enum PemKind {
     Crl,
 }
 
+/// Largest gRPC credential file (PEM bundle or token) config validation
+/// reads.
+const MAX_GRPC_CREDENTIAL_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Validate a PEM-encoded TLS file at config-load / `--check` time.
 ///
 /// Checks readability and PEM framing/block kind. Startup and both `--check`
@@ -4007,13 +4011,15 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
 /// Read a gRPC credential file under the shared admission rules
 /// ([`rustbgpd_api::credential_file`]): a refused file fails config load.
 /// Permission warnings are reported by credential staging, once per load.
+/// At most [`MAX_GRPC_CREDENTIAL_FILE_BYTES`] are read; a larger file is
+/// refused rather than buffered.
 fn read_grpc_credential_file(
     path: &str,
     field_name: &str,
     kind: rustbgpd_api::credential_file::CredentialKind,
 ) -> Result<Vec<u8>, ConfigError> {
     use std::io::Read as _;
-    let (mut file, _warning) = rustbgpd_api::credential_file::open_credential(
+    let (file, _warning) = rustbgpd_api::credential_file::open_credential(
         Path::new(path),
         field_name,
         kind,
@@ -4021,10 +4027,19 @@ fn read_grpc_credential_file(
     )
     .map_err(|reason| ConfigError::InvalidGrpcConfig { reason })?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(MAX_GRPC_CREDENTIAL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| ConfigError::InvalidGrpcConfig {
             reason: format!("failed to read {field_name} {path:?}: {e}"),
         })?;
+    if bytes.len() as u64 > MAX_GRPC_CREDENTIAL_FILE_BYTES {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!(
+                "failed to read {field_name} {path:?}: larger than \
+                 {MAX_GRPC_CREDENTIAL_FILE_BYTES} bytes"
+            ),
+        });
+    }
     Ok(bytes)
 }
 

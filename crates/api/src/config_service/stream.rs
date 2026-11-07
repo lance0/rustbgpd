@@ -421,6 +421,7 @@ pub(super) async fn stream_plan_config_transaction(
     let audit_handle = request.extensions().get::<GrpcAuditHandle>().cloned();
     let mut audit = StreamAudit::new(audit_handle);
     let role = principal_role(&request)?;
+    let operator_sources = crate::authz::CallerTier::is_operator(request.extensions());
     if !authenticated_transport {
         audit.outcome = "unauthenticated_transport";
         return Err(Status::unauthenticated(
@@ -593,6 +594,7 @@ pub(super) async fn stream_plan_config_transaction(
         admission.permit,
         admission.after_operator_wait,
         role,
+        operator_sources,
         audit,
         response_tx,
     ));
@@ -622,6 +624,7 @@ async fn run_detached_plan(
     _permit: OwnedSemaphorePermit,
     after_operator_wait: bool,
     issuer_role: PrincipalRole,
+    operator_sources: bool,
     mut audit: StreamAudit,
     response_tx: oneshot::Sender<Result<proto::StreamPlanConfigTransactionResponse, Status>>,
 ) {
@@ -634,6 +637,7 @@ async fn run_detached_plan(
                 candidate_toml,
                 expected_runtime_snapshot_token,
                 verify_external_inputs: true,
+                operator_sources,
                 reply,
             })
             .await
@@ -1240,6 +1244,7 @@ mod tests {
             candidate_toml,
             expected_runtime_snapshot_token,
             verify_external_inputs: true,
+            operator_sources: false,
             reply,
         } = peer_rx.recv().await.unwrap()
         else {
@@ -2307,6 +2312,7 @@ mod tests {
             permit,
             false,
             PrincipalRole::Observer,
+            false,
             StreamAudit::new(None),
             response_tx,
         ));
