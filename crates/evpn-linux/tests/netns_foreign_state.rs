@@ -967,6 +967,146 @@ async fn l2_foreign_vxlan_moved_to_another_bridge_is_not_programmed() {
     assert_eq!(err.class(), FailureClass::Transient, "{err}");
 }
 
+/// LAN-2909 L-E3 review: the SVD VXLAN stays in place, but its VLAN 10
+/// tunnel mapping to VNI 100 is removed after the link dump. The
+/// target-scoped VLAN database read must see that, so a VNI 100 flood row
+/// is not written with a stale `src_vni`.
+#[tokio::test]
+async fn l2_foreign_svd_vlan_tunnel_removed_after_the_dump_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-svd-tunnel-gone");
+        ns.exec(
+            "ip",
+            &["addr", "add", &format!("{L2_LOCAL_IP}/32"), "dev", "lo"],
+        );
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                "brvlan",
+                "type",
+                "bridge",
+                "vlan_filtering",
+                "1",
+                "vlan_default_pvid",
+                "0",
+            ],
+        );
+        ns.exec("ip", &["link", "set", "brvlan", "up"]);
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                "vxlan0",
+                "type",
+                "vxlan",
+                "external",
+                "vnifilter",
+                "dstport",
+                "4789",
+                "nolearning",
+            ],
+        );
+        ns.exec("ip", &["link", "set", "vxlan0", "master", "brvlan"]);
+        ns.exec("ip", &["link", "set", "vxlan0", "up"]);
+        ns.exec(
+            "bridge",
+            &["link", "set", "dev", "vxlan0", "vlan_tunnel", "on"],
+        );
+        ns.exec(
+            "bridge",
+            &["vlan", "add", "vid", "10", "dev", "brvlan", "self"],
+        );
+        ns.exec("bridge", &["vlan", "add", "vid", "10", "dev", "vxlan0"]);
+        ns.exec(
+            "bridge",
+            &[
+                "vlan",
+                "add",
+                "vid",
+                "10",
+                "dev",
+                "vxlan0",
+                "tunnel_info",
+                "id",
+                "100",
+            ],
+        );
+        run_inner(
+            &ns,
+            "l2_foreign_svd_vlan_tunnel_removed_after_the_dump_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut instances = EvpnInstanceTable::new();
+    instances
+        .insert(
+            EvpnInstance::new(
+                EvpnInstanceId::new(L2_VNI).unwrap(),
+                l2_rd(),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: L2_VNI,
+                }],
+                L2_LOCAL_IP.parse::<IpAddr>().unwrap(),
+                Some("brvlan".to_string()),
+                false,
+            )
+            .expect("EvpnInstance")
+            .with_bridge_vlan(Some(rustbgpd_evpn::BridgeVlan::new(10).unwrap())),
+        )
+        .expect("insert");
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let _ = dp.probe(&instances).await;
+    let flood = DataplaneOp::AddFloodFdb {
+        vni: EvpnInstanceId::new(L2_VNI).unwrap(),
+        dst: "10.0.0.2".parse().unwrap(),
+    };
+    dp.apply(&flood)
+        .await
+        .expect("mapped SVD target accepts the row");
+
+    run(
+        "bridge",
+        &[
+            "vlan",
+            "del",
+            "vid",
+            "10",
+            "dev",
+            "vxlan0",
+            "tunnel_info",
+            "id",
+            "100",
+        ],
+    );
+    let second = DataplaneOp::AddFloodFdb {
+        vni: EvpnInstanceId::new(L2_VNI).unwrap(),
+        dst: "10.0.0.3".parse().unwrap(),
+    };
+    let result = dp.apply(&second).await;
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxlan0"])
+        .lines()
+        .filter(|row| row.starts_with("00:00:00:00:00:00") && row.contains("10.0.0.3"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "flood row written after the tunnel mapping was removed ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("an unmapped SVD target must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
 #[tokio::test]
 async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     if !netns_gate() {

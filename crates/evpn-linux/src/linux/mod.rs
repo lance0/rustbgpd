@@ -72,6 +72,7 @@ pub mod nexthop_raw;
 mod notify;
 mod probe;
 mod routes;
+mod vlan_tunnel;
 
 type ObservationDropHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
 const IP_NEIGHBOUR_MAC_CACHE_LIMIT: usize = 16_384;

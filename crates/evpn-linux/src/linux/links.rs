@@ -381,17 +381,10 @@ pub(crate) async fn confirm_fdb_vxlan_target(
     if !live.collect_metadata {
         return Err(stale("no longer a collect-metadata VXLAN"));
     }
-    let inventory = dump_bridge_vlan_inventory(handle).await?;
-    let mapped = inventory
-        .get(&target.ifindex)
-        .is_some_and(|(vlans, tunnels)| {
-            vlan_rows_contain(vlans, binding.bridge_vlan)
-                && tunnels.iter().any(|tunnel| {
-                    tunnel.vid == Some(binding.bridge_vlan)
-                        && tunnel.tunnel_id == Some(vni.as_u32())
-                })
-        });
-    if mapped {
+    // Read only this port's VLAN database: the AF_BRIDGE link dump would
+    // return every port in the namespace on each row written.
+    let entries = super::vlan_tunnel::dump_port_vlans(target.ifindex).await?;
+    if super::vlan_tunnel::entries_map_vlan_to_tunnel(&entries, binding.bridge_vlan, vni.as_u32()) {
         Ok(())
     } else {
         Err(stale(
