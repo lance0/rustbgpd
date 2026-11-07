@@ -1401,6 +1401,19 @@ mod linux {
                 );
                 return;
             }
+            if pkt.your_discriminator == 0
+                && !entry
+                    .session
+                    .admits_zero_your_discriminator(pkt.my_discriminator)
+            {
+                debug!(
+                    %peer,
+                    state = ?entry.session.state(),
+                    my_discriminator = pkt.my_discriminator,
+                    "BFD packet with zero Your Discriminator selected only by source; ignoring"
+                );
+                return;
+            }
             let before_state = entry.session.state();
             let before_remote_admin_down = entry.session.remote_admin_down();
             let actions = entry.session.handle(Event::PacketReceived(pkt));
@@ -2248,6 +2261,38 @@ mod linux {
                 })
                 .count();
             assert_eq!(live_detect, 1, "compaction keeps the live detect deadline");
+        }
+
+        /// An on-link sender that spoofs the peer's address cannot bounce an
+        /// Up session with a zero-Your-Discriminator Down packet: only the
+        /// peer's learned discriminator selects the session that way.
+        #[tokio::test]
+        async fn spoofed_zero_your_discriminator_cannot_bounce_an_up_session() {
+            let metrics = rustbgpd_telemetry::BgpMetrics::new();
+            let (status_tx, _) = tokio::sync::watch::channel(Vec::new());
+            let params = reload_params("127.0.0.2", 1);
+            let mut actor = socketless_actor(vec![params.clone()], &metrics, &status_tx).await;
+            let ours = actor.sessions[&params.peer].local_discriminator;
+            let up = peer_packet(params.peer, ours, SessionState::Init, 300_000, 3);
+            actor.on_packet(up, &metrics, &status_tx).await;
+            let session = |actor: &super::Actor| {
+                let s = &actor.sessions[&params.peer].session;
+                (s.state(), s.remote_discriminator())
+            };
+            assert_eq!(session(&actor), (SessionState::Up, 0xdead));
+
+            let mut spoof = peer_packet(params.peer, 0, SessionState::Down, 300_000, 3);
+            spoof.packet.my_discriminator = 0xdead_beef;
+            actor.on_packet(spoof, &metrics, &status_tx).await;
+            assert_eq!(
+                session(&actor),
+                (SessionState::Up, 0xdead),
+                "a forged bootstrap packet must not reset the session"
+            );
+
+            let peer_down = peer_packet(params.peer, 0, SessionState::Down, 300_000, 3);
+            actor.on_packet(peer_down, &metrics, &status_tx).await;
+            assert_eq!(session(&actor).0, SessionState::Down);
         }
 
         /// A peer advertising the largest Desired Min TX and multiplier, then

@@ -64,6 +64,82 @@ async fn reset_peer_sends_administrative_reset_and_keeps_peer_enabled() {
     assert_eq!(counters.administrative_reset.load(Ordering::SeqCst), 1);
 }
 
+/// RFC 4271 §8.2.2 ignores a start event outside Idle, so enabling an
+/// enabled, Established neighbor is a no-op. It sends no NOTIFICATION, keeps
+/// the session up and leaves its NOTIFICATION backoff streak unchanged.
+#[tokio::test]
+async fn repeated_enable_keeps_an_established_session_and_its_backoff_streak() {
+    use super::collision::{mock_open, read_bgp_message, send_bgp_message};
+
+    const STREAK: u32 = 3;
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let mut transport = mgr.build_transport_config(&make_config(addr, 65002));
+    transport.remote_addr = listener.local_addr().unwrap();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1024);
+    let rib_drain = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    let handle = PeerHandle::spawn(
+        transport,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    // An inbound start carries a replaced session's streak; it stands in for
+    // earlier NOTIFICATION teardowns.
+    handle
+        .start_inbound_timeout(STREAK, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let (mut peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("session dials the scripted peer")
+        .unwrap();
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut peer, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(
+        &mut peer,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    send_bgp_message(&mut peer, &Message::Keepalive).await;
+    assert!(matches!(
+        read_bgp_message(&mut peer, &mut buf).await,
+        Message::Keepalive
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while handle.query_state().await.unwrap().fsm_state != SessionState::Established {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session reaches Established");
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+    mgr.enable_peer(key(addr)).await.unwrap();
+    mgr.enable_peer(key(addr)).await.unwrap();
+
+    // The session handles commands in order: this reply follows both starts.
+    let state = mgr.peers[&key(addr)].handle().query_state().await.unwrap();
+    assert_eq!(state.fsm_state, SessionState::Established);
+    assert_eq!(state.notifications_sent, 0);
+    assert_eq!(state.notification_idle_failures, STREAK);
+    assert!(mgr.peers[&key(addr)].enabled);
+
+    let managed = mgr.peers.remove(&key(addr)).unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
+    rib_drain.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn manager_shutdown_bounds_many_stalled_peers_by_concurrent_waves() {
     let (tx, rx) = mpsc::channel(1);

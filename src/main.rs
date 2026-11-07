@@ -1645,6 +1645,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     cert_file: paths.cert_file.clone(),
                     key_file: paths.key_file.clone(),
                     client_ca_file: paths.client_ca_file.clone(),
+                    client_crl_file: paths.client_crl_file.clone(),
                 }),
             },
             GrpcListener::Uds { token_file, .. } => CredentialSource {
@@ -1724,6 +1725,36 @@ fn check_tls_expiry_warnings(listeners: &[GrpcListenerConfig]) -> usize {
         }
     }
     warnings
+}
+
+/// `--check` warnings for credential files readable beyond the daemon.
+fn check_credential_file_warnings(listeners: &[GrpcListenerConfig]) -> usize {
+    let Some(listener) = listeners.first() else {
+        return 0;
+    };
+    let generation = listener.credential_store.load();
+    for warning in generation.file_warnings() {
+        print_framed_warning(
+            "gRPC credential file is readable beyond the daemon",
+            &format!(
+                "{warning}.\nA bearer token or private key grants operator access to whoever can read it."
+            ),
+        );
+    }
+    generation.file_warnings().len()
+}
+
+/// Log the staged generation's credential-file warnings, once per load or
+/// reload.
+fn warn_grpc_credential_files(credentials: &rustbgpd_api::credentials::CredentialStore) {
+    let generation = credentials.load();
+    for warning in generation.file_warnings() {
+        warn!(
+            event = "grpc_credential_file_permissions",
+            generation = generation.sequence(),
+            "{warning}"
+        );
+    }
 }
 
 fn warn_grpc_tls_expiry(
@@ -2106,7 +2137,9 @@ fn listener_mss_clamps(
 /// not a defect in the operator's config, so gating on it would make a
 /// correct deployment unshippable.
 fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
-    let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
+    let mut warnings = warn_unpoliced_ebgp(config)
+        + check_tls_expiry_warnings(listeners)
+        + check_credential_file_warnings(listeners);
     #[cfg(target_os = "linux")]
     {
         warnings += host_ipv6_runtime::check(config);
@@ -4473,6 +4506,12 @@ async fn run<T>(
                 %error,
                 "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
             );
+            // The log may go to stdout or a collector; a refusal to start
+            // must also say why where a supervisor shows it.
+            eprintln!(
+                "error: refusing to start: runtime_state_dir {}: {error}",
+                runtime_state_path.display()
+            );
             process::exit(1);
         }
     };
@@ -4689,6 +4728,9 @@ async fn run<T>(
     let grpc_credentials = grpc_listeners
         .first()
         .map(GrpcListenerConfig::credential_store);
+    if let Some(credentials) = &grpc_credentials {
+        warn_grpc_credential_files(credentials);
+    }
     let grpc_tls_expiry_warning = grpc_listeners.iter().find_map(|listener| {
         matches!(listener.endpoint, ListenerEndpoint::Tcp(_)).then_some((
             listener.credential_index,
@@ -7337,6 +7379,7 @@ async fn run<T>(
                                         operation.mark_sighup_accepted_effect();
                                         reload_metrics.record_grpc_credential_reload("success");
                                         info!(generation, "gRPC credential generation reloaded");
+                                        warn_grpc_credential_files(&credentials);
                                         if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
                                             warn_grpc_tls_expiry(&credentials, index, warning_seconds);
                                         }

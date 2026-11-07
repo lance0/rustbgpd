@@ -268,9 +268,10 @@ pub fn encode_capability_value(entries: &[OrfCapEntry], buf: &mut impl BufMut) {
     }
 }
 
-/// Decode the ORF capability value. Returns `None` on a structural error or an
-/// unrecognized AFI/SAFI, so the caller can preserve the capability as
-/// `Capability::Unknown` for a lossless round-trip (mirroring Add-Path).
+/// Decode the ORF capability value. Returns `None` on a structural error, so
+/// the caller can preserve the capability as `Capability::Unknown`. A block for
+/// an unrecognized AFI/SAFI is skipped on its own (RFC 5492 §4), keeping the
+/// modeled families.
 #[must_use]
 pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
     // RFC 5291 §5: the value carries one or more blocks. An empty value is
@@ -290,16 +291,20 @@ pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
         if raw.len() < count * 2 {
             return None;
         }
-        let afi = Afi::from_u16(afi_raw)?;
-        let safi = Safi::from_u8(safi_raw)?;
-        let mut orf_types = Vec::with_capacity(count);
-        for _ in 0..count {
-            orf_types.push(OrfCapType {
-                orf_type: OrfType::from_u8(raw[0]),
-                send_receive: OrfSendReceive::from_u8(raw[1]),
-            });
-            raw = &raw[2..];
-        }
+        let types = &raw[..count * 2];
+        raw = &raw[count * 2..];
+        let (Some(afi), Some(safi)) = (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw)) else {
+            continue;
+        };
+        let orf_types = types
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[orf_type, send_receive]| OrfCapType {
+                orf_type: OrfType::from_u8(orf_type),
+                send_receive: OrfSendReceive::from_u8(send_receive),
+            })
+            .collect();
         entries.push(OrfCapEntry {
             afi,
             safi,
@@ -658,10 +663,10 @@ mod tests {
     }
 
     #[test]
-    fn capability_value_unknown_afi_rejected() {
-        // AFI 99 (unknown) → None so the caller preserves Capability::Unknown.
+    fn capability_value_unknown_afi_block_skipped() {
+        // AFI 99 (unknown): the block is skipped, not the whole value.
         let raw = [0u8, 99, 0, 1, 1, 64, 1];
-        assert!(decode_capability_value(&raw).is_none());
+        assert_eq!(decode_capability_value(&raw), Some(Vec::new()));
     }
 
     #[test]

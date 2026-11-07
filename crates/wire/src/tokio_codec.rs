@@ -266,25 +266,51 @@ mod tests {
         assert_eq!(src, original);
     }
 
+    /// A well-framed message whose body fails to decode is consumed, so the
+    /// following frame still decodes.
     #[test]
     fn malformed_complete_body_preserves_following_frame() {
         let mut src = BytesMut::new();
         src.put_slice(&MARKER);
-        src.put_u16(20);
-        src.put_u8(message_type::NOTIFICATION);
-        src.put_u8(NotificationCode::Cease.as_u8());
+        src.put_u16(23);
+        src.put_u8(message_type::UPDATE);
+        // Withdrawn Routes Length 5 overruns the 4-octet body.
+        src.put_slice(&[0, 5, 0, 0]);
         let keepalive = encode_message(&Message::Keepalive).unwrap();
         src.extend_from_slice(&keepalive);
         let mut codec = BgpCodec::new();
 
         assert!(matches!(
             codec.decode(&mut src),
-            Err(BgpCodecError::Decode(DecodeError::MalformedField {
-                message_type: "NOTIFICATION",
-                ..
-            }))
+            Err(BgpCodecError::Decode(
+                DecodeError::UpdateLengthMismatch { .. }
+            ))
         ));
         assert_eq!(src.as_ref(), keepalive.as_ref());
+        assert_eq!(codec.decode(&mut src).unwrap(), Some(Message::Keepalive));
+    }
+
+    /// A NOTIFICATION shorter than 21 octets is a header-level Bad Message
+    /// Length (RFC 4271 §6.1). Like every header error it ends the session,
+    /// so the codec leaves the buffer untouched instead of guessing where the
+    /// next frame starts.
+    #[test]
+    fn short_notification_is_a_header_length_error() {
+        let mut src = BytesMut::new();
+        src.put_slice(&MARKER);
+        src.put_u16(20);
+        src.put_u8(message_type::NOTIFICATION);
+        src.put_u8(NotificationCode::Cease.as_u8());
+        let original = src.clone();
+        let mut codec = BgpCodec::new();
+
+        assert!(matches!(
+            codec.decode(&mut src),
+            Err(BgpCodecError::Decode(DecodeError::InvalidLength {
+                length: 20
+            }))
+        ));
+        assert_eq!(src, original);
     }
 
     #[test]
