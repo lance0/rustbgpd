@@ -832,6 +832,13 @@ async fn reconcile_once<F>(
                     || state.owned.contains_key(prefix)
             })
             .collect();
+        // A pending adoption whose row vanished or turned foreign before
+        // this retry is no longer ours. Pending must stay within ownership,
+        // or the reap's release of it would disable ownership.
+        state
+            .adoption
+            .pending
+            .retain(|prefix| retained.contains(prefix));
         state.ownership.prefixes.clone_from(&retained);
         // A failed prune is retried by the next pass's sweep, but the
         // retained rows are adopted either way: they still count against
@@ -4738,6 +4745,58 @@ pub(super) mod tests {
             fib.install_calls.is_empty(),
             "a row was installed after receipt authority was lost"
         );
+    }
+
+    /// An unclaimed adopted row that vanishes, or turns foreign, between a
+    /// failed startup prune and its retry leaves the retried prune's
+    /// ownership. Its pending adoption must go with it: the reap would
+    /// otherwise release a prefix ownership no longer names and disable
+    /// every later install and withdrawal until restart.
+    #[tokio::test]
+    async fn adopted_row_lost_before_prune_retry_keeps_mutations_enabled() {
+        for became_foreign in [false, true] {
+            let (leftover, absent, new) = (v4_host(1), v4_host(2), v4_host(3));
+            let (_dir, ownership) = ownership_with_receipt(&[leftover, absent]);
+            ownership
+                .store
+                .as_ref()
+                .unwrap()
+                .fail_next_writes
+                .store(1, Ordering::Relaxed);
+            // Deferred: the reap releases a vanished pending row whether or
+            // not the deferral has passed, and the first pass keeps the
+            // live leftover.
+            let mut state =
+                ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+            let mut fib = FakeFib::default();
+            fib.installed.insert(leftover);
+
+            pass(&mut state, &mut fib, Vec::new()).await;
+            assert!(!state.adoption.swept, "the prune write must fail first");
+            assert_eq!(state.adoption.pending, [leftover].into());
+
+            fib.installed.remove(&leftover);
+            if became_foreign {
+                fib.foreign.insert(leftover);
+            }
+            pass(&mut state, &mut fib, Vec::new()).await;
+            assert!(state.adoption.swept);
+            assert!(
+                state.ownership.available,
+                "foreign={became_foreign}: the stale pending row disabled ownership"
+            );
+            assert!(state.adoption.pending.is_empty());
+            assert!(receipt_on_disk(&mut state).is_empty());
+            assert!(fib.remove_calls.is_empty(), "a row was deleted");
+
+            let statuses = pass(&mut state, &mut fib, blackholed(&[new])).await;
+            assert_eq!(fib.install_calls, vec![new]);
+            assert_eq!(
+                reason_of(&statuses, new),
+                (BlackholeState::Installed, "installed")
+            );
+            assert_eq!(receipt_on_disk(&mut state), [new].into());
+        }
     }
 
     /// A startup prune that fails still adopts the live receipted rows, so
