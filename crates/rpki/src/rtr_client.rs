@@ -778,24 +778,23 @@ impl RtrClient {
         if matches!(error, RtrError::ServerError { code: 4, .. }) {
             return true;
         }
-        // Server closed the connection, answered with a lower version
-        // byte, or sent garbage before this attempt's version was ever
-        // accepted: no epoch is held, or the held epoch is from v1 and
-        // this attempt probes v2. Real-world caches like GoRTR and StayRTR
-        // disconnect on unsupported versions instead of sending error
-        // code 4. Once the cache has answered at v2, negotiation is over
-        // and a later failure is an ordinary session error: a corrupt
-        // Prefix PDU must take its flush, not a fallback that keeps data.
+        // Server closed the connection, or answered with a lower version
+        // byte, before this attempt's version was accepted: no epoch is
+        // held, or the held epoch is from v1 and this attempt probes v2.
+        // Real-world caches like GoRTR and StayRTR disconnect on
+        // unsupported versions instead of sending error code 4. A PDU that
+        // carries the probed version but fails to decode is not a refusal:
+        // the cache speaks that version, and the error takes its own
+        // handling (a corrupt Prefix PDU flushes, §12), whether or not a
+        // Cache Response came first. Once the cache has answered at v2,
+        // negotiation is over and no failure is a refusal.
         !self.negotiation_complete
             && self
                 .epoch
                 .is_none_or(|epoch| epoch.version < self.negotiated_version)
             && matches!(
                 error,
-                RtrError::Io(_)
-                    | RtrError::ConnectionClosed
-                    | RtrError::Decode(_)
-                    | RtrError::VersionMismatch { .. }
+                RtrError::Io(_) | RtrError::ConnectionClosed | RtrError::VersionMismatch { .. }
             )
     }
 
@@ -3932,6 +3931,18 @@ mod tests {
     /// fallback that keeps the data.
     #[tokio::test(start_paused = true)]
     async fn corrupt_prefix_after_accepted_v2_reprobe_flushes_held_data() {
+        corrupt_prefix_during_v2_reprobe_flushes_held_data(true).await;
+    }
+
+    /// A corrupt Prefix PDU at the probed version, even ahead of any Cache
+    /// Response, shows the cache speaks v2: it is the same §12 fatal error,
+    /// not a version refusal, so the held v1 data is flushed.
+    #[tokio::test(start_paused = true)]
+    async fn corrupt_prefix_before_the_v2_reprobe_response_flushes_held_data() {
+        corrupt_prefix_during_v2_reprobe_flushes_held_data(false).await;
+    }
+
+    async fn corrupt_prefix_during_v2_reprobe_flushes_held_data(cache_response_first: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
@@ -3974,7 +3985,9 @@ mod tests {
             read_pdu_with_version(&mut probe).await,
             (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery)
         );
-        write_pdus(&mut probe, &[RtrPdu::CacheResponse { session_id: 9 }]).await;
+        if cache_response_first {
+            write_pdus(&mut probe, &[RtrPdu::CacheResponse { session_id: 9 }]).await;
+        }
         // Host bits set: a corrupt Prefix PDU (§12, code 0).
         write_pdus(
             &mut probe,
