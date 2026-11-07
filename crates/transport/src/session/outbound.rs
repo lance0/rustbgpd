@@ -1054,17 +1054,16 @@ impl PeerSession {
 }
 
 // The per-batch outbound maps (`PreparedAttrCacheKey` cache + the
-// `AttrGroupKey` UPDATE-grouping indices) use FxHash rather than the
-// default SipHash: keying is once per announced route, and SipHash on
-// these wide keys was the top prepare+encode line in the RR fanout
-// flamegraph. HashDoS tradeoff (deliberate), mirroring the route-map
-// rationale block at the top of `rib::adj_rib_in`: the key material
-// (attribute Arc pointers, next hops, router ids) derives from route
-// data of explicitly configured peers, each map lives only for one
-// `send_route_update_slice` batch, and per-peer route count is bounded by
-// enforced `max_prefixes` — so a collision chain is short-lived and
-// capped. A peer able to craft colliding attribute sets already has
-// strictly higher-impact vectors (churn flood, hijack).
+// `AttrGroupKey` UPDATE-grouping indices) use address-aware Fx hashing
+// rather than the default SipHash: keying is once per announced route,
+// and SipHash on these wide keys was the top prepare+encode line in the
+// RR fanout flamegraph. HashDoS tradeoff (deliberate), mirroring the
+// route-map rationale at the top of `rib::adj_rib_in`: keys include
+// peer-derived attributes, next hops and router ids. Ordinary maps live
+// for one outbound slice; shared encoding keeps its attribute cache for
+// the group payload. The hasher is not collision-resistant.
+// Optional `max_prefixes` limits count unique prefixes, not Add-Path paths
+// or distinct attribute sets, so they do not bound collision-chain length.
 use crate::fast_hash::FastMap as HashMap;
 use std::collections::hash_map::Entry;
 
