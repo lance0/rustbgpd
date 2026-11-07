@@ -4889,7 +4889,7 @@ file_prefix = "rib"         # filename prefix (default "rib")
 | `output_dir`    | string  | yes      | --       | Directory for MRT dump files (created lazily; must be writable) |
 | `dump_interval` | u64     | no       | 7200     | Seconds between periodic dumps (must be > 0) |
 | `compress`      | bool    | no       | false    | Compress output files with gzip           |
-| `file_prefix`   | string  | no       | `"rib"`  | Filename prefix for dump files            |
+| `file_prefix`   | string  | no       | `"rib"`  | Nonempty filename component; no `/`, `\`, NUL, `.` or `..` |
 
 ### Output files
 
