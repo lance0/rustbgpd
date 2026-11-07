@@ -1287,11 +1287,13 @@ fn bench_announce_validation(c: &mut Criterion) {
                             tx.try_send(RibUpdate::RpkiCacheUpdate {
                                 table: Arc::clone(&vrps),
                                 delta: None,
+                                admission: None,
                             })
                             .unwrap();
                             tx.try_send(RibUpdate::AspaTableUpdate {
                                 table: Arc::clone(&aspa),
                                 changed_customer_asns: None,
+                                admission: None,
                             })
                             .unwrap();
                             manager.bench_drain_primary_updates();

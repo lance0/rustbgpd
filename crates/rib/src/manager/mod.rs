@@ -5547,14 +5547,22 @@ impl RibManager {
                     self.ensure_all_route_pages_advanced(page_versions);
                 }
             }
-            RibUpdate::RpkiCacheUpdate { table, delta } => {
+            RibUpdate::RpkiCacheUpdate {
+                table,
+                delta,
+                admission,
+            } => {
                 self.handle_rpki_cache_update(table, delta);
+                // Applied: the sender may queue its next table.
+                drop(admission);
             }
             RibUpdate::AspaTableUpdate {
                 table,
                 changed_customer_asns,
+                admission,
             } => {
                 self.handle_aspa_cache_update(table, changed_customer_asns);
+                drop(admission);
             }
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::InjectLeasedFlowSpec {

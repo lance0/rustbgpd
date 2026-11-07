@@ -2418,29 +2418,97 @@ fn merge_validation_deltas(
     }
 }
 
+/// One VRP table update covering `older` then `newer`: the newer table, with
+/// a delta that holds every entry of both, or a full re-evaluation when either
+/// is one or the union outgrows the table itself.
+fn merge_vrp_table_updates(
+    older: rustbgpd_rpki::RpkiTableUpdate,
+    newer: rustbgpd_rpki::RpkiTableUpdate,
+) -> rustbgpd_rpki::RpkiTableUpdate {
+    let table_len = newer.table.len();
+    let delta = older
+        .delta
+        .zip(newer.delta)
+        .map(|(older, newer)| {
+            older
+                .into_iter()
+                .chain(newer)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .filter(|union| union.len() <= table_len)
+        .map(|union| union.into_iter().collect());
+    rustbgpd_rpki::RpkiTableUpdate {
+        table: newer.table,
+        delta,
+    }
+}
+
+/// One ASPA table update covering `older` then `newer`, as for
+/// [`merge_vrp_table_updates`].
+fn merge_aspa_table_updates(
+    older: rustbgpd_rpki::AspaTableUpdate,
+    newer: rustbgpd_rpki::AspaTableUpdate,
+) -> rustbgpd_rpki::AspaTableUpdate {
+    let changed_customer_asns = older
+        .changed_customer_asns
+        .zip(newer.changed_customer_asns)
+        .map(|(mut older, newer)| {
+            older.extend(newer);
+            older
+        })
+        .filter(|union| union.len() <= newer.table.len());
+    rustbgpd_rpki::AspaTableUpdate {
+        table: newer.table,
+        changed_customer_asns,
+    }
+}
+
 /// Forward one validation cache's table updates: `split` turns each into
-/// the RIB's update and the sessions' delta. The RIB gets each update in
-/// order as it arrives; the peer manager gets the deltas through a
-/// [`ValidationRefreshQueue`]. Ends when the cache's channel closes.
+/// the RIB's update and the sessions' delta, and the peer manager gets the
+/// deltas through a [`ValidationRefreshQueue`]. Ends when the cache's channel
+/// closes.
+///
+/// At most one update is queued in the RIB mailbox at a time: `split` puts the
+/// admission permit in the RIB update, and the RIB drops it once the update is
+/// applied. Updates that arrive meanwhile are combined by `merge` into one
+/// pending update. Every update is a whole table, so a slow RIB holds a fixed
+/// number of them however many the caches send, instead of one per table.
+/// Skipping an intermediate table is sound: the merged delta covers every
+/// entry that changed since the last table the RIB applied.
 async fn forward_validation_cache<U>(
     mut updates: mpsc::Receiver<U>,
     rib_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-    mut split: impl FnMut(U) -> (RibUpdate, rustbgpd_transport::ValidationDelta),
+    mut merge: impl FnMut(U, U) -> U,
+    mut split: impl FnMut(
+        U,
+        tokio::sync::OwnedSemaphorePermit,
+    ) -> (RibUpdate, rustbgpd_transport::ValidationDelta),
 ) {
     let mut refresh = ValidationRefreshQueue::new(peer_mgr_tx);
-    loop {
-        let update = tokio::select! {
-            update = updates.recv() => update,
-            outcome = refresh.finished() => {
-                refresh.complete(outcome).await;
-                continue;
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let mut pending: Option<U> = None;
+    let mut open = true;
+    while open || pending.is_some() {
+        tokio::select! {
+            update = updates.recv(), if open => match update {
+                Some(update) => {
+                    pending = Some(match pending.take() {
+                        Some(older) => merge(older, update),
+                        None => update,
+                    });
+                }
+                None => open = false,
+            },
+            permit = Arc::clone(&admission).acquire_owned(), if pending.is_some() => {
+                let Some(update) = pending.take() else { continue };
+                let permit = permit.expect("the admission semaphore is never closed");
+                let (rib_update, delta) = split(update, permit);
+                let _ = rib_tx.send(rib_update).await;
+                refresh.push(delta).await;
             }
-        };
-        let Some(update) = update else { break };
-        let (rib_update, delta) = split(update);
-        let _ = rib_tx.send(rib_update).await;
-        refresh.push(delta).await;
+            outcome = refresh.finished() => refresh.complete(outcome).await,
+        }
     }
 }
 
@@ -5151,10 +5219,14 @@ async fn run<T>(
         && !rpki_config.cache_servers.is_empty()
     {
         let (vrp_update_tx, vrp_update_rx) = mpsc::channel(256);
-        let (rpki_table_tx, rpki_table_rx) = mpsc::channel(16);
+        // One slot each: the forwarders coalesce while the RIB is busy, so a
+        // deeper queue would only hold more uncharged whole-table snapshots.
+        // A forwarder that cannot take an update blocks the manager, and so
+        // the RTR clients, whose undelivered data stays charged.
+        let (rpki_table_tx, rpki_table_rx) = mpsc::channel(1);
 
         // ASPA table channel (VrpManager → RIB)
-        let (aspa_table_tx, aspa_table_rx) = mpsc::channel(16);
+        let (aspa_table_tx, aspa_table_rx) = mpsc::channel(1);
 
         let configured_cache_addrs: Vec<std::net::SocketAddr> = rpki_config
             .cache_servers
@@ -5200,7 +5272,8 @@ async fn run<T>(
             rpki_table_rx,
             rpki_rib_tx,
             rpki_peer_mgr_tx,
-            move |update: rustbgpd_rpki::RpkiTableUpdate| {
+            merge_vrp_table_updates,
+            move |update: rustbgpd_rpki::RpkiTableUpdate, admission| {
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -5214,6 +5287,7 @@ async fn run<T>(
                     RibUpdate::RpkiCacheUpdate {
                         table: update.table,
                         delta: update.delta,
+                        admission: Some(admission),
                     },
                     rustbgpd_transport::ValidationDelta::Rpki(session_delta),
                 )
@@ -5234,7 +5308,8 @@ async fn run<T>(
             aspa_table_rx,
             aspa_rib_tx,
             aspa_peer_mgr_tx,
-            move |update: rustbgpd_rpki::AspaTableUpdate| {
+            merge_aspa_table_updates,
+            move |update: rustbgpd_rpki::AspaTableUpdate, admission| {
                 validation_tx_aspa.send_modify(|snapshot| {
                     snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -5248,6 +5323,7 @@ async fn run<T>(
                     RibUpdate::AspaTableUpdate {
                         table: update.table,
                         changed_customer_asns: update.changed_customer_asns,
+                        admission: Some(admission),
                     },
                     rustbgpd_transport::ValidationDelta::Aspa(session_delta),
                 )
@@ -8070,10 +8146,10 @@ mod tests {
         assert_eq!(merged.to_vec(), vec![vrp(24)], "one copy of the VRP");
     }
 
-    /// The forwarding loop sends each table update to the RIB as it arrives
-    /// and, when the pass in flight ends, the deltas that waited for it as
-    /// one. Every wait is bounded under paused time, so a loop that never
-    /// sends something fails at once instead of hanging.
+    /// The forwarding loop sends each table update the RIB is ready for and,
+    /// when the pass in flight ends, the deltas that waited for it as one.
+    /// Every wait is bounded under paused time, so a loop that never sends
+    /// something fails at once instead of hanging.
     #[tokio::test(start_paused = true)]
     async fn validation_forwarder_sends_the_merged_delta_when_the_pass_ends() {
         async fn next<T>(receiver: &mut mpsc::Receiver<T>) -> Option<T> {
@@ -8090,7 +8166,9 @@ mod tests {
             updates_rx,
             rib_tx,
             peer_mgr_tx,
-            |(peer, delta): (PeerId, rustbgpd_transport::ValidationDelta)| {
+            |_, newer| newer,
+            // `PeerDown` carries no admission permit, so none is held.
+            |(peer, delta): (PeerId, rustbgpd_transport::ValidationDelta), _admission| {
                 (
                     RibUpdate::PeerDown {
                         peer,
@@ -8105,14 +8183,13 @@ mod tests {
                 192, 0, 2, last,
             )))
         };
+        // One at a time, so none is coalesced with the next.
         for (index, entry) in [24, 25, 26].into_iter().enumerate() {
             let index = u8::try_from(index).unwrap();
             updates_tx
                 .send((peer(index), rpki_delta(&[vrp(entry)])))
                 .await
                 .unwrap();
-        }
-        for index in 0..3 {
             let Some(RibUpdate::PeerDown { peer: sent, .. }) = next(&mut rib_rx).await else {
                 panic!("each table update reaches the RIB");
             };
@@ -8149,6 +8226,178 @@ mod tests {
             .await
             .expect("the forwarder ends when its channel closes")
             .unwrap();
+    }
+
+    /// A distinct VRP table of `size` entries, all from AS `asn`.
+    fn vrp_table(asn: u32, size: u16) -> Arc<rustbgpd_rpki::VrpTable> {
+        Arc::new(rustbgpd_rpki::VrpTable::new(
+            (0..size)
+                .map(|index| {
+                    let [high, low] = index.to_be_bytes();
+                    rustbgpd_rpki::VrpEntry {
+                        prefix: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, high, low, 0)),
+                        prefix_len: 24,
+                        max_len: 24,
+                        origin_asn: asn,
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    /// A VRP forwarder wired as the daemon wires it: a one-slot channel from
+    /// the manager and the admission permit in each RIB update. The peer
+    /// manager never answers.
+    fn spawn_vrp_forwarder(
+        rib_capacity: usize,
+    ) -> (
+        mpsc::Sender<rustbgpd_rpki::RpkiTableUpdate>,
+        mpsc::Receiver<RibUpdate>,
+        mpsc::Receiver<PeerManagerCommand>,
+    ) {
+        let (updates_tx, updates_rx) = mpsc::channel(1);
+        let (rib_tx, rib_rx) = mpsc::channel(rib_capacity);
+        let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(8);
+        tokio::spawn(forward_validation_cache(
+            updates_rx,
+            rib_tx,
+            peer_mgr_tx,
+            merge_vrp_table_updates,
+            |update: rustbgpd_rpki::RpkiTableUpdate, admission| {
+                let session_delta = update
+                    .delta
+                    .as_deref()
+                    .map(Arc::<[rustbgpd_rpki::VrpEntry]>::from);
+                (
+                    RibUpdate::RpkiCacheUpdate {
+                        table: update.table,
+                        delta: update.delta,
+                        admission: Some(admission),
+                    },
+                    rustbgpd_transport::ValidationDelta::Rpki(session_delta),
+                )
+            },
+        ));
+        (updates_tx, rib_rx, peer_mgr_rx)
+    }
+
+    /// A RIB that stops reading does not make the forwarder queue one whole
+    /// VRP table per update. With room for 64 messages in the RIB mailbox,
+    /// 20 distinct 1000-entry tables leave only two alive: the one queued for
+    /// the RIB and the newest, pending. The others are freed as they are
+    /// superseded, and the manager never waits on the forwarder.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_rib_holds_two_vrp_tables_however_many_arrive() {
+        const TABLES: u32 = 20;
+        const SIZE: u16 = 1000;
+        let (updates_tx, _rib_rx, _peer_mgr_rx) = spawn_vrp_forwarder(64);
+        let mut sent = Vec::new();
+        for asn in 0..TABLES {
+            let table = vrp_table(65_000 + asn, SIZE);
+            sent.push(Arc::downgrade(&table));
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                updates_tx.send(rustbgpd_rpki::RpkiTableUpdate { table, delta: None }),
+            )
+            .await
+            .expect("the forwarder keeps taking updates while the RIB is stalled")
+            .unwrap();
+        }
+        // Let the forwarder take the last update off the channel.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let live: Vec<usize> = sent
+            .iter()
+            .enumerate()
+            .filter_map(|(index, table)| table.upgrade().map(|_| index))
+            .collect();
+        let live_records: usize = sent
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .map(|table| table.len())
+            .sum();
+        assert_eq!(
+            live,
+            vec![0, usize::try_from(TABLES).unwrap() - 1],
+            "only the table queued for the RIB and the newest are alive \
+             ({live_records} live VRP records, {SIZE} per table)"
+        );
+    }
+
+    /// Once the RIB applies the queued table, it gets the newest one, with a
+    /// delta covering every update it skipped, or a full re-evaluation when
+    /// any of them asked for one. The first table always reaches the RIB as
+    /// sent, so its first-table full re-evaluation is never merged away.
+    #[tokio::test(start_paused = true)]
+    async fn the_rib_gets_the_newest_vrp_table_with_the_skipped_deltas() {
+        type Applied = (
+            Arc<rustbgpd_rpki::VrpTable>,
+            Option<BTreeSet<u8>>,
+            tokio::sync::OwnedSemaphorePermit,
+        );
+        async fn next(rib_rx: &mut mpsc::Receiver<RibUpdate>) -> Applied {
+            let update = tokio::time::timeout(Duration::from_secs(1), rib_rx.recv())
+                .await
+                .expect("the RIB gets an update")
+                .expect("the forwarder is running");
+            let RibUpdate::RpkiCacheUpdate {
+                table,
+                delta,
+                admission: Some(admission),
+            } = update
+            else {
+                panic!("a VRP table update with its permit");
+            };
+            let delta = delta.map(|delta| delta.iter().map(|entry| entry.prefix_len).collect());
+            (table, delta, admission)
+        }
+        async fn settle(rib_rx: &mut mpsc::Receiver<RibUpdate>) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert!(rib_rx.try_recv().is_err(), "one table queued at a time");
+        }
+        let update = |table: &Arc<rustbgpd_rpki::VrpTable>, delta: Option<&[u8]>| {
+            rustbgpd_rpki::RpkiTableUpdate {
+                table: Arc::clone(table),
+                delta: delta.map(|lens| lens.iter().map(|&len| vrp(len)).collect()),
+            }
+        };
+        let (updates_tx, mut rib_rx, _peer_mgr_rx) = spawn_vrp_forwarder(64);
+        let tables: Vec<_> = (0..7).map(|asn| vrp_table(65_000 + asn, 4)).collect();
+
+        updates_tx.send(update(&tables[0], None)).await.unwrap();
+        let (table, delta, admission) = next(&mut rib_rx).await;
+        assert!(Arc::ptr_eq(&table, &tables[0]), "the first table, as sent");
+        assert_eq!(delta, None);
+
+        // While the first is unapplied, three concrete deltas coalesce.
+        for (index, len) in [(1, 24), (2, 25), (3, 24)] {
+            updates_tx
+                .send(update(&tables[index], Some(&[len])))
+                .await
+                .unwrap();
+        }
+        settle(&mut rib_rx).await;
+        drop(admission);
+        let (table, delta, admission) = next(&mut rib_rx).await;
+        assert!(Arc::ptr_eq(&table, &tables[3]), "the newest table");
+        assert_eq!(
+            delta,
+            Some(BTreeSet::from([24, 25])),
+            "every skipped change, once"
+        );
+
+        // A full re-evaluation in the middle wins over the deltas around it.
+        for (index, delta) in [(4, Some(&[26][..])), (5, None), (6, Some(&[27][..]))] {
+            updates_tx
+                .send(update(&tables[index], delta))
+                .await
+                .unwrap();
+        }
+        settle(&mut rib_rx).await;
+        drop(admission);
+        let (table, delta, _admission) = next(&mut rib_rx).await;
+        assert!(Arc::ptr_eq(&table, &tables[6]));
+        assert_eq!(delta, None, "a skipped full re-evaluation is kept");
+        settle(&mut rib_rx).await;
     }
 
     #[test]

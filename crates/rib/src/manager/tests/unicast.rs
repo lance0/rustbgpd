@@ -4655,9 +4655,13 @@ async fn install_vrp_10_0_0_0_24_as65000(tx: &mpsc::Sender<RibUpdate>) {
             origin_asn: 65000,
         },
     ]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table,
+        delta: None,
+        admission: None,
+    })
+    .await
+    .unwrap();
 }
 
 async fn ebgp_target_up(tx: &mpsc::Sender<RibUpdate>) -> mpsc::Receiver<OutboundRouteUpdate> {

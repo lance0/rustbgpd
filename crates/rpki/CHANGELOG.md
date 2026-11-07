@@ -28,6 +28,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   not covered. Withdrawals are charged against the total budget while their
   delta is staged or queued, and released once the manager applies it; they do
   not count against the per-cache cap.
+- A full table's withdrawal lists are freed before their charge is released.
+  Previously they stayed allocated, uncounted, while the update waited for a
+  full `VrpManager` queue. `RpkiTableUpdate` and `AspaTableUpdate` snapshots
+  are merged copies and are not charged: a consumer that queues them should
+  keep its queue short or coalesce superseded snapshots.
 - A second Cache Response inside one RTR response now ends the transaction as
   a protocol violation. Previously it restarted collection, and nothing staged
   before it was published.

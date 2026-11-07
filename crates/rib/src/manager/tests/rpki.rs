@@ -612,9 +612,13 @@ async fn routes_validated_on_insert_with_vrp_table() {
         max_len: 24,
         origin_asn: 65001,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table,
+        delta: None,
+        admission: None,
+    })
+    .await
+    .unwrap();
 
     // Now send a route with matching origin
     let peer = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
@@ -686,9 +690,13 @@ async fn rpki_cache_update_revalidates_existing_routes() {
         max_len: 24,
         origin_asn: 65001,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table,
+        delta: None,
+        admission: None,
+    })
+    .await
+    .unwrap();
 
     // Query again — should be Valid now
     let routes = query_received_routes(&tx, peer).await;
@@ -760,9 +768,13 @@ async fn rpki_cache_update_changes_best_path() {
         max_len: 24,
         origin_asn: 65002,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table,
+        delta: None,
+        admission: None,
+    })
+    .await
+    .unwrap();
 
     // After RPKI: peer2 should be best (Valid > NotFound)
     // But peer1's route has origin 65001, not covered → still NotFound.
@@ -833,9 +845,13 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
         max_len: 24,
         origin_asn: 65002,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table,
+        delta: None,
+        admission: None,
+    })
+    .await
+    .unwrap();
 
     // peer1 is now Invalid (VRP covers prefix but wrong origin), peer2 is Valid
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -904,6 +920,7 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
     tx.send(RibUpdate::AspaTableUpdate {
         table: valid_table,
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();
@@ -948,6 +965,7 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
     tx.send(RibUpdate::AspaTableUpdate {
         table: invalid_table,
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();
@@ -1013,6 +1031,7 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
     tx.send(RibUpdate::AspaTableUpdate {
         table,
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();
@@ -1085,13 +1104,57 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         max_len: 24,
         origin_asn: 65099,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table,
+        delta: None,
+        admission: None,
+    })
+    .await
+    .unwrap();
 
     // Verify route stays NotFound — no VRP covers 10.0.0.0/24
     let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes[0].validation_state, RpkiValidation::NotFound);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The RIB releases a table update's admission permit once it has applied
+/// the update, so the sender, which waits for that permit, can queue its
+/// next table.
+#[tokio::test]
+async fn validation_table_updates_release_their_admission_once_applied() {
+    use rustbgpd_rpki::{AspaTable, VrpTable};
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let take = || async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Arc::clone(&admission).acquire_owned(),
+        )
+        .await
+        .expect("the RIB released the previous update's permit")
+        .unwrap()
+    };
+
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table: Arc::new(VrpTable::new(Vec::new())),
+        delta: None,
+        admission: Some(take().await),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: Arc::new(AspaTable::new(Vec::new())),
+        changed_customer_asns: None,
+        admission: Some(take().await),
+    })
+    .await
+    .unwrap();
+    drop(take().await);
 
     drop(tx);
     handle.await.unwrap();
@@ -1751,6 +1814,7 @@ async fn aspa_revalidation_keeps_each_route_session_context_across_gr_reconnect(
     tx.send(RibUpdate::AspaTableUpdate {
         table,
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();
