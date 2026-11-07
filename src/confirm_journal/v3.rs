@@ -37,7 +37,20 @@ const MAX_LOCATOR_BYTES: usize = 512 * 1024;
 const MAX_PATH_BYTES: usize = 64 * 1024;
 const LOCATOR_SUFFIX: &str = ".commit-confirm-locator.json";
 const RETIRED_V2_LOCATOR: &str = "retired v2 commit-confirm locator";
-const BACKUP_NAME_TAKEN: &str = "the boot revert's `.unconfirmed-<id>` backup name beside the recorded target is already taken by a different file; move that file away and restart; the unconfirmed candidate, that file and the pending authority were left untouched";
+#[derive(Debug)]
+struct BackupNameTaken(String);
+
+impl std::fmt::Display for BackupNameTaken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the boot revert's `{}` backup suffix beside the recorded target is already taken by a different file; move that file away and restart; the unconfirmed candidate, that file and the pending authority were left untouched",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for BackupNameTaken {}
 const RETIRED_LOCATOR_FREE_AUTHORITY: &str = "retired locator-free commit-confirm authority exists; recover it with rustbgpd v0.64.0, or delete it only after proving the transaction is terminal and the current config is intended; the artifact was left untouched";
 pub(crate) const RAW_FILE_NAME: &str = "commit-confirm-v3-prior.toml";
 pub(crate) const METADATA_FILE_NAME: &str = "commit-confirm-v3-metadata.json";
@@ -113,8 +126,8 @@ impl LaunchIdentity {
             if message == RETIRED_LOCATOR_FREE_AUTHORITY {
                 return RETIRED_LOCATOR_FREE_AUTHORITY.to_string();
             }
-            if message == BACKUP_NAME_TAKEN {
-                return BACKUP_NAME_TAKEN.to_string();
+            if let Some(collision) = error.get_ref().and_then(|error| error.downcast_ref::<BackupNameTaken>()) {
+                return collision.to_string();
             }
             format!(
                 "v3 commit-confirm boot authority is invalid or unavailable ({:?}); inspect the config-adjacent locator and fixed owner-only pending files",
@@ -182,7 +195,7 @@ impl LaunchIdentity {
         let backup_suffix = backup_suffix(&metadata_bytes);
         let backup_name = append_name(&target.name, backup_suffix.as_bytes())?;
         step(BootStep::CandidateSave)?;
-        save_candidate_aside(&target, &backup_name, raw_toml.as_bytes())?;
+        save_candidate_aside(&target, &backup_name, &backup_suffix, raw_toml.as_bytes())?;
         step(BootStep::ConfigRestore)?;
         target.replace(raw_toml.as_bytes())?;
 
@@ -1333,7 +1346,12 @@ fn backup_suffix(metadata_bytes: &[u8]) -> String {
 /// between link and unlink), or the target already holds the restored
 /// `prior` (stopped after the restore). Anything else refuses boot before
 /// the candidate or the backup is touched.
-fn save_candidate_aside(target: &Entry, backup_name: &OsStr, prior: &[u8]) -> io::Result<()> {
+fn save_candidate_aside(
+    target: &Entry,
+    backup_name: &OsStr,
+    backup_suffix: &str,
+    prior: &[u8],
+) -> io::Result<()> {
     use nix::fcntl::AtFlags;
     use nix::sys::stat::fstatat;
     use nix::unistd::{UnlinkatFlags, linkat, unlinkat};
@@ -1374,7 +1392,10 @@ fn save_candidate_aside(target: &Entry, backup_name: &OsStr, prior: &[u8]) -> io
             if current == prior {
                 return Ok(());
             }
-            Err(invalid(BACKUP_NAME_TAKEN))
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                BackupNameTaken(backup_suffix.to_string()),
+            ))
         }
         Err(error) => Err(errno(error)),
     }
@@ -1726,6 +1747,15 @@ log_format = "json"
             panic!("an occupied backup name must refuse boot");
         };
         assert!(error.contains("already taken"), "{error}");
+        assert!(
+            error.contains(&suffix),
+            "the occupied suffix must be named: {error}"
+        );
+        assert!(
+            !error.contains(&fixture.config.display().to_string())
+                && !error.contains(&fixture.state.display().to_string()),
+            "locator-carried paths must remain redacted: {error}"
+        );
         assert_eq!(
             fs::read_to_string(&fixture.config).unwrap(),
             "candidate-occupied"
