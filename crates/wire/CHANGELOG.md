@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.28.0 - Unreleased
 
+- Add `notification::fsm_subcode` constants for the RFC 6608 FSM Error
+  subcodes. NOTIFICATION decoding and encoding are unchanged.
 - Add IPv4/IPv6 VPN FlowSpec (AFI 1/2 / SAFI 134, RFC 8955 §8 and
   RFC 8956): `Safi::FlowSpecVpn`, both `l3vpn_ipv4_flowspec` and
   `l3vpn_ipv6_flowspec` in `CONFIGURED_FAMILIES`, and `VpnFlowSpecRule`

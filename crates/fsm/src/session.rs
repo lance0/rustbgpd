@@ -3,9 +3,9 @@
 use bytes::Bytes;
 use std::sync::Arc;
 
-use rustbgpd_wire::constants::capability_code;
-use rustbgpd_wire::notification::{NotificationCode, cease_subcode, open_subcode};
-use rustbgpd_wire::{Capability, OpenMessage};
+use rustbgpd_wire::constants::{capability_code, message_type};
+use rustbgpd_wire::notification::{NotificationCode, cease_subcode, fsm_subcode, open_subcode};
+use rustbgpd_wire::{Capability, DecodeError, OpenMessage};
 
 use crate::action::{Action, NegotiatedSession, ReceivedRole, TimerType};
 use crate::config::PeerConfig;
@@ -339,10 +339,7 @@ impl Session {
                 actions
             }
 
-            Event::DecodeError(ref e) => {
-                let (code, subcode, data) = e.to_notification();
-                self.enter_idle_with_notification(code, subcode, data)
-            }
+            Event::DecodeError(ref e) => self.enter_idle_decode_error(e),
 
             // RFC 4271: in OpenSent, only the Hold timer is running.
             // ConnectRetry/Keepalive ticks are stale.
@@ -352,7 +349,7 @@ impl Session {
             // RFC 4271 §8.2.2: start events are ignored outside Idle.
             Event::ManualStart => vec![],
 
-            _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
+            _ => self.enter_idle_unexpected_event(&event),
         }
     }
 
@@ -425,10 +422,7 @@ impl Session {
                 actions
             }
 
-            Event::DecodeError(ref e) => {
-                let (code, subcode, data) = e.to_notification();
-                self.enter_idle_with_notification(code, subcode, data)
-            }
+            Event::DecodeError(ref e) => self.enter_idle_decode_error(e),
 
             // RFC 4271: in OpenConfirm, only Hold + Keepalive timers
             // are running. ConnectRetry ticks are stale.
@@ -437,7 +431,7 @@ impl Session {
             // RFC 4271 §8.2.2: start events are ignored outside Idle.
             Event::ManualStart => vec![],
 
-            _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
+            _ => self.enter_idle_unexpected_event(&event),
         }
     }
 
@@ -556,10 +550,9 @@ impl Session {
             }
 
             Event::DecodeError(ref e) => {
-                let (code, subcode, data) = e.to_notification();
                 self.negotiated = None;
                 let mut actions = vec![Action::SessionDown];
-                actions.extend(self.enter_idle_with_notification(code, subcode, data));
+                actions.extend(self.enter_idle_decode_error(e));
                 actions
             }
 
@@ -573,17 +566,46 @@ impl Session {
             _ => {
                 self.negotiated = None;
                 let mut actions = vec![Action::SessionDown];
-                actions.extend(self.enter_idle_with_notification(
-                    NotificationCode::FsmError,
-                    0,
-                    Bytes::new(),
-                ));
+                actions.extend(self.enter_idle_unexpected_event(&event));
                 actions
             }
         }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    fn enter_idle_unexpected_event(&mut self, event: &Event) -> Vec<Action> {
+        let message_type = match event {
+            Event::OpenReceived(_) => Some(message_type::OPEN),
+            Event::UpdateReceived | Event::UpdateValidationError(_) => Some(message_type::UPDATE),
+            Event::KeepaliveReceived => Some(message_type::KEEPALIVE),
+            Event::RouteRefreshReceived { .. } => Some(message_type::ROUTE_REFRESH),
+            _ => None,
+        };
+        let subcode = match (self.state, message_type) {
+            (SessionState::OpenSent, Some(_)) => fsm_subcode::UNEXPECTED_MESSAGE_IN_OPEN_SENT,
+            (SessionState::OpenConfirm, Some(_)) => fsm_subcode::UNEXPECTED_MESSAGE_IN_OPEN_CONFIRM,
+            (SessionState::Established, Some(_)) => fsm_subcode::UNEXPECTED_MESSAGE_IN_ESTABLISHED,
+            _ => fsm_subcode::UNSPECIFIED,
+        };
+        // RFC 6608 §4 requires the unexpected message type in the data field.
+        let data = message_type.map_or_else(Bytes::new, |kind| Bytes::copy_from_slice(&[kind]));
+        self.enter_idle_with_notification(NotificationCode::FsmError, subcode, data)
+    }
+
+    fn enter_idle_decode_error(&mut self, error: &DecodeError) -> Vec<Action> {
+        let (code, subcode, data) = error.to_notification();
+        // RFC 4271 §8.2.2: UpdateMsgErr before Established is an FSM error.
+        if matches!(
+            self.state,
+            SessionState::OpenSent | SessionState::OpenConfirm
+        ) && code == NotificationCode::UpdateMessage
+        {
+            self.enter_idle_unexpected_event(&Event::UpdateReceived)
+        } else {
+            self.enter_idle_with_notification(code, subcode, data)
+        }
+    }
 
     /// Transition to a new state, returning the `StateChanged` action.
     fn transition_to(&mut self, new: SessionState) -> Action {
@@ -1570,7 +1592,65 @@ mod tests {
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::SendNotification(n) if n.code == NotificationCode::FsmError
+                && n.subcode == 3 && n.data.as_ref() == [1]
         )));
+    }
+
+    #[test]
+    fn unexpected_internal_events_keep_unspecified_fsm_error() {
+        for state in [
+            SessionState::OpenSent,
+            SessionState::OpenConfirm,
+            SessionState::Established,
+        ] {
+            let mut session = Session::new(test_config());
+            session.handle_event(Event::ManualStart);
+            session.handle_event(Event::TcpConnectionConfirmed);
+            if state != SessionState::OpenSent {
+                session.handle_event(Event::OpenReceived(peer_open()));
+            }
+            if state == SessionState::Established {
+                session.handle_event(Event::KeepaliveReceived);
+            }
+            let actions = session.handle_event(Event::TcpConnectionConfirmed);
+            assert!(
+                has_action(&actions, |action| matches!(
+                    action,
+                    Action::SendNotification(notification)
+                        if notification.code == NotificationCode::FsmError
+                            && notification.subcode == 0 && notification.data.is_empty()
+                )),
+                "{state:?}: {actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_established_update_validation_errors_name_the_message() {
+        for (state, subcode) in [(SessionState::OpenSent, 1), (SessionState::OpenConfirm, 2)] {
+            let mut session = Session::new(test_config());
+            session.handle_event(Event::ManualStart);
+            session.handle_event(Event::TcpConnectionConfirmed);
+            if state == SessionState::OpenConfirm {
+                session.handle_event(Event::OpenReceived(peer_open()));
+            }
+            let actions = session.handle_event(Event::UpdateValidationError(
+                rustbgpd_wire::NotificationMessage::new(
+                    NotificationCode::UpdateMessage,
+                    3,
+                    Bytes::from_static(&[1]),
+                ),
+            ));
+            assert!(
+                has_action(&actions, |action| matches!(
+                    action,
+                    Action::SendNotification(notification)
+                        if notification.code == NotificationCode::FsmError
+                            && notification.subcode == subcode && notification.data.as_ref() == [2]
+                )),
+                "{state:?}: {actions:?}"
+            );
+        }
     }
 
     /// Only Established input reaches the RIB, so every exit from
