@@ -124,6 +124,7 @@ async fn gr_eor_clears_stale() {
     assert!(best.iter().all(|r| r.is_stale));
 
     // Only `kept_prefix` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -256,6 +257,7 @@ async fn gr_eor_sweep_scopes_to_family() {
 
     // IPv4 EoR without re-advertisement: the v4 route is removed
     // (RFC 4724 §4.1), the v6 route is untouched and still stale.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::EndOfRib {
         session_id: 0,
         peer: source,
@@ -3447,6 +3449,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
     });
+    manager.handle_update(registering_peer_up(peer_v4(gr), 0));
     announce(
         &mut manager,
         gr,
@@ -3497,6 +3500,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     });
     manager.sweep_gr_stale(peer_v4(llgr));
     assert!(manager.llgr_peers.contains_key(&peer_v4(llgr)));
+    manager.handle_update(registering_peer_up(peer_v4(llgr), 0));
     announce(
         &mut manager,
         llgr,
@@ -3999,4 +4003,84 @@ async fn readiness_probe_runs_during_mass_graceful_restart_entry() {
     assert_eq!(gr_entries.load(Ordering::SeqCst), usize::from(PEERS));
     drop(tx);
     handle.await.unwrap();
+}
+
+/// Session 1 registers, advertises one route and enters Graceful Restart;
+/// then the peer's End-of-RIB for IPv4 unicast arrives stamped `eor_session`,
+/// after a `PeerUp` for it only when `register` is set. Returns the routes
+/// left in the Loc-RIB.
+async fn gr_retained_routes_after_end_of_rib(eor_session: u64, register: bool) -> Vec<Route> {
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    tx.send(registering_peer_up(source, 1)).await.unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 1,
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 1,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(best[0].is_stale, "the route is retained stale under GR");
+
+    if register {
+        tx.send(registering_peer_up(source, eor_session))
+            .await
+            .unwrap();
+    }
+    tx.send(RibUpdate::EndOfRib {
+        session_id: eor_session,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let best = query_best_routes(&tx).await;
+
+    drop(tx);
+    handle.await.unwrap();
+    best
+}
+
+/// An End-of-RIB from a session that never registered (one that sent it
+/// before Established) must not complete the Graceful Restart sweep of the
+/// routes the RIB retains for the peer.
+#[tokio::test]
+async fn end_of_rib_from_an_unregistered_session_keeps_gr_retained_routes() {
+    let best = gr_retained_routes_after_end_of_rib(2, false).await;
+    assert_eq!(best.len(), 1, "the retained route was swept");
+    assert!(best[0].is_stale, "the retained route stays stale");
+}
+
+/// Control: the restarted session's own End-of-RIB, after its `PeerUp`,
+/// completes the sweep of the route it did not re-advertise.
+#[tokio::test]
+async fn end_of_rib_from_the_registered_restarted_session_sweeps_stale_routes() {
+    assert!(
+        gr_retained_routes_after_end_of_rib(2, true)
+            .await
+            .is_empty()
+    );
 }

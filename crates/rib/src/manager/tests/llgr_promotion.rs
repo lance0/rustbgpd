@@ -1398,11 +1398,13 @@ fn run_gr_walk_case(
         GrWalk::Entry => Box::new(move |manager| manager.handle_update(gr)),
         GrWalk::EorGr => {
             manager.handle_update(gr);
+            manager.handle_update(registering_peer_up(peer, 0));
             Box::new(move |manager| manager.handle_update(eor))
         }
         GrWalk::EorLlgr => {
             manager.handle_update(gr);
             manager.sweep_gr_stale(peer);
+            manager.handle_update(registering_peer_up(peer, 0));
             Box::new(move |manager| manager.handle_update(eor))
         }
         GrWalk::ExpiryNoLlgr => {
@@ -1861,6 +1863,7 @@ fn eor_add_path_removal_scans_answer_readiness() {
         });
         drain_route_chunks(&mut manager);
         manager.handle_update(gr_with_llgr(peer, 120, vec![unicast], Vec::new(), 0));
+        manager.handle_update(registering_peer_up(peer, 0));
         let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
             manager.handle_update(RibUpdate::EndOfRib {
                 session_id: 0,
@@ -1897,6 +1900,7 @@ fn run_flowspec_eor_case(flowspec: u8, unicast: u8) -> usize {
         }
     }
     manager.handle_update(gr_with_llgr(peer, 120, families.to_vec(), Vec::new(), 0));
+    manager.handle_update(registering_peer_up(peer, 0));
     let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
         manager.handle_update(RibUpdate::EndOfRib {
             session_id: 0,

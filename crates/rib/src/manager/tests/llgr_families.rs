@@ -449,6 +449,7 @@ async fn vpn_llgr_eor_clears_llgr_stale() {
 
     // Only the two `kept` routes are re-advertised before End-of-RIB; the
     // tagged one still carries its peer-originated LLGR_STALE community.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -556,6 +557,7 @@ async fn bgpls_llgr_eor_clears_llgr_stale() {
     let promoted = query_bgpls_routes(&tx).await;
     assert!(promoted.iter().all(|r| r.is_llgr_stale));
 
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: source,
@@ -669,6 +671,7 @@ async fn rtc_llgr_eor_clears_llgr_stale() {
             .all(|r| r.nlri.is_default() || r.is_llgr_stale)
     );
 
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: source,

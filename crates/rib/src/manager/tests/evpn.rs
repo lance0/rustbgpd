@@ -1326,6 +1326,7 @@ async fn evpn_gr_eor_clears_stale() {
     assert!(best.iter().all(|r| r.is_stale));
 
     // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1663,6 +1664,7 @@ async fn evpn_llgr_eor_clears_llgr_stale() {
     // phase removes what was not re-advertised (RFC 4724 §4.1 via RFC 9494
     // §4.2) and clears is_llgr_stale + strips the locally-injected
     // LLGR_STALE community on the retained route.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,

@@ -982,6 +982,7 @@ async fn bgpls_gr_eor_clears_stale() {
     assert!(stale.iter().all(|r| r.is_stale));
 
     // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
