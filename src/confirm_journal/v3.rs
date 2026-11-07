@@ -157,7 +157,8 @@ impl LaunchIdentity {
         verify_launch_target(&self.lexical_config, &recorded_target)?;
         let target = Entry::pin(&recorded_target)?;
         let raw_toml = std::str::from_utf8(&raw_bytes).map_err(invalid)?;
-        let accepted = AcceptedConfigSnapshot::load_retained(raw_toml, &recorded_target)
+        // `target.replace` below writes exactly `raw_toml`.
+        let accepted = AcceptedConfigSnapshot::load_restored(raw_toml, &recorded_target)
             .map_err(|_| invalid("journaled prior sources are unavailable or changed"))?;
         verify_snapshot(&accepted, raw_toml, &metadata_wire)?;
 
@@ -2132,6 +2133,22 @@ log_format = "json"
             reverted.accepted.normalized_toml(),
             fixture.prior.normalized_toml()
         );
+    }
+
+    /// The restored snapshot arms the persister's stale-source fence with
+    /// the bytes the revert wrote, so an edit made before the daemon's first
+    /// write is not overwritten by it.
+    #[test]
+    fn boot_revert_arms_the_stale_source_fence_with_the_restored_bytes() {
+        let fixture = fixture();
+        fixture
+            .launch
+            .publish(&fixture.state, "deploy-1", 9, &fixture.prior)
+            .unwrap();
+        fs::write(&fixture.config, b"candidate").unwrap();
+        let reverted = fixture.launch.boot_revert_check().unwrap().unwrap();
+        let restored: [u8; 32] = Sha256::digest(fs::read(&fixture.config).unwrap()).into();
+        assert_eq!(reverted.accepted.read_sha256(), Some(restored));
     }
 
     #[test]

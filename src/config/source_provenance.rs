@@ -333,6 +333,19 @@ impl AcceptedConfigSnapshot {
         Self::load_retained_with_hook(content, config_path, || {})
     }
 
+    /// [`Self::load_retained`] for a document the caller writes to the
+    /// config file itself (a commit-confirm boot revert's restore). The
+    /// snapshot records `content` as the file's bytes, so the persister's
+    /// stale-source fence is armed from boot rather than off until the
+    /// daemon's first write or SIGHUP.
+    pub(crate) fn load_restored(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
+        let mut snapshot = Self::load_retained(content, config_path)?;
+        if let Some(fresh) = Arc::get_mut(&mut snapshot) {
+            fresh.read_sha256 = Some(Sha256::digest(content.as_bytes()).into());
+        }
+        Ok(snapshot)
+    }
+
     fn load_retained_with_hook(
         content: &str,
         config_path: &Path,
