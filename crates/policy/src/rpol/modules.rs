@@ -252,11 +252,13 @@ pub(super) struct ModuleFingerprint {
 /// `max_graph_bytes` is the total-source-byte budget for the whole
 /// graph ([`DEFAULT_MAX_GRAPH_BYTES`] when no configuration provides
 /// one). Returns the resolved graph, or an error for unreadable
-/// inputs / resolution and parse diagnostics.
+/// inputs / resolution and parse diagnostics. A module whose canonical path
+/// is in `excluded` is refused like one outside the roots.
 pub(super) fn resolve(
     main_path: &Path,
     roots: &[PathBuf],
     max_graph_bytes: usize,
+    excluded: &[PathBuf],
 ) -> Result<ResolvedGraph, LoadError> {
     let io = |path: &Path, reason: String| LoadError::Io {
         path: path.display().to_string(),
@@ -265,6 +267,12 @@ pub(super) fn resolve(
     let main_canon = main_path
         .canonicalize()
         .map_err(|e| io(main_path, format!("failed to read: {e}")))?;
+    if excluded.contains(&main_canon) {
+        return Err(io(
+            main_path,
+            "is not an admissible policy source".to_string(),
+        ));
+    }
     let main_dir = main_canon
         .parent()
         .map(Path::to_path_buf)
@@ -284,6 +292,7 @@ pub(super) fn resolve(
 
     let mut resolver = Resolver {
         confine,
+        excluded,
         modules: Vec::new(),
         fingerprints: Vec::new(),
         asts: Vec::new(),
@@ -343,9 +352,11 @@ pub(super) fn resolve(
     })
 }
 
-struct Resolver {
+struct Resolver<'e> {
     /// Canonicalized confinement roots (main dir + configured roots).
     confine: Vec<PathBuf>,
+    /// Canonical paths refused even under a root.
+    excluded: &'e [PathBuf],
     /// Per-module metadata, indexed by module (`file`) id.
     modules: Vec<ModuleSource>,
     /// Same-read lossless identities, indexed by module id.
@@ -368,7 +379,7 @@ struct Resolver {
     diags: Vec<Diagnostic>,
 }
 
-impl Resolver {
+impl Resolver<'_> {
     /// Load, parse, and recurse into one module whose canonical path
     /// and text are already in hand. Returns its module id.
     fn visit(
@@ -476,7 +487,10 @@ impl Resolver {
             ));
             return None;
         };
-        if !self.confine.iter().any(|root| canon.starts_with(root)) {
+        // An excluded file reads exactly like one outside the roots.
+        if !self.confine.iter().any(|root| canon.starts_with(root))
+            || self.excluded.contains(&canon)
+        {
             self.diags.push(
                 Diagnostic::coded(
                     DiagnosticCode::Resolve,

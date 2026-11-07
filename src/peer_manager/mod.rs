@@ -1262,7 +1262,12 @@ impl PeerManager {
 
     /// [`Self::replace_current_config`], also returning whether the BFD
     /// membership followed the new configuration.
-    fn install_current_config(&mut self, config: Config) -> (Config, Result<(), String>) {
+    fn install_current_config(&mut self, mut config: Config) -> (Config, Result<(), String>) {
+        // A config built from an API candidate has no file of its own. The
+        // daemon's config file stays the one later candidates may not read.
+        if config.file_path.is_none() {
+            config.file_path.clone_from(&self.current_config.file_path);
+        }
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;

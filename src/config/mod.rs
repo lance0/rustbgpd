@@ -294,6 +294,16 @@ enum SourceRules<'a> {
     Api(Option<&'a CandidateSourceLimits>),
 }
 
+impl<'a> SourceRules<'a> {
+    /// Canonical files no `.rpol` module may be, imports included.
+    fn protected_files(self) -> &'a [PathBuf] {
+        match self {
+            Self::Api(Some(limits)) => &limits.protected_files,
+            _ => &[],
+        }
+    }
+}
+
 /// What an API candidate below `operator_only` may name, taken from the
 /// running config by [`Config::candidate_source_limits`].
 #[derive(Debug, Clone, Default)]
@@ -651,7 +661,9 @@ impl Config {
             // resolves the file's `import` graph against `roots`
             // (LAN-300) as one compilation unit — a missing or broken
             // import anywhere rejects the whole load.
-            let file = match RpolFile::load(&path, &roots, max_graph_bytes) {
+            // Imports may not reach a protected file either.
+            let excluded = sources.protected_files();
+            let file = match RpolFile::load_excluding(&path, &roots, max_graph_bytes, excluded) {
                 Ok(file) => file,
                 Err(LoadError::Io { path, reason }) => {
                     return Err(ConfigError::InvalidRpolFile { path, reason });
@@ -1075,7 +1087,8 @@ impl Config {
     /// roots, and the gRPC credential files must be ones the running config
     /// already uses. The limits come from [`Self::candidate_source_limits`]
     /// of the running config. Imports stay confined as usual, to the
-    /// candidate's own roots, which are themselves inside. `None` is for
+    /// candidate's own roots, which are themselves inside, and may not
+    /// reach a protected file either. `None` is for
     /// operator callers, who may stage a candidate's sources anywhere the
     /// daemon can read, as an on-disk config can.
     ///

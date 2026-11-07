@@ -450,6 +450,85 @@ async fn the_running_config_file_is_not_a_candidate_source() {
     assert!(error.contains("is not a file under"), "{error}");
 }
 
+/// A config transaction stages an API candidate, which has no file of its
+/// own; the running config file stays protected for the next candidate.
+#[tokio::test]
+async fn the_running_config_file_stays_protected_after_a_transaction() {
+    let policy_dir = tempfile::tempdir().unwrap();
+    let running = policy_dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, format!("# {SECRET}\n")).unwrap();
+    let mut manager = manager_with_policy_dir(policy_dir.path());
+    manager.current_config.file_path = Some(running.clone());
+    let staged = Config::load_rpc_candidate(
+        &candidate(&[&policy_dir.path().join("edge.rpol")], ""),
+        "transaction candidate",
+        false,
+        Some(&manager.current_config.candidate_source_limits()),
+    )
+    .unwrap();
+    assert_eq!(staged.file_path, None);
+
+    let (tx, rx) = mpsc::channel(4);
+    manager.rx = rx;
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    manager.internal_rx = Some(internal_rx);
+    let task = tokio::spawn(manager.run());
+    let (stage_tx, stage_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(staged),
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .await
+        .unwrap();
+    stage_rx.await.unwrap().expect("the candidate stages");
+
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::DiffRuntimeConfig {
+        candidate_toml: candidate(&[&running], ""),
+        operator_sources: false,
+        reply,
+    })
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), response)
+        .await
+        .expect("config diff answers")
+        .unwrap();
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    task.await.unwrap();
+    let Err(rustbgpd_api::peer_types::RuntimeConfigDiffError::InvalidCandidate(error)) = result
+    else {
+        panic!("expected an invalid candidate, got {result:?}");
+    };
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(error.contains("is not a file under"), "{error}");
+}
+
+/// The protected files hold for imports too: a listed `.rpol` whose import
+/// chain reaches the running config file is refused at the import, before
+/// the config is read and parsed as policy source.
+#[tokio::test]
+async fn a_transitive_import_cannot_reach_the_running_config_file() {
+    let policy_dir = tempfile::tempdir().unwrap();
+    let running = policy_dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, format!("# {SECRET}\n")).unwrap();
+    std::fs::write(
+        policy_dir.path().join("mid.rpol"),
+        "import \"rustbgpd.toml\"\n",
+    )
+    .unwrap();
+    let top = policy_dir.path().join("top.rpol");
+    std::fs::write(&top, format!("import \"mid.rpol\"\n{POLICY}")).unwrap();
+    let mut manager = manager_with_policy_dir(policy_dir.path());
+    manager.current_config.file_path = Some(running.clone());
+    let error = diff_error(manager, candidate(&[&top], "")).await;
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(error.contains("mid.rpol:1:8: resolve-error"), "{error}");
+    assert!(!error.contains("rustbgpd.toml:"), "{error}");
+}
+
 /// Loads run off the actor and, below `operator_only`, at most
 /// `MAX_CANDIDATE_LOADS` at a time, with operators exempt. A latch holds
 /// four observer loads in flight; the actor still answers `Ping`, a fifth
