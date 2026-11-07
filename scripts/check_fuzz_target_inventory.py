@@ -637,8 +637,6 @@ def validate_wire_corpus_cache_contract(
         "temporary cache staging": (
             "WIRE_CACHE_BUNDLE: ${{ runner.temp }}/wire-corpus-cache"
         ),
-        "standalone restore action": "uses: actions/cache/restore@v6",
-        "standalone save action": "uses: actions/cache/save@v6",
         "reviewed cargo-fuzz": "cargo install cargo-fuzz --version 0.13.2 --locked",
         "main lineage key": "wire-fuzz-corpus-v1-main-",
         "unique run key": "${{ github.run_id }}-${{ github.run_attempt }}",
@@ -660,6 +658,14 @@ def validate_wire_corpus_cache_contract(
     for label, fragment in required_fragments.items():
         if fragment not in workflow:
             raise InventoryError(f"nightly wire corpus cache lacks {label}")
+    for action in ("restore", "save"):
+        pattern = (
+            rf"(?m)^[ \t]*uses: actions/cache/{action}@[0-9a-f]{{40}} # v6[ \t]*$"
+        )
+        if len(re.findall(pattern, workflow)) != 1:
+            raise InventoryError(
+                f"nightly wire corpus cache needs one SHA-pinned cache/{action} v6"
+            )
     if workflow.count("wire-fuzz-corpus-v1-main-") != 3:
         raise InventoryError("nightly wire corpus cache main lineage key count differs")
     if workflow.count("${{ github.run_id }}-${{ github.run_attempt }}") != 2:
@@ -699,12 +705,12 @@ def validate_wire_corpus_cache_contract(
         raise InventoryError("wire corpus cache action paths differ")
 
     ordered_steps = (
-        "uses: actions/cache/restore@v6",
+        "uses: actions/cache/restore@",
         "python3 scripts/fuzz_corpus_cache.py restore",
         'rm -rf -- "$WIRE_CACHE_BUNDLE"',
         "- name: Fuzz wire codecs",
         "python3 scripts/fuzz_corpus_cache.py seal",
-        "uses: actions/cache/save@v6",
+        "uses: actions/cache/save@",
     )
     positions = [workflow.find(fragment) for fragment in ordered_steps]
     if any(position < 0 for position in positions) or positions != sorted(positions):
