@@ -1200,7 +1200,7 @@ restarting-speaker behavior is described in §4.1 and ADR-0040.
   and no-op requests cannot clear that uncertainty. Other families keep their
   own role-derived bits.
 - If a peer sends multiple GR capabilities (malformed OPEN), only the
-  first is used. A warning is logged.
+  last is used, as RFC 4724 §3 specifies. A warning is logged.
 - Capability decode is bounded to the enclosing optional-parameter slice
   — a malformed capability length cannot consume beyond the parameter.
 
@@ -1648,12 +1648,21 @@ separate from control-plane-only families advertising F=1.
 An Add-Path capability value that is empty or not a whole number of 4-octet
 tuples is a malformed OPEN: the session is refused with OPEN Message Error /
 Unspecific (2/0), as RFC 4271 §6.2 prescribes for a recognized but malformed
-optional parameter, and as FRR and BIRD do. Ignoring it would leave the peer
-believing Add-Path was advertised, so it would send path IDs that are read as
-prefixes. The same rule covers Multiprotocol (length other than 4), Graceful
-Restart (not 2 + 4n), Long-Lived Graceful Restart (not a multiple of 7),
-Extended Next Hop (not a multiple of 6) and Paths-Limit (not a multiple of 5).
-A well-sized value that names only unmodeled families is ignored, not refused.
+optional parameter. Ignoring it would leave the peer believing Add-Path was
+advertised, so it would send path IDs that are read as prefixes. The same rule
+covers Multiprotocol (length other than 4), Four-Octet AS (length other than
+4, which would leave the peer's four-octet `AS_PATH` parsed as two-octet),
+Graceful Restart (not 2 + 4n), Long-Lived Graceful Restart (not a multiple of
+7), Extended Next Hop (not a multiple of 6) and Paths-Limit (not a multiple of
+5). A well-sized value that names only unmodeled families is ignored, not
+refused.
+
+By design the refusal is blanket. It also covers a malformed Graceful Restart
+instance followed by a well-formed one, although RFC 4724 §3 uses only the
+last instance, and a malformed Long-Lived Graceful Restart value sent without
+Graceful Restart, although RFC 9494 §4.5 ignores LLGR without GR. Both need a
+sender that is already non-compliant, and refusing the session is simpler to
+reason about than negotiating around a value that is known to be wrong.
 
 ### Experimental Paths-Limit
 

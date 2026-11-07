@@ -18,8 +18,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   left armed fired later in Idle as a stale tick.
 - `validate_open` refuses an OPEN carrying a recognized per-family capability
   whose value is not a whole number of its tuples (Multiprotocol, Graceful
-  Restart, LLGR, Add-Path, Extended Next Hop, Paths-Limit) with OPEN Message
-  Error / Unspecific (2/0), per RFC 4271 §6.2. Earlier releases ignored it.
+  Restart, LLGR, Add-Path, Extended Next Hop, Paths-Limit), or a Four-Octet AS
+  capability that is not 4 octets, with OPEN Message Error / Unspecific
+  (2/0), per RFC 4271 §6.2. Earlier releases ignored it.
 
 ## 0.14.0 - 2026-11-01
 
