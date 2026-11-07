@@ -5591,6 +5591,40 @@ async fn multi_binding_peer_sync_stages_contenders_before_adopting() {
     );
 }
 
+/// RFC 7432 §15 counts mobility per MAC. A different-segment PE advertises
+/// the bare MAC at sequence 7 while we advertise it as MAC/IP. When the
+/// MAC moves to another local port, the MAC/IP route must be re-advertised
+/// above that contender, not at 1.
+#[tokio::test]
+async fn local_move_of_a_mac_ip_route_bumps_above_a_mac_only_contender() {
+    let contender = evpn_macip_route(100, 0xAA, "10.0.0.2", Some(7), false);
+    let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![contender]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    let _ = h.take_log().await;
+
+    h.observe(LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ifindex: 11,
+    })
+    .await;
+    let log = h.take_log().await;
+    let key = macip_key_with(100, 0xAA, Some("192.0.2.10"));
+    let sequences: Vec<_> = log
+        .iter()
+        .filter_map(|action| match action {
+            RibActionWithSeq::Inject(route_key, sequence) if *route_key == key => *sequence,
+            _ => None,
+        })
+        .collect();
+    assert!(
+        sequences.last().is_some_and(|seq| *seq > 7),
+        "local move must outbid the MAC-only contender at 7: {log:?}"
+    );
+}
+
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
     with_esi(
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),

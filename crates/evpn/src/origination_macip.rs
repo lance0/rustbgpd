@@ -492,7 +492,16 @@ impl LocalMacIpOriginator {
     /// §15) re-advertises too: the move is a locally detected mobility
     /// event. Other withdrawn entries keep their ratchet untouched; a MAC
     /// with nothing advertising is a no-op.
-    pub fn on_local_mac_moved(&mut self, mac: MacAddress) -> Vec<OriginationAction> {
+    ///
+    /// `mac_contender_seq` is the highest sequence any different-segment
+    /// PE advertises for the MAC itself, MAC-only routes included. RFC
+    /// 7432 §15 counts mobility per MAC, and a bare-MAC contender never
+    /// appears in a per-`(MAC, IP)` view, so the bump must clear it too.
+    pub fn on_local_mac_moved(
+        &mut self,
+        mac: MacAddress,
+        mac_contender_seq: Option<u32>,
+    ) -> Vec<OriginationAction> {
         let mut out = Vec::new();
         let (rd, ethernet_tag) = (self.rd, self.ethernet_tag);
         for (k, state) in &mut self.by_key {
@@ -502,8 +511,8 @@ impl LocalMacIpOriginator {
             if state.originated_key.is_none() && state.yielded_to.is_none() {
                 continue;
             }
-            state.our_seq = state
-                .last_seen_remote_seq
+            let contender = state.last_seen_remote_seq.max(mac_contender_seq);
+            state.our_seq = contender
                 .map_or(state.our_seq, |remote| remote.max(state.our_seq))
                 .saturating_add(1);
             let key = match (state.originated_key, state.yielded_to) {
@@ -815,7 +824,7 @@ mod tests {
             local_ip(),
         );
         assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
-        let actions = o.on_local_mac_moved(mac(0xAA));
+        let actions = o.on_local_mac_moved(mac(0xAA), None);
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(u32::MAX), false);
     }
@@ -951,7 +960,7 @@ mod tests {
         // Different MAC — must not be cascaded.
         let _ = o.on_local_ip_learned(mac(0xBB), ipa("192.0.2.20"), false, None);
 
-        let actions = o.on_local_mac_moved(mac(0xAA));
+        let actions = o.on_local_mac_moved(mac(0xAA), None);
         assert_eq!(
             actions.len(),
             2,
@@ -977,12 +986,12 @@ mod tests {
     #[test]
     fn mac_moved_with_nothing_advertising_is_no_op() {
         let mut o = fresh();
-        assert_eq!(o.on_local_mac_moved(mac(0xAA)).len(), 0);
+        assert_eq!(o.on_local_mac_moved(mac(0xAA), None).len(), 0);
 
         // Tracked but withdrawn: still a no-op, ratchet untouched.
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
         let _ = o.on_local_mac_aged(mac(0xAA));
-        assert_eq!(o.on_local_mac_moved(mac(0xAA)).len(), 0);
+        assert_eq!(o.on_local_mac_moved(mac(0xAA), None).len(), 0);
         let relearn = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
         assert_eq!(relearn.len(), 1);
         assert_inject(&relearn[0], None, false);
@@ -996,7 +1005,7 @@ mod tests {
         let mut o = fresh();
         // remote=7 → we advertise 8.
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, Some(&remote(Some(7))));
-        let moved = o.on_local_mac_moved(mac(0xAA));
+        let moved = o.on_local_mac_moved(mac(0xAA), None);
         assert_eq!(moved.len(), 1);
         assert_inject(&moved[0], Some(9), false);
 
@@ -1018,10 +1027,10 @@ mod tests {
         );
         // Re-emit at the ceiling, never at a wrapped 0. Same policy as
         // the MAC-only port-move bump.
-        let actions = o.on_local_mac_moved(mac(0xAA));
+        let actions = o.on_local_mac_moved(mac(0xAA), None);
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(u32::MAX), false);
-        let actions = o.on_local_mac_moved(mac(0xAA));
+        let actions = o.on_local_mac_moved(mac(0xAA), None);
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(u32::MAX), false);
     }
@@ -1118,13 +1127,25 @@ mod tests {
         let actions = o.on_remote_ip_changed(mac(0xAA), ip, Some(&lower_at_max), local_ip());
         assert!(matches!(actions[..], [OriginationAction::Withdraw { .. }]));
 
-        assert_eq!(o.on_local_mac_moved(mac(0xAA)), Vec::new());
+        assert_eq!(o.on_local_mac_moved(mac(0xAA), None), Vec::new());
         assert_eq!(o.advertised_count(), 0);
         assert_eq!(
             o.on_remote_ip_changed(mac(0xAA), ip, None, local_ip())
                 .len(),
             1
         );
+    }
+
+    // RFC 7432 §15: mobility is per MAC. A bare-MAC contender at 7 is not in
+    // any (MAC, IP) view, but a local move must still bump above it.
+    #[test]
+    fn local_move_bumps_above_a_mac_only_contender() {
+        let mut o = fresh();
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, None);
+        let actions = o.on_local_mac_moved(mac(0xAA), Some(7));
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(8), false);
     }
 
     #[test]
