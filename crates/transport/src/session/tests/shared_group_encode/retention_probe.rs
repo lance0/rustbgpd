@@ -1,8 +1,8 @@
 //! Fresh-process lifecycle measurements. Run only this ignored test, with
 //! `SHARED_RETENTION_PROBE_SHAPE=grouped_uc|grouped_vpn|diverse_uc`, using
-//! `--release --features bench-internals -- --ignored --exact --nocapture`.
+//! `--release --features retention-probe -- --ignored --exact --nocapture`.
 //! Compare identical probe sources over parent and candidate under the host
-//! lock. This allocator applies only to Linux unit tests with bench internals.
+//! lock. This allocator applies only to Linux unit tests with the retention probe.
 
 use super::*;
 use crate::session::shared_group::ProgressiveGroupEncode;

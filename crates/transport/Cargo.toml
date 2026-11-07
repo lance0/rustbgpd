@@ -30,12 +30,15 @@ libc.workspace = true
 lru.workspace = true
 rustc-hash.workspace = true
 zeroize.workspace = true
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 
 [features]
 # Exposes the real outbound export encoder plus inbound attribute helpers to
 # the `fanout` and `inbound_attrs` microbenches. Off by default — nothing is
 # reachable outside the crate in a normal build.
 bench-internals = ["rustbgpd-rib/bench-internals"]
+# Linux allocator probe only; keep its control dependency out of normal benches.
+retention-probe = ["bench-internals", "dep:tikv-jemalloc-ctl"]
 
 [dev-dependencies]
 rustbgpd-wire = { workspace = true, features = ["strict-encode-invariants"] }
@@ -45,7 +48,6 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
 tikv-jemallocator.workspace = true
-tikv-jemalloc-ctl.workspace = true
 
 [[bin]]
 name = "rejected-route-store-allocation"

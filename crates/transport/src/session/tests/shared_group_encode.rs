@@ -1,7 +1,7 @@
 use super::*;
 use rustbgpd_rib::AttrSet;
 
-#[cfg(all(feature = "bench-internals", target_os = "linux"))]
+#[cfg(all(feature = "retention-probe", target_os = "linux"))]
 mod retention_probe;
 
 /// RIB staging normally removes OTC-blocked routes. The shared encoder must
