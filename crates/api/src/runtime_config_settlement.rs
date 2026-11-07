@@ -470,6 +470,11 @@ pub mod settlement_test_control {
         }
     }
 
+    /// Publish a control file by rename, so a reader never sees it partial.
+    ///
+    /// No fsync: the files are same-host IPC between live processes, and
+    /// `rename` makes the complete contents visible without it. An fsync
+    /// here held the armed checkpoint for seconds on a loaded disk.
     fn atomic_write(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
         let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
@@ -479,7 +484,6 @@ pub mod settlement_test_control {
             .open(&temporary)
             .map_err(|error| format!("cannot create settlement control {name}: {error}"))?;
         file.write_all(bytes)
-            .and_then(|()| file.sync_all())
             .map_err(|error| format!("cannot write settlement control {name}: {error}"))?;
         fs::rename(&temporary, directory.join(name))
             .map_err(|error| format!("cannot publish settlement control {name}: {error}"))
@@ -588,7 +592,10 @@ pub mod settlement_test_control {
             assert!(ControlDirectory::open(directory.path().to_path_buf()).is_err());
         }
 
-        #[tokio::test]
+        // Paused time: the release is written by a task on this runtime after
+        // a virtual 30 ms, so a slow file write stalls the clock with it and
+        // the hold deadline cannot expire first.
+        #[tokio::test(start_paused = true)]
         async fn mismatch_is_not_consumed_and_claim_receipt_release_are_exact_and_one_shot() {
             let (directory, control) = control_directory();
             let armed = command(Checkpoint::ReplaceBeforePublish, Action::Hold, NONCE);
@@ -626,12 +633,17 @@ pub mod settlement_test_control {
             atomic_write(directory.path(), RELEASE, mismatch.as_bytes()).unwrap();
             let path = directory.path().to_path_buf();
             let release = armed.clone();
-            let writer = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(30));
+            let started = tokio::time::Instant::now();
+            let writer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(30)).await;
                 atomic_write(&path, RELEASE, release.as_bytes()).unwrap();
             });
             control.wait_for_release(&claimed).await.unwrap();
-            writer.join().unwrap();
+            assert!(
+                started.elapsed() >= Duration::from_millis(30),
+                "the mismatched release was accepted"
+            );
+            writer.await.unwrap();
 
             atomic_write(directory.path(), ARM, armed.as_bytes()).unwrap();
             assert!(control.claim(Checkpoint::ReplaceBeforePublish).is_err());
