@@ -231,7 +231,7 @@ pub fn spawn(
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
-    status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
     forwarding_state: Option<std::sync::Arc<crate::forwarding_state::ForwardingState>>,
@@ -273,7 +273,7 @@ fn spawn_with_fib<F>(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     fib: F,
     metrics: BgpMetrics,
-    status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
     forwarding_state: Option<std::sync::Arc<crate::forwarding_state::ForwardingState>>,
@@ -319,7 +319,7 @@ async fn run_loop<F>(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     mut fib: F,
     metrics: BgpMetrics,
-    status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     event_tx: broadcast::Sender<FibRuntimeEvent>,
     mut cmd_rx: mpsc::Receiver<FibRuntimeCommand>,
     shutdown: CancellationToken,
@@ -1002,7 +1002,7 @@ async fn reconcile_once_with_events<F>(
     rib_query_tx: &mpsc::Sender<RibUpdate>,
     fib: &mut F,
     metrics: &BgpMetrics,
-    status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: &watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     owned: &mut FibOwnedState,
     unresolved: &mut UnresolvedHolds,
@@ -1021,7 +1021,7 @@ where
     if config.tables.is_empty() && owned.routes.is_empty() {
         unresolved.routes.clear();
         metrics.set_fib_routes_unresolved(0);
-        status_tx.send_replace(Vec::new());
+        status_tx.send_replace(Arc::default());
         return true;
     }
 
@@ -1184,7 +1184,7 @@ where
             Err(e) => {
                 metrics.record_fib_kernel_failure("dump");
                 warn!(error = %e, "failed to dump configured FIB tables");
-                status_tx.send_replace(failed_dump_statuses(&intent, owned, &e));
+                status_tx.send_replace(Arc::new(failed_dump_statuses(&intent, owned, &e)));
                 return false;
             }
         }
@@ -1260,7 +1260,7 @@ where
         &outcome.failed_keys,
     );
     statuses.extend(outcome.failures);
-    status_tx.send_replace(statuses);
+    status_tx.send_replace(Arc::new(statuses));
     true
 }
 
@@ -1292,7 +1292,7 @@ async fn reconcile_once<F>(
     rib_query_tx: &mpsc::Sender<RibUpdate>,
     fib: &mut F,
     metrics: &BgpMetrics,
-    status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: &watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     owned: &mut FibOwnedState,
     shutdown: &CancellationToken,
 ) where
@@ -1663,7 +1663,7 @@ async fn drain_owned_with_events<F>(
     config: &FibRuntimeConfig,
     fib: &mut F,
     metrics: &BgpMetrics,
-    status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: &watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     owned: &mut FibOwnedState,
 ) where
@@ -1674,7 +1674,11 @@ async fn drain_owned_with_events<F>(
         Err(e) => {
             metrics.record_fib_kernel_failure("dump");
             warn!(error = %e, "failed to dump configured FIB tables before shutdown drain");
-            status_tx.send_replace(failed_dump_statuses(&FibIntent::default(), owned, &e));
+            status_tx.send_replace(Arc::new(failed_dump_statuses(
+                &FibIntent::default(),
+                owned,
+                &e,
+            )));
             return;
         }
     };
@@ -1735,7 +1739,7 @@ async fn drain_owned_with_events<F>(
     if owned_changed {
         let _ = persist_owned_state(config, owned, metrics);
     }
-    status_tx.send_replace(Vec::new());
+    status_tx.send_replace(Arc::default());
 }
 
 #[cfg(test)]
@@ -1743,7 +1747,7 @@ async fn drain_owned<F>(
     config: &FibRuntimeConfig,
     fib: &mut F,
     metrics: &BgpMetrics,
-    status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    status_tx: &watch::Sender<Arc<Vec<FibRuntimeStatus>>>,
     owned: &mut FibOwnedState,
 ) where
     F: UnicastFib,
@@ -3543,7 +3547,7 @@ mod tests {
             })
             .collect();
         let rib_tx = rib_with_routes(routes);
-        let (status_tx, _) = watch::channel(Vec::new());
+        let (status_tx, _) = watch::channel(Arc::new(Vec::new()));
         let pass = tokio::spawn(async move {
             reconcile_once(
                 &config(),
@@ -3591,7 +3595,7 @@ mod tests {
             };
             assert_eq!(probe.failure(), Some("starting"));
             let rib_tx = rib_with_routes(routes);
-            let (status_tx, _status_rx) = watch::channel(Vec::new());
+            let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
             let (events_tx, _) = broadcast::channel(1);
             let handle = spawn_with_fib(
                 config(),
@@ -4260,7 +4264,7 @@ mod tests {
         owned: &mut FibOwnedState,
     ) -> Vec<FibRuntimeStatus> {
         let rib_tx = rib_with_routes(routes);
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         reconcile_once(
             &config(),
             &rib_tx,
@@ -4271,7 +4275,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        status_rx.borrow().clone()
+        status_rx.borrow().as_ref().clone()
     }
 
     async fn reconcile_for_test_with_events(
@@ -4280,7 +4284,7 @@ mod tests {
         owned: &mut FibOwnedState,
     ) -> (Vec<FibRuntimeStatus>, Vec<FibRuntimeEvent>) {
         let rib_tx = rib_with_routes(routes);
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
         let mut unresolved = UnresolvedHolds::default();
         reconcile_once_with_events(
@@ -4300,7 +4304,7 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
-        (status_rx.borrow().clone(), events)
+        (status_rx.borrow().as_ref().clone(), events)
     }
 
     async fn reconcile_for_test_with_holds(
@@ -4312,7 +4316,7 @@ mod tests {
         metrics: &BgpMetrics,
     ) -> (Vec<FibRuntimeStatus>, Vec<FibRuntimeEvent>) {
         let rib_tx = rib_with_routes(routes);
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
         reconcile_once_with_events(
             &config(),
@@ -4331,7 +4335,7 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
-        let statuses = status_rx.borrow().clone();
+        let statuses = status_rx.borrow().as_ref().clone();
         (statuses, events)
     }
 
@@ -4395,7 +4399,7 @@ mod tests {
         fib: &mut FakeFib,
         owned: &mut FibOwnedState,
     ) -> Vec<FibRuntimeStatus> {
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         reconcile_once(
             &config,
             &rib_tx,
@@ -4406,7 +4410,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        status_rx.borrow().clone()
+        status_rx.borrow().as_ref().clone()
     }
 
     fn config_with(tables: Vec<FibTableConfig>) -> FibRuntimeConfig {
@@ -4546,7 +4550,7 @@ mod tests {
     fn spawn_returns_none_when_fib_tables_empty() {
         let (rib_tx, _rx) = mpsc::channel(1);
         let (rib_query_tx, _query_rx) = mpsc::channel(1);
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let handle = spawn(
             FibRuntimeConfig {
@@ -5674,7 +5678,7 @@ mod tests {
             route(v4(24), ip("192.0.2.1")),
             route(v6(64), ip("2001:db8::1")),
         ]);
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let handle = spawn_with_fib(
             config_with(prior.clone()),
@@ -5737,7 +5741,7 @@ mod tests {
         config.owned_state_path = Some(path.clone());
         let previous_signatures = table_signatures(&config.tables);
         let (rib_tx, _query_count, _events_tx, _candidates_tx) = rib_with_events(Vec::new());
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
@@ -5925,7 +5929,7 @@ mod tests {
             },
         );
         let metrics = metrics();
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let desired = vec![route(v4(24), ip("192.0.2.1"))];
 
         reconcile_once(
@@ -5938,7 +5942,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        let statuses = status_rx.borrow().clone();
+        let statuses = status_rx.borrow().as_ref().clone();
         let held = statuses
             .iter()
             .find(|status| status.prefix == v4(24))
@@ -5969,7 +5973,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        let statuses = status_rx.borrow().clone();
+        let statuses = status_rx.borrow().as_ref().clone();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Installed);
         assert_eq!(load_owned_state(&config), owned);
@@ -6003,7 +6007,7 @@ mod tests {
         let mut config = config_with(tables.clone());
         config.owned_state_path = Some(path);
         let (rib_tx, _count, _events, _candidates) = rib_with_events(Vec::new());
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let handle = spawn_with_fib(
             config,
@@ -6074,7 +6078,7 @@ mod tests {
         };
         let (rib_tx, _count, _events, _candidates) =
             rib_with_events(vec![route(v4(24), ip("198.51.100.1"))]);
-        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (status_tx, mut status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let handle = spawn_with_fib(
             config.clone(),
@@ -6176,7 +6180,7 @@ mod tests {
         };
         let (rib_tx, _count, _events, _candidates) =
             rib_with_events(vec![route(v4(24), ip("198.51.100.1"))]);
-        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (status_tx, mut status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let handle = spawn_with_fib(
             config,
@@ -6301,7 +6305,7 @@ mod tests {
             ..FakeFib::default()
         };
         let mut owned = FibOwnedState::default();
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         reconcile_once(
             &config,
             &rib_with_routes(vec![route(v4(24), ip("192.0.2.1"))]),
@@ -6351,7 +6355,7 @@ mod tests {
                 protocol: FibKernelProtocol::Bgp,
             },
         );
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
 
         drain_owned(&config, &mut fib, &metrics(), &status_tx, &mut owned).await;
 
@@ -6375,7 +6379,7 @@ mod tests {
         };
 
         let (rib_tx, _count, _events, _candidates) = rib_with_events(vec![route]);
-        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (status_tx, mut status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
@@ -6425,7 +6429,7 @@ mod tests {
     async fn route_event_wakes_actor_before_periodic_interval() {
         let (rib_tx, query_count, events_tx, _candidates_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
@@ -6475,7 +6479,7 @@ mod tests {
 
     struct RealRibHarness {
         rib_tx: mpsc::Sender<RibUpdate>,
-        status_rx: watch::Receiver<Vec<FibRuntimeStatus>>,
+        status_rx: watch::Receiver<Arc<Vec<FibRuntimeStatus>>>,
         handle: FibRuntimeHandle,
         /// Kept open so distribution to the two peers never fails and
         /// marks them dirty.
@@ -6495,7 +6499,7 @@ mod tests {
 
         let mut config = config();
         config.tables[0].maximum_paths = Some(2);
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let handle = spawn_with_fib(
             config,
@@ -6850,7 +6854,7 @@ mod tests {
                 protocol: FibKernelProtocol::Bgp,
             },
         );
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
         let mut unresolved = UnresolvedHolds {
             routes: BTreeMap::from([
@@ -7022,7 +7026,7 @@ mod tests {
                 FibRuntimeState::Installed,
                 "last_good".to_string(),
             )];
-            let (status_tx, status_rx) = watch::channel(sentinel.clone());
+            let (status_tx, status_rx) = watch::channel(Arc::new(sentinel.clone()));
             let (event_tx, mut event_rx) = broadcast::channel(16);
             let mut fib = FakeFib::default();
             let test_metrics = metrics();
@@ -7053,7 +7057,7 @@ mod tests {
             assert_eq!(fib.applied.len(), 0);
             assert_eq!(owned, owned_before);
             assert_eq!(unresolved, unresolved_before);
-            assert_eq!(*status_rx.borrow(), sentinel);
+            assert_eq!(status_rx.borrow().as_ref(), &sentinel);
             assert!(event_rx.try_recv().is_err());
             let reason = match failure {
                 Failure::Groups => "send_failed",
@@ -7132,7 +7136,7 @@ mod tests {
                 FibRuntimeState::Installed,
                 "last_good".to_string(),
             )];
-            let (status_tx, status_rx) = watch::channel(sentinel.clone());
+            let (status_tx, status_rx) = watch::channel(Arc::new(sentinel.clone()));
             let (event_tx, _) = broadcast::channel(1);
             let metrics = metrics();
 
@@ -7155,7 +7159,7 @@ mod tests {
             assert_eq!(fib.applied.len(), 0);
             assert_eq!(owned, owned_before);
             assert_eq!(unresolved, unresolved_before);
-            assert_eq!(*status_rx.borrow(), sentinel);
+            assert_eq!(status_rx.borrow().as_ref(), &sentinel);
             for reason in ["send_failed", "reply_dropped", "query_failed", "timeout"] {
                 assert_planning_failure_value(&metrics, "general_fib", reason, 0.0);
             }
@@ -7199,7 +7203,7 @@ mod tests {
             FibRuntimeState::Installed,
             "last_good".to_string(),
         )];
-        let (status_tx, status_rx) = watch::channel(sentinel.clone());
+        let (status_tx, status_rx) = watch::channel(Arc::new(sentinel.clone()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
         let mut fib = FakeFib::default();
         let mut owned = FibOwnedState::default();
@@ -7224,7 +7228,7 @@ mod tests {
         assert_eq!(fib.dump_calls, 0);
         assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty() && unresolved.routes.is_empty());
-        assert_eq!(*status_rx.borrow(), sentinel);
+        assert_eq!(status_rx.borrow().as_ref(), &sentinel);
         assert!(event_rx.try_recv().is_err());
         assert_planning_failure_value(&test_metrics, "general_fib", "timeout", 1.0);
     }
@@ -7304,7 +7308,7 @@ mod tests {
                 },
             );
         }
-        let (status_tx, _) = watch::channel(Vec::new());
+        let (status_tx, _) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let mut unresolved = UnresolvedHolds::default();
         assert!(
@@ -7376,7 +7380,7 @@ mod tests {
         let config = config_with(vec![capped, uncapped]);
         let mut fib = FakeFib::default();
         let mut owned = FibOwnedState::default();
-        let (status_tx, _) = watch::channel(Vec::new());
+        let (status_tx, _) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let mut unresolved = UnresolvedHolds::default();
         assert!(
@@ -7571,7 +7575,7 @@ mod tests {
     async fn kernel_drift_event_wakes_actor_before_periodic_interval() {
         let (rib_tx, query_count, _events_tx, _candidates_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let (drift_tx, drift_rx) = mpsc::channel(64);
         let shutdown = CancellationToken::new();
@@ -7639,7 +7643,7 @@ mod tests {
     async fn route_event_debounce_waits_after_idle() {
         let (rib_tx, query_count, events_tx, candidates_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
@@ -7848,7 +7852,7 @@ mod tests {
         let metrics = BgpMetrics::with_registry(registry.clone());
         let desired = route(v4(24), ip("192.0.2.1"));
         let (rib_tx, _count, _events, _candidates) = rib_with_events(vec![desired]);
-        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (status_tx, mut status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
@@ -8144,11 +8148,11 @@ mod tests {
         let mut unresolved = unresolved_with(route);
         let mut fib = FakeFib::default();
         let mut owned = FibOwnedState::default();
-        let (status_tx, status_rx) = watch::channel(vec![status_for_route(
+        let (status_tx, status_rx) = watch::channel(Arc::new(vec![status_for_route(
             &unresolved.routes[&key(v4(24))].route,
             FibRuntimeState::Unresolved,
             "next_hop_unresolved".to_string(),
-        )]);
+        )]));
         let (event_tx, _) = broadcast::channel(16);
 
         let reached_apply = reconcile_once_with_events(
@@ -8267,7 +8271,7 @@ mod tests {
             routes: BTreeMap::from([(existing_key, existing)]),
             ..Default::default()
         };
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
 
         reconcile_once(
             &config(),
@@ -8280,7 +8284,7 @@ mod tests {
         )
         .await;
 
-        let statuses = status_rx.borrow().clone();
+        let statuses = status_rx.borrow().as_ref().clone();
         assert_eq!(statuses.len(), 0);
         assert!(fib.applied.is_empty(), "failed query must not reach apply");
         assert!(owned.routes.contains_key(&existing_key));
@@ -8505,7 +8509,7 @@ mod tests {
             routes: BTreeMap::from([(route.key, route)]),
             ..Default::default()
         };
-        let (status_tx, status_rx) = watch::channel(vec![FibRuntimeStatus {
+        let (status_tx, status_rx) = watch::channel(Arc::new(vec![FibRuntimeStatus {
             table_name: "edge".to_string(),
             table_id: 1000,
             metric: 200,
@@ -8517,7 +8521,7 @@ mod tests {
             state: FibRuntimeState::Installed,
             reason: "owned".to_string(),
             sampling: None,
-        }]);
+        }]));
 
         drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
 
@@ -8545,7 +8549,7 @@ mod tests {
             routes: BTreeMap::from([(route.key, route)]),
             ..Default::default()
         };
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
 
         drain_owned(&config, &mut fib, &metrics(), &status_tx, &mut owned).await;
 
@@ -8583,7 +8587,7 @@ mod tests {
             routes: BTreeMap::from([(route.key, route.clone())]),
             ..Default::default()
         };
-        let (status_tx, status_rx) = watch::channel(vec![FibRuntimeStatus {
+        let (status_tx, status_rx) = watch::channel(Arc::new(vec![FibRuntimeStatus {
             table_name: "edge".to_string(),
             table_id: 1000,
             metric: 200,
@@ -8595,7 +8599,7 @@ mod tests {
             state: FibRuntimeState::Installed,
             reason: "owned".to_string(),
             sampling: None,
-        }]);
+        }]));
 
         drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
 
@@ -9352,7 +9356,7 @@ mod tests {
         let mut kernel_events = fib.take_kernel_route_events();
         let mut owned = FibOwnedState::default();
         let mut unresolved = UnresolvedHolds::default();
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
 
         assert_raw_unresolved_errno(
@@ -9468,7 +9472,7 @@ mod tests {
         let mut kernel_events = fib.take_kernel_route_events();
         let mut owned = FibOwnedState::default();
         let mut unresolved = UnresolvedHolds::default();
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
 
         assert_raw_unresolved_errno(&fib, fib_route(prefix, gateway), -libc::EHOSTUNREACH).await;
@@ -9578,7 +9582,7 @@ mod tests {
             LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
-        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (status_tx, status_rx) = watch::channel(Arc::new(Vec::new()));
 
         // Empty [[fib_tables]] means no kernel install even when the
         // RIB has a best route.
@@ -9621,7 +9625,7 @@ mod tests {
             "foreign route changed: {foreign}"
         );
         assert!(owned.routes.is_empty());
-        let statuses = status_rx.borrow().clone();
+        let statuses = status_rx.borrow().as_ref().clone();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
         assert_eq!(statuses[0].reason, "foreign_route_exists");
@@ -9857,7 +9861,7 @@ mod tests {
             drifted.contains("via 192.0.2.99") && drifted.contains("proto static"),
             "drifted route was not preserved: {drifted}"
         );
-        let statuses = status_rx.borrow().clone();
+        let statuses = status_rx.borrow().as_ref().clone();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
         assert_eq!(statuses[0].reason, "owned_route_drifted");
@@ -9934,7 +9938,7 @@ mod tests {
             LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let route = scoped_route(prefix, ip("fe80::2"), scope_ifindex);
 
         reconcile_once(
@@ -10019,7 +10023,7 @@ mod tests {
             LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let config = FibRuntimeConfig {
             tables: vec![{
                 let mut table = table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"]);
@@ -10143,7 +10147,7 @@ mod tests {
             LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
-        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(Vec::new()));
         let config = FibRuntimeConfig {
             tables: vec![{
                 let mut table = table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"]);

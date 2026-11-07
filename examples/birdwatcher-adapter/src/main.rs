@@ -53,6 +53,7 @@ use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::{Json, Router, routing::get};
 use clap::Parser;
 use rustbgpd_api::proto;
@@ -121,6 +122,52 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     max_lpm_scan_routes: u64,
+
+    /// Maximum rows inspected by each route-view scan, including primary markers.
+    #[arg(long, env = "BIRDWATCHER_ADAPTER_MAX_SCAN_ROUTES", default_value_t = 10_000,
+        value_parser = clap::value_parser!(u64).range(1..))]
+    max_scan_routes: u64,
+}
+
+const MAX_CONCURRENT_ROUTE_REQUESTS: usize = 4;
+const ROUTE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+tokio::task_local! {
+    static ROUTE_REQUEST_DEADLINE: tokio::time::Instant;
+}
+
+async fn bounded_route_request(
+    State(readers): State<Arc<tokio::sync::Semaphore>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Ok(permit) = readers.try_acquire_owned() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Route request capacity is busy",
+        )
+        .into_response();
+    };
+    let deadline = tokio::time::Instant::now() + ROUTE_REQUEST_TIMEOUT;
+    // A disconnected/timed-out HTTP reader must not free an in-flight RPC's slot.
+    let mut work = tokio::spawn(async move {
+        let _permit = permit;
+        ROUTE_REQUEST_DEADLINE
+            .scope(deadline, next.run(request))
+            .await
+    });
+    match tokio::time::timeout_at(deadline, &mut work).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            error!(%error, "route request worker failed");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Route request failed").into_response()
+        }
+        Err(_) => json_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Route request deadline exceeded",
+        )
+        .into_response(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -442,6 +489,12 @@ struct BearerInterceptor {
 
 impl Interceptor for BearerInterceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        if ROUTE_REQUEST_DEADLINE
+            .try_with(|deadline| tokio::time::Instant::now() >= *deadline)
+            .unwrap_or(false)
+        {
+            return Err(Status::deadline_exceeded("route request deadline exceeded"));
+        }
         if let Some(authorization) = self.authorization.clone() {
             request
                 .metadata_mut()
@@ -563,6 +616,7 @@ struct AppState {
     identity_store: Arc<ResolverStore>,
     max_routes: u64,
     max_lpm_scan_routes: u64,
+    max_scan_routes: u64,
     arouteserver_reject_communities: Option<Arc<ArsRejectCommunities>>,
 }
 
@@ -574,6 +628,7 @@ impl Clone for AppState {
             identity_store: Arc::clone(&self.identity_store),
             max_routes: self.max_routes,
             max_lpm_scan_routes: self.max_lpm_scan_routes,
+            max_scan_routes: self.max_scan_routes,
             arouteserver_reject_communities: self.arouteserver_reject_communities.clone(),
         }
     }
@@ -614,6 +669,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity_store,
         max_routes: args.max_routes,
         max_lpm_scan_routes: args.max_lpm_scan_routes,
+        max_scan_routes: args.max_scan_routes,
         arouteserver_reject_communities: args
             .arouteserver_reject_communities_file
             .as_deref()
@@ -623,10 +679,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let app = Router::new()
-        .route("/status", get(status))
-        .route("/protocols/bgp", get(protocols_bgp))
-        .route("/protocol/{id}", get(protocol_detail))
-        .route("/symbols", get(symbols))
         .route("/routes/protocol/{id}", get(routes_protocol))
         .route("/routes/export/{id}", get(routes_export))
         .route("/routes/table/{table}", get(routes_table))
@@ -641,6 +693,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(routes_protocol_large_community_wild_xy),
         )
         .route("/routes/noexport/{id}", get(routes_noexport))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ROUTE_REQUESTS)),
+            bounded_route_request,
+        ))
+        .route("/status", get(status))
+        .route("/protocols/bgp", get(protocols_bgp))
+        .route("/protocol/{id}", get(protocol_detail))
+        .route("/symbols", get(symbols))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -1001,6 +1061,46 @@ fn route_key(route: &proto::Route) -> (String, u32, String, u32) {
 type RouteCaptureVersion = (u64, u64);
 const CAPTURE_ATTEMPTS: usize = 3;
 
+/// Counts inspected rows independently of the number rendered by a view.
+#[derive(Default)]
+struct RouteScan {
+    rows: u64,
+}
+
+impl RouteScan {
+    fn observe_rows(&mut self, count: u64, maximum: u64) -> Result<(), HttpError> {
+        if count > maximum.saturating_sub(self.rows) {
+            return Err(route_scan_limit(maximum));
+        }
+        self.rows += count;
+        Ok(())
+    }
+
+    fn observe(&mut self, page: &proto::ListRoutesResponse, maximum: u64) -> Result<(), HttpError> {
+        if page.total_count > maximum {
+            return Err(route_scan_limit(maximum));
+        }
+        let count = page.routes.len() as u64;
+        self.observe_rows(count, maximum)?;
+        if !page.next_page_token.is_empty() {
+            if count == 0 {
+                return Err(invalid_table_snapshot());
+            }
+            if self.rows == maximum {
+                return Err(route_scan_limit(maximum));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn route_scan_limit(maximum: u64) -> HttpError {
+    json_error(
+        StatusCode::FORBIDDEN,
+        format!("Route scan exceeds maximum allowed ({maximum} routes)"),
+    )
+}
+
 #[derive(Debug)]
 enum CaptureError {
     Retry,
@@ -1042,6 +1142,7 @@ async fn capture_best_route_keys(
     let mut keys = HashSet::new();
     let mut page_token = String::new();
     let mut version = None;
+    let mut scan = RouteScan::default();
     loop {
         let response = client
             .list_best_routes(proto::ListRoutesRequest {
@@ -1056,8 +1157,8 @@ async fn capture_best_route_keys(
             .map_err(|error| capture_error("ListBestRoutes", &error))?
             .into_inner();
         capture_version(&mut version, response.page_version.as_ref())?;
-        // Marker set, not a served view: the max-routes cap applies to
-        // the view being rendered, not to this lookup.
+        scan.observe(&response, state.max_scan_routes)
+            .map_err(CaptureError::Fatal)?;
         keys.extend(response.routes.iter().map(route_key));
         if response.next_page_token.is_empty() {
             break;
@@ -1077,6 +1178,7 @@ async fn best_route_keys(
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut keys = HashSet::new();
     let mut page_token = String::new();
+    let mut scan = RouteScan::default();
     loop {
         let response = client
             .list_best_routes(proto::ListRoutesRequest {
@@ -1090,6 +1192,7 @@ async fn best_route_keys(
             .await
             .map_err(|error| bad_gateway("ListBestRoutes", &error))?
             .into_inner();
+        scan.observe(&response, state.max_scan_routes)?;
         keys.extend(response.routes.iter().map(route_key));
         if response.next_page_token.is_empty() {
             break;
@@ -1127,15 +1230,11 @@ async fn serve_routes_for_peer(
 ) -> Result<Json<Value>, HttpError> {
     let selector = peer_selector(state, peer).await?;
     for _ in 0..CAPTURE_ATTEMPTS {
-        let (best, best_version) = match capture_best_route_keys(state, None).await {
-            Ok(capture) => capture,
-            Err(CaptureError::Retry) => continue,
-            Err(CaptureError::Fatal(error)) => return Err(error),
-        };
         let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
         let mut captured = Vec::new();
         let mut page_token = String::new();
         let mut received_version = None;
+        let mut scan = RouteScan::default();
         loop {
             let resp = match client
                 .list_received_routes(proto::ListRoutesRequest {
@@ -1164,8 +1263,17 @@ async fn serve_routes_for_peer(
             if page_token.is_empty() && wildcard.is_none() {
                 enforce_max(resp.total_count, state.max_routes)?;
             }
+            scan.observe(&resp, state.max_scan_routes)?;
             retain_received_page(&mut captured, resp.routes, wildcard, state.max_routes)?;
             if resp.next_page_token.is_empty() {
+                if captured.is_empty() {
+                    return Ok(Json(empty_routes_body(state.max_routes)));
+                }
+                let (best, best_version) = match capture_best_route_keys(state, None).await {
+                    Ok(capture) => capture,
+                    Err(CaptureError::Retry) => break,
+                    Err(CaptureError::Fatal(error)) => return Err(error),
+                };
                 if received_version == Some(best_version) {
                     let routes = captured
                         .iter()
@@ -1331,6 +1439,7 @@ async fn routes_table(
             let mut seen_tokens = HashSet::new();
             let mut expected_total = None;
             let mut rows_seen = 0_u64;
+            let mut scan = RouteScan::default();
             loop {
                 let request = proto::ListRoutesRequest {
                     neighbor_address: String::new(),
@@ -1375,6 +1484,7 @@ async fn routes_table(
                     enforce_max(response.total_count, state.max_routes)?;
                     expected_total = Some(response.total_count);
                 }
+                scan.observe(&response, state.max_scan_routes)?;
                 rows_seen += response.routes.len() as u64;
                 if rows_seen > response.total_count {
                     return Err(invalid_table_snapshot());
@@ -1411,10 +1521,10 @@ async fn routes_export(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
     let peer = peer_selector(&state, state.identities.resolve(&id)?).await?;
-    let best = best_route_keys(&state, None).await?;
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes = Vec::new();
     let mut page_token = String::new();
+    let mut scan = RouteScan::default();
     loop {
         let resp = client
             .list_advertised_routes(proto::ListRoutesRequest {
@@ -1430,22 +1540,23 @@ async fn routes_export(
         if page_token.is_empty() {
             enforce_max(resp.total_count, state.max_routes)?;
         }
-        routes.extend(resp.routes.iter().map(|route| {
-            route_to_birdwatcher_with_primary(
-                route,
-                &state.identities,
-                best.contains(&route_key(route)),
-            )
-        }));
+        scan.observe(&resp, state.max_scan_routes)?;
+        routes.extend(resp.routes);
         enforce_max(routes.len() as u64, state.max_routes)?;
         if resp.next_page_token.is_empty() {
             break;
         }
         page_token = resp.next_page_token;
     }
+    if routes.is_empty() {
+        return Ok(Json(empty_routes_body(state.max_routes)));
+    }
+    let best = best_route_keys(&state, None).await?;
     Ok(Json(serde_json::json!({
         "api": api_block(state.max_routes),
-        "routes": routes,
+        "routes": routes.iter().map(|route| route_to_birdwatcher_with_primary(
+            route, &state.identities, best.contains(&route_key(route))
+        )).collect::<Vec<_>>(),
     })))
 }
 
@@ -1707,6 +1818,7 @@ async fn serve_exact_route(
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes = Vec::new();
     let mut page_token = String::new();
+    let mut scan = RouteScan::default();
     loop {
         let request = exact_route_request(peer, prefix, page_token, source);
         let response = match source {
@@ -1720,6 +1832,7 @@ async fn serve_exact_route(
                 .map_err(|error| bad_gateway("ListAdvertisedRoutes", &error))?,
         }
         .into_inner();
+        scan.observe(&response, state.max_scan_routes)?;
         append_exact_routes(&mut routes, response.routes, prefix, state.max_routes)?;
         if response.next_page_token.is_empty() {
             break;
@@ -1747,6 +1860,9 @@ async fn serve_exact_route(
         }
     }
 
+    if routes.is_empty() {
+        return Ok(Json(empty_routes_body(state.max_routes)));
+    }
     let best = best_route_keys(state, Some(matched)).await?;
     Ok(Json(serde_json::json!({
         "api": api_block(state.max_routes),
@@ -1790,6 +1906,7 @@ async fn serve_exact_received_route(
         let mut page_token = String::new();
         let mut received_version = None;
         let mut retry = false;
+        let mut scan = RouteScan::default();
         loop {
             let request = exact_route_request(peer, prefix, page_token, ExactRouteSource::Received);
             let response =
@@ -1801,6 +1918,7 @@ async fn serve_exact_received_route(
                     }
                     Err(CaptureError::Fatal(error)) => return Err(error),
                 };
+            scan.observe(&response, state.max_scan_routes)?;
             append_exact_routes(&mut routes, response.routes, prefix, state.max_routes)?;
             if response.next_page_token.is_empty() {
                 break;
@@ -1850,6 +1968,9 @@ async fn serve_exact_received_route(
             }
         }
 
+        if routes.is_empty() {
+            return Ok(Json(empty_routes_body(state.max_routes)));
+        }
         let (best, best_version) = match capture_best_route_keys(state, Some(matched)).await {
             Ok(capture) => capture,
             Err(CaptureError::Retry) => continue,
@@ -1902,6 +2023,10 @@ async fn route_table(
         }
         Err(status) => return Err(bad_gateway("LookupBestPath", &status)),
     };
+    RouteScan::default().observe_rows(
+        response.candidates.len() as u64 + u64::from(response.best_route.is_some()),
+        state.max_scan_routes,
+    )?;
     Ok(Json(table_lookup_body(
         &response,
         prefix,
@@ -1989,6 +2114,7 @@ async fn routes_filtered(
         }
         Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
     };
+    RouteScan::default().observe_rows(resp.routes.len() as u64, state.max_scan_routes)?;
     Ok(Json(filtered_routes_body(
         &resp,
         peer_addr,
@@ -2040,6 +2166,7 @@ async fn routes_table_filtered(
         let family = table_address_family(&neighbors, &state.identities, &table)?;
         let inventory = table_reject_inventory(&neighbors, &state.identities, &table)?;
         let mut stores = Vec::with_capacity(inventory.len());
+        let mut scan = RouteScan::default();
         for (peer, ..) in &inventory {
             let response = match policy
                 .list_rejected_routes(proto::ListRejectedRoutesRequest {
@@ -2052,6 +2179,9 @@ async fn routes_table_filtered(
                 Err(status) if status.code() == tonic::Code::NotFound => None,
                 Err(error) => return Err(bad_gateway("ListRejectedRoutes", &error)),
             };
+            if let Some(response) = &response {
+                scan.observe_rows(response.routes.len() as u64, state.max_scan_routes)?;
+            }
             stores.push((*peer, response));
         }
         // The session-local reject stores carry no version. Retry when the
@@ -2175,6 +2305,7 @@ async fn routes_protocol_large_community_wild_xy(
         }
         Err(error) => return Err(bad_gateway("ListRejectedRoutes", &error)),
     };
+    RouteScan::default().observe_rows(response.routes.len() as u64, state.max_scan_routes)?;
     let routes = response
         .routes
         .iter()
@@ -2541,6 +2672,7 @@ async fn routes_noexport(
     // partially-suppressed extra paths are not reported as noexport).
     let mut advertised: HashSet<(String, u32)> = HashSet::new();
     let mut page_token = String::new();
+    let mut advertised_scan = RouteScan::default();
     loop {
         let resp = rib
             .list_advertised_routes(proto::ListRoutesRequest {
@@ -2553,6 +2685,7 @@ async fn routes_noexport(
             .await
             .map_err(|e| bad_gateway("ListAdvertisedRoutes", &e))?
             .into_inner();
+        advertised_scan.observe(&resp, state.max_scan_routes)?;
         advertised.extend(
             resp.routes
                 .iter()
@@ -2572,6 +2705,7 @@ async fn routes_noexport(
     let mut excluded = advertised;
     let mut candidates: Vec<proto::Route> = Vec::new();
     let mut page_token = String::new();
+    let mut best_scan = RouteScan::default();
     loop {
         let resp = rib
             .list_best_routes(proto::ListRoutesRequest {
@@ -2583,6 +2717,7 @@ async fn routes_noexport(
             .await
             .map_err(|e| bad_gateway("ListBestRoutes", &e))?
             .into_inner();
+        best_scan.observe(&resp, state.max_scan_routes)?;
         retain_noexport_page(
             &mut candidates,
             &mut excluded,
@@ -2981,6 +3116,136 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    use tower::ServiceExt as _;
+
+    #[tokio::test(start_paused = true)]
+    async fn route_deadline_and_disconnect_keep_admission_until_work_settles() {
+        use tokio::sync::{Notify, Semaphore};
+        type Held = (Arc<Notify>, Arc<Notify>, Arc<Semaphore>);
+        async fn held(State((entered, release, finished)): State<Held>) -> StatusCode {
+            entered.notify_one();
+            release.notified().await;
+            finished.add_permits(1);
+            StatusCode::OK
+        }
+        for deadline in [false, true] {
+            let readers = Arc::new(Semaphore::new(MAX_CONCURRENT_ROUTE_REQUESTS));
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let finished = Arc::new(Semaphore::new(0));
+            let app = Router::new()
+                .route("/", get(held))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    readers.clone(),
+                    bounded_route_request,
+                ))
+                .with_state((entered.clone(), release.clone(), finished.clone()));
+            let request = || {
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap()
+            };
+            let mut work = Vec::new();
+            for _ in 0..MAX_CONCURRENT_ROUTE_REQUESTS {
+                work.push(tokio::spawn(app.clone().oneshot(request())));
+                entered.notified().await;
+            }
+            if deadline {
+                tokio::time::advance(ROUTE_REQUEST_TIMEOUT).await;
+                for request in work {
+                    assert_eq!(
+                        request.await.unwrap().unwrap().status(),
+                        StatusCode::GATEWAY_TIMEOUT
+                    );
+                }
+            } else {
+                for request in work {
+                    request.abort();
+                    assert!(request.await.unwrap_err().is_cancelled());
+                }
+            }
+            assert_eq!(readers.available_permits(), 0);
+            assert_eq!(
+                app.oneshot(request()).await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            release.notify_waiters();
+            finished
+                .acquire_many(u32::try_from(MAX_CONCURRENT_ROUTE_REQUESTS).unwrap())
+                .await
+                .unwrap()
+                .forget();
+            assert_eq!(readers.available_permits(), MAX_CONCURRENT_ROUTE_REQUESTS);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_route_deadline_refuses_further_upstream_calls() {
+        let mut interceptor = BearerInterceptor::default();
+        ROUTE_REQUEST_DEADLINE
+            .scope(tokio::time::Instant::now(), async {
+                assert_eq!(
+                    interceptor.call(Request::new(())).unwrap_err().code(),
+                    tonic::Code::DeadlineExceeded
+                );
+            })
+            .await;
+        assert!(interceptor.call(Request::new(())).is_ok());
+    }
+
+    #[test]
+    fn route_scan_caps_aggregate_retained_stores_before_keeping_the_next_store() {
+        let mut scan = RouteScan::default();
+        for _ in 0..9 {
+            scan.observe_rows(1024, 10_000).unwrap();
+        }
+        assert_eq!(scan.rows, 9216);
+        assert_eq!(
+            scan.observe_rows(1024, 10_000).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(scan.rows, 9216);
+    }
+
+    #[test]
+    fn route_scan_refuses_oversized_and_incomplete_pages_before_retention() {
+        let page = |rows: usize, total, more| proto::ListRoutesResponse {
+            routes: vec![proto::Route::default(); rows],
+            total_count: total,
+            next_page_token: if more { "next".into() } else { String::new() },
+            ..Default::default()
+        };
+        let mut scan = RouteScan::default();
+        assert_eq!(
+            scan.observe(&page(1, 11, true), 10).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(scan.rows, 0);
+        scan.observe(&page(6, 10, true), 10).unwrap();
+        assert_eq!(
+            scan.observe(&page(5, 10, false), 10).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(scan.rows, 6);
+        scan.observe(&page(4, 10, false), 10).unwrap();
+        assert_eq!(scan.rows, 10);
+        assert_eq!(
+            RouteScan::default()
+                .observe(&page(10, 10, true), 10)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            RouteScan::default()
+                .observe(&page(0, 10, true), 10)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert!(RouteScan::default().observe(&page(0, 0, false), 10).is_ok());
+    }
     use super::*;
     use clap::CommandFactory;
 
@@ -3201,6 +3466,7 @@ mod tests {
             identity_store: store,
             max_routes: 1,
             max_lpm_scan_routes: 10_000,
+            max_scan_routes: 10_000,
             arouteserver_reject_communities: None,
         };
         let mut neighbor = proto::NeighborState {
@@ -4522,6 +4788,7 @@ mod tests {
             identity_store: Arc::clone(&store),
             max_routes: 1,
             max_lpm_scan_routes: 10_000,
+            max_scan_routes: 10_000,
             arouteserver_reject_communities: None,
         };
         let request_a = state.clone();
@@ -4571,8 +4838,9 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(defaults.max_lpm_scan_routes, 10_000);
+        assert_eq!(defaults.max_scan_routes, 10_000);
 
-        for flag in ["--max-routes", "--max-lpm-scan-routes"] {
+        for flag in ["--max-routes", "--max-lpm-scan-routes", "--max-scan-routes"] {
             assert!(
                 Args::try_parse_from([
                     "birdwatcher-adapter",
@@ -4671,6 +4939,7 @@ mod tests {
             identity_store: store,
             max_routes: 7,
             max_lpm_scan_routes: 10_000,
+            max_scan_routes: 10_000,
             arouteserver_reject_communities: None,
         };
         for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {

@@ -2992,7 +2992,16 @@ empty. `rbgp rib fib` exposes the same filters as `--table`, `--state`,
 `--reason`, `--prefix`, and `--neighbor`. `page_size` and `page_token` enable
 optional pagination over the filtered status rows; `page_size = 0` keeps the
 legacy full-snapshot response, and `page_token` is valid only when
-`page_size > 0`. The response includes `next_page_token` and `total_count`;
+`page_size > 0`. The response includes `next_page_token` and `total_count`.
+
+Reads use the last complete indexed status publication. Conversion and index
+construction run outside the FIB reconciler and API executor; while a newer
+publication is being prepared, reads can lag native reconciliation. Paged
+queries find exact filter counts through prepared indexes and clone only their
+returned rows. Unpaged reads still allocate and return the complete matching
+result. The legacy dataplane event summary uses three counts prepared with the
+same publication, so polling it does not walk the FIB rows.
+
 CLI JSON output remains a route array unless `--limit` is given (1 or
 more; omit it for the full snapshot), in which case it emits an object with `routes`,
 `next_page_token`, `total_count`, and optional `sampling` metadata.

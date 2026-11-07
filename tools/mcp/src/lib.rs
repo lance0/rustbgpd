@@ -2197,7 +2197,7 @@ mod tests {
         let service = rustbgpd_api::rib_service::RibService::with_status_snapshots(
             rib_tx,
             std::sync::Arc::new(Vec::new),
-            std::sync::Arc::new(Vec::new),
+            rustbgpd_api::rib_service::FibRouteSnapshotReader::default(),
         );
         for (address, learned, interface) in [
             ("fe80::1", "", "eth0"),
