@@ -230,17 +230,18 @@ pub(crate) struct FdbVxlanTarget {
     pub source_vni: Option<EvpnInstanceId>,
     /// Observed VXLAN learning state for the CVE-2025-39851 guard.
     pub learning_disabled: Option<bool>,
-    /// For an SVD target, the bridge and bridge VLAN whose tunnel
-    /// mapping selected it; [`confirm_fdb_vxlan_target`] re-checks both.
+    /// Ifindex of the bridge the VXLAN was enslaved to in the cache;
+    /// [`confirm_fdb_vxlan_target`] requires the live device to still be
+    /// enslaved to it, because the write carries the bridge-master flag.
+    pub bridge_ifindex: u32,
+    /// For an SVD target, the bridge VLAN whose tunnel mapping selected
+    /// it; [`confirm_fdb_vxlan_target`] re-checks the mapping.
     pub svd_binding: Option<SvdBinding>,
 }
 
-/// The bridge and bridge VLAN through which an SVD VXLAN was selected
-/// for a VNI.
+/// The bridge VLAN through which an SVD VXLAN was selected for a VNI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SvdBinding {
-    /// Ifindex of the VLAN-aware bridge the SVD VXLAN is enslaved to.
-    pub bridge_ifindex: u32,
     /// Bridge VLAN mapped to the VNI by the port's VLAN tunnel row.
     pub bridge_vlan: u16,
 }
@@ -248,23 +249,26 @@ pub(crate) struct SvdBinding {
 fn find_unique_vxlan_for_vni(
     cache: &LinkCache,
     vni: EvpnInstanceId,
-) -> Result<Option<&KernelVxlanInfo>, DataplaneError> {
+) -> Result<Option<(&KernelVxlanInfo, u32)>, DataplaneError> {
     let raw = vni.as_u32();
     let mut found = None;
+    let mut found_bridge = None;
 
     for bridge in cache.bridges.values() {
         if bridge.vxlan_ports.is_empty() {
             if let Some(vxlan) = bridge.vxlan.as_ref().filter(|vxlan| vxlan.vni == raw) {
                 record_vxlan_match(&mut found, vxlan, vni)?;
+                found_bridge.get_or_insert(bridge.ifindex);
             }
             continue;
         }
         for vxlan in bridge.vxlan_ports.iter().filter(|vxlan| vxlan.vni == raw) {
             record_vxlan_match(&mut found, vxlan, vni)?;
+            found_bridge.get_or_insert(bridge.ifindex);
         }
     }
 
-    Ok(found)
+    Ok(found.zip(found_bridge))
 }
 
 /// Resolve the kernel FDB programming target for `vni`.
@@ -283,7 +287,7 @@ pub(crate) fn unique_fdb_vxlan_target_for_vni(
 
     match (fixed, svd) {
         (
-            Some(fixed),
+            Some((fixed, _)),
             Some(SvdVxlanTarget {
                 ifindex: svd_ifindex,
                 ..
@@ -292,16 +296,18 @@ pub(crate) fn unique_fdb_vxlan_target_for_vni(
             "ambiguous VXLAN target for VNI {vni}: fixed-VNI ifindex {} and SVD ifindex {svd_ifindex} both match",
             fixed.ifindex
         ))),
-        (Some(fixed), _) => Ok(FdbVxlanTarget {
+        (Some((fixed, bridge_ifindex)), _) => Ok(FdbVxlanTarget {
             ifindex: fixed.ifindex,
             source_vni: None,
             learning_disabled: fixed.learning_disabled,
+            bridge_ifindex,
             svd_binding: None,
         }),
         (None, Some(svd)) => Ok(FdbVxlanTarget {
             ifindex: svd.ifindex,
             source_vni: Some(vni),
             learning_disabled: svd.learning_disabled,
+            bridge_ifindex: svd.bridge_ifindex,
             svd_binding: Some(svd.binding),
         }),
         (None, None) => Err(DataplaneError::LinkNotFound {
@@ -362,6 +368,9 @@ pub(crate) async fn confirm_fdb_vxlan_target(
     if live.learning_disabled != target.learning_disabled {
         return Err(stale("learning state changed"));
     }
+    if parsed.master != Some(target.bridge_ifindex) {
+        return Err(stale("no longer enslaved to the cached bridge"));
+    }
     let Some(binding) = target.svd_binding else {
         return if !live.collect_metadata && live.vni == Some(vni.as_u32()) {
             Ok(())
@@ -371,11 +380,6 @@ pub(crate) async fn confirm_fdb_vxlan_target(
     };
     if !live.collect_metadata {
         return Err(stale("no longer a collect-metadata VXLAN"));
-    }
-    if parsed.master != Some(binding.bridge_ifindex) {
-        return Err(stale(
-            "no longer enslaved to the bridge that mapped the VNI",
-        ));
     }
     let inventory = dump_bridge_vlan_inventory(handle).await?;
     let mapped = inventory
@@ -418,6 +422,7 @@ fn record_vxlan_match<'a>(
 struct SvdVxlanTarget {
     ifindex: u32,
     learning_disabled: Option<bool>,
+    bridge_ifindex: u32,
     binding: SvdBinding,
 }
 
@@ -441,8 +446,8 @@ fn find_unique_svd_vxlan_target_for_vni(
             let candidate = SvdVxlanTarget {
                 ifindex: svd.ifindex,
                 learning_disabled: svd.learning_disabled,
+                bridge_ifindex: bridge.ifindex,
                 binding: SvdBinding {
-                    bridge_ifindex: bridge.ifindex,
                     bridge_vlan: *bridge_vlan,
                 },
             };

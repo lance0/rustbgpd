@@ -887,6 +887,86 @@ async fn l2_foreign_learning_vxlan_on_a_recycled_ifindex_is_not_programmed() {
     assert_eq!(err.class(), FailureClass::Transient, "{err}");
 }
 
+/// LAN-2909 L-E3 review: vxlan100 is replaced at its ifindex by a VXLAN
+/// with the same VNI on a different bridge. The write carries the
+/// bridge-master flag, so accepting it would program the unrelated bridge.
+#[tokio::test]
+async fn l2_foreign_vxlan_moved_to_another_bridge_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-bridge");
+        setup_l2_topology(&ns);
+        ns.exec("ip", &["link", "add", "name", "br200", "type", "bridge"]);
+        ns.exec("ip", &["link", "set", "br200", "up"]);
+        run_inner(
+            &ns,
+            "l2_foreign_vxlan_moved_to_another_bridge_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan100/ifindex")
+        .expect("vxlan100 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan100"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxlan100",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "id",
+            "100",
+            "local",
+            L2_LOCAL_IP,
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run("ip", &["link", "set", "vxlan100", "master", "br200"]);
+    run("ip", &["link", "set", "vxlan100", "up"]);
+
+    let result = dp.apply(&add.ops[0]).await;
+    let mac = mac_str(l2_mac());
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "br", "br200"])
+        .lines()
+        .filter(|row| row.starts_with(&mac))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "row programmed through an unrelated bridge ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("a VXLAN on another bridge must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
 #[tokio::test]
 async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     if !netns_gate() {
