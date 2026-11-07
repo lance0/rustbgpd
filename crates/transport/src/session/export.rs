@@ -1449,6 +1449,7 @@ impl SessionExportProfile {
 
     // Keep the variable-length FlowSpec scan separate so fixed-family
     // admission can inline its attribute-summary and framing arithmetic.
+    #[inline(never)]
     fn flowspec_announcement_wire_bound(&self, route: &FlowSpecRoute) -> usize {
         // FlowSpec has plain Vec attributes, so reuse the same bound without
         // allocation or a second maintained summary.
