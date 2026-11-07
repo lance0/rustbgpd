@@ -415,8 +415,6 @@ fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
     let mut checker = Checker {
         file,
         sets,
-        datasets: index_by_name(&file.datasets, |d| &d.name),
-        fns: index_by_name(&file.fns, |f| &f.name),
         diags: Vec::new(),
     };
     checker.check_declarations();
@@ -442,18 +440,6 @@ fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
     checker.diags
 }
 
-/// `items` by name, the first definition winning as a linear `find` would.
-fn index_by_name<'a, T>(
-    items: &'a [T],
-    name: impl Fn(&'a T) -> &'a Spanned<String>,
-) -> HashMap<&'a str, &'a T> {
-    let mut index = HashMap::with_capacity(items.len());
-    for item in items {
-        index.entry(name(item).node.as_str()).or_insert(item);
-    }
-    index
-}
-
 /// One named set in [`Checker::sets`].
 struct SetEntry<'a> {
     kind: &'static str,
@@ -465,12 +451,9 @@ struct SetEntry<'a> {
 struct Checker<'a> {
     file: &'a SourceFile,
     /// Every named set by name, so a reference resolves in constant time
-    /// rather than by a scan of every set.
+    /// rather than by a scan of every set (other definitions: the
+    /// [`SourceFile`] lookups).
     sets: HashMap<&'a str, SetEntry<'a>>,
-    /// Datasets and functions by name, for the same reason (policies:
-    /// [`SourceFile::policy`]).
-    datasets: HashMap<&'a str, &'a DatasetDecl>,
-    fns: HashMap<&'a str, &'a FnDef>,
     /// At most [`MAX_TYPECHECK_DIAGNOSTICS`]; see [`Checker::push_diag`].
     diags: Vec<Diagnostic>,
 }
@@ -840,7 +823,7 @@ impl<'a> Checker<'a> {
 
     /// The declaration of a dataset by name (LAN-305).
     fn dataset_of(&self, name: &str) -> Option<&'a DatasetDecl> {
-        self.datasets.get(name).copied()
+        self.file.dataset(name)
     }
 
     /// The names of every declared dataset of `kind`, for did-you-mean
@@ -868,7 +851,7 @@ impl<'a> Checker<'a> {
     fn symbol_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
         self.set_def_of(name)
             .or_else(|| self.dataset_of(name).map(|d| ("dataset", d.name.span)))
-            .or_else(|| self.fns.get(name).map(|f| ("function", f.name.span)))
+            .or_else(|| self.file.fn_def(name).map(|f| ("function", f.name.span)))
             .or_else(|| self.policy(name).map(|p| ("policy", p.name.span)))
     }
 
@@ -1978,7 +1961,7 @@ impl<'a> Checker<'a> {
                     // A user-defined function (LAN-304): arity-checked
                     // here; the call graph and budgets are validated
                     // in `check_fn_graph`.
-                    if let Some(def) = self.fns.get(name.node.as_str()).copied() {
+                    if let Some(def) = self.file.fn_def(&name.node) {
                         if def.params.len() != args.len() {
                             self.push_diag(
                                 Diagnostic::coded(
@@ -2401,6 +2384,10 @@ impl<'a> Checker<'a> {
         scope: Option<&Scope<'_>>,
     ) {
         for (index, arg) in args.iter().enumerate().take(target.param_types.len()) {
+            // Only diagnostics come of the checks below.
+            if self.full() {
+                return;
+            }
             let ty = target.param_types[index];
             if let (Some(scope), CallArg::Name(name)) = (scope, &arg.node)
                 && scope.is_local(name)
@@ -4151,18 +4138,15 @@ pub(super) fn check_call_arg(
         ) => {
             let kind = ty.set_kind().expect("a set type");
             let declared = match ty {
-                ParamType::PrefixSet => file.prefix_sets.iter().any(|s| s.name.node == *name),
-                ParamType::CommunitySet => file.community_sets.iter().any(|s| s.name.node == *name),
-                _ => file.asn_sets.iter().any(|s| s.name.node == *name),
-            } || file
-                .datasets
-                .iter()
-                .any(|d| d.name.node == *name && d.kind == kind);
+                ParamType::PrefixSet => file.prefix_set(name).is_some(),
+                ParamType::CommunitySet => file.community_set(name).is_some(),
+                _ => file.asn_set(name).is_some(),
+            } || file.dataset(name).is_some_and(|d| d.kind == kind);
             let removals = uses
                 .removal_sets
                 .iter()
                 .filter(|(used, _, _)| *used == param);
-            let community_set = file.community_sets.iter().find(|s| s.name.node == *name);
+            let community_set = file.community_set(name);
             if declared {
                 for &(_, kind, negate) in removals {
                     // A community dataset is checked at runtime (LAN-2785).
@@ -4801,7 +4785,7 @@ fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
                 in_value(lhs, file).or_else(|| in_value(rhs, file))
             }
             ValueExprAst::Call { name, args, span } => {
-                if file.fns.iter().any(|f| f.name.node == name.node) {
+                if file.fn_def(&name.node).is_some() {
                     return Some(*span);
                 }
                 args.iter().find_map(|arg| in_value(arg, file))
@@ -4857,7 +4841,7 @@ fn collect_fn_calls<'a>(expr: &'a ValueExprAst, file: &SourceFile, out: &mut Vec
             collect_fn_calls(rhs, file, out);
         }
         ValueExprAst::Call { name, args, span } => {
-            if file.fns.iter().any(|f| f.name.node == name.node) {
+            if file.fn_def(&name.node).is_some() {
                 out.push((&name.node, *span));
             }
             for arg in args {

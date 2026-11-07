@@ -581,6 +581,69 @@ mod tests {
         eprintln!("compiled 50k x 50k in {elapsed:?}");
     }
 
+    /// Compile `source` on its own thread within 60 s; the diagnostics.
+    fn compile_within_a_minute(source: String, what: &str) -> Diagnostics {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("{what} compiles within 60 s"));
+        eprintln!("compiled {what} in {elapsed:?}");
+        result.expect_err("every reference is unknown")
+    }
+
+    /// 200k functions, each calling an unknown function: building the call
+    /// graph resolves every call by index, not a scan of every function.
+    #[test]
+    fn many_functions_calling_unknown_functions_compile_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..200_000 {
+            let _ = writeln!(source, "fn f{index}(x: u32) -> u32 {{ missing{index}(x) }}");
+        }
+        let diagnostics = compile_within_a_minute(source, "200k unknown fn calls");
+        assert_eq!(diagnostics.len(), 256);
+        assert!(
+            diagnostics
+                .to_string()
+                .contains("unknown function or builtin `missing0`"),
+            "{diagnostics}"
+        );
+    }
+
+    /// 200k prefix-sets and 200k `apply` calls passing an unknown set:
+    /// argument checks resolve sets by index and stop at the diagnostic cap.
+    #[test]
+    fn many_unknown_set_arguments_compile_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let mut source = String::from(
+            "policy take(s: prefix-set) { term t { if route.prefix in s { reject } } }\n",
+        );
+        for index in 0..200_000 {
+            let _ = writeln!(source, "prefix-set s{index} {{ 10.0.0.0/8 }}");
+        }
+        for index in 0..200_000 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ apply take(missing{index}) }} }}"
+            );
+        }
+        let diagnostics = compile_within_a_minute(source, "200k unknown set arguments");
+        assert_eq!(diagnostics.len(), 256);
+        assert!(
+            diagnostics
+                .to_string()
+                .contains("unknown prefix-set `missing0`"),
+            "{diagnostics}"
+        );
+    }
+
     /// One oversized report still stops at the byte cap.
     #[test]
     fn render_stops_at_the_byte_cap() {
