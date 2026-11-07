@@ -200,6 +200,14 @@ impl Drop for Reservation {
     }
 }
 
+/// After falling back to RTR v1, how long a healthy v1 session runs before
+/// the client reconnects to probe v2 again. 8210bis §7: a router "MUST
+/// attempt to open" each session at the highest version it implements,
+/// and a version can only change on a new transport connection, so a
+/// fallback that a transient failure caused is retried on a later
+/// connection instead of pinning v1 for the life of the process.
+const V2_REPROBE_INTERVAL: Duration = Duration::from_hours(1);
+
 /// Maximum in-transaction restarts (identity mismatch, Cache Reset)
 /// before the connection is dropped and retries are paced by
 /// `retry_interval`.
@@ -369,6 +377,9 @@ pub struct RtrClient {
     /// Until then, Serial Notify PDUs are ignored regardless of their
     /// version field (§5.2/§7).
     negotiation_complete: bool,
+    /// When a v1 session, entered by falling back from v2, next reconnects
+    /// to probe v2 again. See [`V2_REPROBE_INTERVAL`].
+    v2_reprobe_at: Option<TokioInstant>,
     /// Per-transaction budgets (consts in production; shrunk in tests).
     transaction_deadline: Duration,
     max_transaction_records: usize,
@@ -484,6 +495,7 @@ impl RtrClient {
             epoch: None,
             negotiated_version: crate::rtr_codec::RTR_VERSION_2,
             negotiation_complete: false,
+            v2_reprobe_at: None,
             transaction_deadline: TRANSACTION_DEADLINE,
             max_transaction_records: MAX_TRANSACTION_RECORDS,
             max_transaction_bytes: MAX_TRANSACTION_BYTES,
@@ -614,10 +626,26 @@ impl RtrClient {
     }
 
     async fn dial(&self) -> std::io::Result<TcpStream> {
-        match &self.dialer {
-            Some(dial) => dial(self.config.server_addr).await,
-            None => TcpStream::connect(self.config.server_addr).await,
-        }
+        let connect = async {
+            match &self.dialer {
+                Some(dial) => dial(self.config.server_addr).await,
+                None => TcpStream::connect(self.config.server_addr).await,
+            }
+        };
+        // §6: held data MUST NOT be kept past its expire interval. A
+        // connection attempt that hangs past that instant ends there, and
+        // the failed-attempt path flushes the expired data.
+        let Some(expires_at) = self.data_expires_at else {
+            return connect.await;
+        };
+        tokio::time::timeout_at(expires_at, connect)
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "held RTR data expired while connecting",
+                ))
+            })
     }
 
     /// Main event loop — connects, keeps the RTR session open, and reconnects
@@ -657,6 +685,19 @@ impl RtrClient {
         if let Some(epoch) = self.epoch {
             self.negotiated_version = epoch.version;
         }
+        if self.v2_reprobe_due() {
+            // The held v1 data stays live: the probe is a v2 Reset Query,
+            // and a refusal falls straight back to v1 with that epoch.
+            self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
+        }
+    }
+
+    /// A fallback to v1 is old enough to try v2 again.
+    fn v2_reprobe_due(&self) -> bool {
+        self.negotiated_version != crate::rtr_codec::RTR_VERSION_2
+            && self
+                .v2_reprobe_at
+                .is_some_and(|at| TokioInstant::now() >= at)
     }
 
     async fn connect_and_run(&mut self) -> Result<(), std::io::Error> {
@@ -737,18 +778,23 @@ impl RtrClient {
         if matches!(error, RtrError::ServerError { code: 4, .. }) {
             return true;
         }
-        // Server closed the connection, answered with a lower version
-        // byte, or sent garbage without ever completing a transaction
-        // (no epoch established). Real-world caches like GoRTR and
-        // StayRTR disconnect on unsupported versions instead of sending
-        // error code 4.
-        self.epoch.is_none()
+        // Server closed the connection, or answered with a lower version
+        // byte, before this attempt's version was accepted: no epoch is
+        // held, or the held epoch is from v1 and this attempt probes v2.
+        // Real-world caches like GoRTR and StayRTR disconnect on
+        // unsupported versions instead of sending error code 4. A PDU that
+        // carries the probed version but fails to decode is not a refusal:
+        // the cache speaks that version, and the error takes its own
+        // handling (a corrupt Prefix PDU flushes, §12), whether or not a
+        // Cache Response came first. Once the cache has answered at v2,
+        // negotiation is over and no failure is a refusal.
+        !self.negotiation_complete
+            && self
+                .epoch
+                .is_none_or(|epoch| epoch.version < self.negotiated_version)
             && matches!(
                 error,
-                RtrError::Io(_)
-                    | RtrError::ConnectionClosed
-                    | RtrError::Decode(_)
-                    | RtrError::VersionMismatch { .. }
+                RtrError::Io(_) | RtrError::ConnectionClosed | RtrError::VersionMismatch { .. }
             )
     }
 
@@ -758,10 +804,18 @@ impl RtrClient {
             "RTR server does not support v2, falling back to v1 (no ASPA)"
         );
         self.negotiated_version = crate::rtr_codec::RTR_VERSION;
-        // The v2 epoch is no longer valid at v1, so the next query is a
-        // full Reset Query. Held data and its expiry are retained until
-        // the v1 full table replaces them or the expire interval passes.
-        self.epoch = None;
+        self.v2_reprobe_at = Some(TokioInstant::now() + V2_REPROBE_INTERVAL);
+        // A v2 epoch is not valid at v1, so the next query is a full Reset
+        // Query; held data and its expiry are retained until the v1 full
+        // table replaces them or the expire interval passes. A v1 epoch
+        // (a failed v2 re-probe) stays, and the v1 session resumes with a
+        // Serial Query.
+        if self
+            .epoch
+            .is_some_and(|epoch| epoch.version != crate::rtr_codec::RTR_VERSION)
+        {
+            self.epoch = None;
+        }
 
         match self.dial().await {
             Ok(mut stream) => {
@@ -1079,6 +1133,16 @@ impl RtrClient {
                 .wait_for_next_query(stream, &mut read_buf, &mut parse_buf)
                 .await
             {
+                // Instead of the next query on this v1 session, reconnect
+                // to probe v2 (§7: the version changes only on a new
+                // connection).
+                Ok(_) if self.v2_reprobe_due() => {
+                    info!(
+                        server = %self.config.server_addr,
+                        "RTR reconnecting to probe protocol v2 after a v1 fallback"
+                    );
+                    return Ok(());
+                }
                 Ok(query) => next_query = query,
                 Err(error) => break error,
             }
@@ -1087,7 +1151,9 @@ impl RtrClient {
         // An Error Report, where the draft calls for one, is sent
         // BEFORE the session is dropped (8210bis §5.11, §12) — and
         // never in response to a received Error Report.
-        if let Some((code, pdu, text)) = teardown_report(&result, &parse_buf) {
+        if let Some((code, pdu, text)) =
+            teardown_report(&result, &parse_buf, self.negotiation_complete)
+        {
             self.send_error_report(stream, code, &pdu, text).await;
         }
         Err(result)
@@ -1247,6 +1313,21 @@ impl RtrClient {
         mut query: QueryKind,
     ) -> Result<(), RtrError> {
         let deadline = TokioInstant::now() + self.transaction_deadline;
+        // §6: the held data expires on time even while a query is in
+        // flight; a transaction still running then ends and the data is
+        // flushed. The bound covers every read and every query write: a
+        // cache that stops reading can fill the socket buffers and stall a
+        // write as long as one that stops sending stalls a read.
+        let expires_at = self.data_expires_at;
+        let io_deadline = expires_at.map_or(deadline, |at| at.min(deadline));
+        let expired = || expires_at.is_some_and(|at| TokioInstant::now() >= at);
+        let timed_out = || {
+            if expired() {
+                RtrError::Expired
+            } else {
+                RtrError::TransactionTimeout
+            }
+        };
         let mut bytes: usize = 0;
         let mut restarts: u8 = 0;
 
@@ -1286,7 +1367,9 @@ impl RtrClient {
             let mut aspa_withdrawn: Vec<AspaRecord> = Vec::new();
             // Announcements charged to the record caps as they decode.
             let mut reservation = Reservation::new(Arc::clone(&self.record_budget));
-            let is_reset = self.send_query(stream, query).await?;
+            let is_reset = tokio::time::timeout_at(io_deadline, self.send_query(stream, query))
+                .await
+                .map_err(|_| timed_out())??;
 
             loop {
                 while let Some(pdu) = self.next_pdu(parse_buf)? {
@@ -1681,9 +1764,12 @@ impl RtrClient {
                     }
                 }
 
-                let n = tokio::time::timeout_at(deadline, stream.read(read_buf))
+                if expired() {
+                    return Err(RtrError::Expired);
+                }
+                let n = tokio::time::timeout_at(io_deadline, stream.read(read_buf))
                     .await
-                    .map_err(|_| RtrError::TransactionTimeout)?
+                    .map_err(|_| timed_out())?
                     .map_err(RtrError::Io)?;
                 if n == 0 {
                     return Err(RtrError::ConnectionClosed);
@@ -1713,7 +1799,11 @@ impl RtrClient {
 /// Returns `None` for received Error Reports — §5.11: "An Error Report
 /// PDU MUST NOT be sent as a response to an Error Report PDU" — and for
 /// events with no draft-assigned code (transport loss, local budgets).
-fn teardown_report(error: &RtrError, parse_buf: &[u8]) -> Option<(u16, Vec<u8>, &'static str)> {
+fn teardown_report(
+    error: &RtrError,
+    parse_buf: &[u8],
+    negotiated: bool,
+) -> Option<(u16, Vec<u8>, &'static str)> {
     // §5.11/§7: never answer an Error Report — even one that is itself
     // erroneous (bad version byte, undecodable) — with an Error Report.
     let offending_is_error_report =
@@ -1729,8 +1819,17 @@ fn teardown_report(error: &RtrError, parse_buf: &[u8]) -> Option<(u16, Vec<u8>, 
         // negotiated one → code 8 ("Unexpected Protocol Version") for a
         // known-but-wrong version, code 4 ("Unsupported Protocol
         // Version") for a version this implementation does not know.
-        RtrError::VersionMismatch { got, .. } => {
+        RtrError::VersionMismatch { expected, got } => {
             if offending_is_error_report {
+                return None;
+            }
+            // §7: a response at a lower version than the router's query is
+            // the cache downgrading, and the router "MUST either downgrade
+            // ... or terminate the connection". Terminating needs no
+            // report: code 8 is for a version that "differs from the
+            // protocol version negotiated", and none has been negotiated
+            // yet. The fallback then reconnects at the lower version.
+            if !negotiated && got < expected {
                 return None;
             }
             let (code, text) = if matches!(got, 0..=2) {
@@ -3646,6 +3745,456 @@ mod tests {
         let _ = client_handle.await;
     }
 
+    /// A transient failure before the first End of Data falls back to v1,
+    /// and the v1 session takes the fallback's held data. The client does
+    /// not stay at v1 for good: after the re-probe interval it reconnects at
+    /// v2, and a v2-capable cache brings back v2 and ASPA without a restart.
+    #[tokio::test(start_paused = true)]
+    async fn v1_fallback_reprobes_v2_after_the_interval_and_regains_aspa() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        // A connection reset before End of Data.
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(stream);
+
+        let (mut v1, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut v1).await,
+            (crate::rtr_codec::RTR_VERSION, RtrPdu::ResetQuery)
+        );
+        write_pdus_version(
+            &mut v1,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 3600,
+                    retry: 0,
+                    expire: 7200,
+                },
+            ],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        assert!(matches!(
+            vrp_rx.recv().await.unwrap(),
+            VrpUpdate::FullTable { .. }
+        ));
+
+        // The healthy v1 session stays open; at the first refresh past
+        // the re-probe interval the client reconnects at v2.
+        let (mut v2, _) = timeout(Duration::from_secs(4000), listener.accept())
+            .await
+            .expect("no reconnect after the re-probe interval")
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut v2).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery),
+            "the reconnect did not probe v2"
+        );
+        let aspa = AspaRecord {
+            customer_asn: 64_500,
+            provider_asns: vec![64_501],
+        };
+        write_pdus(
+            &mut v2,
+            &[
+                RtrPdu::CacheResponse { session_id: 9 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::Aspa {
+                    flags: 1,
+                    customer_asn: aspa.customer_asn,
+                    provider_asns: aspa.provider_asns.clone(),
+                },
+                RtrPdu::EndOfData {
+                    session_id: 9,
+                    serial: 1,
+                    refresh: 3600,
+                    retry: 0,
+                    expire: 7200,
+                },
+            ],
+        )
+        .await;
+        assert_eq!(
+            vrp_rx.recv().await.unwrap(),
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 65001)],
+                aspa_records: vec![aspa],
+            }
+        );
+        drop(v1);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// A v2 re-probe that a v1-only cache refuses falls straight back to
+    /// v1, keeping the held v1 epoch: the next query is a v1 Serial Query,
+    /// nothing is flushed, and there is no retry-paced probe loop.
+    #[tokio::test(start_paused = true)]
+    async fn refused_v2_reprobe_resumes_v1_with_the_held_epoch() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(stream);
+        let (mut v1, _) = listener.accept().await.unwrap();
+        let _ = read_pdu_with_version(&mut v1).await;
+        write_pdus_version(
+            &mut v1,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 3600,
+                    retry: 0,
+                    expire: 7200,
+                },
+            ],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        let _ = vrp_rx.recv().await.unwrap();
+
+        let (mut probe, _) = timeout(Duration::from_secs(4000), listener.accept())
+            .await
+            .expect("no reconnect after the re-probe interval")
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut probe).await.0,
+            crate::rtr_codec::RTR_VERSION_2
+        );
+        // A v1-only cache: Unsupported Protocol Version at v1.
+        write_pdu_version(
+            &mut probe,
+            RtrPdu::ErrorReport {
+                code: 4,
+                pdu: Vec::new(),
+                text: "unsupported protocol version".to_string(),
+            },
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+
+        let (mut resumed, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the refused probe did not fall back to v1 at once")
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut resumed).await,
+            (
+                crate::rtr_codec::RTR_VERSION,
+                RtrPdu::SerialQuery {
+                    session_id: 7,
+                    serial: 1,
+                }
+            ),
+            "the v1 epoch was not kept through the refused probe"
+        );
+        assert!(vrp_rx.try_recv().is_err(), "held data was flushed");
+        drop(v1);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// A v2 re-probe that the cache accepts has completed negotiation, so a
+    /// corrupt Prefix PDU in its first transaction is the §12 fatal error it
+    /// is anywhere else: the held v1 data is flushed. Before End of Data the
+    /// held epoch is still v1, which must not turn the error into a v1
+    /// fallback that keeps the data.
+    #[tokio::test(start_paused = true)]
+    async fn corrupt_prefix_after_accepted_v2_reprobe_flushes_held_data() {
+        corrupt_prefix_during_v2_reprobe_flushes_held_data(true).await;
+    }
+
+    /// A corrupt Prefix PDU at the probed version, even ahead of any Cache
+    /// Response, shows the cache speaks v2: it is the same §12 fatal error,
+    /// not a version refusal, so the held v1 data is flushed.
+    #[tokio::test(start_paused = true)]
+    async fn corrupt_prefix_before_the_v2_reprobe_response_flushes_held_data() {
+        corrupt_prefix_during_v2_reprobe_flushes_held_data(false).await;
+    }
+
+    async fn corrupt_prefix_during_v2_reprobe_flushes_held_data(cache_response_first: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(stream);
+        let (mut v1, _) = listener.accept().await.unwrap();
+        let _ = read_pdu_with_version(&mut v1).await;
+        write_pdus_version(
+            &mut v1,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 3600,
+                    retry: 0,
+                    expire: 7200,
+                },
+            ],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        let _ = vrp_rx.recv().await.unwrap();
+
+        let (mut probe, _) = timeout(Duration::from_secs(4000), listener.accept())
+            .await
+            .expect("no reconnect after the re-probe interval")
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut probe).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery)
+        );
+        if cache_response_first {
+            write_pdus(&mut probe, &[RtrPdu::CacheResponse { session_id: 9 }]).await;
+        }
+        // Host bits set: a corrupt Prefix PDU (§12, code 0).
+        write_pdus(
+            &mut probe,
+            &[RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 1),
+                asn: 65001,
+            }],
+        )
+        .await;
+
+        assert_eq!(
+            timeout(Duration::from_secs(5), vrp_rx.recv())
+                .await
+                .expect("the corrupt Prefix PDU did not flush the held data")
+                .unwrap(),
+            VrpUpdate::ServerDown { server: addr }
+        );
+        drop(v1);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: held data expires on time while a refresh query is in flight. A
+    /// cache that accepts the query and never answers must not keep the
+    /// data published until the transaction deadline.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_expires_during_a_stalled_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Refresh 60 s, expire 120 s: the refresh query is still
+        // unanswered when the data expires.
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 120).await;
+        let accepted = TokioInstant::now();
+        assert!(matches!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery { .. }
+        ));
+
+        let update = timeout(Duration::from_secs(1000), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        assert!(
+            accepted.elapsed() <= Duration::from_secs(120),
+            "flushed {:?} after End of Data, past the 120 s expire",
+            accepted.elapsed()
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: held data expires on time while a query write is blocked. A cache
+    /// that never reads lets the socket buffers fill, and the next query
+    /// write must not wait past the expire interval.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_expires_during_a_blocked_query_write() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dials);
+        // The first connection is ordinary. Every later one arrives with its
+        // send path already full, as after a cache stopped reading.
+        let client = zero_retry_client(addr, vrp_tx).with_dialer(move |_| {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                let stream = TcpStream::connect(addr).await?;
+                if !first {
+                    let filler = vec![0u8; 65_536];
+                    loop {
+                        match stream.try_write(&filler) {
+                            Ok(_) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                Ok(stream)
+            }
+        });
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 120).await;
+        let accepted = TokioInstant::now();
+        drop(stream);
+        // Held open and never read.
+        let (_silent, _) = listener.accept().await.unwrap();
+
+        let update = timeout(Duration::from_secs(1000), vrp_rx.recv())
+            .await
+            .expect("held data outlived its expire interval behind a blocked query write")
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        assert!(accepted.elapsed() <= Duration::from_secs(120));
+        assert!(dials.load(Ordering::SeqCst) >= 2);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: held data expires on time while a reconnect hangs in connect.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_expires_during_a_hung_connect() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dials);
+        // The first connection succeeds; every later one never completes.
+        let client = zero_retry_client(addr, vrp_tx).with_dialer(move |_| {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                if first {
+                    TcpStream::connect(addr).await
+                } else {
+                    std::future::pending().await
+                }
+            }
+        });
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 120).await;
+        let accepted = TokioInstant::now();
+        drop(stream);
+
+        let update = timeout(Duration::from_secs(1000), vrp_rx.recv())
+            .await
+            .expect("held data outlived its expire interval during a hung connect")
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        assert!(accepted.elapsed() <= Duration::from_secs(120));
+        assert!(dials.load(Ordering::SeqCst) >= 2);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §7: a cache that answers the v2 query with a v1 Cache Response is
+    /// downgrading. The router terminates without an Error Report (code 8
+    /// applies only once a version is negotiated) and reconnects at v1.
+    #[tokio::test]
+    async fn downgrade_reply_during_negotiation_falls_back_without_error_report() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, _vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut stream).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery)
+        );
+        write_pdu_version(
+            &mut stream,
+            RtrPdu::CacheResponse { session_id: 7 },
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        let mut rest = Vec::new();
+        timeout(Duration::from_secs(5), stream.read_to_end(&mut rest))
+            .await
+            .expect("the client did not close the downgraded connection")
+            .unwrap();
+        assert!(
+            rest.is_empty(),
+            "the client answered the downgrade with {:?}",
+            RtrPdu::decode(&rest).map(|(pdu, _)| pdu)
+        );
+
+        let (mut v1, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut v1).await,
+            (crate::rtr_codec::RTR_VERSION, RtrPdu::ResetQuery)
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn record_budget_exceeded_drops_connection_without_publishing() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3664,16 +4213,30 @@ mod tests {
                 flags: 1,
                 prefix_len: 24,
                 max_len: 24,
-                prefix: Ipv4Addr::new(203, 0, 113, i),
+                // Distinct /24s with no host bits: the budget, not a
+                // corrupt Prefix PDU, must end the transaction.
+                prefix: Ipv4Addr::new(203, 0, 113 + i, 0),
                 asn: 65001,
             });
         }
+        // A complete transaction, so an unenforced budget would publish it.
+        pdus.push(RtrPdu::EndOfData {
+            session_id: 7,
+            serial: 1,
+            refresh: 60,
+            retry: 5,
+            expire: 120,
+        });
         write_pdus(&mut stream, &pdus).await;
 
         // Budget exceeded: the client drops the connection (bounded
         // error, no wedge/OOM) and publishes nothing.
         let (mut stream2, _) = listener.accept().await.unwrap();
-        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert_eq!(
+            read_pdu_with_version(&mut stream2).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery),
+            "a record-budget failure is not a version refusal"
+        );
         assert!(vrp_rx.try_recv().is_err());
 
         client_handle.abort();

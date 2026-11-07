@@ -109,6 +109,25 @@ impl Ord for VrpEntry {
 }
 
 /// Mask an IPv4 address to its leading `len` bits (`len <= 32`).
+impl VrpEntry {
+    /// This entry with host bits cleared, as validation reads it. RTR v1
+    /// accepts Prefix PDUs with host bits set; keying a cache's records by
+    /// the canonical prefix keeps a withdrawal from missing its
+    /// announcement over the same network.
+    pub(crate) fn canonical(self) -> Self {
+        let prefix = match self.prefix {
+            IpAddr::V4(addr) if self.prefix_len <= 32 => {
+                IpAddr::V4(Ipv4Addr::from(mask_v4(addr, self.prefix_len)))
+            }
+            IpAddr::V6(addr) if self.prefix_len <= 128 => {
+                IpAddr::V6(Ipv6Addr::from(mask_v6(addr, self.prefix_len)))
+            }
+            other => other,
+        };
+        Self { prefix, ..self }
+    }
+}
+
 fn mask_v4(addr: Ipv4Addr, len: u8) -> u32 {
     let bits = u32::from(addr);
     if len == 0 {
