@@ -292,7 +292,7 @@ impl ConfigPersister {
         self.discard_staged();
         // Refuse while the caller can still back out with no effect; the
         // commit checks again for an edit made during its runtime apply.
-        self.verify_on_disk()?;
+        self.verify_on_disk(&self.config_path)?;
         let staged = crate::confirm_journal::stage_atomic(
             &self.config_path,
             new_config.normalized_toml().as_bytes(),
@@ -313,7 +313,7 @@ impl ConfigPersister {
             );
         };
         let written = sha256_of(config.normalized_toml());
-        match staged.commit_if(|| self.verify_on_disk()) {
+        match staged.commit_if(|target| self.verify_on_disk(target)) {
             Ok(()) => {
                 self.current = config;
                 self.on_disk = Some(written);
@@ -366,7 +366,7 @@ impl ConfigPersister {
             Err(error) => return ConfigPersistCommitOutcome::NotPublished(error.to_string()),
         };
         let written = sha256_of(self.current.normalized_toml());
-        match staged.commit_if(|| self.verify_on_disk()) {
+        match staged.commit_if(|target| self.verify_on_disk(target)) {
             Ok(()) => {
                 self.on_disk = Some(written);
                 self.record_current_history(None);
@@ -382,15 +382,17 @@ impl ConfigPersister {
         }
     }
 
-    /// The stale-source fence: the config file must still be the version
-    /// the daemon last read or wrote. An operator edit not yet adopted by
-    /// SIGHUP fails the write before anything is published, and the edit
-    /// stays on disk.
-    fn verify_on_disk(&self) -> std::io::Result<()> {
+    /// The stale-source fence: `path`, the config file or the destination a
+    /// stage resolved it to, must still hold the version the daemon last
+    /// read or wrote. An operator edit not yet adopted by SIGHUP fails the
+    /// write before anything is published, and the edit stays on disk. A
+    /// save in the moment between the commit's check and its rename is not
+    /// caught; see [`crate::confirm_journal::StagedWrite::commit_if`].
+    fn verify_on_disk(&self, path: &std::path::Path) -> std::io::Result<()> {
         let Some(expected) = self.on_disk else {
             return Ok(());
         };
-        let current = match std::fs::read(&self.config_path) {
+        let current = match std::fs::read(path) {
             Ok(bytes) => Some(sha256_of(&bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
@@ -1399,6 +1401,61 @@ log_format = "json"
             .expect("stage after own write");
         assert_eq!(commit().await, ConfigPersistCommitOutcome::PublishedDurable);
 
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    /// The commit checks the file its rename replaces, the symlink target the
+    /// stage resolved, not what the configured path resolves to by then. An
+    /// operator who edits that target and repoints the symlink at a copy of
+    /// the accepted bytes keeps the edit.
+    #[tokio::test]
+    async fn staged_commit_checks_the_staged_target_through_a_repointed_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("config.toml");
+        std::fs::write(
+            &real,
+            crate::test_support::tier_authorized_uds_test_config(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n\
+                 [global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n",
+            ),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let booted = Arc::new(AcceptedConfigSnapshot::load(&link, None).unwrap());
+        let mut config = booted.config();
+        config.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        let candidate = booted.derive_config(config).unwrap();
+        let (tx, rx) = mpsc::channel(4);
+        let handle = tokio::spawn(
+            ConfigPersister::new_accepted(rx, link.clone(), Arc::clone(&booted), None).run(),
+        );
+        let (ack, staged) = oneshot::channel();
+        tx.send(ConfigMutation::StageConfigAck(candidate, ack))
+            .await
+            .unwrap();
+        staged.await.unwrap().expect("stage before any edit");
+
+        let accepted = std::fs::read_to_string(&real).unwrap();
+        let edited = format!("{accepted}\n# operator edit\n");
+        std::fs::write(&real, &edited).unwrap();
+        let copy = dir.path().join("copy.toml");
+        std::fs::write(&copy, &accepted).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&copy, &link).unwrap();
+
+        let (ack, outcome) = oneshot::channel();
+        tx.send(ConfigMutation::CommitStagedConfig(ack))
+            .await
+            .unwrap();
+        let outcome = outcome.await.unwrap();
+        let ConfigPersistCommitOutcome::NotPublished(error) = &outcome else {
+            panic!("the commit must not publish over the edit: {outcome:?}");
+        };
+        assert!(error.contains(CONFIG_CHANGED_ON_DISK), "{error}");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), edited);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), accepted);
         drop(tx);
         handle.await.unwrap();
     }

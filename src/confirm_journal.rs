@@ -161,14 +161,21 @@ impl StagedWrite {
     }
 
     /// Re-run a caller-owned stale-source fence immediately before publish.
+    /// The fence gets the destination this stage resolved, the file the
+    /// rename replaces: a symlink repointed since then cannot send the check
+    /// to another file.
+    ///
+    /// The fence and the rename are separate steps. A write to the
+    /// destination after the fence reads it is still replaced; without a
+    /// lock every writer takes, no check-then-rename closes that window.
     pub(crate) fn commit_if(
         mut self,
-        fence: impl FnOnce() -> io::Result<()>,
+        fence: impl FnOnce(&Path) -> io::Result<()>,
     ) -> Result<(), AtomicPublishError> {
         self.file
             .sync_all()
             .map_err(AtomicPublishError::NotPublished)?;
-        fence()
+        fence(&self.target)
             .map_err(|error| name_write_failure(&self.target, &error))
             .map_err(AtomicPublishError::NotPublished)?;
         self.publish()

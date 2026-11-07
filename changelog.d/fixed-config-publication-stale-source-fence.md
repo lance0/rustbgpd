@@ -10,4 +10,8 @@
   transaction compensate and fail. The other mutations cannot undo their
   runtime change, so they fence the daemon (exit 70), and it restarts from
   the edited file. In every case the edit stays on disk; SIGHUP adopts it.
+  The check is active from boot, also after a commit-confirm boot revert,
+  and through a symlinked config path it reads the file the write replaces.
+  A save in the brief interval between the last check and the rename can
+  still be replaced.
   See [runtime changes rewrite the config file](../docs/reference/operations.md#runtime-changes-rewrite-the-config-file).

@@ -1116,6 +1116,14 @@ rename.
 Either way, `rbgp doctor` reports `daemon.config_freshness` yellow until a
 SIGHUP adopts the edit. After that, mutations write the file again.
 
+The check starts at boot, including after a commit-confirm boot revert. When
+the config path is a symlink, the check reads the file the write will
+replace, the symlink's target. The last check and the rename are still two
+steps. A save in the brief interval between them, while the daemon reads
+and hashes the file, is replaced without a refusal. Editors and the daemon
+share no lock that could close that window. Avoid it by sending SIGHUP
+after each edit and before the next runtime mutation.
+
 ---
 
 ## Upgrading
