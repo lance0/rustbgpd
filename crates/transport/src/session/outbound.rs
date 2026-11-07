@@ -257,6 +257,9 @@ impl PendingOutbound {
         shared: Option<(Arc<super::shared_group::ProgressiveGroupEncode>, usize)>,
         requests: Vec<(Afi, Safi)>,
     ) -> Self {
+        // Election is finished. The cursor owns any stream this member uses;
+        // the envelope must not retain its chunks through EoR or retirement.
+        update.shared_group_encode = None;
         let evpn_announce = take_private_announcements(&mut update.evpn_announce, shared.is_some());
         let vpn_announce = take_private_announcements(&mut update.vpn_announce, shared.is_some());
         Self {

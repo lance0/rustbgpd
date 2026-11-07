@@ -278,6 +278,21 @@ impl ProgressiveGroupEncode {
         let (chunks, terminal) = self.snapshot_from(0, usize::MAX);
         (chunks.len(), terminal)
     }
+
+    /// Logical wire bytes and chunk-vector allocation; excludes allocator
+    /// overhead and any spare capacity hidden behind `Bytes`.
+    #[cfg(test)]
+    pub(super) fn test_retained_bytes(&self) -> (usize, usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.chunks.len(),
+            state.chunks.iter().map(|chunk| chunk.bytes.len()).sum(),
+            state.chunks.capacity() * std::mem::size_of::<SharedAnnounceChunk>(),
+        )
+    }
 }
 
 /// Publishes `Failed` and notifies waiters if the producer returns early,

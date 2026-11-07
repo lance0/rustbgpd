@@ -1,6 +1,9 @@
 use super::*;
 use rustbgpd_rib::AttrSet;
 
+#[cfg(all(feature = "bench-internals", target_os = "linux"))]
+mod retention_probe;
+
 /// RIB staging normally removes OTC-blocked routes. The shared encoder must
 /// still defer a blocked payload to the per-session path for diagnostics.
 #[test]
@@ -3138,7 +3141,7 @@ impl RetirementFixture {
         } else {
             (0..count)
                 .map(|i| Route {
-                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 | (i << 8)), 24)),
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 + (i << 8)), 24)),
                     ..unicast_template.clone()
                 })
                 .collect()
@@ -3213,6 +3216,119 @@ impl RetirementFixture {
 
 const RETIRE_SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
 const RETIRE_TOTAL: usize = 4 * RETIRE_SLICE + 1;
+
+/// The election cell must survive an unstarted follower, but a member that
+/// has consumed the stream no longer needs its encoded chunks while `EoR` is
+/// blocked or its route inventory is retiring. Only weak observations of
+/// the actual production stream remain outside the two outbound envelopes.
+#[tokio::test]
+async fn shared_chunks_release_before_blocked_eor_and_inventory_retirement() {
+    use super::shared_group::ProgressiveGroupEncode;
+
+    for vpn in [false, true] {
+        let mut fixture = RetirementFixture::new(vpn, RETIRE_TOTAL, 100_000);
+        let family = (Afi::Ipv4, if vpn { Safi::MplsVpn } else { Safi::Unicast });
+        fixture.updates[1].end_of_rib = vec![family];
+        let update = fixture.updates.remove(0);
+        fixture.members[0].0.test_drain_outbound(update).await;
+        while fixture.members[0].2.try_recv().is_ok() {}
+
+        let (stream, retained) = {
+            let cell = fixture.updates[0].shared_group_encode.as_ref().unwrap();
+            let stream = Arc::clone(cell.cell.get().unwrap())
+                .downcast::<ProgressiveGroupEncode>()
+                .unwrap();
+            (Arc::downgrade(&stream), stream.test_retained_bytes())
+        };
+        assert!(
+            stream.upgrade().is_some(),
+            "the unstarted follower needs the stream"
+        );
+        assert!(retained.0 > 1 && retained.1 > 0 && retained.2 > 0);
+
+        // One slot pins EoR immediately behind the last announcement.
+        let (writer, frames) = mpsc::channel(1);
+        fixture.members[1].0.writer_bulk_tx = Some(writer);
+        fixture.members[1].2 = frames;
+        let update = fixture.updates.remove(0);
+        fixture.members[1]
+            .0
+            .handle_outbound_route_update(update)
+            .await;
+        let mut announced = 0;
+        for _ in 0..retained.0 + 16 {
+            let (member, _, frames) = &mut fixture.members[1];
+            let pending = member.pending_outbound.as_ref().expect("EoR still pending");
+            if pending.shared.is_none() {
+                break;
+            }
+            if let Ok(frame) = frames.try_recv() {
+                let parsed = parse_frame(&frame, false);
+                announced += if vpn {
+                    parsed
+                        .attributes
+                        .iter()
+                        .map(|attr| match attr {
+                            PathAttribute::MpReachNlri(mp) => mp.vpn_announced.len(),
+                            _ => 0,
+                        })
+                        .sum::<usize>()
+                } else {
+                    parsed.announced.len()
+                };
+            }
+            member.advance_pending_outbound();
+        }
+        assert_eq!(fixture.live(), RETIRE_TOTAL);
+        let (member, _, frames) = &mut fixture.members[1];
+        assert!(member.pending_outbound.as_ref().unwrap().shared.is_none());
+        assert_eq!(member.writer_bulk_tx.as_ref().unwrap().capacity(), 0);
+        assert!(!member.pending_outbound.as_ref().unwrap().retiring());
+        eprintln!(
+            "vpn={vpn} chunks={} wire_bytes={} chunk_capacity_bytes={} retained_after_announce={}",
+            retained.0,
+            retained.1,
+            retained.2,
+            stream.upgrade().is_some()
+        );
+        assert!(
+            stream.upgrade().is_none(),
+            "completed shared chunks remain behind EoR"
+        );
+
+        let parsed = parse_frame(&frames.try_recv().unwrap(), false);
+        announced += if vpn {
+            parsed
+                .attributes
+                .iter()
+                .map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => mp.vpn_announced.len(),
+                    _ => 0,
+                })
+                .sum::<usize>()
+        } else {
+            parsed.announced.len()
+        };
+        assert_eq!(announced, RETIRE_TOTAL, "all announcements precede EoR");
+        member.advance_pending_outbound();
+        let terminal = parse_frame(
+            &frames.try_recv().expect("EoR follows announcements"),
+            false,
+        );
+        assert_eq!(terminal.announced.len(), 0);
+        if vpn {
+            assert!(terminal.attributes.iter().any(|attr| matches!(attr,
+                PathAttribute::MpUnreachNlri(mp) if mp.vpn_withdrawn.is_empty())));
+        } else {
+            assert!(terminal.attributes.is_empty() && terminal.withdrawn.is_empty());
+        }
+        assert!(member.pending_outbound.as_ref().unwrap().retiring());
+        assert!(stream.upgrade().is_none());
+        let mut released = Vec::new();
+        fixture.drain(1, &mut released).await;
+        assert_eq!(fixture.live(), 0);
+    }
+}
 
 /// The member that holds the last reference to a completed shared inventory
 /// releases it one bounded batch per advance after its final frame, not in
