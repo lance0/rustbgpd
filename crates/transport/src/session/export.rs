@@ -1407,6 +1407,7 @@ impl SessionExportProfile {
     /// Reserve a complete single-entry frame without preparing or encoding it
     /// twice. The live sender remains the validator, including malformed or
     /// oversized rows: clamping lets it run once a full frame's credit exists.
+    #[inline]
     pub(super) fn announcement_wire_bound(&self, candidate: ExportCandidate<'_>) -> usize {
         let (attrs, framing) = match candidate {
             // MP framing is at most 32 octets before next-hop/NLRI: BGP
@@ -1458,6 +1459,7 @@ impl SessionExportProfile {
 
     /// Complete single-entry withdrawal frame bound without reconstructing
     /// or encoding the NLRI. `MP_UNREACH` framing is at most 30 octets.
+    #[inline]
     pub(super) fn withdrawal_wire_bound(&self, candidate: ExportWithdrawal<'_>) -> usize {
         let length = match candidate {
             ExportWithdrawal::Unicast { .. } => 52,

@@ -44,52 +44,37 @@ pub struct SelectionSummary {
     wire_bound: u8,
 }
 
+// The same seven first-match slots used while constructing a summary. This
+// accumulator stays on the stack; bound-only callers need none of it.
+#[derive(Default)]
+struct SelectionInputs {
+    local_pref: Option<u32>,
+    med: Option<u32>,
+    as_path_len: Option<u32>,
+    cluster_list_len: Option<u32>,
+    originator_id: Option<Ipv4Addr>,
+    origin: Option<Origin>,
+    llgr_stale: Option<bool>,
+}
+
 impl SelectionSummary {
     fn compute(attrs: &[PathAttribute]) -> Self {
-        let mut local_pref = None;
-        let mut med = None;
-        let mut as_path_len = None;
-        let mut cluster_list_len = None;
-        let mut originator_id = None;
-        let mut origin = None;
-        let mut llgr_stale = None;
+        let mut selection = SelectionInputs::default();
         let mut wire_bound = 0_usize;
         for attr in attrs {
-            wire_bound = wire_bound.saturating_add(attribute_wire_bound(attr));
-            match attr {
-                PathAttribute::LocalPref(v) => {
-                    local_pref.get_or_insert(*v);
-                }
-                PathAttribute::Med(v) => {
-                    med.get_or_insert(*v);
-                }
-                PathAttribute::AsPath(path) => {
-                    as_path_len.get_or_insert_with(|| saturating_u32(path.len()));
-                }
-                PathAttribute::ClusterList(ids) => {
-                    cluster_list_len.get_or_insert_with(|| saturating_u32(ids.len()));
-                }
-                PathAttribute::OriginatorId(id) => {
-                    originator_id.get_or_insert(*id);
-                }
-                PathAttribute::Origin(o) => {
-                    origin.get_or_insert(*o);
-                }
-                other => {
-                    if let Some(values) = other.communities() {
-                        llgr_stale.get_or_insert_with(|| values.contains(&COMMUNITY_LLGR_STALE));
-                    }
-                }
-            }
+            wire_bound = wire_bound.saturating_add(attribute_wire_bound_with_selection(
+                attr,
+                Some(&mut selection),
+            ));
         }
         Self {
-            local_pref: local_pref.unwrap_or(100),
-            med: med.unwrap_or(0),
-            as_path_len: as_path_len.unwrap_or(0),
-            cluster_list_len: cluster_list_len.unwrap_or(0),
-            originator_id,
-            origin: origin.unwrap_or(Origin::Incomplete),
-            llgr_stale: llgr_stale.unwrap_or(false),
+            local_pref: selection.local_pref.unwrap_or(100),
+            med: selection.med.unwrap_or(0),
+            as_path_len: selection.as_path_len.unwrap_or(0),
+            cluster_list_len: selection.cluster_list_len.unwrap_or(0),
+            originator_id: selection.originator_id,
+            origin: selection.origin.unwrap_or(Origin::Incomplete),
+            llgr_stale: selection.llgr_stale.unwrap_or(false),
             wire_bound: compact_wire_bound(wire_bound),
         }
     }
@@ -121,31 +106,78 @@ fn expand_wire_bound(compact: u8) -> usize {
 /// and both the legacy and AS4 compatibility forms. A saturated result means
 /// the caller must reserve a complete maximum-size frame and let the encoder
 /// retain its existing validation/error behavior.
+#[inline]
 #[must_use]
 pub fn attribute_wire_bound(attr: &PathAttribute) -> usize {
+    attribute_wire_bound_with_selection(attr, None)
+}
+
+#[inline]
+fn attribute_wire_bound_with_selection(
+    attr: &PathAttribute,
+    selection: Option<&mut SelectionInputs>,
+) -> usize {
     let value = match attr {
-        PathAttribute::Origin(_) => 1,
+        PathAttribute::Origin(origin) => {
+            if let Some(selection) = selection {
+                selection.origin.get_or_insert(*origin);
+            }
+            1
+        }
         PathAttribute::AsPath(path) => {
             // Two headers, 2+4 octets per ASN, and two 2-octet segment
             // headers for every group of at most 255 ASNs. Even when an
             // AS4 sidecar is unnecessary this remains an upper bound.
-            return path.segments.iter().fold(8_usize, |bound, segment| {
-                let (AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns)) = segment;
-                bound
+            let mut bound = 8_usize;
+            let mut path_len = 0_usize;
+            for segment in &path.segments {
+                let (asns, count) = match segment {
+                    AsPathSegment::AsSequence(asns) => (asns, asns.len()),
+                    // AsPath::len counts every AS_SET as one, even if empty.
+                    AsPathSegment::AsSet(asns) => (asns, 1),
+                };
+                path_len = path_len.saturating_add(count);
+                bound = bound
                     .saturating_add(asns.len().saturating_mul(6))
-                    .saturating_add(asns.len().div_ceil(255).saturating_mul(4))
-            });
+                    .saturating_add(asns.len().div_ceil(255).saturating_mul(4));
+            }
+            if let Some(selection) = selection {
+                selection
+                    .as_path_len
+                    .get_or_insert(saturating_u32(path_len));
+            }
+            return bound;
         }
         // Legacy AGGREGATOR (6) plus AS4_AGGREGATOR (8), with both headers.
         PathAttribute::Aggregator(_) => return 22,
         PathAttribute::AtomicAggregate => 0,
+        PathAttribute::LocalPref(value) => {
+            if let Some(selection) = selection {
+                selection.local_pref.get_or_insert(*value);
+            }
+            4
+        }
+        PathAttribute::Med(value) => {
+            if let Some(selection) = selection {
+                selection.med.get_or_insert(*value);
+            }
+            4
+        }
+        PathAttribute::OriginatorId(value) => {
+            if let Some(selection) = selection {
+                selection.originator_id.get_or_insert(*value);
+            }
+            4
+        }
         PathAttribute::NextHop(_)
-        | PathAttribute::LocalPref(_)
-        | PathAttribute::Med(_)
-        | PathAttribute::OriginatorId(_)
         | PathAttribute::OnlyToCustomer(_)
         | PathAttribute::OnlyToCustomerPartial(_) => 4,
         PathAttribute::Communities(values) | PathAttribute::CommunitiesPartial(values) => {
+            if let Some(selection) = selection {
+                selection
+                    .llgr_stale
+                    .get_or_insert_with(|| values.contains(&COMMUNITY_LLGR_STALE));
+            }
             values.len().saturating_mul(4)
         }
         PathAttribute::ExtendedCommunities(values)
@@ -154,7 +186,14 @@ pub fn attribute_wire_bound(attr: &PathAttribute) -> usize {
         | PathAttribute::Ipv6ExtendedCommunitiesPartial(values) => values.len().saturating_mul(20),
         PathAttribute::LargeCommunities(values)
         | PathAttribute::LargeCommunitiesPartial(values) => values.len().saturating_mul(12),
-        PathAttribute::ClusterList(values) => values.len().saturating_mul(4),
+        PathAttribute::ClusterList(values) => {
+            if let Some(selection) = selection {
+                selection
+                    .cluster_list_len
+                    .get_or_insert_with(|| saturating_u32(values.len()));
+            }
+            values.len().saturating_mul(4)
+        }
         PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => return 0,
         PathAttribute::PmsiTunnel(tunnel) | PathAttribute::PmsiTunnelPartial(tunnel) => {
             use rustbgpd_wire::PmsiTunnelIdentifier;
@@ -326,6 +365,13 @@ mod tests {
 
     fn assert_wire_bound(attrs: Vec<PathAttribute>) {
         let set = AttrSet::new(attrs);
+        let raw_bound = set.iter().fold(0_usize, |sum, attr| {
+            sum.saturating_add(attribute_wire_bound(attr))
+        });
+        assert_eq!(
+            set.non_mp_wire_size_bound(),
+            expand_wire_bound(compact_wire_bound(raw_bound))
+        );
         for four_octet in [false, true] {
             let mut encoded = Vec::new();
             rustbgpd_wire::attribute::encode_path_attributes(&set, &mut encoded, four_octet, false)
@@ -539,6 +585,65 @@ mod tests {
                 llgr_stale: true,
                 ..*set.summary()
             }
+        );
+    }
+
+    #[test]
+    fn fused_summary_preserves_first_matches_and_empty_as_sets() {
+        let first = Ipv4Addr::new(192, 0, 2, 1);
+        let second = Ipv4Addr::new(192, 0, 2, 2);
+        let path = AsPath {
+            segments: vec![
+                AsPathSegment::AsSet(vec![]),
+                AsPathSegment::AsSequence(vec![]),
+                AsPathSegment::AsSet(vec![1, 2]),
+                AsPathSegment::AsSequence(vec![1, 2, 3]),
+            ],
+        };
+        assert_eq!(path.len(), 5);
+        let attrs = vec![
+            PathAttribute::LocalPref(100),
+            PathAttribute::LocalPref(200),
+            PathAttribute::Med(7),
+            PathAttribute::Med(9),
+            PathAttribute::AsPath(path),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![1; 9])],
+            }),
+            PathAttribute::ClusterList(vec![]),
+            PathAttribute::ClusterList(vec![first, second]),
+            PathAttribute::OriginatorId(first),
+            PathAttribute::OriginatorId(second),
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::Origin(Origin::Egp),
+            PathAttribute::CommunitiesPartial(vec![]),
+            PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]),
+        ];
+        let set = AttrSet::new(attrs.clone());
+        assert_eq!(
+            *set.summary(),
+            SelectionSummary {
+                local_pref: 100,
+                med: 7,
+                as_path_len: 5,
+                cluster_list_len: 0,
+                originator_id: Some(first),
+                origin: Origin::Igp,
+                llgr_stale: false,
+                ..*set.summary()
+            }
+        );
+        // AS_SET and duplicate attributes exercise selection semantics but
+        // are deliberately rejected by the wire encoder.
+        let mut selection = SelectionInputs::default();
+        let raw_bound = attrs.iter().fold(0_usize, |sum, attr| {
+            let fused = attribute_wire_bound_with_selection(attr, Some(&mut selection));
+            assert_eq!(fused, attribute_wire_bound(attr));
+            sum.saturating_add(fused)
+        });
+        assert_eq!(
+            set.non_mp_wire_size_bound(),
+            expand_wire_bound(compact_wire_bound(raw_bound))
         );
     }
 

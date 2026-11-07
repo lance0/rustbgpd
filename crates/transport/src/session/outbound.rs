@@ -639,17 +639,14 @@ impl PendingOutbound {
                 self.update
                     .announce
                     .iter()
-                    .enumerate()
                     .skip(self.offset)
                     .take(rows)
-                    .map(|(index, route)| {
+                    .map(|route| {
                         export.announcement_wire_bound(ExportCandidate::Unicast {
                             route,
-                            next_hop_override: self
-                                .update
-                                .next_hop_override
-                                .get(index)
-                                .and_then(Option::as_ref),
+                            // The bound reserves maximum next-hop framing,
+                            // independent of the row's actual override.
+                            next_hop_override: None,
                         })
                     }),
                 available,
