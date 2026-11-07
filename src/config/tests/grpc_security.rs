@@ -816,6 +816,51 @@ fn grpc_tls_missing_file_rejected_at_load() {
     );
 }
 
+/// A CRL needs the mTLS listener it constrains, and must be a CRL.
+#[test]
+fn grpc_tls_client_crl_requires_tls_and_crl_pem() {
+    let crl = write_pem("-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n");
+    let without_tls = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_client_crl_file = {:?}\n",
+        valid_toml(),
+        crl.path(),
+    );
+    let ConfigError::InvalidGrpcConfig { reason } = parse_strict(&without_tls).unwrap_err() else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(reason.contains("tls_client_crl_file requires"), "{reason}");
+
+    let cert = write_pem(STUB_CERT);
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let with_tls = |crl: &std::path::Path| {
+        format!(
+            "{}\n[security.grpc.roles]\n\"rustbgpd://operator/test-only\" = \"operator\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\ntls_client_crl_file = {:?}\n",
+            valid_toml(),
+            cert.path(),
+            key.path(),
+            ca.path(),
+            crl,
+        )
+    };
+    let config = parse_strict(&with_tls(crl.path())).unwrap();
+    let paths = config
+        .grpc_listeners()
+        .into_iter()
+        .find_map(|listener| match listener {
+            GrpcListener::Tcp { tls, .. } => tls,
+            GrpcListener::Uds { .. } => None,
+        })
+        .unwrap();
+    assert_eq!(paths.client_crl_file.as_deref(), Some(crl.path()));
+
+    let ConfigError::InvalidGrpcConfig { reason } = parse_strict(&with_tls(ca.path())).unwrap_err()
+    else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(reason.contains("tls_client_crl_file"), "{reason}");
+}
+
 #[test]
 fn grpc_tls_empty_file_rejected_at_load() {
     let cert = NamedTempFile::new().unwrap(); // empty

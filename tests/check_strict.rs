@@ -540,6 +540,13 @@ const INVALID_CERT_DER: &str =
 const INVALID_KEY_DER: &str =
     "-----BEGIN PRIVATE KEY-----\nbm90LWEtdGxzLXByaXZhdGUta2V5\n-----END PRIVATE KEY-----\n";
 
+/// Private keys are owner-only, as an operator writes them; a umask-default
+/// key is readable by others and `--check` warns about it.
+fn write_private(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 fn check_tls_material(cert: &str, key: &str, ca: &str, expected_error: Option<&str>) {
     let dir = tempfile::tempdir().unwrap();
     let cert_file = dir.path().join("server.pem");
@@ -547,6 +554,7 @@ fn check_tls_material(cert: &str, key: &str, ca: &str, expected_error: Option<&s
     let ca_file = dir.path().join("client-ca.pem");
     std::fs::write(&cert_file, cert).unwrap();
     std::fs::write(&key_file, key).unwrap();
+    write_private(&key_file);
     std::fs::write(&ca_file, ca).unwrap();
     // A valid check must succeed even when its configured port is occupied,
     // and must not create the UDS parent or runtime state directory.
@@ -675,6 +683,7 @@ fn check_tls_expiry_warnings_are_opt_in_and_strict_sensitive() {
         let ca_file = dir.path().join("client-ca.pem");
         std::fs::write(&cert_file, cert).unwrap();
         std::fs::write(&key_file, CHECK_KEY).unwrap();
+        write_private(&key_file);
         std::fs::write(&ca_file, cert).unwrap();
         let window_config = window.map_or_else(String::new, |seconds| {
             format!("tls_expiry_warning_seconds = {seconds}\n")
@@ -765,4 +774,52 @@ fn check_runs_rpol_tests_with_and_without_the_knob() {
             }
         }
     }
+}
+
+/// Load-bearing: `--check` applies the daemon's credential-file rules. A
+/// private token is clean, a world-readable one is a warning that
+/// `--strict` fails, and a world-writable one or a directory is rejected.
+#[test]
+fn check_judges_grpc_token_file_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token = dir.path().join("grpc.token");
+    std::fs::write(&token, "check-token\n").expect("write token");
+    let config = |path: &std::path::Path| {
+        CLEAN.replace(
+            "mode = 0o600\n",
+            &format!(
+                "mode = 0o600\ntoken_file = {:?}\n",
+                path.display().to_string()
+            ),
+        )
+    };
+    let chmod = |mode| {
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+
+    chmod(0o600);
+    let (code, stdout, stderr) = run(&config(&token), &["--check", "--strict"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    chmod(0o644);
+    let (code, stdout, stderr) = run(&config(&token), &["--check"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("gRPC credential file is readable beyond the daemon")
+            && stderr.contains("mode 0644")
+            && stderr.contains("chmod 600"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run(&config(&token), &["--check", "--strict"]);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    chmod(0o666);
+    let (code, _, stderr) = run(&config(&token), &["--check"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("world-writable"), "{stderr}");
+
+    let (code, _, stderr) = run(&config(dir.path()), &["--check"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("not a regular file"), "{stderr}");
 }

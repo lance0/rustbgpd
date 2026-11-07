@@ -575,8 +575,9 @@ pub struct PeerRuntimeConfigUpdate {
 /// Commands sent to a running peer session.
 #[derive(Debug)]
 pub enum PeerCommand {
-    /// Start the BGP session (`ManualStart`). An operator start also clears
-    /// the NOTIFICATION reconnect-backoff streak.
+    /// Start the BGP session (`ManualStart`). In Idle, an operator start also
+    /// clears the NOTIFICATION reconnect-backoff streak; outside Idle it is
+    /// ignored (RFC 4271 §8.2.2).
     Start,
     /// Start a session that replaces this peer's previous one with an accepted
     /// inbound connection. The previous session's NOTIFICATION streak carries

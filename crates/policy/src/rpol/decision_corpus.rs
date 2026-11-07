@@ -1396,6 +1396,8 @@ fn declared_constructs(file: &RpolFile) -> Seen {
         // Walked per evaluated case by `Corpus::count`.
         policies: _,
         tests,
+        // A lookup cache over the fields above.
+        names: _,
     } = &file.file;
     if file.modules.len() > 1 {
         seen.insert("ast.decl.import");

@@ -34,6 +34,54 @@ pub struct SourceFile {
     pub policies: Vec<PolicyDef>,
     /// `test` blocks.
     pub tests: Vec<TestDef>,
+    /// Name lookups for the walkers that resolve a loop set or a callee per
+    /// statement, built on first use from the complete unit.
+    pub(crate) names: std::sync::OnceLock<SourceNames>,
+}
+
+/// Definition positions by name in a [`SourceFile`], the first definition
+/// winning as a linear `find` would.
+#[derive(Debug, Default)]
+pub(crate) struct SourceNames {
+    asn_sets: std::collections::HashMap<String, usize>,
+    policies: std::collections::HashMap<String, usize>,
+}
+
+impl SourceFile {
+    fn names(&self) -> &SourceNames {
+        let names = self.names.get_or_init(|| {
+            let index = |names: &mut dyn Iterator<Item = &String>| {
+                let mut index = std::collections::HashMap::new();
+                for (position, name) in names.enumerate() {
+                    index.entry(name.clone()).or_insert(position);
+                }
+                index
+            };
+            SourceNames {
+                asn_sets: index(&mut self.asn_sets.iter().map(|s| &s.name.node)),
+                policies: index(&mut self.policies.iter().map(|p| &p.name.node)),
+            }
+        });
+        // The unit is complete before its first lookup: the resolver merges
+        // modules into a fresh file, and nothing extends one after.
+        names
+    }
+
+    /// The first `asn-set` named `name`.
+    pub(crate) fn asn_set(&self, name: &str) -> Option<&AsnSetDef> {
+        self.names()
+            .asn_sets
+            .get(name)
+            .map(|&position| &self.asn_sets[position])
+    }
+
+    /// The first policy named `name`.
+    pub(crate) fn policy(&self, name: &str) -> Option<&PolicyDef> {
+        self.names()
+            .policies
+            .get(name)
+            .map(|&position| &self.policies[position])
+    }
 }
 
 /// `fn NAME(params) -> u32 { lets… result }` — a pure user-defined

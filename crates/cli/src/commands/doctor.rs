@@ -3048,6 +3048,96 @@ fn detect_run_context() -> &'static str {
     classify_run_context(pid1_comm.trim_end(), in_container)
 }
 
+/// Judge the gRPC credential files the config names, with the rules the
+/// daemon applies on load and reload. A verified local daemon contributes its
+/// mount namespace and effective user and group; without one (first deploy)
+/// host paths are judged on mode alone.
+fn credential_file_checks(document: &toml::Value, process: Option<LocalProcess>) -> Vec<Check> {
+    use crate::credential_file::{CredentialKind, Verdict, assess};
+
+    let daemon = process.and_then(|process| {
+        let status = process.read_file("status")?;
+        parse_proc_status_identity(&status)
+    });
+    let telemetry = document.get("global").and_then(|g| g.get("telemetry"));
+    let mut checks = Vec::new();
+    for (listener, fields) in [
+        (
+            "grpc_tcp",
+            &[
+                ("token_file", "token", CredentialKind::Secret),
+                ("tls_cert_file", "certificate", CredentialKind::Public),
+                ("tls_key_file", "private key", CredentialKind::Secret),
+                ("tls_client_ca_file", "client CA", CredentialKind::Public),
+                ("tls_client_crl_file", "client CRL", CredentialKind::Public),
+            ][..],
+        ),
+        (
+            "grpc_uds",
+            &[("token_file", "token", CredentialKind::Secret)][..],
+        ),
+    ] {
+        let Some(table) = telemetry.and_then(|t| t.get(listener)) else {
+            continue;
+        };
+        if table.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
+            continue;
+        }
+        for &(field, label, kind) in fields {
+            let Some(configured) = table.get(field).and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let path = match process {
+                Some(process) => process_config_path(process.pid, Path::new(configured)),
+                None => PathBuf::from(configured),
+            };
+            let name = format!("credentials.{listener}.{field}");
+            let (status, detail) = match fs::metadata(&path) {
+                Err(error) => (
+                    CheckStatus::Warn,
+                    format!("{label} file {configured} could not be inspected: {error}"),
+                ),
+                Ok(metadata) => {
+                    match assess(Path::new(configured), label, kind, &metadata, daemon) {
+                        Verdict::Accept => (
+                            CheckStatus::Ok,
+                            format!("{label} file {configured} passes the daemon's file checks"),
+                        ),
+                        Verdict::Warn(message) => (CheckStatus::Warn, message),
+                        Verdict::Refuse(message) => (
+                            CheckStatus::Fail,
+                            format!("{message}; the daemon refuses to load it"),
+                        ),
+                    }
+                }
+            };
+            checks.push(Check {
+                name,
+                status,
+                detail,
+            });
+        }
+    }
+    checks
+}
+
+/// Effective user and group from `/proc/<pid>/status`.
+fn parse_proc_status_identity(status: &str) -> Option<crate::credential_file::DaemonIdentity> {
+    let effective = |key: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(key))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<u32>()
+            .ok()
+    };
+    Some(crate::credential_file::DaemonIdentity {
+        uid: effective("Uid:")?,
+        gid: effective("Gid:")?,
+    })
+}
+
 /// Config-file path from a daemon's `/proc/<pid>/cmdline`: the first
 /// non-flag argument after argv0, mirroring the daemon's own CLI.
 fn parse_cmdline_config_path(cmdline: &[u8]) -> Option<String> {
@@ -4666,6 +4756,14 @@ async fn run_with_deadlines(
                 let dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
                 for check in state_dir_checks(&dir) {
                     reporter.record(check.name, check.status, check.detail)?;
+                }
+                if opts.daemon_address.starts_with("unix://") {
+                    let process = local_connection
+                        .as_ref()
+                        .and_then(Connection::local_process);
+                    for check in credential_file_checks(document, process) {
+                        reporter.record(check.name, check.status, check.detail)?;
+                    }
                 }
                 sections.insert("probes", format!("collected (targets from {source})"));
             } else {
@@ -7830,6 +7928,66 @@ paths = ["x"]
             "{}",
             denied.detail
         );
+    }
+
+    /// Load-bearing: doctor applies the daemon's credential-file rules. A
+    /// shared token warns, a directory fails, a private key and a shared
+    /// certificate pass, and a disabled listener is not inspected.
+    #[test]
+    fn credential_file_checks_apply_the_daemon_rules() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, mode: u32| {
+            let path = dir.path().join(name);
+            fs::write(&path, b"x\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path.display().to_string()
+        };
+        let token = write("token", 0o644);
+        let key = write("key", 0o600);
+        let cert = write("cert", 0o644);
+        let ca = dir.path().display().to_string();
+        let document: toml::Value = toml::from_str(&format!(
+            "[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n\
+             tls_cert_file = {cert:?}\ntls_key_file = {key:?}\ntls_client_ca_file = {ca:?}\n\
+             [global.telemetry.grpc_uds]\ntoken_file = {token:?}\n"
+        ))
+        .unwrap();
+        let checks = credential_file_checks(&document, None);
+        let status = |name: &str| {
+            checks
+                .iter()
+                .find(|check| check.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .status
+        };
+        assert_eq!(checks.len(), 4);
+        assert_eq!(
+            status("credentials.grpc_tcp.tls_cert_file"),
+            CheckStatus::Ok
+        );
+        assert_eq!(status("credentials.grpc_tcp.tls_key_file"), CheckStatus::Ok);
+        assert_eq!(
+            status("credentials.grpc_tcp.tls_client_ca_file"),
+            CheckStatus::Fail
+        );
+        assert_eq!(status("credentials.grpc_uds.token_file"), CheckStatus::Warn);
+
+        let disabled: toml::Value = toml::from_str(&format!(
+            "[global.telemetry.grpc_uds]\nenabled = false\ntoken_file = {token:?}\n"
+        ))
+        .unwrap();
+        assert!(credential_file_checks(&disabled, None).is_empty());
+    }
+
+    #[test]
+    fn proc_status_identity_uses_effective_ids() {
+        let status = "Name:\trustbgpd\nUid:\t0\t998\t998\t998\nGid:\t0\t997\t997\t997\n";
+        assert_eq!(
+            parse_proc_status_identity(status),
+            Some(crate::credential_file::DaemonIdentity { uid: 998, gid: 997 })
+        );
+        assert_eq!(parse_proc_status_identity("Name:\tx\n"), None);
     }
 
     #[test]

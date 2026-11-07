@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
 use crate::aspa::{AspaRecord, AspaTable};
-use crate::rtr_client::VrpUpdate;
+use crate::rtr_client::{Reservation, VrpUpdate};
 use crate::vrp::{VrpEntry, VrpTable};
 
 const CACHE_QUERY_CAPACITY: usize = 16;
@@ -104,6 +104,9 @@ struct ServerVrpTable {
     entries: HashSet<VrpEntry>,
     v4_count: usize,
     v6_count: usize,
+    /// Record-budget charge for this cache's VRP and ASPA data, released
+    /// when the table is replaced or removed.
+    charge: Option<Reservation>,
 }
 
 impl ServerVrpTable {
@@ -164,6 +167,7 @@ pub(crate) enum EnhancedVrpUpdate {
         server: SocketAddr,
         entries: Vec<VrpEntry>,
         aspa_records: Vec<AspaRecord>,
+        charge: Reservation,
         version: u8,
         session_id: u16,
         serial: u32,
@@ -175,6 +179,7 @@ pub(crate) enum EnhancedVrpUpdate {
         withdrawn: Vec<VrpEntry>,
         aspa_announced: Vec<AspaRecord>,
         aspa_withdrawn: Vec<AspaRecord>,
+        charge: Reservation,
         version: u8,
         session_id: u16,
         serial: u32,
@@ -528,6 +533,7 @@ impl VrpManager {
                 server,
                 entries,
                 aspa_records,
+                charge,
                 version,
                 session_id,
                 serial,
@@ -539,6 +545,11 @@ impl VrpManager {
                     aspa_records,
                 })
                 .await;
+                // The replaced table released its charge; this one holds
+                // the new data's.
+                if let Some(table) = self.server_tables.get_mut(&server) {
+                    table.charge = Some(charge);
+                }
                 self.set_accepted(
                     server,
                     Some(version),
@@ -554,6 +565,7 @@ impl VrpManager {
                 withdrawn,
                 aspa_announced,
                 aspa_withdrawn,
+                charge,
                 version,
                 session_id,
                 serial,
@@ -567,6 +579,16 @@ impl VrpManager {
                     aspa_withdrawn,
                 })
                 .await;
+                // The delta's withdrawals are applied; only its
+                // announcements stay charged with the table.
+                let mut charge = charge;
+                charge.release_withdrawn();
+                if let Some(table) = self.server_tables.get_mut(&server) {
+                    match &mut table.charge {
+                        Some(held) => held.absorb(charge),
+                        held => *held = Some(charge),
+                    }
+                }
                 self.set_accepted(
                     server,
                     Some(version),
@@ -602,6 +624,7 @@ impl VrpManager {
     }
 
     async fn handle_update(&mut self, update: VrpUpdate) {
+        let update = canonical_update(update);
         let (server, ready, vrp_delta, changed_customer_asns) = match update {
             VrpUpdate::FullTable {
                 server,
@@ -789,6 +812,38 @@ impl VrpManager {
     }
 }
 
+/// The update with every VRP keyed by its canonical prefix (host bits
+/// cleared). Validation already masks prefixes, so the per-cache set and the
+/// distributed delta must use the same identity.
+fn canonical_update(update: VrpUpdate) -> VrpUpdate {
+    let canonical = |entries: Vec<VrpEntry>| entries.into_iter().map(VrpEntry::canonical).collect();
+    match update {
+        VrpUpdate::FullTable {
+            server,
+            entries,
+            aspa_records,
+        } => VrpUpdate::FullTable {
+            server,
+            entries: canonical(entries),
+            aspa_records,
+        },
+        VrpUpdate::IncrementalUpdate {
+            server,
+            announced,
+            withdrawn,
+            aspa_announced,
+            aspa_withdrawn,
+        } => VrpUpdate::IncrementalUpdate {
+            server,
+            announced: canonical(announced),
+            withdrawn: canonical(withdrawn),
+            aspa_announced,
+            aspa_withdrawn,
+        },
+        other @ VrpUpdate::ServerDown { .. } => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -813,6 +868,16 @@ mod tests {
             max_len,
             origin_asn: asn,
         }
+    }
+
+    /// A zero charge on one unlimited budget shared by these tests, so a
+    /// table's charges can be merged.
+    fn test_charge() -> Reservation {
+        static BUDGET: std::sync::OnceLock<Arc<crate::rtr_client::RecordBudget>> =
+            std::sync::OnceLock::new();
+        Reservation::new(Arc::clone(
+            BUDGET.get_or_init(|| crate::rtr_client::RecordBudget::new(usize::MAX)),
+        ))
     }
 
     fn server1() -> SocketAddr {
@@ -929,6 +994,45 @@ mod tests {
 
         let update = rib_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 2);
+    }
+
+    /// RTR v1 accepts Prefix PDUs with host bits set, and validation masks
+    /// them. A cache that announces a VRP with host bits and then withdraws
+    /// the canonical form must leave nothing behind, and the same VRP sent
+    /// both ways counts once.
+    #[tokio::test]
+    async fn host_bit_prefixes_share_the_canonical_identity() {
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx);
+        let host_bits = entry(Ipv4Addr::new(10, 0, 0, 1), 8, 8, 65001);
+        let canonical = entry(Ipv4Addr::new(10, 0, 0, 0), 8, 8, 65001);
+        let other = entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 65002);
+
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![host_bits.clone(), canonical.clone(), other.clone()],
+            aspa_records: vec![],
+        })
+        .await;
+        let update = rib_rx.try_recv().unwrap();
+        assert_eq!(update.table.len(), 2, "one VRP sent two ways counted twice");
+
+        mgr.handle_update(VrpUpdate::IncrementalUpdate {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![canonical],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![],
+        })
+        .await;
+        let update = rib_rx.try_recv().unwrap();
+        assert_eq!(
+            update.table.len(),
+            1,
+            "the withdrawn VRP still authorizes its prefix through the host-bit copy"
+        );
+        assert_eq!(mgr.server_tables[&server1()].counts(), (1, 0));
     }
 
     #[tokio::test]
@@ -1346,6 +1450,7 @@ mod tests {
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server1() })
             .await;
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Full {
+            charge: test_charge(),
             server: server1(),
             entries: vec![
                 entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496),
@@ -1396,6 +1501,7 @@ mod tests {
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server1() })
             .await;
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Incremental {
+            charge: test_charge(),
             server: server1(),
             announced: vec![
                 // Duplicate announcement must not inflate the v6 count.
@@ -1457,6 +1563,7 @@ mod tests {
                     .insert(("connected", server), connected);
             });
         let full = || EnhancedVrpUpdate::Full {
+            charge: test_charge(),
             server: server1(),
             entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
             aspa_records: vec![],
@@ -1516,6 +1623,67 @@ mod tests {
     /// and an expiry. Dropping the notify on either clearing path, or
     /// reporting a fresh `Instant::now()` instead of the accepted instant,
     /// turns this red.
+    /// A cache's record charge lives with its data in the manager: a full
+    /// table releases the charge of the table it replaces, a delta adds to
+    /// it, and a flush releases it.
+    #[tokio::test]
+    async fn table_charge_is_released_when_the_data_is_replaced_or_removed() {
+        let budget = crate::rtr_client::RecordBudget::new(10);
+        let (_legacy_tx, legacy_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (attachment, _updates, _queries) = CacheInventoryAttachment::new([server1()]);
+        let mut mgr = VrpManager::new(legacy_rx, rib_tx).with_cache_inventory(attachment);
+        let full = |records| EnhancedVrpUpdate::Full {
+            charge: Reservation::charged(&budget, records, 0),
+            server: server1(),
+            entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+            aspa_records: vec![],
+            version: 2,
+            session_id: 7,
+            serial: 11,
+            accepted_at: Instant::now(),
+        };
+
+        mgr.handle_enhanced_update(full(3)).await;
+        assert_eq!(budget.used(), 3);
+        let replacement = full(2);
+        assert_eq!(
+            budget.used(),
+            5,
+            "a queued table is charged beside the held one"
+        );
+        mgr.handle_enhanced_update(replacement).await;
+        assert_eq!(budget.used(), 2, "the replaced table released its charge");
+
+        // A delta with one announcement and two withdrawals: the withdrawals
+        // are charged while it waits, and released once it is applied.
+        let delta = EnhancedVrpUpdate::Incremental {
+            charge: Reservation::charged(&budget, 1, 2),
+            server: server1(),
+            announced: vec![entry(Ipv4Addr::new(192, 0, 2, 128), 25, 25, 64_496)],
+            withdrawn: vec![
+                entry(Ipv4Addr::new(198, 51, 100, 0), 24, 24, 64_496),
+                entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 64_496),
+            ],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![],
+            version: 2,
+            session_id: 7,
+            serial: 12,
+            accepted_at: Instant::now(),
+        };
+        assert_eq!(budget.used(), 5);
+        mgr.handle_enhanced_update(delta).await;
+        assert_eq!(budget.used(), 3, "applied withdrawals stayed charged");
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: true,
+        })
+        .await;
+        assert_eq!(budget.used(), 0, "a flush released the cache's charge");
+    }
+
     #[tokio::test]
     async fn end_of_data_observer_tracks_accepted_instant_until_flush_or_expiry() {
         let (_legacy_tx, legacy_rx) = mpsc::channel(16);
@@ -1534,6 +1702,7 @@ mod tests {
                 .unwrap()
         };
         let full = |server, accepted_at| EnhancedVrpUpdate::Full {
+            charge: test_charge(),
             server,
             entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
             aspa_records: vec![],
@@ -1564,6 +1733,7 @@ mod tests {
 
         let second = earlier(10);
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Incremental {
+            charge: test_charge(),
             server: server1(),
             announced: vec![],
             withdrawn: vec![],
@@ -1719,6 +1889,7 @@ mod tests {
         updates
             .0
             .send(EnhancedVrpUpdate::Full {
+                charge: test_charge(),
                 server: server1(),
                 entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
                 aspa_records: vec![],

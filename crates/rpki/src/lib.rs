@@ -44,8 +44,10 @@
 //!   daemon can open them through its own dialer
 //!   ([`RtrClient::with_dialer`]) to install TCP MD5 or TCP-AO before
 //!   connect. RTR over TLS or SSH is not implemented.
-//! - **Not implemented** — Router Key PDUs (`BGPsec`, type 9) are rejected
-//!   as unknown and end the session.
+//! - **Decoded and ignored** — Router Key PDUs (`BGPsec`, type 9, RFC 8210
+//!   §5.10) are decoded with their framing checked, then ignored: `BGPsec`
+//!   path validation is not implemented. A malformed Router Key is a decode
+//!   error like any other PDU.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
@@ -65,7 +67,8 @@ use std::sync::Arc;
 pub use aspa::{AspaRecord, AspaTable};
 pub use aspa_verify::{AspaInvalidHop, AspaVerificationResult};
 pub use rtr_client::{
-    EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS, RtrClient, RtrClientConfig, VrpUpdate,
+    DEFAULT_MAX_CACHE_RECORDS, DEFAULT_MAX_TOTAL_RECORDS, EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS,
+    RecordBudget, RtrClient, RtrClientConfig, VrpUpdate,
 };
 pub use vrp::{CoveringVrp, CoveringVrps, MAX_COVERING_VRPS, VrpEntry, VrpTable};
 pub use vrp_manager::{

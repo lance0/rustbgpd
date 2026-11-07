@@ -1401,6 +1401,19 @@ mod linux {
                 );
                 return;
             }
+            if pkt.your_discriminator == 0
+                && !entry
+                    .session
+                    .admits_zero_your_discriminator(pkt.my_discriminator)
+            {
+                debug!(
+                    %peer,
+                    state = ?entry.session.state(),
+                    my_discriminator = pkt.my_discriminator,
+                    "BFD packet with zero Your Discriminator selected only by source; ignoring"
+                );
+                return;
+            }
             let before_state = entry.session.state();
             let before_remote_admin_down = entry.session.remote_admin_down();
             let actions = entry.session.handle(Event::PacketReceived(pkt));
@@ -1486,6 +1499,7 @@ mod linux {
                                 kind,
                                 epoch,
                             }));
+                            self.compact_timers();
                         }
                     }
                     Action::StopTimer { kind } => {
@@ -1556,6 +1570,23 @@ mod linux {
         }
 
         /// Apply jitter to transmit timers (RFC 5880 §6.8.7: 0–25% reduction).
+        /// Every received packet re-arms the detect timer, and a superseded
+        /// deadline otherwise stays queued until it is due. Once superseded
+        /// entries could outnumber the live ones (at most one per session and
+        /// timer kind), drop them, so the heap stays within
+        /// `4 × sessions + 64` under any packet rate at amortized O(1) per push.
+        fn compact_timers(&mut self) {
+            if self.timers.len() <= 4 * self.sessions.len() + 64 {
+                return;
+            }
+            let sessions = &self.sessions;
+            self.timers.retain(|Reverse(deadline)| {
+                sessions
+                    .get(&deadline.peer)
+                    .is_some_and(|entry| entry.epochs.get(&deadline.kind) == Some(&deadline.epoch))
+            });
+        }
+
         fn timer_interval(&mut self, kind: TimerKind, interval_us: u32) -> Duration {
             let micros = match kind {
                 TimerKind::Detect => u64::from(interval_us),
@@ -2133,6 +2164,170 @@ mod linux {
                 )
                 .await;
             assert!(has_series(), "re-added member seeds a new gauge");
+        }
+
+        /// Actor with no sockets (sends are dropped) and the given sessions.
+        async fn socketless_actor(
+            sessions: Vec<super::BfdSessionParams>,
+            metrics: &rustbgpd_telemetry::BgpMetrics,
+            status_tx: &tokio::sync::watch::Sender<Vec<super::BfdStatus>>,
+        ) -> super::Actor {
+            use super::*;
+            let (event_tx, _) = broadcast::channel(8);
+            let (state_change_tx, _state_rx) = super::super::state_change_channel();
+            let mut actor = Actor {
+                configured_peers: HashSet::new(),
+                sessions: BTreeMap::new(),
+                discriminators: DiscriminatorAllocator::new(),
+                by_discriminator: HashMap::new(),
+                timers: BinaryHeap::new(),
+                tx_v4: None,
+                tx_v6: None,
+                multihop_tx_v4: None,
+                multihop_tx_v6: None,
+                event_tx,
+                state_change_tx,
+                jitter_state: 1,
+            };
+            actor
+                .reconcile(&BfdRuntimeConfig { sessions }, metrics, status_tx)
+                .await;
+            actor
+        }
+
+        /// A single-hop control packet from `src` addressed to our
+        /// discriminator, advertising the given Desired Min TX and multiplier.
+        fn peer_packet(
+            src: IpAddr,
+            your_discriminator: u32,
+            state: SessionState,
+            desired_min_tx: u32,
+            detect_mult: u8,
+        ) -> super::ReceivedPacket {
+            super::ReceivedPacket {
+                src,
+                ifindex: None,
+                multihop: false,
+                ttl: Some(255),
+                packet: ControlPacket {
+                    diagnostic: Diagnostic::None,
+                    state,
+                    poll: false,
+                    final_bit: false,
+                    control_plane_independent: false,
+                    auth_present: false,
+                    demand: false,
+                    multipoint: false,
+                    detect_mult,
+                    my_discriminator: 0xdead,
+                    your_discriminator,
+                    desired_min_tx_interval: desired_min_tx,
+                    required_min_rx_interval: 300_000,
+                    required_min_echo_rx_interval: 0,
+                },
+            }
+        }
+
+        /// Every accepted packet re-arms the detect timer. A flood from the
+        /// session's peer must not grow the timer heap one node per packet.
+        #[tokio::test]
+        async fn packet_flood_keeps_the_timer_heap_bounded() {
+            let metrics = rustbgpd_telemetry::BgpMetrics::new();
+            let (status_tx, _) = tokio::sync::watch::channel(Vec::new());
+            let params = reload_params("127.0.0.2", 1);
+            let mut actor = socketless_actor(vec![params.clone()], &metrics, &status_tx).await;
+            let ours = actor.sessions[&params.peer].local_discriminator;
+            for _ in 0..10_000 {
+                let packet = peer_packet(params.peer, ours, SessionState::Init, u32::MAX, 255);
+                actor.on_packet(packet, &metrics, &status_tx).await;
+            }
+            assert_eq!(
+                actor.sessions[&params.peer].session.state(),
+                SessionState::Up
+            );
+            let bound = 4 * actor.sessions.len() + 64;
+            assert!(
+                actor.timers.len() <= bound,
+                "{} heap nodes after 10,000 packets; bound {bound}",
+                actor.timers.len()
+            );
+            let entry = &actor.sessions[&params.peer];
+            let live_detect = actor
+                .timers
+                .iter()
+                .filter(|timer| {
+                    timer.0.kind == TimerKind::Detect
+                        && entry.epochs.get(&TimerKind::Detect) == Some(&timer.0.epoch)
+                })
+                .count();
+            assert_eq!(live_detect, 1, "compaction keeps the live detect deadline");
+        }
+
+        /// An on-link sender that spoofs the peer's address cannot bounce an
+        /// Up session with a zero-Your-Discriminator Down packet: only the
+        /// peer's learned discriminator selects the session that way.
+        #[tokio::test]
+        async fn spoofed_zero_your_discriminator_cannot_bounce_an_up_session() {
+            let metrics = rustbgpd_telemetry::BgpMetrics::new();
+            let (status_tx, _) = tokio::sync::watch::channel(Vec::new());
+            let params = reload_params("127.0.0.2", 1);
+            let mut actor = socketless_actor(vec![params.clone()], &metrics, &status_tx).await;
+            let ours = actor.sessions[&params.peer].local_discriminator;
+            let up = peer_packet(params.peer, ours, SessionState::Init, 300_000, 3);
+            actor.on_packet(up, &metrics, &status_tx).await;
+            let session = |actor: &super::Actor| {
+                let s = &actor.sessions[&params.peer].session;
+                (s.state(), s.remote_discriminator())
+            };
+            assert_eq!(session(&actor), (SessionState::Up, 0xdead));
+
+            let mut spoof = peer_packet(params.peer, 0, SessionState::Down, 300_000, 3);
+            spoof.packet.my_discriminator = 0xdead_beef;
+            actor.on_packet(spoof, &metrics, &status_tx).await;
+            assert_eq!(
+                session(&actor),
+                (SessionState::Up, 0xdead),
+                "a forged bootstrap packet must not reset the session"
+            );
+
+            let peer_down = peer_packet(params.peer, 0, SessionState::Down, 300_000, 3);
+            actor.on_packet(peer_down, &metrics, &status_tx).await;
+            assert_eq!(session(&actor).0, SessionState::Down);
+        }
+
+        /// A peer advertising the largest Desired Min TX and multiplier, then
+        /// going silent, is detected down within five minutes rather than the
+        /// ~71.6-minute window its fields would otherwise select.
+        #[tokio::test(start_paused = true)]
+        async fn huge_advertised_interval_is_detected_within_the_clamp() {
+            let metrics = rustbgpd_telemetry::BgpMetrics::new();
+            let (status_tx, _) = tokio::sync::watch::channel(Vec::new());
+            let params = reload_params("127.0.0.2", 1);
+            let mut actor = socketless_actor(vec![params.clone()], &metrics, &status_tx).await;
+            let ours = actor.sessions[&params.peer].local_discriminator;
+            let packet = peer_packet(params.peer, ours, SessionState::Init, u32::MAX, 255);
+            actor.on_packet(packet, &metrics, &status_tx).await;
+            assert_eq!(
+                actor.sessions[&params.peer].session.state(),
+                SessionState::Up
+            );
+            tokio::time::advance(std::time::Duration::from_secs(299)).await;
+            actor.fire_due_timers(&metrics, &status_tx).await;
+            assert_eq!(
+                actor.sessions[&params.peer].session.state(),
+                SessionState::Up,
+                "detection must not fire before the clamp"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            actor.fire_due_timers(&metrics, &status_tx).await;
+            assert_eq!(
+                actor.sessions[&params.peer].session.state(),
+                SessionState::Down
+            );
+            assert_eq!(
+                actor.sessions[&params.peer].last_diagnostic,
+                Diagnostic::ControlDetectionTimeExpired
+            );
         }
 
         /// An interface-only neighbor's session is labelled `interface:eth1`,

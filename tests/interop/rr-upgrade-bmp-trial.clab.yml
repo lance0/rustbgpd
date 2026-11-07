@@ -12,7 +12,11 @@ topology:
       image: ${RR_MAIN_IMAGE_ALIAS}
       cmd: sleep infinity
       binds:
-        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd-fixture/grpc-test-only-operator.token:ro
+      exec:
+        # A checkout leaves the fixture world-readable and runner-owned;
+        # install a root-owned 0600 copy where the config names it.
+        - install -D -m 600 /run/rustbgpd-fixture/grpc-test-only-operator.token /run/rustbgpd/grpc-test-only-operator.token
     incumbent:
       kind: linux
       image: ${RR_MAIN_IMAGE_ALIAS}

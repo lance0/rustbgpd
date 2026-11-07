@@ -3451,6 +3451,26 @@ fn orf_entry(sequence: u32, match_: OrfMatch, prefix: Prefix) -> AddressPrefixOr
     }
 }
 
+/// REMOVE-ALL followed by the identical installed entry in one message
+/// leaves the filter unchanged, so, like a plain resend, it must not
+/// invalidate a paged walk.
+#[test]
+fn orf_remove_all_then_identical_readd_keeps_the_walk() {
+    let permit = orf_entry(10, OrfMatch::Permit, v4_prefix());
+    let (mut manager, _receivers, first) =
+        orf_walk_started(move |manager| push_orf(manager, vec![permit]));
+    let remove_all = AddressPrefixOrf {
+        action: OrfAction::RemoveAll,
+        match_: OrfMatch::Permit,
+        sequence: 0,
+        min_len: 0,
+        max_len: 0,
+        prefix: None,
+    };
+    push_orf(&mut manager, vec![remove_all, permit]);
+    assert_walk_resumes(&mut manager, &first);
+}
+
 /// The peer's ROUTE-REFRESH lifting the initial ORF gate changes its row
 /// from `orf_pending`, so it invalidates the walk. Red proof: not advancing
 /// the export-settings generation in `lift_orf_gate` fails this test.

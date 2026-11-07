@@ -1072,6 +1072,7 @@ impl Config {
                     cert_file: PathBuf::from(cert),
                     key_file: PathBuf::from(key),
                     client_ca_file: PathBuf::from(ca),
+                    client_crl_file: cfg.tls_client_crl_file.as_ref().map(PathBuf::from),
                 }),
                 // Partial TLS config rejected at Config::load via
                 // validate_grpc_tls_config(); the all-None and
@@ -1817,6 +1818,7 @@ pub struct GrpcTlsPaths {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub client_ca_file: PathBuf,
+    pub client_crl_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

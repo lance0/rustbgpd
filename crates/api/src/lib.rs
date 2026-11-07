@@ -22,6 +22,7 @@ pub mod bfd_service;
 mod config_service;
 mod connect_info;
 mod control_service;
+pub mod credential_file;
 pub mod credentials;
 pub mod dampening_control;
 mod event_service;
