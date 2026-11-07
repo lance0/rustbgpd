@@ -20,3 +20,7 @@ serde_json.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true, features = ["util"] }
