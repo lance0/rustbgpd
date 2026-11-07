@@ -244,7 +244,7 @@ def _check_mass_dirty(job: str, errors: list[str]) -> None:
         errors.append("mass-dirty finalizer must always run, retain failure evidence, and fail closed")
     upload = _named_step(job, "Upload mass-dirty evidence even after refusal or failure")
     if any(required not in upload for required in (
-        '        if: always()', '        uses: actions/upload-artifact@v7',
+        '        if: always()', '        uses: actions/upload-artifact@',
         'name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ matrix.cohort }}-${{ github.sha }}',
         'path: ${{ runner.temp }}/update-group-recovery-mass-dirty',
         'if-no-files-found: error', 'retention-days: 30',
@@ -372,7 +372,7 @@ def check(root: Path) -> list[str]:
     if re.findall(r"(?m)^ {4}runs-on:[ \t]*(.*?)[ \t]*$", recovery) != ["ubuntu-24.04"]:
         errors.append("recovery_memory_receipt must use the fresh ubuntu-24.04 hosted runner")
     if len(re.findall(
-        r"(?m)^ {6}- uses: dtolnay/rust-toolchain@v1[^\n]*\n {8}with:\n {10}toolchain: stable[ \t]*$",
+        r"(?m)^ {6}- uses: dtolnay/rust-toolchain@[0-9a-f]{40}[^\n]*\n {8}with:\n {10}toolchain: stable[ \t]*$",
         recovery,
     )) != 1:
         errors.append("recovery_memory_receipt must provide the stable toolchain input")

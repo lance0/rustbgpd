@@ -45,7 +45,7 @@ jobs:
     steps:
       # Shallow on purpose: full history alone can outlast the one-minute cap.
       # The classifier fetches a pull request's base...head merge base itself.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Classify complete pull-request diff
         id: classify
         env:
@@ -76,7 +76,7 @@ jobs:
     outputs:
       bird3_status: ${{ steps.prepare.outputs.bird3_status }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
       - name: Resolve pinned bird3 checksum
@@ -89,7 +89,7 @@ jobs:
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
       - name: Restore exact bird3 archive cache
         id: cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/bird-cache/bird-${{ steps.bird_pin.outputs.version }}.tar.gz
           key: bird-v${{ steps.bird_pin.outputs.version }}-source-${{ steps.bird_pin.outputs.sha256 }}
@@ -117,7 +117,7 @@ jobs:
       # job never hands bytes over through the artifact service.
       - name: Save verified bird3 archive cache
         if: steps.prepare.outputs.bird3_status == 'ok' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/bird-cache/bird-${{ steps.bird_pin.outputs.version }}.tar.gz
           key: bird-v${{ steps.bird_pin.outputs.version }}-source-${{ steps.bird_pin.outputs.sha256 }}
@@ -134,7 +134,7 @@ jobs:
       group: rustbgpd-dev-image-${{ github.sha }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
       - name: Prime rustbgpd:dev build cache
@@ -146,7 +146,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # One runner, several short scenarios. A failed scenario does not stop
@@ -216,7 +216,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M39 (deploy + test + destroy with retry)
@@ -233,7 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M39b (deploy + test + destroy with retry)
@@ -250,7 +250,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M109 (deploy + test + destroy with retry)
@@ -266,7 +266,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M117 (deploy + test + destroy with retry)
@@ -282,7 +282,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M110 (one fresh deployment)
@@ -300,7 +300,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M48 (deploy + test + destroy with retry)
@@ -317,7 +317,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M60 (deploy + test + destroy with retry)
@@ -333,7 +333,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M61 (deploy + test + destroy with retry)
@@ -350,7 +350,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M62 (deploy + test + destroy with retry)
@@ -366,7 +366,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M40 (deploy + test + destroy with retry)
@@ -382,7 +382,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # One runner, several short scenarios. A failed scenario does not stop
@@ -452,7 +452,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M53 (deploy + test + destroy with retry)
@@ -468,7 +468,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Check M53b next-hop JSON oracle
@@ -481,7 +481,7 @@ jobs:
           script: tests/interop/scripts/test-m53b-interface-only-frr.sh
       - name: Upload M53b daemon and FRR logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m53b-interface-only-logs
           path: /tmp/m53b-lifecycle-last-*
@@ -494,7 +494,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M53c (deploy + test + destroy with retry)
@@ -510,7 +510,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M53d (deploy + test + destroy with retry)
@@ -526,7 +526,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M51 (deploy + test + destroy with retry)
@@ -542,7 +542,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M51b (deploy + test + destroy with retry)
@@ -558,7 +558,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M108 (deploy + test + destroy with retry)
@@ -584,7 +584,7 @@ jobs:
     outputs:
       tcp_ao_supported: ${{ steps.tcp_ao.outputs.supported }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
 
@@ -617,13 +617,13 @@ jobs:
 
       - name: Install Rust 1.95 for the direct GET_KEYS receipt
         if: steps.tcp_ao.outputs.supported == 'true'
-        uses: dtolnay/rust-toolchain@v1 # 1.95
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (1.95)
         with:
           toolchain: "1.95"
 
       - name: Cache direct GET_KEYS receipt build
         if: steps.tcp_ao.outputs.supported == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: m43-tcp-ao-get-keys
@@ -692,7 +692,7 @@ jobs:
 
       - name: Build pinned BIRD 3 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird3
@@ -726,7 +726,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M47 (deploy + test + destroy with retry)
@@ -742,7 +742,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M69 (deploy + test + destroy with retry)
@@ -758,7 +758,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
       - name: Run M121 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -768,7 +768,7 @@ jobs:
           script: tests/interop/scripts/test-m121-evpn-all-active-frr.sh
       - name: Upload M121 packet and state evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m121-all-active-forwarding
           path: /tmp/m121
@@ -785,7 +785,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
       - name: Run M123 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -795,7 +795,7 @@ jobs:
           script: tests/interop/scripts/test-m123-evpn-dont-preempt-srlinux.sh
       - name: Upload M123 phase snapshots
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m123-dont-preempt-srlinux
           path: /tmp/m123
@@ -808,7 +808,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # Cross-vendor proof for ADR-0089's v1 Linux topology: rustbgpd owns
@@ -828,7 +828,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # The segment PEs run GoBGP (the failure injection needs the RFC 7432
@@ -855,7 +855,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # rustbgpd is the receive-side DUT; GoBGP is the route source. GoBGP
@@ -884,7 +884,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # rustbgpd is the receive-side DUT; two GoBGP PEs are route
@@ -912,7 +912,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # All three BGP speakers are rustbgpd — the origination-side
@@ -931,7 +931,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # The M66 sibling with the production trigger: an attachment-
@@ -952,7 +952,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # Cross-vendor consume-side proof for native GW-IP overlay-index
@@ -976,7 +976,7 @@ jobs:
     env:
       SKIP_BUILD: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Initialize netns selector receipt
         run: |
@@ -1155,7 +1155,7 @@ jobs:
 
       - name: Upload netns selector receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: netns-selector-receipt
           path: ${{ runner.temp }}/netns-selector-receipt.json

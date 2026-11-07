@@ -177,7 +177,7 @@ jobs:
     steps:
       # Shallow on purpose: full history alone can outlast the one-minute cap.
       # The classifier fetches a pull request's base...head merge base itself.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Classify complete pull-request diff
         id: classify
         env:
@@ -199,7 +199,7 @@ jobs:
       group: rustbgpd-dev-image-${{ github.sha }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
       - name: Prime rustbgpd:dev build cache
@@ -211,7 +211,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -235,7 +235,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -259,7 +259,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -289,7 +289,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -313,7 +313,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -344,7 +344,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -368,7 +368,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -403,7 +403,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -454,7 +454,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -491,7 +491,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -528,7 +528,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -569,7 +569,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -610,7 +610,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -651,7 +651,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -693,7 +693,7 @@ jobs:
     # Three fresh deployments; the lease-expiry leg alone waits ~70 s.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -746,7 +746,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -770,7 +770,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -819,7 +819,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -856,7 +856,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -881,7 +881,7 @@ jobs:
       - name: Build bird:v2.19.3-m83
         # BIRD 2.19.3 + tshark: the member stack that carries the byte-level
         # RFC 7947 transparency / OTC / EoR wire assertions.
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird2
@@ -916,7 +916,7 @@ jobs:
 
       - name: Upload M83 failed-attempt evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m83-failed-attempts-${{ github.run_attempt }}
           path: ${{ runner.temp }}/m83-failure-artifacts
@@ -929,7 +929,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -952,7 +952,7 @@ jobs:
           version: "2.19.3"
 
       - name: Build bird:v2.19.3-m85
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird2
@@ -993,7 +993,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1027,7 +1027,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1085,7 +1085,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1109,7 +1109,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # containerlab and grpcurl are installed locally to the runner;
       # both are cheap (single Go binaries). Pinned versions to keep the
@@ -1144,7 +1144,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1175,7 +1175,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1205,7 +1205,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1235,7 +1235,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1265,7 +1265,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1294,7 +1294,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1325,7 +1325,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1356,7 +1356,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1392,7 +1392,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1420,7 +1420,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1455,7 +1455,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1479,7 +1479,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1509,7 +1509,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1540,7 +1540,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1571,7 +1571,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1672,7 +1672,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1723,7 +1723,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1751,7 +1751,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1783,7 +1783,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1802,7 +1802,7 @@ jobs:
           version: "2.19.2"
 
       - name: Build bird:v2.19.2-m100
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird2
@@ -1838,7 +1838,7 @@ jobs:
           max_attempts: "1"
 
       - name: Upload M100 successful-run evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m100-partial-receiver-${{ github.sha }}
           path: ${{ runner.temp }}/m100
@@ -1847,7 +1847,7 @@ jobs:
 
       - name: Upload M100 failed-attempt evidence
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m100-failed-attempt-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/m100
@@ -1860,7 +1860,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1880,7 +1880,7 @@ jobs:
         id: bird_archive
 
       - name: Build checksum-pinned BIRD 3 image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird-v332
@@ -1909,7 +1909,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1962,7 +1962,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -2004,7 +2004,7 @@ jobs:
           max_attempts: "1"
 
       - name: Upload M103 normal successful-run evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m103-gobgp-v48-normal-${{ github.sha }}
           path: ${{ runner.temp }}/m103-normal
@@ -2023,7 +2023,7 @@ jobs:
           max_attempts: "1"
 
       - name: Upload M103 negative successful-run evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m103-gobgp-v48-negative-${{ github.sha }}
           path: ${{ runner.temp }}/m103-negative
@@ -2039,7 +2039,7 @@ jobs:
       # The differential asserts its source contains the post-M103 boundary via
       # `git merge-base --is-ancestor`, which needs history the default shallow
       # checkout does not fetch.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -2084,7 +2084,7 @@ jobs:
           version: "2.19.3"
 
       - name: Build bird:v2.19.3-m104
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird2
@@ -2131,7 +2131,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: ./.github/actions/install-protobuf
 
@@ -2159,7 +2159,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: ./.github/actions/install-protobuf
 
@@ -2209,7 +2209,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -2237,7 +2237,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -2265,7 +2265,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -2341,7 +2341,7 @@ jobs:
     # 20 min of lab work plus the 600 s VRF-required module fetch budget.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up dataplane host
         uses: ./.github/actions/setup-dataplane-host
@@ -2393,7 +2393,7 @@ jobs:
 
       - name: Upload M118 observations
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m118-bundle-vtep-${{ github.sha }}
           path: ${{ runner.temp }}/m118
@@ -2405,7 +2405,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
       - name: Check M122 oracle and driver
@@ -2437,7 +2437,7 @@ jobs:
           script: tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
       - name: Upload bounded protocol witnesses
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m122-protocol-witnesses
           path: |
@@ -2458,7 +2458,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -2497,7 +2497,7 @@ jobs:
 
       - name: Upload M125 receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: m125-global-srv6-witnesses
           path: ${{ runner.temp }}/m125-evidence/

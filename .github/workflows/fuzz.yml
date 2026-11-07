@@ -19,7 +19,7 @@ jobs:
     env:
       WIRE_CORPUS_WRITER: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # fuzz/rust-nightly.txt holds the single reviewed nightly, shared with
       # the OSS-Fuzz and ClusterFuzzLite images. A floating `nightly` lets an
       # upstream compiler regression take the campaign down with no change on
@@ -37,17 +37,17 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       # The action implementation follows its `v1` release line; the
       # independently reviewed nightly is still passed through `toolchain:`.
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.nightly.outputs.toolchain }}
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Restore bounded wire corpus cache
         id: wire-corpus-restore
         if: env.WIRE_CORPUS_WRITER == 'true'
         continue-on-error: true
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/wire-corpus-cache
           key: wire-fuzz-corpus-v1-main-${{ github.run_id }}-${{ github.run_attempt }}
@@ -224,7 +224,7 @@ jobs:
           done
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-crashes
           retention-days: 14
@@ -257,7 +257,7 @@ jobs:
       - name: Save bounded wire corpus cache
         if: steps.wire-corpus-seal.outputs.save == 'true' && env.WIRE_CORPUS_WRITER == 'true'
         continue-on-error: true
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/wire-corpus-cache
           key: wire-fuzz-corpus-v1-main-${{ github.run_id }}-${{ github.run_attempt }}

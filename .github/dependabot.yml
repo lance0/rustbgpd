@@ -85,10 +85,30 @@ updates:
       # and run the differential tests.
       - dependency-name: "bgpkit-parser"
 
-  # GitHub Actions versions in workflows/. Catches deprecation
-  # warnings (e.g. Node 20 → Node 24 transition) before they bite.
+  # SHA pins retain inline version tags so Dependabot updates both together.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+
+  # Digest pins need updates to receive rebuilt base-image security fixes.
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/.clusterfuzzlite"
+      - "/.oss-scanner"
+      - "/bench/scale/reloadstall"
+      - "/crates/evpn-linux/tests/docker"
+      - "/fuzz/oss-fuzz"
+      - "/tests/compat/ixp-manager-birdseye"
+      - "/tests/interop"
+      - "/tests/interop/m126-fastnetmon-rtbh"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      # This image is built locally from the current checkout.
+      - dependency-name: "rustbgpd"

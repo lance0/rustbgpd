@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -13,8 +14,9 @@ from pathlib import Path
 from scripts import classify_heavy_ci_paths as heavy
 from scripts.check_ci_image_primer_contract import (
     LAB_WORKFLOWS,
-    PINS,
-    VERSION_TAG,
+    _check_action_refs,
+    _check_base_images,
+    _check_build_inputs,
     _jobs,
     check,
 )
@@ -531,13 +533,14 @@ class PrimerContractTests(unittest.TestCase):
                 errors,
             )
         with self.subTest("root Dockerfile built without file: gains a download"):
+            runtime = re.search(r"(?m)^FROM \S+ AS runtime$", (ROOT / "Dockerfile").read_text())[0]
             self.assert_red(
                 "Dockerfile: fetch is not verified by sha256sum before extraction",
                 (
                     "Dockerfile",
-                    "\nFROM debian:bookworm-slim AS runtime\n",
+                    f"\n{runtime}\n",
                     "\nRUN curl -fsSLo /tmp/x.tgz https://example.invalid/x.tgz && tar -xzf /tmp/x.tgz"
-                    "\nFROM debian:bookworm-slim AS runtime\n",
+                    f"\n{runtime}\n",
                 ),
             )
         with self.subTest("checksum covers a different file than the one extracted"):
@@ -622,26 +625,117 @@ class PrimerContractTests(unittest.TestCase):
 
     # 2. Action refs.
 
-    def test_external_action_refs_are_reviewed_version_tags(self):
-        for ref in PINS:
-            self.assertRegex(ref, VERSION_TAG)
+    def test_movable_action_tag_is_rejected(self):
         audit = ".github/workflows/audit.yml"
-        clab = ".github/actions/install-containerlab/action.yml"
+        current = re.search(r"uses: (actions/checkout@\S+)", (ROOT / audit).read_text())[1]
+        self.assert_red(
+            "action ref is not pinned to a full commit SHA",
+            (audit, current, "actions/checkout@v7"),
+        )
+
+    def test_external_base_requires_digest(self):
+        current = re.search(r"(?m)^FROM (\S+) AS runtime$", (ROOT / "Dockerfile").read_text())[1]
+        self.assert_red(
+            "external image is not pinned to a SHA-256 digest",
+            ("Dockerfile", current, "debian:bookworm-slim"),
+        )
+
+    def test_external_action_refs_require_shas_and_version_comments(self):
         sha = "0123456789abcdef0123456789abcdef01234567"
-        for relative, old, new, expect in (
-            (audit, "actions/checkout@v7", "actions/checkout@main", "not a reviewed version tag: actions/checkout@main"),
-            (audit, "actions/checkout@v7", f"actions/checkout@{sha}", f"not a reviewed version tag: actions/checkout@{sha}"),
-            (audit, "actions/checkout@v7", "actions/checkout@v8", "not in the reviewed pin set: actions/checkout@v8"),
-            (
-                audit,
-                "      - uses: actions/checkout@v7\n",
-                "      - uses: actions/checkout@v7\n      - uses: actions/setup-python@v5\n",
-                "not in the reviewed pin set: actions/setup-python@v5",
-            ),
-            (clab, "actions/cache/restore@v6", "actions/cache/restore@main", "not a reviewed version tag: actions/cache/restore@main"),
+        for ref in (
+            "./.github/actions/install-protobuf",
+            f"actions/checkout@{sha} # v7",
+            f"'actions/checkout@{sha}' # v8.1.2",
         ):
-            with self.subTest(relative=relative, ref=new.strip()):
-                self.assert_red(f"{relative}: action ref is {expect}", (relative, old, new))
+            errors = []
+            _check_action_refs("workflow.yml", f"      - uses: {ref}\n", errors)
+            self.assertEqual([], errors)
+        for ref, expect in (
+            ("actions/checkout@main # v7", "full commit SHA"),
+            ("actions/checkout@v7 # v7", "full commit SHA"),
+            (f"actions/checkout@{sha[:12]} # v7", "full commit SHA"),
+            (f"actions/checkout@{sha}", "trailing version tag"),
+            (f"actions/checkout@{sha} # stable", "trailing version tag"),
+            (f"unknown/action@{sha} # v1", "reviewed set"),
+        ):
+            with self.subTest(ref=ref):
+                errors = []
+                _check_action_refs("workflow.yml", f"uses: {ref}\n", errors)
+                self.assertTrue(any(expect in error for error in errors), errors)
+        for line in (
+            '- {uses: actions/checkout@v7}',
+            '- {name: checkout, "uses": "actions/checkout@main"}',
+            'uses: >\n  actions/checkout@v7',
+        ):
+            errors = []
+            _check_action_refs("workflow.yml", line, errors)
+            self.assertTrue(any("full commit SHA" in error for error in errors), errors)
+        errors = []
+        _check_action_refs("workflow.yml", f'- {{uses: "actions/checkout@{sha}"}} # v7', errors)
+        self.assertEqual([], errors)
+        _check_action_refs("workflow.yml", "# Never use {uses: actions/checkout@main}\n", errors)
+        self.assertEqual([], errors)
+
+    def test_base_image_digest_checks_follow_stages_and_arguments(self):
+        digest = "a" * 64
+        for source in (
+            f"# syntax=docker/dockerfile:1.7@sha256:{digest}\nFROM debian:bookworm@sha256:{digest} AS base\nFROM base AS final\n",
+            f"ARG BASE=debian:bookworm@sha256:{digest}\nFROM --platform=$BUILDPLATFORM ${{BASE}}\n",
+            "  FROM " + "\\" + f"\n                debian:bookworm@sha256:{digest}\n",
+            "FROM scratch\n",
+        ):
+            errors = []
+            _check_base_images("Dockerfile", source, errors)
+            self.assertEqual([], errors)
+        for source in (
+            "FROM debian:bookworm\n", "FROM unknown_stage\n", "FROM ${BASE}\n",
+            "ARG BASE=debian:bookworm\nFROM ${BASE}\n", "# syntax=docker/dockerfile:1.7\n",
+            "FROM rustbgpd:dev\n", "  FROM debian:bookworm\n",
+        ):
+            errors = []
+            _check_base_images("Dockerfile", source, errors)
+            self.assertTrue(any("external image" in error for error in errors), errors)
+        errors = []
+        _check_base_images("tests/interop/m126-fastnetmon-rtbh/Dockerfile", "ARG BASE=rustbgpd:dev\nFROM ${BASE}\n", errors)
+        self.assertEqual([], errors)
+
+    def test_build_input_discovery_covers_all_workflows_actions_and_dockerfiles(self):
+        sources = {
+            ".github/workflows/extra.yaml": "jobs:\n  build:\n    container: alpine:3.22\n",
+            ".github/actions/extra/action.yml": "runs:\n  steps:\n    - {uses: actions/checkout@v7}\n",
+            ".clusterfuzzlite/Dockerfile": "FROM rust:1.95\n",
+            "tests/new/Dockerfile.fixture": "FROM alpine:3.22\n",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, source in sources.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source)
+            errors = []
+            _check_build_inputs(root, errors)
+            for relative in sources:
+                self.assertTrue(any(error.startswith(relative + ":") for error in errors), errors)
+
+    def test_workflow_container_images_cover_quoted_keys_and_flow_objects(self):
+        digest = "a" * 64
+        for source in (
+            '"container": "alpine:3.22"',
+            "container: {image: alpine:3.22}",
+            "services: {database: {'image': 'alpine:3.22'}}",
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = root / ".github/workflows/test.yml"
+                path.parent.mkdir(parents=True)
+                path.write_text(source)
+                errors = []
+                _check_build_inputs(root, errors)
+                self.assertTrue(any("external image" in error for error in errors), errors)
+                path.write_text(source.replace("alpine:3.22", f"alpine:3.22@sha256:{digest}"))
+                errors = []
+                _check_build_inputs(root, errors)
+                self.assertEqual([], errors)
 
     # 3. Permissions.
 
@@ -928,7 +1022,7 @@ class PrimerContractTests(unittest.TestCase):
     # 6. Classifier checkout.
 
     def test_classifier_checkout_stays_shallow_inside_its_cap(self):
-        checkout = "      - uses: actions/checkout@v7\n      - name: Classify complete pull-request diff\n"
+        checkout = re.search(r"(?m)^      - uses: actions/checkout@[^\n]+\n      - name: Classify complete pull-request diff\n", (ROOT / INTEROP).read_text())[0]
         run = "        run: python3 scripts/classify_heavy_ci_paths.py\n"
         for workflow in (INTEROP, KERNEL):
             name = Path(workflow).name
@@ -940,7 +1034,7 @@ class PrimerContractTests(unittest.TestCase):
                     self.assert_red(
                         f"{name}:classify_changes overrides the shallow checkout depth",
                         (workflow, checkout, checkout.replace(
-                            "@v7\n", f"@v7\n        with:\n          fetch-depth: {depth}\n"
+                            "\n", f"\n        with:\n          fetch-depth: {depth}\n", 1
                         )),
                     )
             with self.subTest(workflow=name, seam="shallow diff without merge-base coverage"):

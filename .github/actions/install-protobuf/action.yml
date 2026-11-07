@@ -34,7 +34,7 @@ runs:
     # entry fails closed (delete it with `gh cache delete <key>`).
     - name: Restore the verified protoc archive
       id: cache
-      uses: actions/cache/restore@v6
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ~/.cache/rustbgpd-protoc/${{ steps.pin.outputs.name }}
         key: ${{ steps.pin.outputs.key }}
@@ -78,7 +78,7 @@ runs:
     # Saved only after the install step verified the downloaded archive.
     - name: Save the verified protoc archive
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ~/.cache/rustbgpd-protoc/${{ steps.pin.outputs.name }}
         key: ${{ steps.pin.outputs.key }}

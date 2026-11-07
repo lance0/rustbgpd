@@ -51,13 +51,13 @@ TOOLCHAIN_MARKERS = (
 )
 
 # Each rule matches a toolchain selection that does not come from the pin.
-# `dtolnay/rust-toolchain@v1` plus an expression-valued `toolchain:` input is
+# A SHA-pinned `dtolnay/rust-toolchain` plus an expression-valued input is
 # the sanctioned workflow form; `cargo "+$var"` is a pin-derived selector.
 VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"dtolnay/rust-toolchain@(?!v1(?:\s|$))\S+"),
-        "selects a toolchain in the action ref; use "
-        "dtolnay/rust-toolchain@v1 and pass the pinned value as its "
+        re.compile(r"dtolnay/rust-toolchain@(?![0-9a-f]{40}(?:\s|$))\S+"),
+        "selects an unpinned action or a toolchain in the action ref; use "
+        "a full commit SHA and pass the pinned value as its "
         "toolchain input",
     ),
     (
