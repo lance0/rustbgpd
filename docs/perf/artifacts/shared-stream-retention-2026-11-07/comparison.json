@@ -1,0 +1,2550 @@
+{
+  "campaign": "shared-stream-retention-2026-11-07",
+  "status": "PASS",
+  "scope": "Local component ownership, allocator release, maximum observed memory and synchronous session elapsed intervals; no hosted run or public raw-run URL.",
+  "environment": {
+    "os": "Linux 7.0.0-30-generic",
+    "cpu": "AMD Ryzen Threadripper 7970X",
+    "physical_cores": 32,
+    "logical_cpus": 64,
+    "installed_memory_gib": 128,
+    "visible_memory_gib_approx": 125,
+    "pinned_cpu": 5,
+    "rustc": "1.99.1 (58cf8f9c3 2026-10-13)",
+    "clippy": "0.1.99 (58cf8f9c35 2026-10-13)",
+    "criterion": "0.8.2",
+    "jemallocator": "0.7.0"
+  },
+  "sources": {
+    "parent_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+    "original_candidate_applicability_commit": "255d0479411f4d47af172c7b53486e3269327a8b",
+    "final_candidate_commit": "63e67fe6b4f4451833c0a056b8859a2974da23c2",
+    "fix": "PendingOutbound::new clears update.shared_group_encode after election; active cursors and unstarted followers keep their owners.",
+    "original_build_note": "The four recorded precommit source trees are local Git tree identities, not published commits. Equal instrumentation was applied to the parent. Compiled production/probe source applicability was checked against the named commits.",
+    "final_memory_applicability": "The final commit isolates the allocator-control dependency behind retention-probe. Probe algorithm and production release behavior are unchanged. Original matched-instrumentation memory results apply; no duplicate memory campaign ran.",
+    "normal_dependency_graph": "142 normalized library nodes match; neither normal elapsed binary includes tikv-jemalloc-ctl. Both independently rebuilt binaries match their original hashes.",
+    "builds": {
+      "instrumented_parent_memory": {
+        "base_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "recorded_precommit_source_tree": "163043183a1909571f2befe0a3ebb14a6267eaa1",
+        "source_applicability_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "binary_sha256": "8633f41910bb77b71a4cd6cd1d0cd3afae8a31900a7cf58b6ad16b6fe08481d1",
+        "source_note": "Parent source with the same test instrumentation and allocator-control dependency as the candidate; release assignment absent."
+      },
+      "instrumented_candidate_memory": {
+        "base_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "recorded_precommit_source_tree": "26542e4c14eac9d7f05b7291dcb6dfa5045ee9bf",
+        "source_applicability_commit": "255d0479411f4d47af172c7b53486e3269327a8b",
+        "binary_sha256": "1a6b76004645d3daa2df6bd5038ed8d8ad8a6898269e95c33fcea338be99cf37",
+        "source_note": "Release assignment present. Later differences to applicability commit affect tests or prose, not compiled benchmark behavior."
+      },
+      "instrumented_parent_elapsed": {
+        "base_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "recorded_precommit_source_tree": "040964dc46e2f2077f4b3ccc01276cbd5b8dba79",
+        "source_applicability_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "binary_sha256": "78cfd562c737eb7e66a63d8cfdd75a64485a257a6249c42e028fdaaabb3b50c8",
+        "source_note": "Parent source with the same test instrumentation and allocator-control dependency as the candidate; release assignment absent."
+      },
+      "instrumented_candidate_elapsed": {
+        "base_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "recorded_precommit_source_tree": "41245979f71809168c51f709a2185549b2ed1e06",
+        "source_applicability_commit": "255d0479411f4d47af172c7b53486e3269327a8b",
+        "binary_sha256": "7bf23b8f0246edac9b2828e18d9a1c13b0279c30c6881186d4ed8aa1df3666d3",
+        "source_note": "Release assignment present. Later differences to applicability commit affect tests or prose, not compiled benchmark behavior."
+      },
+      "normal_parent_elapsed": {
+        "source_commit": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "source_clean": true,
+        "binary_sha256": "bc8b41cde1d9aa9f7e82f2e6848137e0afde860bf8e3c0851e7459e08e0e1558",
+        "independent_build_reproduced_sha256": true
+      },
+      "normal_candidate_elapsed": {
+        "source_commit": "63e67fe6b4f4451833c0a056b8859a2974da23c2",
+        "source_clean": true,
+        "binary_sha256": "beead1e0fe02ccd9f5a0872160272c7db9ed30ad7eadc11c99ed86e748148a43",
+        "independent_build_reproduced_sha256": true
+      }
+    },
+    "original_candidate_applicability_tree": "0e850319e616c9e1d1203814d42e1024a3caf3c7",
+    "final_candidate_tree": "6503d0edf01da2d7c05fd02136829a1236670ac0"
+  },
+  "procedure": {
+    "leg_order": [
+      {
+        "leg": "aa1",
+        "role": "parent"
+      },
+      {
+        "leg": "aa2",
+        "role": "parent"
+      },
+      {
+        "leg": "abba1",
+        "role": "parent"
+      },
+      {
+        "leg": "abba2",
+        "role": "candidate"
+      },
+      {
+        "leg": "abba3",
+        "role": "candidate"
+      },
+      {
+        "leg": "abba4",
+        "role": "parent"
+      },
+      {
+        "leg": "confirm1",
+        "role": "parent"
+      },
+      {
+        "leg": "confirm2",
+        "role": "candidate"
+      }
+    ],
+    "criterion_samples": 30,
+    "warmup_seconds": 1,
+    "measurement_seconds": 2,
+    "quiet": "Exclusive host lock; two accepted samples at least 30 seconds apart, load1 < 2, all CPU governors performance, no competing build/test/daemon process, no swap counter change.",
+    "timing_domain": "Sum of synchronous session Instant intervals; writer drains excluded; not CPU time.",
+    "snapshot_columns": [
+      "allocated_bytes",
+      "active_bytes",
+      "resident_bytes",
+      "rss_bytes",
+      "hwm_bytes"
+    ],
+    "snapshot_phases": [
+      "baseline",
+      "setup",
+      "encoded",
+      "before_last",
+      "blocked_eor",
+      "retired"
+    ],
+    "memory_processes": "One fresh process per shape per leg; 24 in the original full campaign.",
+    "allocation_domain": "jemalloc stats snapshots and per-thread allocated/deallocated counters around the final announcement advance."
+  },
+  "frozen_bars": {
+    "ownership": "Every candidate stream must lose its final owner before blocked End-of-RIB, while the final queued writer frame may remain owned.",
+    "minimum_net_release_bytes": "deallocated_delta - allocated_delta >= wire_bytes - last_frame_bytes + vector_bytes",
+    "memory_metrics": [
+      "allocated_bytes",
+      "hwm_bytes"
+    ],
+    "memory_maximum": "Maximum observed value across the six recorded phases.",
+    "memory_abba": "mean(candidate abba2, abba3 maxima) <= max(mean(parent abba1, abba4 maxima) * 1.05, mean(parent maxima) + 33554432)",
+    "memory_confirmation": "candidate confirm2 maximum <= max(parent confirm1 maximum * 1.05, parent confirm1 maximum + 33554432)",
+    "elapsed_aa": "max(aa1,aa2) / min(aa1,aa2)",
+    "elapsed_limit": "max(1.02, elapsed_aa + 0.01)",
+    "elapsed_abba": "mean(abba2/abba1, abba3/abba4)",
+    "elapsed_confirmation": "confirm2/confirm1",
+    "elapsed_failure": "ABBA and confirmation must both exceed the limit to fail.",
+    "independent_selection": "Prospectively selected cells with symmetric A/A > 1.02. Replicas report both their fresh and original limits; unresolved disagreement required investigation.",
+    "drop_duration": "Report-only; 50000000 ns reference. No duration gate was added."
+  },
+  "campaigns": {
+    "original_matched_instrumentation": {
+      "status": "PASS",
+      "reason": "All frozen ownership, allocation, maximum-observed memory and 13-cell elapsed bars pass.",
+      "builds": {
+        "parent_memory": "instrumented_parent_memory",
+        "candidate_memory": "instrumented_candidate_memory",
+        "parent_elapsed": "instrumented_parent_elapsed",
+        "candidate_elapsed": "instrumented_candidate_elapsed"
+      },
+      "first_measured_start_utc": "2026-11-07T16:15:13Z",
+      "last_measured_end_utc": "2026-11-07T16:37:39Z",
+      "valid_commands": 32,
+      "quiet_samples_per_command": 2,
+      "elapsed_rows": [
+        {
+          "cell": "failover_encode/announce_only/32",
+          "median_ns": {
+            "aa1": 179542.88595238095,
+            "aa2": 179057.4738095238,
+            "abba1": 179082.60338345866,
+            "abba2": 179208.88888888888,
+            "abba3": 178527.552154195,
+            "abba4": 178529.18722943723,
+            "confirm1": 179503.3324016563,
+            "confirm2": 179277.39285714287
+          },
+          "aa_ratio": 1.0027109292481895,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.0007051801964248,
+            0.9999908414121657
+          ],
+          "abba_ratio": 1.0003480108042953,
+          "confirmation_ratio": 0.9987413072420969,
+          "status": "PASS"
+        },
+        {
+          "cell": "failover_encode/announce_only/8",
+          "median_ns": {
+            "aa1": 121482.15353535354,
+            "aa2": 121234.59490740742,
+            "abba1": 122132.70909090909,
+            "abba2": 121472.81963869464,
+            "abba3": 121488.45976430977,
+            "abba4": 120770.58767676768,
+            "confirm1": 121968.36140583555,
+            "confirm2": 121363.39450899977
+          },
+          "aa_ratio": 1.002041980081141,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9945969473933206,
+            1.0059440969970554
+          ],
+          "abba_ratio": 1.000270522195188,
+          "confirmation_ratio": 0.9950399686454521,
+          "status": "PASS"
+        },
+        {
+          "cell": "failover_encode/mixed/32",
+          "median_ns": {
+            "aa1": 669542.7322222223,
+            "aa2": 670255.5238095238,
+            "abba1": 669877.9953703703,
+            "abba2": 669855.8650793651,
+            "abba3": 667302.0375,
+            "abba4": 672541.669047619,
+            "confirm1": 671694.07518797,
+            "confirm2": 671592.7568027211
+          },
+          "aa_ratio": 1.0010645946150976,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9999669636991241,
+            0.9922092090516282
+          ],
+          "abba_ratio": 0.9960880863753762,
+          "confirmation_ratio": 0.9998491599241507,
+          "status": "PASS"
+        },
+        {
+          "cell": "failover_encode/mixed/8",
+          "median_ns": {
+            "aa1": 244906.7818414322,
+            "aa2": 245351.45187165774,
+            "abba1": 245659.59220389806,
+            "abba2": 243750.47549019608,
+            "abba3": 242892.75490196078,
+            "abba4": 246905.8107843137,
+            "confirm1": 244588.64915966388,
+            "confirm2": 243912.80672268907
+          },
+          "aa_ratio": 1.0018156705456749,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9922286091229957,
+            0.983746612242113
+          ],
+          "abba_ratio": 0.9879876106825544,
+          "confirmation_ratio": 0.9972368201087957,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/distinct_values/100",
+          "median_ns": {
+            "aa1": 46034.06168478261,
+            "aa2": 46426.501180555555,
+            "abba1": 46169.66425120773,
+            "abba2": 46766.20410839161,
+            "abba3": 46065.36016483516,
+            "abba4": 46598.39621212121,
+            "confirm1": 46319.377672101444,
+            "confirm2": 45949.006793478264
+          },
+          "aa_ratio": 1.008524980881769,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.012920602019935,
+            0.9885610645297832
+          ],
+          "abba_ratio": 1.000740833274859,
+          "confirmation_ratio": 0.9920039755014615,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/distinct_values/1000",
+          "median_ns": {
+            "aa1": 508728.45083774254,
+            "aa2": 515440.36273209547,
+            "abba1": 512917.235,
+            "abba2": 510940.6455761317,
+            "abba3": 514110.9547720798,
+            "abba4": 514613.64197530865,
+            "confirm1": 510047.9451058201,
+            "confirm2": 514238.05717592593
+          },
+          "aa_ratio": 1.0131935060508217,
+          "limit": 1.0231935060508217,
+          "abba_pair_ratios": [
+            0.9961463774484625,
+            0.9990231755199894
+          ],
+          "abba_ratio": 0.9975847764842259,
+          "confirmation_ratio": 1.0082151337150012,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/distinct_values/10000",
+          "median_ns": {
+            "aa1": 5596667.625,
+            "aa2": 5537206.5040567955,
+            "abba1": 5560328.933712121,
+            "abba2": 5543191.598484848,
+            "abba3": 5532640.653673164,
+            "abba4": 5552158.450980392,
+            "confirm1": 5740620.461538462,
+            "confirm2": 5554258.25
+          },
+          "aa_ratio": 1.0107384690998322,
+          "limit": 1.0207384690998322,
+          "abba_pair_ratios": [
+            0.9969179278003915,
+            0.9964846469207337
+          ],
+          "abba_ratio": 0.9967012873605625,
+          "confirmation_ratio": 0.967536224910344,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/equal_values/100",
+          "median_ns": {
+            "aa1": 20838.18120829609,
+            "aa2": 21144.298970588236,
+            "abba1": 20955.56986117331,
+            "abba2": 21040.019813180414,
+            "abba3": 20805.84655172414,
+            "abba4": 20720.312371285672,
+            "confirm1": 20697.929611650485,
+            "confirm2": 20909.54384700665
+          },
+          "aa_ratio": 1.014690234201931,
+          "limit": 1.024690234201931,
+          "abba_pair_ratios": [
+            1.0040299525408551,
+            1.0041280352779334
+          ],
+          "abba_ratio": 1.0040789939093941,
+          "confirmation_ratio": 1.010223932505648,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/equal_values/1000",
+          "median_ns": {
+            "aa1": 236753.4125386997,
+            "aa2": 235581.83157894737,
+            "abba1": 236945.756457115,
+            "abba2": 235175.09941520466,
+            "abba3": 236755.85965608468,
+            "abba4": 235407.67707223527,
+            "confirm1": 235206.7236842105,
+            "confirm2": 234755.0814439946
+          },
+          "aa_ratio": 1.004973138004319,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9925271628899975,
+            1.0057270119675652
+          ],
+          "abba_ratio": 0.9991270874287814,
+          "confirmation_ratio": 0.9980798072727619,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/equal_values/10000",
+          "median_ns": {
+            "aa1": 2677865.2767857146,
+            "aa2": 2684592.8954678364,
+            "abba1": 2684897.05,
+            "abba2": 2687522.541666667,
+            "abba3": 2695546.4155518394,
+            "abba4": 2665712.3660714286,
+            "confirm1": 2696250.3653846155,
+            "confirm2": 2694354.5999999996
+          },
+          "aa_ratio": 1.0025123066273884,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.0009778742416464,
+            1.0111917736737586
+          ],
+          "abba_ratio": 1.0060848239577025,
+          "confirmation_ratio": 0.9992968882233808,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/shared_arc/100",
+          "median_ns": {
+            "aa1": 3436.1900904248732,
+            "aa2": 3413.824104896131,
+            "abba1": 3449.7140343405363,
+            "abba2": 3459.7417015633723,
+            "abba3": 3514.1937505052956,
+            "abba4": 3390.439298688681,
+            "confirm1": 3417.4516332515004,
+            "confirm2": 3454.6875980392156
+          },
+          "aa_ratio": 1.0065515928300655,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.0029068111510155,
+            1.0365010079562489
+          ],
+          "abba_ratio": 1.0197039095536322,
+          "confirmation_ratio": 1.010895827881048,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/shared_arc/1000",
+          "median_ns": {
+            "aa1": 27111.128083381587,
+            "aa2": 26968.264662447258,
+            "abba1": 27021.82379746098,
+            "abba2": 27484.406545209175,
+            "abba3": 27238.7874465812,
+            "abba4": 27250.55110260665,
+            "confirm1": 27071.359113155333,
+            "confirm2": 27788.490029325512
+          },
+          "aa_ratio": 1.0052974643612596,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.017118857380443,
+            0.9995683149312776
+          ],
+          "abba_ratio": 1.0083435861558603,
+          "confirmation_ratio": 1.026490392047649,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/shared_arc/10000",
+          "median_ns": {
+            "aa1": 279738.82055152976,
+            "aa2": 273511.3508522727,
+            "abba1": 275706.8419471154,
+            "abba2": 281001.3686079546,
+            "abba3": 283374.00426136365,
+            "abba4": 273094.7890625,
+            "confirm1": 274696.7201704546,
+            "confirm2": 280817.94345238095
+          },
+          "aa_ratio": 1.0227685969150897,
+          "limit": 1.0327685969150897,
+          "abba_pair_ratios": [
+            1.0192034648957127,
+            1.0376397339332284
+          ],
+          "abba_ratio": 1.0284215994144705,
+          "confirmation_ratio": 1.0222835688687073,
+          "status": "PASS"
+        }
+      ],
+      "memory_rows": [
+        {
+          "shape": "grouped_uc",
+          "leg": "aa1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7163904,
+              7163904
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              147251200,
+              148955136,
+              148955136
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              146653184,
+              164708352
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              139067392,
+              147050496,
+              164708352
+            ],
+            "blocked_eor": [
+              127781984,
+              128090112,
+              139067392,
+              147050496,
+              164708352
+            ],
+            "retired": [
+              1546192,
+              1888256,
+              18046976,
+              26226688,
+              164708352
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 601,
+            "eor_advance_ns": 16224,
+            "retirement_max_ns": 7756129,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 7756129
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "aa2",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7176192,
+              7176192
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              147251200,
+              149090304,
+              149090304
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              147132416,
+              165281792
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              139067392,
+              147476480,
+              165281792
+            ],
+            "blocked_eor": [
+              127781984,
+              128090112,
+              139067392,
+              147476480,
+              165281792
+            ],
+            "retired": [
+              1546192,
+              1888256,
+              18055168,
+              26664960,
+              165281792
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 601,
+            "eor_advance_ns": 16425,
+            "retirement_max_ns": 7715598,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 7715598
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "abba1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7139328,
+              7139328
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              146726912,
+              149020672,
+              149020672
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138444800,
+              146853888,
+              164823040
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              138543104,
+              147222528,
+              164823040
+            ],
+            "blocked_eor": [
+              127781984,
+              128090112,
+              138543104,
+              147222528,
+              164823040
+            ],
+            "retired": [
+              1546192,
+              1888256,
+              17530880,
+              26411008,
+              164823040
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 581,
+            "eor_advance_ns": 14792,
+            "retirement_max_ns": 7585593,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 7585593
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "abba2",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6955008,
+              6955008
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              146726912,
+              148922368,
+              148922368
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              146755584,
+              164880384
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              131059712,
+              139005952,
+              164880384
+            ],
+            "blocked_eor": [
+              122659680,
+              122998784,
+              131059712,
+              139005952,
+              164880384
+            ],
+            "retired": [
+              1542800,
+              1880064,
+              10047488,
+              18059264,
+              164880384
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 5158160,
+            "final_announce_ns": 58908,
+            "eor_advance_ns": 17316,
+            "retirement_max_ns": 7613946,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 58908
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "abba3",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6766592,
+              6766592
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              147251200,
+              148578304,
+              148578304
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              146518016,
+              164732928
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              131059712,
+              138940416,
+              164732928
+            ],
+            "blocked_eor": [
+              122659680,
+              122998784,
+              131059712,
+              138940416,
+              164732928
+            ],
+            "retired": [
+              1542800,
+              1880064,
+              10047488,
+              18026496,
+              164732928
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 5158160,
+            "final_announce_ns": 57476,
+            "eor_advance_ns": 20070,
+            "retirement_max_ns": 7655428,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 57476
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "abba4",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7139328,
+              7139328
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              147251200,
+              149155840,
+              149155840
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              147066880,
+              165175296
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              139067392,
+              147394560,
+              165175296
+            ],
+            "blocked_eor": [
+              127781984,
+              128090112,
+              139067392,
+              147394560,
+              165175296
+            ],
+            "retired": [
+              1546192,
+              1888256,
+              18034688,
+              26435584,
+              165175296
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 541,
+            "eor_advance_ns": 12559,
+            "retirement_max_ns": 7740946,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 7740946
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "confirm1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7061504,
+              7061504
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              147251200,
+              149045248,
+              149045248
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              146653184,
+              164675584
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              139067392,
+              147042304,
+              164675584
+            ],
+            "blocked_eor": [
+              127781984,
+              128090112,
+              139067392,
+              147042304,
+              164675584
+            ],
+            "retired": [
+              1546192,
+              1888256,
+              18055168,
+              26230784,
+              164675584
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 681,
+            "eor_advance_ns": 16094,
+            "retirement_max_ns": 7704883,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 7704883
+          }
+        },
+        {
+          "shape": "grouped_uc",
+          "leg": "confirm2",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7036928,
+              7036928
+            ],
+            "setup": [
+              139796712,
+              139890688,
+              147251200,
+              148885504,
+              148885504
+            ],
+            "encoded": [
+              127876520,
+              128135168,
+              138969088,
+              146706432,
+              164716544
+            ],
+            "before_last": [
+              127781984,
+              128090112,
+              139067392,
+              147103744,
+              164716544
+            ],
+            "blocked_eor": [
+              122659680,
+              122998784,
+              139067392,
+              147103744,
+              164716544
+            ],
+            "retired": [
+              1542800,
+              1880064,
+              18055168,
+              26157056,
+              164716544
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 1953,
+            "wire_bytes": 4083979,
+            "vector_bytes": 98304,
+            "last_frame_bytes": 2347,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 5158160,
+            "final_announce_ns": 60410,
+            "eor_advance_ns": 17225,
+            "retirement_max_ns": 7630731,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 60410
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "aa1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7184384,
+              7184384
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              163364864,
+              163364864
+            ],
+            "encoded": [
+              174632336,
+              174997504,
+              189247488,
+              197414912,
+              197414912
+            ],
+            "before_last": [
+              174169936,
+              174493696,
+              189218816,
+              197570560,
+              197570560
+            ],
+            "blocked_eor": [
+              174170272,
+              174493696,
+              189218816,
+              197570560,
+              197570560
+            ],
+            "retired": [
+              1531800,
+              1871872,
+              44507136,
+              53755904,
+              197169152
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 691,
+            "eor_advance_ns": 29774,
+            "retirement_max_ns": 9590968,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 9590968
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "aa2",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7151616,
+              7151616
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              163225600,
+              163225600
+            ],
+            "encoded": [
+              174435728,
+              174776320,
+              189394944,
+              197349376,
+              197349376
+            ],
+            "before_last": [
+              174169936,
+              174493696,
+              189366272,
+              197525504,
+              197525504
+            ],
+            "blocked_eor": [
+              174170272,
+              174493696,
+              189366272,
+              197525504,
+              197525504
+            ],
+            "retired": [
+              1532888,
+              1875968,
+              44662784,
+              53719040,
+              196726784
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 791,
+            "eor_advance_ns": 28582,
+            "retirement_max_ns": 9673571,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 9673571
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "abba1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6955008,
+              6955008
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              162746368,
+              162746368
+            ],
+            "encoded": [
+              174632336,
+              174997504,
+              189091840,
+              196395008,
+              196395008
+            ],
+            "before_last": [
+              174169936,
+              174493696,
+              189067264,
+              196542464,
+              196542464
+            ],
+            "blocked_eor": [
+              174170272,
+              174493696,
+              189067264,
+              196542464,
+              196542464
+            ],
+            "retired": [
+              1524920,
+              1867776,
+              35786752,
+              44118016,
+              196112384
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 1092,
+            "eor_advance_ns": 29224,
+            "retirement_max_ns": 10272770,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 10272770
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "abba2",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7000064,
+              7000064
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              163106816,
+              163106816
+            ],
+            "encoded": [
+              174534032,
+              174886912,
+              189190144,
+              197074944,
+              197074944
+            ],
+            "before_last": [
+              174169888,
+              174493696,
+              189177856,
+              197218304,
+              197218304
+            ],
+            "blocked_eor": [
+              153559408,
+              153903104,
+              189177856,
+              197218304,
+              197218304
+            ],
+            "retired": [
+              1521128,
+              1875968,
+              44474368,
+              53272576,
+              196775936
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 20639600,
+            "final_announce_ns": 301452,
+            "eor_advance_ns": 30315,
+            "retirement_max_ns": 9290828,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 301452
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "abba3",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7036928,
+              7036928
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              163160064,
+              163160064
+            ],
+            "encoded": [
+              174665104,
+              175034368,
+              189480960,
+              197218304,
+              197218304
+            ],
+            "before_last": [
+              174169888,
+              174493696,
+              189452288,
+              197373952,
+              197373952
+            ],
+            "blocked_eor": [
+              153559408,
+              153903104,
+              181047296,
+              188993536,
+              197165056
+            ],
+            "retired": [
+              1484264,
+              1839104,
+              36339712,
+              45043712,
+              197165056
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 20639600,
+            "final_announce_ns": 839548,
+            "eor_advance_ns": 31106,
+            "retirement_max_ns": 9345451,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 839548
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "abba4",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6955008,
+              6955008
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              162742272,
+              162742272
+            ],
+            "encoded": [
+              174566800,
+              174923776,
+              189755392,
+              196538368,
+              196538368
+            ],
+            "before_last": [
+              174169936,
+              174493696,
+              189734912,
+              196673536,
+              196673536
+            ],
+            "blocked_eor": [
+              174170272,
+              174493696,
+              189734912,
+              196673536,
+              196673536
+            ],
+            "retired": [
+              1506744,
+              1843200,
+              45015040,
+              52785152,
+              196050944
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 821,
+            "eor_advance_ns": 27662,
+            "retirement_max_ns": 9526782,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 9526782
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "confirm1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6959104,
+              6959104
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              162746368,
+              162746368
+            ],
+            "encoded": [
+              174501264,
+              174850048,
+              189210624,
+              196567040,
+              196567040
+            ],
+            "before_last": [
+              174169936,
+              174493696,
+              189198336,
+              196710400,
+              196710400
+            ],
+            "blocked_eor": [
+              174170272,
+              174493696,
+              189198336,
+              196710400,
+              196710400
+            ],
+            "retired": [
+              1524408,
+              1863680,
+              44494848,
+              52838400,
+              196116480
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 971,
+            "eor_advance_ns": 30977,
+            "retirement_max_ns": 9618800,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 9618800
+          }
+        },
+        {
+          "shape": "grouped_vpn",
+          "leg": "confirm2",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6979584,
+              6979584
+            ],
+            "setup": [
+              153676224,
+              153825280,
+              157016064,
+              162709504,
+              162709504
+            ],
+            "encoded": [
+              174501264,
+              174850048,
+              189173760,
+              196575232,
+              196575232
+            ],
+            "before_last": [
+              174169888,
+              174493696,
+              189145088,
+              196718592,
+              196718592
+            ],
+            "blocked_eor": [
+              153559408,
+              153903104,
+              189145088,
+              196718592,
+              196718592
+            ],
+            "retired": [
+              1484264,
+              1839104,
+              44441600,
+              52776960,
+              196255744
+            ]
+          },
+          "result": {
+            "routes": 1000000,
+            "chunks": 7812,
+            "wire_bytes": 16445284,
+            "vector_bytes": 393216,
+            "last_frame_bytes": 2361,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 20639600,
+            "final_announce_ns": 303554,
+            "eor_advance_ns": 29634,
+            "retirement_max_ns": 9305300,
+            "retirement_steps": 488,
+            "stream_drop_step_ns": 303554
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "aa1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7180288,
+              7180288
+            ],
+            "setup": [
+              161737120,
+              162054144,
+              167948288,
+              175419392,
+              175419392
+            ],
+            "encoded": [
+              297372568,
+              301711360,
+              600711168,
+              607797248,
+              616558592
+            ],
+            "before_last": [
+              297552592,
+              299163648,
+              574562304,
+              581939200,
+              616558592
+            ],
+            "blocked_eor": [
+              297553840,
+              299163648,
+              574562304,
+              581939200,
+              616558592
+            ],
+            "retired": [
+              1642944,
+              2134016,
+              555200512,
+              564269056,
+              616558592
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 1722,
+            "eor_advance_ns": 207481,
+            "retirement_max_ns": 3558240,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 3558240
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "aa2",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7225344,
+              7225344
+            ],
+            "setup": [
+              161616288,
+              161935360,
+              167829504,
+              175587328,
+              175587328
+            ],
+            "encoded": [
+              297316152,
+              300552192,
+              600731648,
+              608182272,
+              617074688
+            ],
+            "before_last": [
+              297556432,
+              299159552,
+              575348736,
+              583020544,
+              617074688
+            ],
+            "blocked_eor": [
+              297557680,
+              299159552,
+              575348736,
+              583020544,
+              617074688
+            ],
+            "retired": [
+              1637576,
+              2125824,
+              555966464,
+              565207040,
+              617074688
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 1993,
+            "eor_advance_ns": 191387,
+            "retirement_max_ns": 3496257,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 3496257
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "abba1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7118848,
+              7118848
+            ],
+            "setup": [
+              161616288,
+              161935360,
+              167829504,
+              175497216,
+              175497216
+            ],
+            "encoded": [
+              297310152,
+              300793856,
+              600207360,
+              608079872,
+              617025536
+            ],
+            "before_last": [
+              297556432,
+              299180032,
+              574013440,
+              582131712,
+              617025536
+            ],
+            "blocked_eor": [
+              297557680,
+              299180032,
+              574013440,
+              582131712,
+              617025536
+            ],
+            "retired": [
+              1640256,
+              2146304,
+              554651648,
+              564457472,
+              617025536
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 1682,
+            "eor_advance_ns": 194371,
+            "retirement_max_ns": 3588936,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 3588936
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "abba2",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6934528,
+              6934528
+            ],
+            "setup": [
+              161737120,
+              162054144,
+              167948288,
+              175083520,
+              175083520
+            ],
+            "encoded": [
+              297343688,
+              302448640,
+              600711168,
+              607563776,
+              616804352
+            ],
+            "before_last": [
+              297552416,
+              299175936,
+              575422464,
+              582496256,
+              616804352
+            ],
+            "blocked_eor": [
+              160105456,
+              160587776,
+              564809728,
+              573378560,
+              616804352
+            ],
+            "retired": [
+              1630736,
+              2142208,
+              554401792,
+              563085312,
+              616804352
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 137490416,
+            "final_announce_ns": 2828177,
+            "eor_advance_ns": 195122,
+            "retirement_max_ns": 855251,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 2828177
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "abba3",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              6893568,
+              6893568
+            ],
+            "setup": [
+              161737120,
+              162054144,
+              167948288,
+              175263744,
+              175263744
+            ],
+            "encoded": [
+              297307200,
+              300351488,
+              600186880,
+              607621120,
+              616357888
+            ],
+            "before_last": [
+              297558048,
+              299126784,
+              574717952,
+              582434816,
+              616357888
+            ],
+            "blocked_eor": [
+              160111808,
+              160538624,
+              565764096,
+              574971904,
+              616357888
+            ],
+            "retired": [
+              1612048,
+              2080768,
+              555356160,
+              564674560,
+              616357888
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 137490416,
+            "final_announce_ns": 2644952,
+            "eor_advance_ns": 200030,
+            "retirement_max_ns": 804405,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 2644952
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "abba4",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7081984,
+              7081984
+            ],
+            "setup": [
+              161737120,
+              162054144,
+              167948288,
+              175603712,
+              175603712
+            ],
+            "encoded": [
+              297391568,
+              302850048,
+              600711168,
+              608157696,
+              617054208
+            ],
+            "before_last": [
+              297552592,
+              299143168,
+              574566400,
+              582172672,
+              617054208
+            ],
+            "blocked_eor": [
+              297553840,
+              299143168,
+              574566400,
+              582172672,
+              617054208
+            ],
+            "retired": [
+              1639896,
+              2134016,
+              555204608,
+              564379648,
+              617054208
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 1652,
+            "eor_advance_ns": 187571,
+            "retirement_max_ns": 3509808,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 3509808
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "confirm1",
+          "role": "parent",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7077888,
+              7077888
+            ],
+            "setup": [
+              161616288,
+              161935360,
+              167829504,
+              175460352,
+              175460352
+            ],
+            "encoded": [
+              297311072,
+              300515328,
+              600731648,
+              608030720,
+              617119744
+            ],
+            "before_last": [
+              297556944,
+              299139072,
+              575881216,
+              583426048,
+              617119744
+            ],
+            "blocked_eor": [
+              297558192,
+              299139072,
+              575881216,
+              583426048,
+              617119744
+            ],
+            "retired": [
+              1645360,
+              2129920,
+              554635264,
+              563871744,
+              617119744
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": true,
+            "allocated_delta": 272,
+            "deallocated_delta": 272,
+            "final_announce_ns": 1533,
+            "eor_advance_ns": 359128,
+            "retirement_max_ns": 3492973,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 3492973
+          }
+        },
+        {
+          "shape": "diverse_uc",
+          "leg": "confirm2",
+          "role": "candidate",
+          "snapshots": {
+            "baseline": [
+              612232,
+              679936,
+              1765376,
+              7000064,
+              7000064
+            ],
+            "setup": [
+              161737120,
+              162054144,
+              167948288,
+              175235072,
+              175235072
+            ],
+            "encoded": [
+              297378272,
+              302133248,
+              600186880,
+              607797248,
+              616873984
+            ],
+            "before_last": [
+              297552544,
+              299167744,
+              574517248,
+              582361088,
+              616873984
+            ],
+            "blocked_eor": [
+              160106592,
+              160583680,
+              574517248,
+              582361088,
+              616873984
+            ],
+            "retired": [
+              1646336,
+              2158592,
+              561033216,
+              568971264,
+              616873984
+            ]
+          },
+          "result": {
+            "routes": 100000,
+            "chunks": 100000,
+            "wire_bytes": 108200000,
+            "vector_bytes": 6291456,
+            "last_frame_bytes": 1082,
+            "retained_at_eor": false,
+            "allocated_delta": 272,
+            "deallocated_delta": 137490416,
+            "final_announce_ns": 2244172,
+            "eor_advance_ns": 200210,
+            "retirement_max_ns": 819898,
+            "retirement_steps": 48,
+            "stream_drop_step_ns": 2244172
+          }
+        }
+      ],
+      "memory_summary": [
+        {
+          "shape": "grouped_uc",
+          "allocated_bytes": {
+            "abba_parent_mean_max_observed": 139796712,
+            "abba_candidate_mean_max_observed": 139796712,
+            "confirmation_parent_max_observed": 139796712,
+            "confirmation_candidate_max_observed": 139796712
+          },
+          "active_bytes": {
+            "abba_parent_mean_max_observed": 139890688,
+            "abba_candidate_mean_max_observed": 139890688,
+            "confirmation_parent_max_observed": 139890688,
+            "confirmation_candidate_max_observed": 139890688
+          },
+          "resident_bytes": {
+            "abba_parent_mean_max_observed": 146989056,
+            "abba_candidate_mean_max_observed": 146989056,
+            "confirmation_parent_max_observed": 147251200,
+            "confirmation_candidate_max_observed": 147251200
+          },
+          "rss_bytes": {
+            "abba_parent_mean_max_observed": 149088256,
+            "abba_candidate_mean_max_observed": 148750336,
+            "confirmation_parent_max_observed": 149045248,
+            "confirmation_candidate_max_observed": 148885504
+          },
+          "hwm_bytes": {
+            "abba_parent_mean_max_observed": 164999168,
+            "abba_candidate_mean_max_observed": 164806656,
+            "confirmation_parent_max_observed": 164675584,
+            "confirmation_candidate_max_observed": 164716544
+          },
+          "candidate_min_final_net_deallocated": 5157888,
+          "max_stream_drop_step_ns": {
+            "parent": 7756129,
+            "candidate": 60410
+          },
+          "drop_exceeds_existing_50ms_reference": false
+        },
+        {
+          "shape": "grouped_vpn",
+          "allocated_bytes": {
+            "abba_parent_mean_max_observed": 174599568,
+            "abba_candidate_mean_max_observed": 174599568,
+            "confirmation_parent_max_observed": 174501264,
+            "confirmation_candidate_max_observed": 174501264
+          },
+          "active_bytes": {
+            "abba_parent_mean_max_observed": 174960640,
+            "abba_candidate_mean_max_observed": 174960640,
+            "confirmation_parent_max_observed": 174850048,
+            "confirmation_candidate_max_observed": 174850048
+          },
+          "resident_bytes": {
+            "abba_parent_mean_max_observed": 189423616,
+            "abba_candidate_mean_max_observed": 189335552,
+            "confirmation_parent_max_observed": 189210624,
+            "confirmation_candidate_max_observed": 189173760
+          },
+          "rss_bytes": {
+            "abba_parent_mean_max_observed": 196608000,
+            "abba_candidate_mean_max_observed": 197296128,
+            "confirmation_parent_max_observed": 196710400,
+            "confirmation_candidate_max_observed": 196718592
+          },
+          "hwm_bytes": {
+            "abba_parent_mean_max_observed": 196608000,
+            "abba_candidate_mean_max_observed": 197296128,
+            "confirmation_parent_max_observed": 196710400,
+            "confirmation_candidate_max_observed": 196718592
+          },
+          "candidate_min_final_net_deallocated": 20639328,
+          "max_stream_drop_step_ns": {
+            "parent": 10272770,
+            "candidate": 839548
+          },
+          "drop_exceeds_existing_50ms_reference": false
+        },
+        {
+          "shape": "diverse_uc",
+          "allocated_bytes": {
+            "abba_parent_mean_max_observed": 297555760,
+            "abba_candidate_mean_max_observed": 297555232,
+            "confirmation_parent_max_observed": 297558192,
+            "confirmation_candidate_max_observed": 297552544
+          },
+          "active_bytes": {
+            "abba_parent_mean_max_observed": 301821952,
+            "abba_candidate_mean_max_observed": 301400064,
+            "confirmation_parent_max_observed": 300515328,
+            "confirmation_candidate_max_observed": 302133248
+          },
+          "resident_bytes": {
+            "abba_parent_mean_max_observed": 600459264,
+            "abba_candidate_mean_max_observed": 600449024,
+            "confirmation_parent_max_observed": 600731648,
+            "confirmation_candidate_max_observed": 600186880
+          },
+          "rss_bytes": {
+            "abba_parent_mean_max_observed": 608118784,
+            "abba_candidate_mean_max_observed": 607592448,
+            "confirmation_parent_max_observed": 608030720,
+            "confirmation_candidate_max_observed": 607797248
+          },
+          "hwm_bytes": {
+            "abba_parent_mean_max_observed": 617039872,
+            "abba_candidate_mean_max_observed": 616581120,
+            "confirmation_parent_max_observed": 617119744,
+            "confirmation_candidate_max_observed": 616873984
+          },
+          "candidate_min_final_net_deallocated": 137490144,
+          "max_stream_drop_step_ns": {
+            "parent": 3588936,
+            "candidate": 2828177
+          },
+          "drop_exceeds_existing_50ms_reference": false
+        }
+      ]
+    },
+    "dependency_mismatched_replica": {
+      "status": "FAIL",
+      "builds": {
+        "parent": "normal_parent_elapsed",
+        "candidate": "instrumented_candidate_elapsed"
+      },
+      "first_measured_start_utc": "2026-11-07T16:51:45Z",
+      "last_measured_end_utc": "2026-11-07T16:55:43Z",
+      "valid_commands": 8,
+      "quiet_samples_per_command": 2,
+      "cell": "outbound_encode/shared_arc/10000",
+      "median_ns": {
+        "aa1": 273210.0424107143,
+        "aa2": 275912.66310736677,
+        "abba1": 274946.8234375,
+        "abba2": 282103.76622222224,
+        "abba3": 280932.1374751326,
+        "abba4": 274971.62282608694,
+        "confirm1": 272407.8510416667,
+        "confirm2": 279620.3091650198
+      },
+      "aa_ratio": 1.0098920986681361,
+      "fresh_limit": 1.02,
+      "original_limit": 1.0327685969150897,
+      "abba_pair_ratios": [
+        1.0260302799473846,
+        1.0216768355504653
+      ],
+      "abba_ratio": 1.023853557748925,
+      "confirmation_ratio": 1.0264766896246682,
+      "fails_fresh_limit": true,
+      "fails_original_limit": false,
+      "reason": "ABBA and confirmation exceed the fresh 1.02 limit. The original limit passes. Parent and candidate dependency graphs differ; preserve FAIL without attributing a runtime cause.",
+      "independent_build_source_commits": {
+        "parent": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "candidate": "255d0479411f4d47af172c7b53486e3269327a8b"
+      },
+      "post_run_binary_hashes_match": true
+    },
+    "corrected_normal_dependencies": {
+      "status": "PASS",
+      "reason": "All 13 cells pass the unchanged elapsed bar on matching normal dependency graphs.",
+      "builds": {
+        "parent": "normal_parent_elapsed",
+        "candidate": "normal_candidate_elapsed"
+      },
+      "first_measured_start_utc": "2026-11-07T17:27:03Z",
+      "last_measured_end_utc": "2026-11-07T17:36:58Z",
+      "valid_commands": 8,
+      "quiet_samples_per_command": 2,
+      "elapsed_rows": [
+        {
+          "cell": "failover_encode/announce_only/32",
+          "median_ns": {
+            "aa1": 179362.03020482243,
+            "aa2": 179377.6405993432,
+            "abba1": 181955.39166666666,
+            "abba2": 179447.37398785425,
+            "abba3": 179000.5457131128,
+            "abba4": 177092.04230442178,
+            "confirm1": 177022.6148904006,
+            "confirm2": 178717.58298319328
+          },
+          "aa_ratio": 1.000087032882617,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9862163046896298,
+            1.010776901005017
+          ],
+          "abba_ratio": 0.9984966028473234,
+          "confirmation_ratio": 1.0095748675605207,
+          "status": "PASS"
+        },
+        {
+          "cell": "failover_encode/announce_only/8",
+          "median_ns": {
+            "aa1": 121948.6074134199,
+            "aa2": 124191.22821969696,
+            "abba1": 124761.77142857143,
+            "abba2": 121891.19170673077,
+            "abba3": 124060.19545454546,
+            "abba4": 121906.77727272728,
+            "confirm1": 123360.45570409982,
+            "confirm2": 121818.23356946083
+          },
+          "aa_ratio": 1.0183898845082693,
+          "limit": 1.0283898845082693,
+          "abba_pair_ratios": [
+            0.9769915119914426,
+            1.0176644664881969
+          ],
+          "abba_ratio": 0.9973279892398197,
+          "confirmation_ratio": 0.9874982454803972,
+          "status": "PASS"
+        },
+        {
+          "cell": "failover_encode/mixed/32",
+          "median_ns": {
+            "aa1": 663012.7647058824,
+            "aa2": 671282.6883780332,
+            "abba1": 668684.3214285714,
+            "abba2": 669795.0075757576,
+            "abba3": 667774.9924242424,
+            "abba4": 673939.8559523809,
+            "confirm1": 663936.0214646464,
+            "confirm2": 669736.6098901099
+          },
+          "aa_ratio": 1.0124732495547344,
+          "limit": 1.0224732495547344,
+          "abba_pair_ratios": [
+            1.0016610022271994,
+            0.9908525019351666
+          ],
+          "abba_ratio": 0.996256752081183,
+          "confirmation_ratio": 1.0087366677479968,
+          "status": "PASS"
+        },
+        {
+          "cell": "failover_encode/mixed/8",
+          "median_ns": {
+            "aa1": 245249.69251336897,
+            "aa2": 245309.5574229692,
+            "abba1": 247849.80309396487,
+            "abba2": 244776.73602941175,
+            "abba3": 245490.07452454665,
+            "abba4": 243602.939977872,
+            "confirm1": 246069.93101604277,
+            "confirm2": 244914.8954248366
+          },
+          "aa_ratio": 1.0002440977967668,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9876010913618194,
+            1.007746764250243
+          ],
+          "abba_ratio": 0.9976739278060311,
+          "confirmation_ratio": 0.9953060677245816,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/distinct_values/100",
+          "median_ns": {
+            "aa1": 45901.47576664566,
+            "aa2": 45826.11195652174,
+            "abba1": 45962.031746031746,
+            "abba2": 46019.64611801242,
+            "abba3": 46743.653703703705,
+            "abba4": 45797.58095708639,
+            "confirm1": 46807.14233193277,
+            "confirm2": 46574.37408424908
+          },
+          "aa_ratio": 1.001644560424315,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.0012535209996596,
+            1.0206577012769258
+          ],
+          "abba_ratio": 1.0109556111382927,
+          "confirmation_ratio": 0.9950270784310433,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/distinct_values/1000",
+          "median_ns": {
+            "aa1": 507647.50694444444,
+            "aa2": 519154.8412698413,
+            "abba1": 510528.61904761905,
+            "abba2": 510479.6224747475,
+            "abba3": 515601.3014705882,
+            "abba4": 508161.27314814815,
+            "confirm1": 518608.5763888889,
+            "confirm2": 518530.7791666667
+          },
+          "aa_ratio": 1.0226679618593226,
+          "limit": 1.0326679618593226,
+          "abba_pair_ratios": [
+            0.999904027764471,
+            1.0146410769879173
+          ],
+          "abba_ratio": 1.007272552376194,
+          "confirmation_ratio": 0.9998499885544433,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/distinct_values/10000",
+          "median_ns": {
+            "aa1": 5498895.170634921,
+            "aa2": 5533465.454166667,
+            "abba1": 5532310.546666667,
+            "abba2": 5516046.066666666,
+            "abba3": 5600445.806666667,
+            "abba4": 5510573.6347962385,
+            "confirm1": 5617989.8125,
+            "confirm2": 5632508.558333334
+          },
+          "aa_ratio": 1.0062867689706756,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9970600927292846,
+            1.0163090410956375
+          ],
+          "abba_ratio": 1.006684566912461,
+          "confirmation_ratio": 1.0025843311073703,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/equal_values/100",
+          "median_ns": {
+            "aa1": 21005.822764227643,
+            "aa2": 21085.506409214093,
+            "abba1": 20919.83999104344,
+            "abba2": 20582.414651109975,
+            "abba3": 20975.904600633356,
+            "abba4": 20874.213128729752,
+            "confirm1": 21080.01757676406,
+            "confirm2": 20774.942233009708
+          },
+          "aa_ratio": 1.0037934074699586,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            0.9838705582797035,
+            1.0048716313892398
+          ],
+          "abba_ratio": 0.9943710948344717,
+          "confirmation_ratio": 0.9855277471831603,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/equal_values/1000",
+          "median_ns": {
+            "aa1": 233811.56419457734,
+            "aa2": 238356.72914979758,
+            "abba1": 236696.03742690058,
+            "abba2": 235036.56966692093,
+            "abba3": 236468.07586206897,
+            "abba4": 234890.45882352942,
+            "confirm1": 237074.12091307814,
+            "confirm2": 238624.65071770333
+          },
+          "aa_ratio": 1.0194394360727075,
+          "limit": 1.0294394360727075,
+          "abba_pair_ratios": [
+            0.9929890344679211,
+            1.0067163947247633
+          ],
+          "abba_ratio": 0.9998527145963422,
+          "confirmation_ratio": 1.0065402744030154,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/equal_values/10000",
+          "median_ns": {
+            "aa1": 2683274.791666667,
+            "aa2": 2687601.930059524,
+            "abba1": 2689908.8295454546,
+            "abba2": 2699662.564338235,
+            "abba3": 2704489.4422268905,
+            "abba4": 2674742.588541667,
+            "confirm1": 2707405.042857143,
+            "confirm2": 2720681.3833333333
+          },
+          "aa_ratio": 1.0016126333412796,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.0036260466100737,
+            1.0111213893301942
+          ],
+          "abba_ratio": 1.0073737179701339,
+          "confirmation_ratio": 1.0049037141713304,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/shared_arc/100",
+          "median_ns": {
+            "aa1": 3406.875548245614,
+            "aa2": 3382.1669540229886,
+            "abba1": 3399.965269789099,
+            "abba2": 3546.0772632512753,
+            "abba3": 3462.648038194445,
+            "abba4": 3407.752451849226,
+            "confirm1": 3411.1168578404277,
+            "confirm2": 3458.719056816353
+          },
+          "aa_ratio": 1.0073055513103029,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.042974554699272,
+            1.016109029960621
+          ],
+          "abba_ratio": 1.0295417923299466,
+          "confirmation_ratio": 1.0139550185349153,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/shared_arc/1000",
+          "median_ns": {
+            "aa1": 26876.259735722,
+            "aa2": 27395.057324840767,
+            "abba1": 26962.857252109705,
+            "abba2": 27341.49311827957,
+            "abba3": 27527.96756993007,
+            "abba4": 28525.612208203187,
+            "confirm1": 27102.175632911392,
+            "confirm2": 27540.712768817204
+          },
+          "aa_ratio": 1.0193031915236783,
+          "limit": 1.0293031915236783,
+          "abba_pair_ratios": [
+            1.014042868774237,
+            0.9650263548774521
+          ],
+          "abba_ratio": 0.9895346118258446,
+          "confirmation_ratio": 1.016180883108634,
+          "status": "PASS"
+        },
+        {
+          "cell": "outbound_encode/shared_arc/10000",
+          "median_ns": {
+            "aa1": 277279.7403492647,
+            "aa2": 278092.1907894737,
+            "abba1": 277216.3385416666,
+            "abba2": 287254.6145454545,
+            "abba3": 281604.48851495725,
+            "abba4": 278369.4020535714,
+            "confirm1": 279144.2002403846,
+            "confirm2": 281644.7857142857
+          },
+          "aa_ratio": 1.0029300750180508,
+          "limit": 1.02,
+          "abba_pair_ratios": [
+            1.0362109825726562,
+            1.01162155911361
+          ],
+          "abba_ratio": 1.023916270843133,
+          "confirmation_ratio": 1.0089580420146567,
+          "status": "PASS"
+        }
+      ],
+      "post_run_binary_hashes_match": true
+    },
+    "final_independent_replica": {
+      "status": "PASS",
+      "builds": {
+        "parent": "normal_parent_elapsed",
+        "candidate": "normal_candidate_elapsed"
+      },
+      "first_measured_start_utc": "2026-11-07T17:55:10Z",
+      "last_measured_end_utc": "2026-11-07T17:59:08Z",
+      "valid_commands": 8,
+      "quiet_samples_per_command": 2,
+      "cell": "outbound_encode/distinct_values/1000",
+      "median_ns": {
+        "aa1": 515398.2291666667,
+        "aa2": 515738.95894383395,
+        "abba1": 509430.61342592596,
+        "abba2": 512927.50925925927,
+        "abba3": 514420.62794612796,
+        "abba4": 513678.09444444446,
+        "confirm1": 510252.04691358027,
+        "confirm2": 517990.78925925924
+      },
+      "aa_ratio": 1.0006611000152603,
+      "fresh_limit": 1.02,
+      "original_limit": 1.0326679618593226,
+      "abba_pair_ratios": [
+        1.0068643221297924,
+        1.0014455230030523
+      ],
+      "abba_ratio": 1.0041549225664224,
+      "confirmation_ratio": 1.0151665091644202,
+      "fails_fresh_limit": false,
+      "fails_original_limit": false,
+      "reason": "ABBA and confirmation are below both the fresh and original limits.",
+      "independent_build_source_commits": {
+        "parent": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+        "candidate": "63e67fe6b4f4451833c0a056b8859a2974da23c2"
+      },
+      "post_run_binary_hashes_match": true
+    }
+  },
+  "retained_invalid_attempts": [
+    {
+      "status": "INVALID",
+      "shape": "Initial direct launcher invocation",
+      "exit": 126,
+      "reason": "Script lacked executable permission; no host lock, quiet gate or measurement ran. The unchanged script then ran through bash."
+    },
+    {
+      "status": "INVALID",
+      "shape": "Four nonquiet memory correctness smokes and two elapsed correctness smokes",
+      "reason": "No canonical quiet gates; excluded from qualification."
+    }
+  ],
+  "controls": {
+    "ownership_regression": "Parent fails, fixed candidate passes, removing only the release assignment fails; 8193 routes per unicast/VPN fixture.",
+    "seeded_defects": [
+      "candidate retains stream",
+      "insufficient allocator release",
+      "allocated bytes above bar",
+      "VmHWM above bar",
+      "confirmed elapsed regression"
+    ],
+    "seeded_result": "All expected failures detected.",
+    "invalid_input_controls": "Missing cells/phases, failed commands, nonfinite values, too-short quiet spacing and identical binaries rejected."
+  },
+  "vmhwm_limitation": {
+    "meaning": "Maximum observed VmHWM remains the original measured domain and bar. No true lifetime peak-RSS claim follows. Ownership and allocator conclusions do not depend on VmHWM.",
+    "separate_same_environment_control": {
+      "method": "One barrier-frozen process with 12 pinned workers; 112 ordinary 4096-byte pages faulted then discarded per worker. Stable process identity.",
+      "vmhwm_kib": [
+        2264,
+        7640,
+        2264
+      ],
+      "vmrss_kib": [
+        2264,
+        7640,
+        2264
+      ],
+      "smaps_rollup_rss_kib": [
+        2264,
+        7640,
+        2264
+      ],
+      "observed_vmhwm_decrease_kib": 5376
+    },
+    "limit": "Demonstrates non-monotonic reporting in this environment; does not establish the exact kernel path for the retention campaign or repair the lifetime peak."
+  },
+  "reproduction": {
+    "elapsed_build": "cargo bench --locked -p rustbgpd-transport --features bench-internals --bench outbound_encode --no-run",
+    "elapsed_arguments": "--bench --sample-size 30 --warm-up-time 1 --measurement-time 2 --noplot",
+    "probe_build_current": "cargo test --release --locked -p rustbgpd-transport --features retention-probe --lib --no-run",
+    "probe_test": "session::tests::shared_group_encode::retention_probe::shared_retention_memory_probe",
+    "probe_arguments": "--ignored --exact --nocapture --test-threads=1",
+    "probe_environment": "SHARED_RETENTION_PROBE_SHAPE=grouped_uc|grouped_vpn|diverse_uc",
+    "original_probe_feature": "bench-internals, before dependency isolation",
+    "parent_overlay": "Apply the identical probe/test instrumentation to the parent; leave the production release assignment absent. Use separate builds and the same quiet procedure."
+  },
+  "limits": [
+    "No daemon/fleet scale, TCP delivery, routing convergence, remote application or forwarding qualification.",
+    "Allocator release does not establish RSS reduction.",
+    "No hosted run, hosted artifact or public raw-log URL is claimed. Curated medians and memory rows are the published numerical record; raw campaign logs remain unchanged."
+  ]
+}
