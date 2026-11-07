@@ -22,6 +22,22 @@ use rustbgpd_telemetry::reason_labels::{
 use rustbgpd_wire::{AspaValidationContext, ErrorDisposition, ParsedUpdate};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Independent schedules for peer-repeatable inbound warnings.
+#[derive(Clone, Copy)]
+pub(super) enum InboundWarningClass {
+    AttributeDiscard,
+    MalformedWithdrawal,
+    UnnegotiatedMpReach,
+    ScopedIpv4Body,
+    NextHopOwnership,
+    OtcPolicy,
+}
+
+impl InboundWarningClass {
+    pub(super) const COUNT: usize = 6;
+}
+
 /// Canonical `bgp_update_malformed_total` label for a wire-crate
 /// RFC 7606 disposition.
 fn malformed_disposition_label(disposition: ErrorDisposition) -> MalformedUpdateDisposition {
@@ -831,6 +847,13 @@ impl PeerSession {
         );
     }
 
+    /// Count each warning class separately without gating its metrics.
+    fn inbound_warning_due(&mut self, class: InboundWarningClass) -> (bool, u64) {
+        let count = &mut self.inbound_warning_updates[class as usize];
+        *count = count.saturating_add(1);
+        (count.is_power_of_two(), *count)
+    }
+
     /// Count a malformed UPDATE under its applied disposition and say
     /// whether its WARNs are due: the first and then power-of-two such
     /// UPDATEs per TCP connection. Attribute-discard and stronger actions
@@ -839,13 +862,13 @@ impl PeerSession {
     /// count must not set the WARN volume; metrics count every one. A
     /// session reset always logs: the reconnect bounds it.
     fn malformed_update_warn_due(&mut self, applied: ErrorDisposition) -> (bool, u64) {
-        let class = usize::from(applied != ErrorDisposition::AttributeDiscard);
-        let count = &mut self.malformed_attribute_updates[class];
-        *count = count.saturating_add(1);
-        (
-            applied == ErrorDisposition::SessionReset || count.is_power_of_two(),
-            *count,
-        )
+        let class = if applied == ErrorDisposition::AttributeDiscard {
+            InboundWarningClass::AttributeDiscard
+        } else {
+            InboundWarningClass::MalformedWithdrawal
+        };
+        let (warn, count) = self.inbound_warning_due(class);
+        (applied == ErrorDisposition::SessionReset || warn, count)
     }
 
     /// Log a malformed UPDATE's deferred WARNs and its summary once its
@@ -949,12 +972,16 @@ impl PeerSession {
         if rejected == 0 {
             return;
         }
-        warn!(
-            peer = %self.peer_label,
-            reason = reason.as_str(),
-            rejected,
-            "OTC rule rejected unicast announcements"
-        );
+        let (warn, warning_updates) = self.inbound_warning_due(InboundWarningClass::OtcPolicy);
+        if warn {
+            warn!(
+                peer = %self.peer_label,
+                reason = reason.as_str(),
+                rejected,
+                warning_updates,
+                "OTC rule rejected unicast announcements"
+            );
+        }
     }
 
     /// Count an OTC ingress block without logging it; returns the number of
@@ -2499,16 +2526,21 @@ impl PeerSession {
             Vec::new()
         };
         if let Some((reason, next_hop, link_local)) = next_hop_ownership_rejection {
-            warn!(
-                peer = %self.peer_label,
-                reason = reason.as_str(),
-                next_hop = %next_hop,
-                link_local_next_hop = ?link_local,
-                rejected = ownership_rejected_unicast.len(),
-                prefixes = ?ownership_rejected_unicast,
-                "strict-peer next-hop ownership rejected unicast announcements \
-                 (ADR-0107); withdrawals still processed"
-            );
+            let (warn, warning_updates) =
+                self.inbound_warning_due(InboundWarningClass::NextHopOwnership);
+            if warn {
+                warn!(
+                    peer = %self.peer_label,
+                    reason = reason.as_str(),
+                    next_hop = %next_hop,
+                    link_local_next_hop = ?link_local,
+                    rejected = ownership_rejected_unicast.len(),
+                    prefixes = ?ownership_rejected_unicast,
+                    warning_updates,
+                    "strict-peer next-hop ownership rejected unicast announcements \
+                     (ADR-0107); withdrawals still processed"
+                );
+            }
         }
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
         // announcements if our local ASN appears in the AS_PATH.
@@ -2778,10 +2810,15 @@ impl PeerSession {
         if unnumbered_ipv4_body_forbidden
             && (!parsed.announced.is_empty() || !parsed.withdrawn.is_empty())
         {
-            warn!(
-                peer = %self.peer_label,
-                "Ignoring IPv4 body NLRI from scoped link-local peer; RFC 8950 requires MP_REACH_NLRI"
-            );
+            let (warn, warning_updates) =
+                self.inbound_warning_due(InboundWarningClass::ScopedIpv4Body);
+            if warn {
+                warn!(
+                    peer = %self.peer_label,
+                    warning_updates,
+                    "Ignoring IPv4 body NLRI from scoped link-local peer; RFC 8950 requires MP_REACH_NLRI"
+                );
+            }
         }
         // Body NLRI routes (IPv4). `import_decisions` collects every
         // evaluation — permit and deny — for the ADR-0073 explain cache.
@@ -3021,12 +3058,17 @@ impl PeerSession {
                 PathAttribute::MpReachNlri(mp) => {
                     let family = (mp.afi, mp.safi);
                     if !self.negotiated_families().contains(&family) {
-                        warn!(
-                            peer = %self.peer_label,
-                            afi = ?mp.afi,
-                            safi = ?mp.safi,
-                            "Ignoring MP_REACH_NLRI for non-negotiated family"
-                        );
+                        let (warn, warning_updates) =
+                            self.inbound_warning_due(InboundWarningClass::UnnegotiatedMpReach);
+                        if warn {
+                            warn!(
+                                peer = %self.peer_label,
+                                afi = ?mp.afi,
+                                safi = ?mp.safi,
+                                warning_updates,
+                                "Ignoring MP_REACH_NLRI for non-negotiated family"
+                            );
+                        }
                         continue;
                     }
                     // ASPA state for this MP_REACH family. Per draft v27 §6.2,

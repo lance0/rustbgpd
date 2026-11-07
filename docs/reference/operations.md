@@ -2237,6 +2237,13 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_max_prefix_blocked_total{peer,family,stage}` | Blocking episodes opened for a bound under `max_prefix_action = "block"`, counted once when the first net-new prefix is withheld by a full bound — not once per withheld prefix. Each increment marks a `bgp_max_prefix_blocking{peer,family,stage}` transition to 1; the bound must recover to 0 before another withheld prefix increments the counter again. Read it as how often a peer has driven a bound to full, never as how much it sent: a `rate()` over it measures episode frequency, the gauge answers whether prefixes are being withheld right now, and the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain |
 | `bgp_max_prefix_warning_total{peer,family,stage}` | `max_prefix_warning_percent` (or the bound itself under `max_prefix_action = "warning"`) crossings, one per crossing per bound; each is paired with one warn log line and one `max_prefix_warning` session event |
 
+Other repeatable inbound WARNs use independent per-connection counts for
+non-negotiated `MP_REACH_NLRI` families, IPv4 body NLRI from scoped link-local
+peers, strict-peer next-hop rejection, and policy OTC rejection. Each class
+logs at counts 1, 2, 4, 8, ... and includes its count as `warning_updates`.
+Reconnect re-arms every class. UPDATE and rejection counters still count
+every event; suppressing a warning does not change route handling.
+
 Malformed UPDATE cause reasons are bounded to `attribute_list`,
 `unrecognized_well_known`, `missing_well_known`, `attribute_flags`,
 `attribute_length`, `invalid_origin`, `invalid_next_hop`, `optional_attribute`,
