@@ -19,6 +19,7 @@ const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 const NLM_F_REQUEST: u16 = 0x1;
 const NLM_F_DUMP: u16 = 0x300;
+const NLM_F_DUMP_INTR: u16 = 0x10;
 const AF_BRIDGE: u8 = 7;
 const NLMSG_HDRLEN: usize = 16;
 const BR_VLAN_MSG_LEN: usize = 8;
@@ -173,9 +174,10 @@ fn parse_dump_datagram(
 ) -> Result<bool, DataplaneError> {
     let mut at = 0;
     while at + NLMSG_HDRLEN <= buf.len() {
-        let (Some(len), Some(kind), Some(msg_seq)) = (
+        let (Some(len), Some(kind), Some(flags), Some(msg_seq)) = (
             read_u32(buf, at),
             read_u16(buf, at + 4),
+            read_u16(buf, at + 6),
             read_u32(buf, at + 8),
         ) else {
             return Err(truncated());
@@ -189,17 +191,27 @@ fn parse_dump_datagram(
         if msg_seq != seq {
             continue;
         }
+        // The VLAN database changed mid-dump: entries already read may be
+        // stale, so the whole dump is untrustworthy. Fail transiently.
+        if flags & NLM_F_DUMP_INTR != 0 {
+            return Err(DataplaneError::Other(
+                "bridge VLAN db read: dump interrupted by a concurrent change".into(),
+            ));
+        }
         match kind {
-            NLMSG_DONE => return Ok(true),
-            NLMSG_ERROR => {
+            // NLMSG_ERROR carries an `int error`; so does NLMSG_DONE when a
+            // dump fails part-way after sending some entries.
+            NLMSG_DONE | NLMSG_ERROR => {
                 let errno = read_u32(body, 0).map_or(0, u32::cast_signed);
-                if errno == 0 {
-                    continue;
+                if errno != 0 {
+                    return Err(DataplaneError::Other(format!(
+                        "bridge VLAN db read: kernel errno {}",
+                        -errno
+                    )));
                 }
-                return Err(DataplaneError::Other(format!(
-                    "bridge VLAN db read: kernel errno {}",
-                    -errno
-                )));
+                if kind == NLMSG_DONE {
+                    return Ok(true);
+                }
             }
             RTM_NEWVLAN => {
                 if body.len() < BR_VLAN_MSG_LEN || read_u32(body, 4) != Some(ifindex) {
@@ -327,6 +339,28 @@ mod tests {
             tunnel_start: None,
         }];
         assert!(!entries_map_vlan_to_tunnel(&entries, 10, 100));
+    }
+
+    // A failed or interrupted dump must not authorize an FDB write, even
+    // after an earlier message supplied a matching tunnel entry.
+    #[test]
+    fn done_with_error_fails_the_dump() {
+        let mut buf = vlan_message(3, 42, &[entry(10, None, Some(100))]);
+        buf.extend(message(NLMSG_DONE, 3, &(-16i32).to_ne_bytes()));
+        let err = parse_dump_datagram(&buf, 3, 42, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("errno 16"), "{err}");
+        assert_eq!(err.class(), crate::error::FailureClass::Transient);
+    }
+
+    #[test]
+    fn interrupted_dump_fails() {
+        let mut intr = vlan_message(3, 42, &[entry(10, None, Some(100))]);
+        let flags = read_u16(&intr, 6).unwrap() | NLM_F_DUMP_INTR;
+        intr[6..8].copy_from_slice(&flags.to_ne_bytes());
+        intr.extend(message(NLMSG_DONE, 3, &[0; 4]));
+        let err = parse_dump_datagram(&intr, 3, 42, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("interrupted"), "{err}");
+        assert_eq!(err.class(), crate::error::FailureClass::Transient);
     }
 
     #[test]
