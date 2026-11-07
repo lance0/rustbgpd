@@ -337,6 +337,16 @@ pub(crate) struct TreatAsWithdrawSummary {
     /// The first [`TREAT_AS_WITHDRAW_PREFIX_SAMPLE`] announcements.
     pub(crate) prefixes: Vec<String>,
 }
+/// WARNs a malformed UPDATE raises before its final action is known. They
+/// log with its summary, under that action's gate.
+#[derive(Default)]
+struct DeferredMalformedWarns {
+    /// Unicast announcements a malformed OTC attribute rejected.
+    otc_rejected: usize,
+    /// The validator's finding: attribute type, subcode and disposition.
+    validation: Option<(u8, u8, ErrorDisposition)>,
+}
+
 /// Summarize the announcements a treat-as-withdraw UPDATE carried.
 pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdrawSummary {
     // Per-family counts in first-seen order; the IPv4 body and an IPv4
@@ -821,20 +831,80 @@ impl PeerSession {
         );
     }
 
-    /// One WARN per malformed UPDATE, and only at power-of-two UPDATE counts
-    /// per TCP connection; DEBUG keeps every record. One UPDATE can carry
-    /// hundreds of malformed records, and a peer can repeat it at will, so
-    /// neither may set the WARN volume. `bgp_update_malformed_total` counts
-    /// every UPDATE.
+    /// Count a malformed UPDATE under its applied disposition and say
+    /// whether its WARNs are due: the first and then power-of-two such
+    /// UPDATEs per TCP connection. Attribute-discard and stronger actions
+    /// count separately, so a stream of discards cannot push a withdrawal's
+    /// WARN out. A peer can repeat a malformed UPDATE at will, so the UPDATE
+    /// count must not set the WARN volume; metrics count every one. A
+    /// session reset always logs: the reconnect bounds it.
+    fn malformed_update_warn_due(&mut self, applied: ErrorDisposition) -> (bool, u64) {
+        let class = usize::from(applied != ErrorDisposition::AttributeDiscard);
+        let count = &mut self.malformed_attribute_updates[class];
+        *count = count.saturating_add(1);
+        (
+            applied == ErrorDisposition::SessionReset || count.is_power_of_two(),
+            *count,
+        )
+    }
+
+    /// Log a malformed UPDATE's deferred WARNs and its summary once its
+    /// final action, `applied`, is known. Returns whether they were due and
+    /// the UPDATE's count, for the action's own WARN.
+    fn log_malformed_update(
+        &mut self,
+        applied: ErrorDisposition,
+        deferred: &DeferredMalformedWarns,
+        malformed: &[rustbgpd_wire::MalformedAttribute],
+        coalesced_duplicates: u32,
+    ) -> (bool, u64) {
+        let (warn, malformed_updates) = self.malformed_update_warn_due(applied);
+        if warn {
+            if deferred.otc_rejected != 0 {
+                warn!(
+                    peer = %self.peer_label,
+                    reason = OtcBlockReason::MalformedLength.as_str(),
+                    rejected = deferred.otc_rejected,
+                    malformed_updates,
+                    "OTC rule rejected unicast announcements"
+                );
+            }
+            if let Some((type_code, subcode, disposition)) = deferred.validation {
+                warn!(
+                    peer = %self.peer_label,
+                    attr_type = type_code,
+                    subcode,
+                    disposition = disposition.as_str(),
+                    max_as_path_length = self.config.max_as_path_length,
+                    malformed_updates,
+                    "UPDATE validation error"
+                );
+            }
+        }
+        self.log_malformed_attributes(
+            malformed,
+            coalesced_duplicates,
+            applied.as_str(),
+            warn,
+            malformed_updates,
+        );
+        (warn, malformed_updates)
+    }
+
+    /// One WARN per malformed UPDATE when `warn` is due; DEBUG keeps every
+    /// record. One UPDATE can carry hundreds of malformed records, so they
+    /// share that WARN. `bgp_update_malformed_total` counts every UPDATE.
     ///
     /// Called once the UPDATE's final action is known: `applied` is that
     /// action, which validation, ASPA, or the RFC 7606 §5.2 escalation may
     /// have made stronger than the decoder's own `decoder_disposition`.
     fn log_malformed_attributes(
-        &mut self,
+        &self,
         malformed: &[rustbgpd_wire::MalformedAttribute],
         coalesced_duplicates: u32,
         applied: &'static str,
+        warn: bool,
+        malformed_updates: u64,
     ) {
         let Some(decoder_disposition) = malformed.iter().map(|m| m.disposition).max() else {
             return;
@@ -848,11 +918,10 @@ impl PeerSession {
         else {
             return;
         };
-        self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
-        if self.malformed_attribute_updates.is_power_of_two() {
+        if warn {
             warn!(
                 peer = %self.peer_label,
-                malformed_updates = self.malformed_attribute_updates,
+                malformed_updates,
                 malformed_attributes = malformed.len(),
                 coalesced_duplicates,
                 disposition = applied,
@@ -876,7 +945,7 @@ impl PeerSession {
     /// Preserve the established OTC ingress diagnostic surfaces for a
     /// decision that rejects one or more unicast announcements.
     fn observe_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) {
-        let rejected = self.eligible_unicast_announcement_iter(parsed).count();
+        let rejected = self.record_otc_ingress_block(parsed, reason);
         if rejected == 0 {
             return;
         }
@@ -886,7 +955,16 @@ impl PeerSession {
             rejected,
             "OTC rule rejected unicast announcements"
         );
-        self.record_otc_routes_blocked(reason, rejected as u64);
+    }
+
+    /// Count an OTC ingress block without logging it; returns the number of
+    /// unicast announcements it rejected.
+    fn record_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) -> usize {
+        let rejected = self.eligible_unicast_announcement_iter(parsed).count();
+        if rejected != 0 {
+            self.record_otc_routes_blocked(reason, rejected as u64);
+        }
+        rejected
     }
 
     /// Iterate over the unicast announcement identities accepted from this
@@ -1996,8 +2074,11 @@ impl PeerSession {
                         _ => false,
                     }
             });
+        // Its WARN waits for the UPDATE's final action and that action's gate.
+        let mut deferred = DeferredMalformedWarns::default();
         if malformed_otc_length {
-            self.observe_otc_ingress_block(&parsed, OtcBlockReason::MalformedLength);
+            deferred.otc_rejected =
+                self.record_otc_ingress_block(&parsed, OtcBlockReason::MalformedLength);
         }
         // RFC 7606 §3 (h): when multiple attribute errors exist, the approach
         // with the strongest action wins.
@@ -2091,6 +2172,9 @@ impl PeerSession {
                     )
                 })
             });
+        // RFC 7606 §5.2: no reachable NLRI encoded turns any disposition
+        // stronger than attribute-discard into a session reset.
+        let no_reachable_nlri = parsed.announced.is_empty() && !mp_reach_carries_nlri;
         if let Err((update_err, type_code, reason)) = validation {
             // A decoder-removed mandatory attribute already has its primary
             // cause. Do not label the resulting absence as a second independent
@@ -2101,20 +2185,18 @@ impl PeerSession {
                 || !malformed.iter().any(|m| m.type_code == type_code)
             {
                 causes.push((Some(type_code), reason));
-                warn!(
-                    peer = %self.peer_label,
-                    attr_type = type_code,
-                    subcode = update_err.subcode,
-                    disposition = update_err.disposition.as_str(),
-                    max_as_path_length = self.config.max_as_path_length,
-                    "UPDATE validation error"
-                );
+                deferred.validation = Some((type_code, update_err.subcode, update_err.disposition));
             }
             if let Some(update) = update {
                 self.debug_dump_malformed_update(update, &parsed);
             }
             if update_err.disposition == ErrorDisposition::SessionReset {
-                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
+                self.log_malformed_update(
+                    ErrorDisposition::SessionReset,
+                    &deferred,
+                    &malformed,
+                    coalesced_duplicates,
+                );
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2144,12 +2226,17 @@ impl PeerSession {
             // session-reset approach MUST be used instead. "Encoded" means
             // actual NLRI content — an MP_REACH_NLRI attribute carrying zero
             // NLRI counts as no reachable NLRI.
-            if parsed.announced.is_empty() && !mp_reach_carries_nlri {
+            if no_reachable_nlri {
                 warn!(
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
                 );
-                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
+                self.log_malformed_update(
+                    ErrorDisposition::SessionReset,
+                    &deferred,
+                    &malformed,
+                    coalesced_duplicates,
+                );
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2175,17 +2262,25 @@ impl PeerSession {
                 }
                 return;
             }
-            let summary = treat_as_withdraw_summary(&parsed);
-            warn!(
-                peer = %self.peer_label,
-                announced = summary.announced,
-                families = %summary.families,
-                next_hop = %summary.next_hop,
-                link_local_next_hop = ?summary.link_local_next_hop,
-                prefixes = ?summary.prefixes,
-                "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
+            let (warn, malformed_updates) = self.log_malformed_update(
+                ErrorDisposition::TreatAsWithdraw,
+                &deferred,
+                &malformed,
+                coalesced_duplicates,
             );
-            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
+            if warn {
+                let summary = treat_as_withdraw_summary(&parsed);
+                warn!(
+                    peer = %self.peer_label,
+                    announced = summary.announced,
+                    families = %summary.families,
+                    next_hop = %summary.next_hop,
+                    link_local_next_hop = ?summary.link_local_next_hop,
+                    prefixes = ?summary.prefixes,
+                    malformed_updates,
+                    "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
+                );
+            }
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
@@ -2222,13 +2317,21 @@ impl PeerSession {
         if let Some((received_first_as, neighbor_asn)) =
             self.aspa_first_as_mismatch(is_ebgp, has_unicast_announcements, &parsed.attributes)
         {
-            warn!(
-                peer = %self.peer_label,
-                received_first_as = ?received_first_as,
-                neighbor_asn,
-                "ASPA first-AS precondition failed; treating UPDATE as withdraw"
+            let (warn, malformed_updates) = self.log_malformed_update(
+                ErrorDisposition::TreatAsWithdraw,
+                &deferred,
+                &malformed,
+                coalesced_duplicates,
             );
-            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
+            if warn {
+                warn!(
+                    peer = %self.peer_label,
+                    received_first_as = ?received_first_as,
+                    neighbor_asn,
+                    malformed_updates,
+                    "ASPA first-AS precondition failed; treating UPDATE as withdraw"
+                );
+            }
             causes.push((
                 Some(rustbgpd_wire::constants::attr_type::AS_PATH),
                 MalformedUpdateReason::AspaFirstAsMismatch,
@@ -2252,7 +2355,7 @@ impl PeerSession {
         // disposition is attribute-discard — the offending attributes were
         // dropped and the UPDATE proceeds without them.
         if let Some(applied) = disposition {
-            self.log_malformed_attributes(&malformed, coalesced_duplicates, applied.as_str());
+            self.log_malformed_update(applied, &deferred, &malformed, coalesced_duplicates);
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,

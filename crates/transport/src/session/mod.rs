@@ -377,8 +377,8 @@ pub(crate) struct PeerSession {
     /// Consecutive falls to Idle caused by a NOTIFICATION (sent or received,
     /// including OPEN exchanges that end in one). Each one doubles the
     /// deferred reconnect wait up to `MAX_NOTIFICATION_IDLE_BACKOFF_SECS`.
-    /// Cleared by an explicit operator start, an administrative reset, or a
-    /// session that stays Established for `HEALTHY_ESTABLISHED`.
+    /// Cleared by an explicit operator start in Idle, an administrative
+    /// reset, or a session that stays Established for `HEALTHY_ESTABLISHED`.
     notification_idle_failures: u32,
     /// The FSM batch being executed tore the session down with a
     /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.
@@ -570,9 +570,9 @@ pub(crate) struct PeerSession {
     known_evpn: HashSet<EvpnRouteKey>,
     /// One warning per unsupported wire route type per TCP connection.
     evpn_discard_warned: [bool; 256],
-    /// UPDATEs with RFC 7606-recovered attribute malformations on this TCP
-    /// connection; their WARN fires only at powers of two.
-    malformed_attribute_updates: u64,
+    /// Malformed UPDATEs on this TCP connection, attribute-discard then
+    /// stronger; each class's WARNs fire only at its powers of two.
+    malformed_attribute_updates: [u64; 2],
     /// Accepted BGP-LS routes from this peer (RFC 9552 opaque keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_bgpls: HashSet<BgpLsRouteKey>,
@@ -2446,7 +2446,7 @@ impl PeerSession {
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             evpn_discard_warned: [false; 256],
-            malformed_attribute_updates: 0,
+            malformed_attribute_updates: [0; 2],
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),

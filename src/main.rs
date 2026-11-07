@@ -4439,6 +4439,12 @@ async fn run<T>(
                 %error,
                 "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
             );
+            // The log may go to stdout or a collector; a refusal to start
+            // must also say why where a supervisor shows it.
+            eprintln!(
+                "error: refusing to start: runtime_state_dir {}: {error}",
+                runtime_state_path.display()
+            );
             process::exit(1);
         }
     };

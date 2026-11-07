@@ -88,9 +88,21 @@ pub fn refuse_retired_journal(path: &Path) -> Result<(), String> {
 /// stage beside it is opened `O_NOFOLLOW`. Config-file writes use
 /// [`stage_atomic`], which deliberately writes through an operator's symlink.
 pub(crate) fn write_state_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
-    stage_target(path.to_path_buf(), bytes)
+    stage_target(path.to_path_buf(), bytes, true)
         .map_err(|error| AtomicPublishError::NotPublished(name_write_failure(path, &error)))?
         .commit()
+}
+
+/// [`write_state_atomic`] without durability, for a hint whose loss after a
+/// crash is harmless. It is just as symlink-safe: the stage is opened
+/// `O_NOFOLLOW` and identity-checked, and the rename replaces a symlink at
+/// `path` rather than writing through it. It never fsyncs the file or the
+/// directory, so a slow disk cannot hold up the caller (the daemon writes the
+/// config last-persist marker on its boot path).
+pub(crate) fn write_state_hint(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
+    stage_target(path.to_path_buf(), bytes, false)
+        .map_err(|error| AtomicPublishError::NotPublished(name_write_failure(path, &error)))?
+        .publish_with(|_| Ok(()))
 }
 
 /// Write temp file + fsync + rename + fsync dir, with no stale-source fence.
@@ -307,10 +319,12 @@ fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
         }
         Err(error) => return Err(error),
     };
-    stage_target(target, bytes)
+    stage_target(target, bytes, true)
 }
 
-fn stage_target(target: PathBuf, bytes: &[u8]) -> io::Result<StagedWrite> {
+/// Write `bytes` to a locked, identity-checked stage beside `target`, and
+/// fsync it when `durable`.
+fn stage_target(target: PathBuf, bytes: &[u8], durable: bool) -> io::Result<StagedWrite> {
     let mut tmp = target.clone().into_os_string();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -370,11 +384,13 @@ fn stage_target(target: PathBuf, bytes: &[u8]) -> io::Result<StagedWrite> {
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     stage.file.set_len(0)?;
     stage.file.write_all(bytes)?;
-    #[cfg(test)]
-    if FAIL_STAGE_PAYLOAD_SYNC.with(std::cell::Cell::get) {
-        return Err(io::Error::other("injected staged payload fsync failure"));
+    if durable {
+        #[cfg(test)]
+        if FAIL_STAGE_PAYLOAD_SYNC.with(std::cell::Cell::get) {
+            return Err(io::Error::other("injected staged payload fsync failure"));
+        }
+        stage.file.sync_all()?;
     }
-    stage.file.sync_all()?;
     Ok(stage)
 }
 
@@ -502,6 +518,46 @@ mod tests {
         assert!(matches!(result, Err(AtomicPublishError::NotPublished(_))));
         assert_eq!(fs::read(&target).unwrap(), b"accepted");
         assert!(!target.with_extension("toml.tmp").exists());
+    }
+
+    /// The hint writer never takes the durable path: with the staged payload
+    /// fsync faulted (the existing seam), the durable state writer fails and
+    /// the hint writer still publishes. Its directory step is a no-op closure
+    /// in place of `fsync_dir`.
+    #[test]
+    fn state_hint_skips_the_payload_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("marker");
+        FAIL_STAGE_PAYLOAD_SYNC.with(|fail| fail.set(true));
+        let durable = write_state_atomic(&target, b"durable\n");
+        let hint = write_state_hint(&target, b"hint\n");
+        FAIL_STAGE_PAYLOAD_SYNC.with(|fail| fail.set(false));
+        assert!(matches!(durable, Err(AtomicPublishError::NotPublished(_))));
+        assert!(hint.is_ok(), "{hint:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"hint\n");
+        assert!(!dir.path().join("marker.tmp").exists());
+    }
+
+    /// The hint writer is as symlink-safe as the durable one: a symlink at
+    /// the final name is replaced, and one planted at the stage name is not
+    /// written through.
+    #[test]
+    fn state_hint_never_writes_through_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, b"untouched\n").unwrap();
+        let target = dir.path().join("marker");
+
+        symlink(&victim, &target).unwrap();
+        write_state_hint(&target, b"1\n").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched\n");
+        assert!(fs::symlink_metadata(&target).unwrap().is_file());
+
+        symlink(&victim, dir.path().join("marker.tmp")).unwrap();
+        assert!(write_state_hint(&target, b"2\n").is_err());
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched\n");
+        assert_eq!(fs::read(&target).unwrap(), b"1\n");
     }
 
     #[test]

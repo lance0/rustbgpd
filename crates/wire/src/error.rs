@@ -180,7 +180,12 @@ impl DecodeError {
                     data.freeze(),
                 )
             }
-            Self::InvalidKeepaliveLength { .. } | Self::Incomplete { .. } => (
+            Self::InvalidKeepaliveLength { length } => (
+                NotificationCode::MessageHeader,
+                2, // Bad Message Length, carrying the Length field (RFC 4271 §6.1)
+                Bytes::copy_from_slice(&length.to_be_bytes()),
+            ),
+            Self::Incomplete { .. } => (
                 NotificationCode::MessageHeader,
                 2, // Bad Message Length
                 Bytes::new(),
@@ -264,6 +269,16 @@ mod tests {
         assert_eq!(code, NotificationCode::MessageHeader);
         assert_eq!(subcode, 2);
         assert_eq!(data.as_ref(), &5000u16.to_be_bytes());
+    }
+
+    /// RFC 4271 §6.1: Bad Message Length carries the erroneous Length field.
+    #[test]
+    fn invalid_keepalive_length_carries_the_length() {
+        let err = DecodeError::InvalidKeepaliveLength { length: 20 };
+        let (code, subcode, data) = err.to_notification();
+        assert_eq!(code, NotificationCode::MessageHeader);
+        assert_eq!(subcode, 2);
+        assert_eq!(data.as_ref(), &20u16.to_be_bytes());
     }
 
     #[test]
