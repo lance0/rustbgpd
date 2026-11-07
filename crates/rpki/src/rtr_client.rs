@@ -1597,7 +1597,12 @@ impl RtrClient {
                                 Reservation::new(Arc::clone(&self.record_budget)),
                             );
                             // A full table carries no withdrawals onward.
+                            // Free them before their charge, so the budget
+                            // never undercounts what is allocated while the
+                            // update waits for the manager below.
                             if is_reset {
+                                drop(std::mem::take(&mut withdrawn));
+                                drop(std::mem::take(&mut aspa_withdrawn));
                                 charge.release_withdrawn();
                             }
                             self.apply_eod_timers(refresh, retry, expire);

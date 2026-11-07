@@ -756,6 +756,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
     tx.send(RibUpdate::AspaTableUpdate {
         table: Arc::clone(&valid_table),
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();
@@ -773,6 +774,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
     tx.send(RibUpdate::AspaTableUpdate {
         table: valid_table,
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();
@@ -790,6 +792,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
             provider_asns: vec![65099],
         }])),
         changed_customer_asns: Some([65003].into_iter().collect()),
+        admission: None,
     })
     .await
     .unwrap();
@@ -807,6 +810,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
             provider_asns: vec![65002],
         }])),
         changed_customer_asns: Some([65003].into_iter().collect()),
+        admission: None,
     })
     .await
     .unwrap();
@@ -877,6 +881,7 @@ async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates
     tx.send(RibUpdate::RpkiCacheUpdate {
         table: Arc::clone(&table),
         delta: None,
+        admission: None,
     })
     .await
     .unwrap();
@@ -889,6 +894,7 @@ async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates
         tx.send(RibUpdate::RpkiCacheUpdate {
             table: Arc::clone(&table),
             delta,
+            admission: None,
         })
         .await
         .unwrap();
@@ -920,12 +926,14 @@ async fn rib_stored_verdicts(
     tx.send(RibUpdate::RpkiCacheUpdate {
         table: Arc::clone(vrps),
         delta: None,
+        admission: None,
     })
     .await
     .unwrap();
     tx.send(RibUpdate::AspaTableUpdate {
         table: Arc::clone(aspa),
         changed_customer_asns: None,
+        admission: None,
     })
     .await
     .unwrap();

@@ -3937,6 +3937,10 @@ pub enum RibUpdate {
         /// `Some` scopes revalidation to routes covered by these entries;
         /// `None` forces a full revalidation of every Adj-RIB-In.
         delta: Option<Vec<rustbgpd_rpki::VrpEntry>>,
+        /// The sender's admission permit, released when the RIB has applied
+        /// the update. A sender that waits for it keeps at most one VRP table
+        /// queued in the mailbox and coalesces newer ones meanwhile.
+        admission: Option<tokio::sync::OwnedSemaphorePermit>,
     },
     /// ASPA cache update — new ASPA table for path verification.
     AspaTableUpdate {
@@ -3947,6 +3951,9 @@ pub enum RibUpdate {
         /// `None` requests full revalidation. The first installed table always
         /// revalidates fully regardless of this payload.
         changed_customer_asns: Option<crate::fast_hash::AspaAsnSet>,
+        /// The sender's admission permit, as for
+        /// [`RibUpdate::RpkiCacheUpdate`].
+        admission: Option<tokio::sync::OwnedSemaphorePermit>,
     },
     /// Inject a locally-originated `FlowSpec` route.
     InjectFlowSpec {
