@@ -125,6 +125,7 @@ SHARDS = {
                 "netns_nexthop_raw",
                 "netns_svd",
                 "notification_registry",
+                "orf_index_memory",
                 "path_attribute_layout",
                 "path_attribute_registry",
                 "policy_check_gate",

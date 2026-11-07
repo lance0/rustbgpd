@@ -75,6 +75,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "orf_distribution"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "contested_prefix_scoped"
 harness = false
 required-features = ["bench-internals"]

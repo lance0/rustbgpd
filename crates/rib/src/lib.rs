@@ -90,6 +90,8 @@ pub use manager::{
     EorGraceConfig, EorGracePeerConfig, EorGraceTarget, ReplayComplete, SelectionDeferralConfig,
     SelectionDeferralWaiterConfig,
 };
+#[cfg(feature = "bench-internals")]
+pub use orf::bench_orf_filter;
 pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
