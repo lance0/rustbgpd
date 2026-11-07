@@ -40,6 +40,7 @@ SHARDS = {
                 "config_import_emitted_check",
                 "config_migration",
                 "config_persistence_lifecycle",
+                "config_publication_fence",
                 "daemon_stdout_closed",
                 "evpn_auto_lacp_binary",
                 "evpn_core_isolation_binary",

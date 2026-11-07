@@ -82,23 +82,26 @@ pub fn refuse_retired_journal(path: &Path) -> Result<(), String> {
     }
 }
 
-/// [`write_atomic`] for daemon-owned runtime state. The destination is the
-/// directory entry at `path`, never what it resolves to: a symlink planted
+/// A durable atomic write for daemon-owned runtime state. The destination is
+/// the directory entry at `path`, never what it resolves to: a symlink planted
 /// there is replaced by the new file, and its target is left untouched. The
-/// stage beside it is opened `O_NOFOLLOW`. Config-file writes keep
-/// [`write_atomic`], which deliberately writes through an operator's symlink.
+/// stage beside it is opened `O_NOFOLLOW`. Config-file writes use
+/// [`stage_atomic`], which deliberately writes through an operator's symlink.
 pub(crate) fn write_state_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
     stage_target(path.to_path_buf(), bytes)
         .map_err(|error| AtomicPublishError::NotPublished(name_write_failure(path, &error)))?
         .commit()
 }
 
-/// Write temp file + fsync + rename + fsync dir. Shared with the config
-/// persister so every durable config write goes through the same primitive.
+/// Write temp file + fsync + rename + fsync dir, with no stale-source fence.
+/// The config persister stages through [`stage_atomic`] and publishes with
+/// [`StagedWrite::commit_if`]; this unfenced form remains for the tests that
+/// pin the primitive.
 ///
 /// Failures name the destination path: a bare io error ("No such file or
 /// directory (os error 2)") is useless to an operator who doesn't know
 /// which file the daemon was writing.
+#[cfg(test)]
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
     stage_atomic(path, bytes)
         .map_err(AtomicPublishError::NotPublished)?
