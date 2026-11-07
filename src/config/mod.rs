@@ -16,6 +16,8 @@ pub use unnumbered::{
     interface_only_rebinds, unnumbered_settings_changed,
 };
 mod validation;
+#[cfg(test)]
+pub(crate) use validation::credential_read_probe;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
