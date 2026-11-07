@@ -3483,8 +3483,8 @@ third of the total. Records are counted as each transfer is received:
   for an unreachable cache.
 - The merged VRP and ASPA tables used for validation are copies of the data
   across all caches, and are not counted. Each holds at most
-  `max_records_total` records, and at most five of each kind are in memory at
-  once:
+  `max_records_total` records. The path that delivers them to route selection
+  holds at most five of each kind at once:
   - the table route selection uses;
   - one queued for it;
   - one waiting behind that, which combines every newer table and its
@@ -3492,9 +3492,14 @@ third of the total. Records are counted as each transfer is received:
   - two in the handoff from the RPKI manager, when the queue to route
     selection or to session revalidation is full.
 
-  Each table's list of changed entries is capped at the table's own size, and
-  a larger one becomes a full revalidation, so at most three table-sized
-  change lists are held besides.
+  That bound does not cover received routes still waiting to be applied, for
+  example in a session's backlog behind busy route selection. Each such batch
+  keeps the tables it was validated against until it is applied, so a replaced
+  table can stay in memory that long.
+
+  Each table travels with a list of the entries that changed. No such list is larger than `max_records_total`. From the
+  handoff on, each is also no larger than its own table, and a larger one
+  becomes a full revalidation.
 
 Each refusal is logged as `RTR session ended` with an `RPKI record limit`
 error. The cache shows as disconnected in `bgp_rpki_cache_connected` and in

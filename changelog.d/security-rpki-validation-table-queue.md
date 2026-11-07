@@ -8,7 +8,7 @@
   many complete copies in memory at once. Now one table of each kind is queued
   for route selection at a time, and tables that arrive meanwhile are combined
   into one waiting behind it: the newest table, with every change since the
-  queued one, so no change is skipped. At most five tables of each kind are
-  held at once, each no larger than `max_records_total`, and their change
-  lists are capped at the table's size. See
+  queued one, so no change is skipped. That path holds at most five tables of
+  each kind at once, each no larger than `max_records_total`. A list of
+  changed entries larger than its table becomes a full revalidation. See
   [record limits](../docs/reference/configuration.md#record-limits).
