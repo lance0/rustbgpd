@@ -4095,6 +4095,135 @@ async fn apply_evpn_runtime_ip_vrf_redefine_commits_after_convergence() {
     assert_eq!(vrf.l3vxlan_device, "vni5000");
 }
 
+/// An applied `ApplyEvpnRuntime` candidate has no config file of its own and
+/// is not the source authority: the next request still cannot read the
+/// running config file from the policy directory.
+#[tokio::test]
+async fn applied_api_candidate_does_not_become_the_source_authority() {
+    const SECRET: &str = "evpn-bearer-TOKEN-7f2e";
+    let policy_dir = tempfile::tempdir().unwrap();
+    let edge = policy_dir.path().join("edge.rpol");
+    std::fs::write(&edge, "policy edge-in {\n    term rest { accept }\n}\n").unwrap();
+    let running = policy_dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, format!("# {SECRET}\n")).unwrap();
+    let with_rpol = |base: &str, rpol: &std::path::Path| {
+        format!(
+            "{base}\n[policy]\nrpol_files = [{:?}]\n",
+            rpol.display().to_string()
+        )
+    };
+    let mut baseline = load_runtime_test_config(
+        &with_rpol(minimal_runtime_candidate_toml(), &edge),
+        "test baseline",
+    );
+    baseline.file_path = Some(running.clone());
+    let apply = EvpnRuntimeReloadApply::new(
+        empty_evpn_runtime_coordinator(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    );
+    let request = |rpol: &std::path::Path, validate_only| proto::ApplyEvpnRuntimeRequest {
+        candidate_toml: crate::test_support::tier_authorized_uds_test_config(&with_rpol(
+            l2vni_runtime_candidate_toml(),
+            rpol,
+        )),
+        validate_only,
+    };
+
+    apply.apply_request(&request(&edge, false)).await.unwrap();
+    assert_eq!(apply.committed_config_locked().evpn_instances.len(), 1);
+    assert_eq!(apply.committed_config_locked().file_path, None);
+
+    let Err(GrpcEvpnRuntimeApplyError::InvalidArgument(error)) =
+        apply.apply_request(&request(&running, true)).await
+    else {
+        panic!("the running config file must stay refused");
+    };
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(error.contains("is not a file under"), "{error}");
+}
+
+/// A reload whose EVPN model is unchanged still moves the source authority
+/// to the reloaded on-disk config: a running config file it now names stays
+/// refused to the next `ApplyEvpnRuntime` candidate.
+#[tokio::test]
+async fn unchanged_evpn_reload_still_refreshes_the_source_authority() {
+    const SECRET: &str = "evpn-reload-TOKEN-91c4";
+    let policy_dir = tempfile::tempdir().unwrap();
+    let edge = policy_dir.path().join("edge.rpol");
+    std::fs::write(&edge, "policy edge-in {\n    term rest { accept }\n}\n").unwrap();
+    let running = policy_dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, format!("# {SECRET}\n")).unwrap();
+    let toml = format!(
+        "{}\n[policy]\nrpol_files = [{:?}]\n",
+        minimal_runtime_candidate_toml(),
+        edge.display().to_string()
+    );
+    let baseline = load_runtime_test_config(&toml, "test baseline");
+    let mut reloaded = baseline.clone();
+    reloaded.file_path = Some(running.clone());
+    let apply = EvpnRuntimeReloadApply::new(
+        empty_evpn_runtime_coordinator(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    );
+    let attempt = apply
+        .apply_config_if_changed(&reloaded, |_, _| false, || {})
+        .await;
+    assert!(matches!(
+        attempt.terminal,
+        EvpnRuntimeReloadTerminal::Unchanged
+    ));
+
+    let request = proto::ApplyEvpnRuntimeRequest {
+        candidate_toml: crate::test_support::tier_authorized_uds_test_config(&format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\n",
+            minimal_runtime_candidate_toml(),
+            running.display().to_string()
+        )),
+        validate_only: true,
+    };
+    let Err(GrpcEvpnRuntimeApplyError::InvalidArgument(error)) =
+        apply.apply_request(&request).await
+    else {
+        panic!("the reloaded running config file must be refused");
+    };
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(error.contains("is not a file under"), "{error}");
+}
+
+/// At most `MAX_EVPN_CANDIDATE_LOADS` candidate loads run at once; another
+/// is refused as unavailable until one finishes.
+#[tokio::test]
+async fn evpn_candidate_loads_are_admission_bounded() {
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "test baseline");
+    let apply = EvpnRuntimeReloadApply::new(
+        empty_evpn_runtime_coordinator(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    );
+    let request = proto::ApplyEvpnRuntimeRequest {
+        candidate_toml: crate::test_support::tier_authorized_uds_test_config(
+            minimal_runtime_candidate_toml(),
+        ),
+        validate_only: true,
+    };
+    let held = apply
+        .candidate_loads
+        .clone()
+        .try_acquire_many_owned(u32::try_from(MAX_EVPN_CANDIDATE_LOADS).unwrap())
+        .unwrap();
+    assert!(matches!(
+        apply.apply_request(&request).await,
+        Err(GrpcEvpnRuntimeApplyError::Unavailable(_))
+    ));
+    drop(held);
+    apply.apply_request(&request).await.unwrap();
+}
+
 /// ADR-0080: dropping the request future mid-converge (a disconnected
 /// gRPC client) must not cancel the apply — the detached task finishes
 /// the commit and advances the reload baseline on its own.

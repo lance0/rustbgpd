@@ -289,6 +289,14 @@ pub(crate) struct EvpnRuntimeReloadApply {
     apply_lock: Arc<tokio::sync::Mutex<()>>,
     converger: Arc<dyn DaemonEvpnRuntimeConverger>,
     committed_config: Arc<Mutex<Config>>,
+    /// What an `ApplyEvpnRuntime` candidate may name. Taken from the config
+    /// the daemon started with and from each applied on-disk reload, never
+    /// from an applied API candidate: that has no config file of its own,
+    /// may name fewer credential files and asks its own graph budget.
+    source_limits: Arc<Mutex<crate::config::CandidateSourceLimits>>,
+    /// Admission for candidate loads, which read files on the blocking
+    /// pool before the apply lock: at most [`MAX_EVPN_CANDIDATE_LOADS`].
+    candidate_loads: Arc<tokio::sync::Semaphore>,
     forwarding_state: Option<Arc<crate::forwarding_state::ForwardingState>>,
     /// ADR-0085: where the resolved `[[ethernet_segments]]` interface
     /// bindings are republished whenever the committed config
@@ -318,6 +326,10 @@ pub(crate) struct EvpnRuntimeReloadApply {
     metrics: BgpMetrics,
 }
 
+/// `ApplyEvpnRuntime` candidate loads in flight at once; more are refused
+/// as unavailable.
+const MAX_EVPN_CANDIDATE_LOADS: usize = 4;
+
 impl EvpnRuntimeReloadApply {
     pub(crate) fn new(
         coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
@@ -329,6 +341,8 @@ impl EvpnRuntimeReloadApply {
             coordinator,
             apply_lock,
             converger,
+            source_limits: Arc::new(Mutex::new(committed_config.candidate_source_limits())),
+            candidate_loads: Arc::new(tokio::sync::Semaphore::new(MAX_EVPN_CANDIDATE_LOADS)),
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
             es_link_bindings_tx: None,
@@ -411,6 +425,15 @@ impl EvpnRuntimeReloadApply {
         }
     }
 
+    /// Take later `ApplyEvpnRuntime` source limits from `config`, a reload's
+    /// on-disk config: the source authority, unlike an applied API candidate.
+    fn set_source_limits(&self, config: &Config) {
+        *self
+            .source_limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config.candidate_source_limits();
+    }
+
     fn set_committed_config(&self, config: &Config) {
         match self.committed_config.lock() {
             Ok(mut guard) => *guard = config.clone(),
@@ -485,14 +508,27 @@ impl EvpnRuntimeReloadApply {
         &self,
         request: &proto::ApplyEvpnRuntimeRequest,
     ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
-        // External sources stay under the committed config's policy
-        // directories, and reading them stays off the async workers.
-        let limits = match self.committed_config.lock() {
-            Ok(guard) => guard.candidate_source_limits(),
-            Err(poisoned) => poisoned.into_inner().candidate_source_limits(),
-        };
+        // External sources stay under the on-disk config's policy
+        // directories, and reading them stays off the async workers. The
+        // blocking task owns the permit, so a dropped caller frees it only
+        // once the read is done.
+        let permit = self
+            .candidate_loads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                GrpcEvpnRuntimeApplyError::Unavailable(format!(
+                    "{MAX_EVPN_CANDIDATE_LOADS} EVPN runtime candidates are already loading; retry"
+                ))
+            })?;
+        let limits = self
+            .source_limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let candidate_toml = request.candidate_toml.clone();
         let candidate = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             Config::load_rpc_candidate(
                 &candidate_toml,
                 "candidate EVPN runtime config",
@@ -628,6 +664,9 @@ impl EvpnRuntimeReloadApply {
             let _apply_guard = this.apply_lock.lock().await;
             let baseline = this.committed_config_locked();
             if !changed(&config, &baseline) {
+                // The EVPN model holds, but the on-disk config may still
+                // have moved its policy directories or credential files.
+                this.set_source_limits(&config);
                 return EvpnRuntimeReloadAttempt {
                     baseline,
                     terminal: EvpnRuntimeReloadTerminal::Unchanged,
@@ -652,6 +691,7 @@ impl EvpnRuntimeReloadApply {
             };
             if matches!(terminal, EvpnRuntimeReloadTerminal::Applied(_)) {
                 this.set_committed_config(&config);
+                this.set_source_limits(&config);
             }
 
             EvpnRuntimeReloadAttempt { baseline, terminal }
