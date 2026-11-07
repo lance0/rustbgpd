@@ -1194,39 +1194,57 @@ async fn ibgp_body_nlri_without_next_hop_over_ipv6_transport_is_withdrawn() {
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(100),
     ];
-    let update = || {
+    let build = |attrs: &[PathAttribute]| {
         UpdateMessage::build(
             &[Ipv4NlriEntry {
                 path_id: 0,
                 prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 24),
             }],
             &[],
-            &attrs,
+            attrs,
             true,
             false,
             Ipv4UnicastMode::Body,
         )
     };
-    let announced = |rib_rx: &mut mpsc::Receiver<RibUpdate>| -> Vec<IpAddr> {
-        let mut next_hops = Vec::new();
+    let update = || build(&attrs);
+    let mut with_next_hop = attrs.clone();
+    with_next_hop.push(PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)));
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 24));
+    // (announced next hops, withdrawn prefixes) the session sent to the RIB.
+    let received = |rib_rx: &mut mpsc::Receiver<RibUpdate>| -> (Vec<IpAddr>, Vec<Prefix>) {
+        let (mut next_hops, mut withdrawn_prefixes) = (Vec::new(), Vec::new());
         while let Ok(update) = rib_rx.try_recv() {
-            if let RibUpdate::RoutesReceived { announced, .. } = update {
+            if let RibUpdate::RoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } = update
+            {
                 next_hops.extend(announced.iter().map(|route| route.next_hop));
+                withdrawn_prefixes.extend(withdrawn.iter().map(|(prefix, _)| *prefix));
             }
         }
-        next_hops
+        (next_hops, withdrawn_prefixes)
     };
 
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
     session.peer_ip = "2001:db8::2".parse().unwrap();
     install_test_negotiated_session(&mut session, negotiated_session(65001, false));
+    // Announced with an explicit NEXT_HOP first, so the RIB holds the route
+    // the treat-as-withdraw must remove.
+    session.process_update(build(&with_next_hop)).await;
+    assert_eq!(
+        received(&mut rib_rx),
+        (vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))], Vec::new())
+    );
     session.process_update(update()).await;
-    assert_eq!(announced(&mut rib_rx), Vec::<IpAddr>::new());
+    assert_eq!(received(&mut rib_rx), (Vec::new(), vec![prefix]));
 
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
     install_test_negotiated_session(&mut session, negotiated_session(65001, false));
     session.process_update(update()).await;
-    assert_eq!(announced(&mut rib_rx), vec![session.peer_ip]);
+    assert_eq!(received(&mut rib_rx), (vec![session.peer_ip], Vec::new()));
 }
 
 /// ADR-0107 §2: a global + link-local next-hop pair always fails closed
