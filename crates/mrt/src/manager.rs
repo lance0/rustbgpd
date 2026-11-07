@@ -559,8 +559,10 @@ mod tests {
         // Cancel after the query is enqueued but before the RIB responds.
         drop(reply_rx);
         tokio::time::timeout(Duration::from_secs(2), async {
+            // Sleep, not yield: a yield keeps the paused clock from advancing,
+            // so the bound would never fire.
             while !snapshot_reply.is_closed() {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -612,7 +614,7 @@ mod tests {
         trigger_tx.send(reply_tx).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while !output_dir.is_dir() {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await

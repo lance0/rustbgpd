@@ -115,6 +115,11 @@ impl PersistenceRig {
     /// Not `async`: everything here is either synchronous or a `tokio::spawn`,
     /// which only needs the caller's runtime, so the rig is fully wired the
     /// moment this returns.
+    ///
+    /// Rig tests run on a paused clock. Every stage and commit fsyncs on the
+    /// blocking pool, which can take seconds on a loaded disk, and tokio does
+    /// not auto-advance a paused clock while a blocking task is in flight. The
+    /// rig's bounds still catch an actor or persister that idles unanswered.
     #[expect(
         clippy::too_many_lines,
         reason = "the inline seed config is the one fixture every rig scenario shares"
@@ -466,7 +471,7 @@ hold_time = 90
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "one scenario verifies raw, resolved, persisted, actor, and reload parity"
@@ -628,7 +633,7 @@ async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() 
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
     let mut rig = PersistenceRig::start();
     let config_before = rig.config_bytes();
@@ -701,7 +706,7 @@ async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
 /// `min_hold_time` above the effective `hold_time` (explicit, daemon default,
 /// or peer-group inherited) is rejected on the gRPC add path before any
 /// session, disk, or history effect; the boundary and inverted pairs succeed.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn presence_create_rejects_min_hold_time_above_effective_hold_time() {
     let mut rig = PersistenceRig::start();
     let config_before = rig.config_bytes();
@@ -795,7 +800,7 @@ fn presence_create_policy_event_keeps_the_neighbor_sentinel() {
 /// the re-added peer is a *new* session with a new identity, a zeroed uptime,
 /// zeroed counters, and a fresh metric series, and the teardown never reaches
 /// the operator's flap count.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn neighbor_delete_persistence_failure_leaves_the_session_untouched() {
     let mut rig = PersistenceRig::start();
     let peer_addr: IpAddr = PersistenceRig::PEER.parse().unwrap();
@@ -858,7 +863,7 @@ async fn neighbor_delete_persistence_failure_leaves_the_session_untouched() {
 
 /// An `AddNeighbor` that cannot persist must create nothing at all — not a
 /// peer that is created and then deleted again, and not a config file edit.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn neighbor_add_persistence_failure_creates_no_session() {
     const NEW_PEER: &str = "10.0.0.9";
 
@@ -915,7 +920,7 @@ async fn neighbor_add_persistence_failure_creates_no_session() {
 
 /// The success path still works: staging before applying must not turn a
 /// writable config into a no-op.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn neighbor_delete_persists_and_applies_when_the_config_is_writable() {
     let mut rig = PersistenceRig::start();
     assert!(rig.peer(PersistenceRig::PEER).await.is_some());
