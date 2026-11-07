@@ -772,6 +772,29 @@ async fn managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip_inner() {
         adopted.vrfs.get("vrf5000").map(|vrf| vrf.ifindex),
         Some(vrf_ifindex)
     );
+
+    // LAN-2951: an operator `ip link set ... down` makes the IP-VRF
+    // NotReady, and the convergent Create the reconciler re-emits raises
+    // the owned link.
+    for (link, create) in [("l3vxlan5000", &create_l3vxlan), ("vrf5000", &create_vrf)] {
+        run("ip", &["link", "set", "dev", link, "down"]);
+        let down = restarted.probe_ip_vrfs(&ip_vrfs).await;
+        assert!(
+            matches!(down.get(&l3vni), Some(IpVrfStatus::NotReady { .. })),
+            "{link} down must make the IP-VRF NotReady: {:?}",
+            down.get(&l3vni)
+        );
+        restarted
+            .apply(create)
+            .await
+            .expect("adopt raises the owned link");
+        let raised = restarted.probe_ip_vrfs(&ip_vrfs).await;
+        assert!(
+            matches!(raised.get(&l3vni), Some(IpVrfStatus::Ready { .. })),
+            "{link} must be raised back to Ready: {:?}",
+            raised.get(&l3vni)
+        );
+    }
     assert_eq!(
         adopted.vxlans.get("l3vxlan5000").map(|vxlan| vxlan.ifindex),
         Some(l3vxlan_ifindex)

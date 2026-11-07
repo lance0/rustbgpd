@@ -5391,6 +5391,10 @@ fn compute_managed_netdev_ops(
     ops
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat absent-or-ours-down arm per managed netdev class; splitting it hides the shared rule"
+)]
 fn compute_managed_netdev_create_ops(
     managed: &ManagedNetdevTable,
     snapshot: &KernelSnapshot,
@@ -5463,7 +5467,13 @@ fn compute_managed_netdev_create_ops(
     }
     for vrf in managed.vrfs() {
         desired.vrfs.insert(vrf.name.clone());
-        if !snapshot.vrfs.contains_key(&vrf.name) && !snapshot.link_name_exists(&vrf.name) {
+        let absent =
+            !snapshot.vrfs.contains_key(&vrf.name) && !snapshot.link_name_exists(&vrf.name);
+        let ours_down = snapshot
+            .vrfs
+            .get(&vrf.name)
+            .is_some_and(|link| vrf_stamped_ours_down(vrf, link));
+        if absent || ours_down {
             ops.push(DataplaneOp::CreateManagedVrf {
                 name: vrf.name.clone(),
                 spec: vrf.spec.clone(),
@@ -5473,8 +5483,13 @@ fn compute_managed_netdev_create_ops(
     }
     for l3vxlan in managed.l3vxlans() {
         desired.l3vxlans.insert(l3vxlan.name.clone());
-        if !snapshot.vxlans.contains_key(&l3vxlan.name) && !snapshot.link_name_exists(&l3vxlan.name)
-        {
+        let absent = !snapshot.vxlans.contains_key(&l3vxlan.name)
+            && !snapshot.link_name_exists(&l3vxlan.name);
+        let ours_down = snapshot
+            .vxlans
+            .get(&l3vxlan.name)
+            .is_some_and(|link| l3vxlan_stamped_ours_down(l3vxlan, link));
+        if absent || ours_down {
             ops.push(DataplaneOp::CreateManagedL3Vxlan {
                 name: l3vxlan.name.clone(),
                 spec: l3vxlan.spec.clone(),
@@ -5539,6 +5554,27 @@ fn svd_stamped_ours_incomplete(
                     &svd_vxlan.spec.bindings,
                 )
             })
+}
+
+/// LAN-2951: a desired VRF that is administratively down but otherwise
+/// exactly ours (its stamp and protected attrs classify owned-safe once
+/// raised). Admin state is not a protected attribute, so the convergent
+/// Create may run again; its adopt path raises the link.
+fn vrf_stamped_ours_down(vrf: &ManagedVrfNetdev, link: &KernelVrfLinkInfo) -> bool {
+    let mut raised = link.clone();
+    raised.up = true;
+    !link.up
+        && classify_desired_managed_vrf(vrf, &raised, &rustbgpd_stamps(&link.altnames)).0
+            == ManagedNetdevState::OwnedSafe
+}
+
+/// LAN-2951: the L3VXLAN counterpart of [`vrf_stamped_ours_down`].
+fn l3vxlan_stamped_ours_down(l3vxlan: &ManagedL3VxlanNetdev, link: &KernelVxlanLinkInfo) -> bool {
+    let mut raised = link.clone();
+    raised.up = true;
+    !link.up
+        && classify_desired_managed_l3vxlan(l3vxlan, &raised, &rustbgpd_stamps(&link.altnames)).0
+            == ManagedNetdevState::OwnedSafe
 }
 
 /// A desired VLAN upper that exists with exactly our stamp and matching
@@ -9819,6 +9855,93 @@ mod managed_netdev_tests {
         assert_eq!(
             compute_managed_netdev_ops(&table, &foreign_snapshot).len(),
             0
+        );
+    }
+
+    // LAN-2951: an admin-down managed VRF or L3VXLAN that is exactly ours is
+    // reported owned-unsafe and gets the convergent Create again, whose adopt
+    // path raises it. A down link whose protected attrs drifted gets no op.
+    #[test]
+    fn managed_netdev_admin_down_vrf_and_l3vxlan_report_unsafe_and_reemit_create() {
+        let table = vrf_l3vxlan_table();
+        let ours_vrf = || vrf_link("vrf100", 30, vec!["rustbgpd:vrf:leaf-1:vrf100"], 5000);
+        let ours_l3vxlan = || {
+            let mut l3vxlan = vxlan_link(
+                "l3vxlan100",
+                40,
+                vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan100"],
+                5000,
+            );
+            l3vxlan.bridge = None;
+            l3vxlan.master = Some("vrf100".to_string());
+            l3vxlan.mac = Some(MacAddress::new([0x02, 0, 0, 0, 0, 1]));
+            l3vxlan
+        };
+        let snapshot_with = |vrf: KernelVrfLinkInfo, l3vxlan: KernelVxlanLinkInfo| {
+            let mut snapshot = KernelSnapshot::new();
+            snapshot.insert_vrf(vrf);
+            snapshot.insert_vxlan(l3vxlan);
+            snapshot
+        };
+
+        let all_up = snapshot_with(ours_vrf(), ours_l3vxlan());
+        let rows = build_managed_netdev_status(&table, Some(&all_up));
+        assert!(
+            rows.iter()
+                .all(|row| row.state == ManagedNetdevState::OwnedSafe),
+            "{rows:?}"
+        );
+        assert_eq!(compute_managed_netdev_ops(&table, &all_up), Vec::new());
+
+        let mut vrf = ours_vrf();
+        vrf.up = false;
+        let mut l3vxlan = ours_l3vxlan();
+        l3vxlan.up = false;
+        let down = snapshot_with(vrf, l3vxlan);
+        let rows = build_managed_netdev_status(&table, Some(&down));
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.state, ManagedNetdevState::OwnedUnsafe, "{row:?}");
+            assert!(row.reason.contains("administratively down"), "{row:?}");
+        }
+        let ops = compute_managed_netdev_ops(&table, &down);
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                DataplaneOp::CreateManagedVrf { name, ownership_stamp, .. }
+                    if name == "vrf100" && ownership_stamp == "rustbgpd:vrf:leaf-1:vrf100"
+            )),
+            "{ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                DataplaneOp::CreateManagedL3Vxlan { name, ownership_stamp, .. }
+                    if name == "l3vxlan100"
+                        && ownership_stamp == "rustbgpd:l3vxlan:leaf-1:l3vxlan100"
+            )),
+            "{ops:?}"
+        );
+
+        // Down but drifted (wrong table / wrong router MAC): reported, never raised.
+        let mut drifted_vrf = vrf_link("vrf100", 30, vec!["rustbgpd:vrf:leaf-1:vrf100"], 6000);
+        drifted_vrf.up = false;
+        let mut drifted_l3vxlan = ours_l3vxlan();
+        drifted_l3vxlan.up = false;
+        drifted_l3vxlan.mac = Some(MacAddress::new([0x02, 0, 0, 0, 0, 2]));
+        let untouchable = snapshot_with(drifted_vrf, drifted_l3vxlan);
+        assert_eq!(compute_managed_netdev_ops(&table, &untouchable), Vec::new());
+        let rows = build_managed_netdev_status(&table, Some(&untouchable));
+        assert!(
+            rows.iter()
+                .any(|row| row.reason.contains("table_id mismatch")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.reason.contains("router MAC mismatch")),
+            "{rows:?}"
         );
     }
 

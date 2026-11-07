@@ -800,7 +800,9 @@ impl InMemoryDataplane {
                 spec,
                 ownership_stamp,
             } => match state.kernel.vrfs.get_mut(name) {
-                Some(link) if managed_vrf_exact(link, name, spec, ownership_stamp) => {}
+                Some(link) if managed_vrf_exact(link, name, spec, ownership_stamp) => {
+                    link.up = true;
+                }
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed VRF {name} changed during apply"
@@ -867,7 +869,9 @@ impl InMemoryDataplane {
                 spec,
                 ownership_stamp,
             } => match state.kernel.vxlans.get_mut(name) {
-                Some(link) if managed_l3vxlan_exact(link, name, spec, ownership_stamp) => {}
+                Some(link) if managed_l3vxlan_exact(link, name, spec, ownership_stamp) => {
+                    link.up = true;
+                }
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed L3VXLAN {name} changed during apply"
