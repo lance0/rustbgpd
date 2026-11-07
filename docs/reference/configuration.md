@@ -705,7 +705,7 @@ uses `local-operator`. Without a token, that implicit identity uses
 | `mode`       | u32    | no       | `0o600` | Filesystem socket mode; creation never grants wider access |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
-| `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `token_file` | string | no       | --      | Optional bearer token file for listener auth; see [credential file permissions](#grpc-credential-file-permissions) |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
 
 At bind time the daemon verifies the parent directory and its ancestors;
@@ -748,11 +748,12 @@ container/network exposure.
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
-| `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `token_file` | string | no       | --      | Optional bearer token file for listener auth; see [credential file permissions](#grpc-credential-file-permissions) |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for non-mTLS bearer-token listeners |
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
 | `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
 | `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
+| `tls_client_crl_file` | string | no | --  | PEM-encoded certificate revocation lists (`X509 CRL` blocks) checked against every client certificate chain; requires the three TLS fields. See [client certificate revocation](#grpc-client-certificate-revocation) |
 | `tls_expiry_warning_seconds` | integer (`u32`) | no | `0` | Opt-in certificate expiry warning window in seconds, including past dates; `0` disables warnings only. Restart-required. |
 
 **Native gRPC mTLS.** Setting any of `tls_cert_file` / `tls_key_file` /
@@ -769,6 +770,27 @@ server identity and client CA for every listener, then atomically publishes one
 process-wide credential generation. A malformed or partial rotation leaves the
 last-known-good generation active. Changing a path or TLS/auth mode remains
 **restart-required** and stays visible as drift until restart.
+
+<a id="grpc-client-certificate-revocation"></a>
+**Client certificate revocation.** `tls_client_crl_file` names a PEM file of
+one or more CRLs. When it is set, a client whose certificate chain includes a
+revoked certificate is refused at the TLS handshake. Without it, revocation is
+not checked, as before. Once configured, the daemon fails closed:
+
+- a missing, empty, or unparsable CRL file fails startup and `--check`, and
+  rejects a SIGHUP credential reload, which keeps the last good generation;
+- a CRL past its `nextUpdate` refuses every client until a fresh CRL is
+  installed and reloaded;
+- every certificate in a client chain must be covered by a CRL from its
+  issuer, so a deployment with intermediate CAs needs a CRL from each;
+- the listener offers no TLS session resumption, because a resumed session
+  skips the certificate check, so every connection runs a full handshake
+  against the current CRL.
+
+SIGHUP re-reads the CRL with the other credential files; replace the file
+before its `nextUpdate` and reload. Changing the path, or adding or removing
+the field, is restart-required. The file is public material and is checked
+only as a regular file.
 
 Expiry metrics and successful-client metadata logs are available independently
 of `tls_expiry_warning_seconds`. A positive window adds warnings at startup,
@@ -812,6 +834,30 @@ the unchanged path as part of the all-listener credential generation. New RPCs
 on existing HTTP/2 connections use the new token; already-admitted streaming
 RPCs continue. Invalid or missing material rejects the whole credential reload.
 Changing the path or enabling/disabling token auth remains restart-required.
+
+<a id="grpc-credential-file-permissions"></a>
+**Credential file permissions.** The same rules apply to every listener's
+`token_file`, `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file` at
+config load, at startup, on every SIGHUP credential reload, in both `--check`
+modes, and in `rbgp doctor`. Symlinks are followed and their target is judged.
+
+| Condition | Files | Result |
+|---|---|---|
+| The target is not a regular file (directory, FIFO, device) | all four | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
+| World-writable | `token_file`, `tls_key_file` | Refused |
+| Readable by every local user | `token_file`, `tls_key_file` | Accepted with a warning |
+| Owned by someone other than the daemon user or root | `token_file`, `tls_key_file` | Accepted with a warning |
+| Readable or writable by a group other than the daemon's | `token_file`, `tls_key_file` | Accepted with a warning |
+
+Mode `0600` owned by the daemon user, or `0640` owned by `root:<daemon group>`
+(the packaged config pattern, `root:rustbgpd`), passes silently. A warning
+names the file, its mode and owner, and the remedy. It is logged once per
+load or reload as `grpc_credential_file_permissions`, never per request. It
+counts as a `--check` warning, so `--check --strict` exits 1, and `rbgp doctor`
+reports it as `credentials.<listener>.<field>`. Certificates and CA bundles are
+public and are checked only as regular files. Warnings rather than refusals
+keep existing deployments that mount a shared token, such as the lab and
+Compose examples, running while they are tightened.
 
 **ADR-0064 principals:** `principal` gives `grpc_authz` records a stable
 operator-controlled identity, and it is

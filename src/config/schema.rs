@@ -1051,6 +1051,11 @@ pub struct GrpcTcpListenerConfig {
     /// always enforces client-cert auth when TLS is on (no
     /// "TLS-without-mTLS" half-mode).
     pub tls_client_ca_file: Option<String>,
+    /// Optional certificate revocation lists (PEM file path, one or more
+    /// `X509 CRL` blocks) checked against every client certificate chain.
+    /// Requires the three TLS fields. Re-read on every credential reload;
+    /// once configured, a missing, unparsable, or expired CRL fails closed.
+    pub tls_client_crl_file: Option<String>,
     /// Warn when a TLS certificate notAfter is within this many seconds,
     /// including past dates. Default 0 disables warnings only; expiry metrics
     /// and successful client handshake metadata remain available. Restart-required.
