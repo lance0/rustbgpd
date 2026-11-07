@@ -101,10 +101,11 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
                 .all(|field| metadata.fields().field(field).is_some()))
 }
 
-/// The treat-as-withdraw action WARN and the ASPA first-AS WARN.
+/// The treat-as-withdraw action WARN, the ASPA first-AS WARN, and the OTC
+/// rejection WARN.
 fn downstream_malformed_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     *metadata.level() == tracing::Level::WARN
-        && ["announced", "received_first_as"]
+        && ["announced", "received_first_as", "rejected"]
             .into_iter()
             .any(|field| metadata.fields().field(field).is_some())
 }
@@ -2178,6 +2179,102 @@ fn downstream_malformed_update_warnings_share_the_connection_gate() {
     assert_eq!(count(&events, "received_first_as"), GATED, "{events:?}");
     assert_eq!(count(&rearmed, "received_first_as"), 1);
     assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
+}
+
+/// Process `update` once and return its WARN events.
+fn warn_events(
+    runtime: &tokio::runtime::Runtime,
+    session: &mut PeerSession,
+    update: &UpdateMessage,
+) -> Vec<SessionLogFields> {
+    capture_session_logs(|| runtime.block_on(session.process_update(update.clone())))
+}
+
+fn with_attributes(update: &UpdateMessage, edit: impl FnOnce(&mut Vec<u8>)) -> UpdateMessage {
+    let mut update = update.clone();
+    let mut attributes = update.path_attributes.to_vec();
+    edit(&mut attributes);
+    update.path_attributes = Bytes::from(attributes);
+    update
+}
+
+/// Load-bearing: attribute-discard and treat-as-withdraw UPDATEs keep
+/// separate WARN schedules, so earlier benign discards do not hold back the
+/// first withdrawal's WARNs. One shared counter would put this
+/// treat-as-withdraw at count 3 and log nothing.
+#[test]
+fn attribute_discards_do_not_delay_the_first_withdrawal_warning() {
+    let (runtime, mut session, _server, update) = malformed_update_fixture();
+    // ATOMIC_AGGREGATE with a value byte: a length error, attribute-discard.
+    let discard = with_attributes(&update, |attrs| attrs.extend([0x40, 6, 1, 0]));
+    let withdraw = with_attributes(&update, |attrs| attrs[3] = 9); // ORIGIN 9
+    for _ in 0..2 {
+        warn_events(&runtime, &mut session, &discard);
+    }
+    let events = warn_events(&runtime, &mut session, &withdraw);
+    let count = |key: &str| events.iter().filter(|e| e.contains_key(key)).count();
+    assert_eq!(count("announced"), 1, "{events:?}");
+    assert_eq!(count("decoder_disposition"), 1, "{events:?}");
+    assert_eq!(update_malformed_count(&session, "attribute_discard"), 2);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 1);
+}
+
+/// Load-bearing: the malformed-OTC rejection WARN follows its UPDATE's
+/// gate, while the OTC counters still count every rejected announcement.
+#[test]
+fn malformed_otc_warnings_share_the_connection_gate() {
+    let (runtime, mut session, _server, update) = malformed_update_fixture();
+    // ONLY_TO_CUSTOMER with a three-byte value: a length error.
+    let otc = with_attributes(&update, |attrs| attrs.extend([0xC0, 35, 3, 0, 0, 1]));
+    let warned: Vec<_> = (0..8)
+        .map(|_| {
+            warn_events(&runtime, &mut session, &otc)
+                .iter()
+                .filter(|e| e.contains_key("rejected"))
+                .count()
+        })
+        .collect();
+    assert_eq!(warned, [1, 1, 0, 1, 0, 0, 0, 1]);
+    assert_eq!(session.config.neighbor_counters.otc_routes_blocked(), 8);
+    session.close_tcp();
+    let rearmed = warn_events(&runtime, &mut session, &otc);
+    assert_eq!(
+        rearmed
+            .iter()
+            .filter(|e| e.contains_key("rejected"))
+            .count(),
+        1,
+        "a new connection re-arms: {rearmed:?}"
+    );
+}
+
+/// Load-bearing: an UPDATE that resets the session logs its cause however
+/// many malformed UPDATEs came before it. Here the third withdrawal-class
+/// UPDATE, not a power of two, escalates under RFC 7606 §5.2: ORIGIN is
+/// missing and the only NLRI carrier is an empty `MP_REACH_NLRI`.
+#[test]
+fn session_reset_logs_its_validation_cause_past_the_first_update() {
+    let (runtime, mut session, _server, update) = malformed_update_fixture();
+    let withdraw = with_attributes(&update, |attrs| attrs[3] = 9); // ORIGIN 9
+    for _ in 0..2 {
+        warn_events(&runtime, &mut session, &withdraw);
+    }
+    let mut reset = with_attributes(&update, |attrs| {
+        attrs.drain(..4); // drop ORIGIN
+        // MP_REACH_NLRI: IPv4 unicast, next hop 10.0.0.2, no NLRI.
+        attrs.extend([0x80, 14, 9, 0, 1, 1, 4, 10, 0, 0, 2, 0]);
+    });
+    reset.nlri = Bytes::new();
+    let events = warn_events(&runtime, &mut session, &reset);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.contains_key("max_as_path_length"))
+            .count(),
+        1,
+        "the reset's validation cause must log: {events:?}"
+    );
+    assert_eq!(update_malformed_count(&session, "session_reset"), 1);
 }
 
 #[test]

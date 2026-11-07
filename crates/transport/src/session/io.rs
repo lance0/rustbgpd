@@ -675,7 +675,7 @@ impl PeerSession {
         self.clear_bmp_stream_repair();
         self.reset_slow_peer_state();
         self.evpn_discard_warned.fill(false);
-        self.malformed_attribute_updates = 0;
+        self.malformed_attribute_updates = [0; 2];
     }
 
     /// Wait for the writer after a terminal `close_tcp`, so the session task
@@ -730,7 +730,7 @@ impl PeerSession {
         self.clear_bmp_stream_repair();
         self.reset_slow_peer_state();
         self.evpn_discard_warned.fill(false);
-        self.malformed_attribute_updates = 0;
+        self.malformed_attribute_updates = [0; 2];
     }
 
     /// Abandon any pending BMP divergence repair (LAN-200). Once the TCP
