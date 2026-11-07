@@ -18,7 +18,7 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, clamp};
 use crate::ir::{ArithOp, ValueField};
 
 use super::ast::{
-    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunitySetDef,
+    ActionStmt, AsnSetDef, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunitySetDef,
     DatasetDecl, DatasetEntryAst, Expr, FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt,
     NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg,
     ValueExprAst,
@@ -391,25 +391,32 @@ fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
     let named = file
         .prefix_sets
         .iter()
-        .map(|s| ("prefix-set", &s.name, None))
+        .map(|s| ("prefix-set", &s.name, None, None))
         .chain(
             file.community_sets
                 .iter()
-                .map(|s| ("community-set", &s.name, Some(s))),
+                .map(|s| ("community-set", &s.name, Some(s), None)),
         )
-        .chain(file.asn_sets.iter().map(|s| ("asn-set", &s.name, None)));
-    for (kind, name, community) in named {
+        .chain(
+            file.asn_sets
+                .iter()
+                .map(|s| ("asn-set", &s.name, None, Some(s))),
+        );
+    for (kind, name, community, asn) in named {
         // First definition wins, as the linear lookups did; a name defined
         // twice is already a diagnostic.
         sets.entry(name.node.as_str()).or_insert(SetEntry {
             kind,
             span: name.span,
             community,
+            asn,
         });
     }
     let mut checker = Checker {
         file,
         sets,
+        datasets: index_by_name(&file.datasets, |d| &d.name),
+        fns: index_by_name(&file.fns, |f| &f.name),
         diags: Vec::new(),
     };
     checker.check_declarations();
@@ -435,11 +442,24 @@ fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
     checker.diags
 }
 
+/// `items` by name, the first definition winning as a linear `find` would.
+fn index_by_name<'a, T>(
+    items: &'a [T],
+    name: impl Fn(&'a T) -> &'a Spanned<String>,
+) -> HashMap<&'a str, &'a T> {
+    let mut index = HashMap::with_capacity(items.len());
+    for item in items {
+        index.entry(name(item).node.as_str()).or_insert(item);
+    }
+    index
+}
+
 /// One named set in [`Checker::sets`].
 struct SetEntry<'a> {
     kind: &'static str,
     span: Span,
     community: Option<&'a CommunitySetDef>,
+    asn: Option<&'a AsnSetDef>,
 }
 
 struct Checker<'a> {
@@ -447,6 +467,10 @@ struct Checker<'a> {
     /// Every named set by name, so a reference resolves in constant time
     /// rather than by a scan of every set.
     sets: HashMap<&'a str, SetEntry<'a>>,
+    /// Datasets and functions by name, for the same reason (policies:
+    /// [`SourceFile::policy`]).
+    datasets: HashMap<&'a str, &'a DatasetDecl>,
+    fns: HashMap<&'a str, &'a FnDef>,
     /// At most [`MAX_TYPECHECK_DIAGNOSTICS`]; see [`Checker::push_diag`].
     diags: Vec<Diagnostic>,
 }
@@ -591,11 +615,7 @@ fn call_prepend_bound(
     if depth > MAX_APPLY_DEPTH {
         return 0;
     }
-    let Some(def) = file
-        .policies
-        .iter()
-        .find(|p| p.name.node == call.policy.node)
-    else {
+    let Some(def) = file.policy(&call.policy.node) else {
         return 0;
     };
     let values: Vec<u64> = call
@@ -682,8 +702,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn policy(&self, name: &str) -> Option<&PolicyDef> {
-        self.file.policies.iter().find(|p| p.name.node == name)
+    fn policy(&self, name: &str) -> Option<&'a PolicyDef> {
+        self.file.policy(name)
     }
 
     fn duplicate_check<'n>(
@@ -820,7 +840,7 @@ impl<'a> Checker<'a> {
 
     /// The declaration of a dataset by name (LAN-305).
     fn dataset_of(&self, name: &str) -> Option<&'a DatasetDecl> {
-        self.file.datasets.iter().find(|d| d.name.node == name)
+        self.datasets.get(name).copied()
     }
 
     /// The names of every declared dataset of `kind`, for did-you-mean
@@ -848,13 +868,7 @@ impl<'a> Checker<'a> {
     fn symbol_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
         self.set_def_of(name)
             .or_else(|| self.dataset_of(name).map(|d| ("dataset", d.name.span)))
-            .or_else(|| {
-                self.file
-                    .fns
-                    .iter()
-                    .find(|f| f.name.node == name)
-                    .map(|f| ("function", f.name.span))
-            })
+            .or_else(|| self.fns.get(name).map(|f| ("function", f.name.span)))
             .or_else(|| self.policy(name).map(|p| ("policy", p.name.span)))
     }
 
@@ -1336,7 +1350,11 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name.node) {
+                if let Some(def) = self
+                    .sets
+                    .get(name.node.as_str())
+                    .and_then(|entry| entry.asn)
+                {
                     // A range is a probe surface, not a member list: a
                     // loop over `0..4294967295` would have no useful bound.
                     if let Some(range) = def
@@ -1380,6 +1398,9 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
+                    return;
+                }
+                if self.full() {
                     return;
                 }
                 let mut diag = Diagnostic::coded(
@@ -1957,7 +1978,7 @@ impl<'a> Checker<'a> {
                     // A user-defined function (LAN-304): arity-checked
                     // here; the call graph and budgets are validated
                     // in `check_fn_graph`.
-                    if let Some(def) = self.file.fns.iter().find(|f| f.name.node == name.node) {
+                    if let Some(def) = self.fns.get(name.node.as_str()).copied() {
                         if def.params.len() != args.len() {
                             self.push_diag(
                                 Diagnostic::coded(
@@ -1976,6 +1997,9 @@ impl<'a> Checker<'a> {
                                 .with_label(def.name.span, "function defined here"),
                             );
                         }
+                        return;
+                    }
+                    if self.full() {
                         return;
                     }
                     let mut diag = Diagnostic::coded(
@@ -2305,11 +2329,12 @@ impl<'a> Checker<'a> {
         span: Span,
         scope: &Scope<'_>,
     ) -> Option<&'a PolicyDef> {
-        // Borrow the target through the file field directly so its
-        // lifetime is independent of `self` (diagnostics below need
-        // `&mut self`).
-        let file = self.file;
-        let Some(target) = file.policies.iter().find(|p| p.name.node == policy.node) else {
+        // `policy` returns the `'a` borrow, independent of `self`
+        // (diagnostics below need `&mut self`).
+        let Some(target) = self.policy(&policy.node) else {
+            if self.full() {
+                return None;
+            }
             let mut diag = Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 policy.span,
@@ -2509,14 +2534,9 @@ impl<'a> Checker<'a> {
                         ParamType::CommunitySet => Some(DatasetKind::Community),
                         _ => None,
                     }
-                } else if self.file.asn_sets.iter().any(|s| s.name.node == set.node) {
+                } else if self.set_kind_of(&set.node) == Some("asn-set") {
                     Some(DatasetKind::Asn)
-                } else if self
-                    .file
-                    .community_sets
-                    .iter()
-                    .any(|s| s.name.node == set.node)
-                {
+                } else if self.set_kind_of(&set.node) == Some("community-set") {
                     Some(DatasetKind::Community)
                 } else {
                     self.dataset_of(&set.node)
@@ -2527,12 +2547,10 @@ impl<'a> Checker<'a> {
                     self.check_probe_kind(ident, value, set, kind);
                 }
                 if scope.typed_param(&set.node).is_some()
-                    || self.file.asn_sets.iter().any(|s| s.name.node == set.node)
-                    || self
-                        .file
-                        .community_sets
-                        .iter()
-                        .any(|s| s.name.node == set.node)
+                    || matches!(
+                        self.set_kind_of(&set.node),
+                        Some("asn-set" | "community-set")
+                    )
                 {
                     // Resolved above.
                 } else if let Some(decl) = self.dataset_of(&set.node) {
@@ -2553,6 +2571,8 @@ impl<'a> Checker<'a> {
                             .with_label(decl.kind_span, "declared here"),
                         );
                     }
+                } else if self.full() {
+                    // The compile already fails; no diagnostic to build.
                 } else {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
@@ -3177,8 +3197,6 @@ impl<'a> Checker<'a> {
         if self.set_kind_of(&set.node) == Some(kind) || self.full() {
             return;
         }
-        let candidates: Vec<(&str, Option<Span>)> =
-            names.map(|n| (n.node.as_str(), Some(n.span))).collect();
         let mut diag = Diagnostic::coded(
             DiagnosticCode::Typecheck,
             set.span,
@@ -3196,7 +3214,11 @@ impl<'a> Checker<'a> {
                 ))
                 .with_label(span, format!("`{}` is defined here", set.node));
         } else {
-            diag = with_suggestion(diag, &set.node, candidates);
+            diag = with_suggestion(
+                diag,
+                &set.node,
+                names.map(|n| (n.node.as_str(), Some(n.span))),
+            );
         }
         self.push_diag(diag);
     }
@@ -3555,6 +3577,9 @@ impl<'a> Checker<'a> {
                     seen_datasets.insert(&def.name.node, def.name.span);
                 }
                 let Some(decl) = self.dataset_of(&def.name.node) else {
+                    if self.full() {
+                        continue;
+                    }
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         def.name.span,
@@ -3607,12 +3632,10 @@ impl<'a> Checker<'a> {
                 }
             }
             for call in test.expects.iter().flat_map(|expect| &expect.calls) {
-                let file = self.file;
-                let Some(target) = file
-                    .policies
-                    .iter()
-                    .find(|p| p.name.node == call.policy.node)
-                else {
+                let Some(target) = self.policy(&call.policy.node) else {
+                    if self.full() {
+                        continue;
+                    }
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         call.policy.span,
@@ -4048,7 +4071,7 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
             out.record(action);
         }
         for (policy, args) in applies {
-            let Some(callee) = file.policies.iter().find(|p| p.name.node == policy) else {
+            let Some(callee) = file.policy(policy) else {
                 continue;
             };
             let inner = uses(file, callee, depth + 1, memo);
@@ -4221,9 +4244,7 @@ fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>, fns: &HashMap<&str, F
 fn loop_iteration_bound(source: &ForSource, file: &SourceFile) -> u64 {
     match source {
         ForSource::Set(name) => file
-            .asn_sets
-            .iter()
-            .find(|s| s.name.node == name.node)
+            .asn_set(&name.node)
             .map_or(u64::from(MAX_LOOP_ITERATIONS), |s| s.entries.len() as u64),
         ForSource::Field(_) => u64::from(MAX_LOOP_ITERATIONS),
     }
@@ -5128,7 +5149,15 @@ fn with_suggestion<'n>(
     name: &str,
     candidates: impl IntoIterator<Item = (&'n str, Option<Span>)>,
 ) -> Diagnostic {
-    let candidates: Vec<(&str, Option<Span>)> = candidates.into_iter().collect();
+    // `closest` would return nothing; do not gather the candidates first.
+    if !super::diag::suggestion_budget_left() {
+        return diag;
+    }
+    // One past the cap is enough for `closest` to refuse an oversized set.
+    let candidates: Vec<(&str, Option<Span>)> = candidates
+        .into_iter()
+        .take(super::diag::MAX_SUGGESTION_CANDIDATES + 1)
+        .collect();
     let Some(suggestion) = closest(name, candidates.iter().map(|&(candidate, _)| candidate)) else {
         return diag;
     };

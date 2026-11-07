@@ -324,12 +324,18 @@ pub(crate) fn closest<'a>(
 const MAX_SUGGESTION_NAME_CHARS: usize = 64;
 
 /// Candidate sets larger than this get no did-you-mean suggestion.
-const MAX_SUGGESTION_CANDIDATES: usize = 1024;
+pub(crate) const MAX_SUGGESTION_CANDIDATES: usize = 1024;
 
 thread_local! {
     /// Did-you-mean searches left on this thread; see
     /// [`with_suggestion_budget`]. Unlimited outside one.
     static SUGGESTIONS_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// Whether this thread has a did-you-mean search left, so a caller can skip
+/// gathering candidates for a search that would not run.
+pub(crate) fn suggestion_budget_left() -> bool {
+    SUGGESTIONS_LEFT.get() > 0
 }
 
 /// Run `work` with at most `budget` did-you-mean searches on this thread.
@@ -531,6 +537,47 @@ mod tests {
             .expect("50k sets x 50k unknown references compile within 60 s");
         let diagnostics = result.expect_err("every reference is unknown");
         assert!(diagnostics.len() <= 256, "{}", diagnostics.len());
+        eprintln!("compiled 50k x 50k in {elapsed:?}");
+    }
+
+    /// 50k asn-sets and 50k policies that probe, loop over and apply unknown
+    /// names: past the diagnostic cap each reference costs index lookups,
+    /// not a scan of every set or policy and a gathered suggestion list,
+    /// and the loop and callee bounds resolve by index too.
+    #[test]
+    fn many_unknown_membership_loop_and_apply_references_compile_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..50_000 {
+            let _ = writeln!(source, "asn-set s{index} {{ 1 }}");
+        }
+        for index in 0..50_000 {
+            let _ = writeln!(
+                source,
+                "policy p{index}(x: u32) {{ term t {{ if x in missing{index} {{ reject }} \
+                 for a in missing{index} {{ reject }} apply missing{index}() }} }}"
+            );
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("50k asn-sets x 50k unknown references compile within 60 s");
+        let diagnostics = result.expect_err("every reference is unknown");
+        assert_eq!(diagnostics.len(), 256);
+        let rendered = diagnostics.to_string();
+        for expected in [
+            "unknown asn-set or community-set `missing0`",
+            "`missing0` is not an iterable set",
+            "unknown policy `missing0`",
+        ] {
+            assert!(rendered.contains(expected), "{expected}: {rendered}");
+        }
         eprintln!("compiled 50k x 50k in {elapsed:?}");
     }
 
