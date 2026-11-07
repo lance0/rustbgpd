@@ -907,7 +907,7 @@ impl PeerSession {
                                 warn!(
                                     peer = %self.peer_label,
                                     count = gr_cap_count,
-                                    "peer sent multiple Graceful Restart capabilities, using first"
+                                    "peer sent multiple Graceful Restart capabilities, using the last"
                                 );
                             }
                             Event::OpenReceived(open)
