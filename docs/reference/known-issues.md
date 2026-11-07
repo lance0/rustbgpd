@@ -292,7 +292,7 @@ resolved.
   recorded prior snapshot at boot — regardless of remaining confirm time, since
   the confirming session died with the old process (NETCONF RFC 6241 §8.4
   cancel-on-session-loss semantics) — saving the unconfirmed candidate aside
-  as `<config>.unconfirmed`. Torn or unusable v3 state refuses boot naming the
+  as `<config>.unconfirmed-<id>`, one copy per reverted transaction. Torn or unusable v3 state refuses boot naming the
   files, as does a retired locator-free
   `<runtime_state_dir>/commit-confirm-journal.json` or retired v2 locator —
   each is left untouched, and only rustbgpd v0.64.0 can recover it. Proven by

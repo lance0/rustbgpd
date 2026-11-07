@@ -48,6 +48,9 @@ pub struct BootRevertNotice {
     pub confirm_id: String,
     /// Where the unconfirmed candidate was saved aside.
     pub backup_path: PathBuf,
+    /// What the candidate's file name gained when it was saved beside its
+    /// recorded target, for the redacted v3 notice.
+    pub backup_suffix: String,
     /// The journal recorded a failed live rollback of this transaction: the
     /// state the daemon was in before this restart is uncertain (the banner
     /// says so), even though the boot revert itself succeeded.
@@ -79,11 +82,11 @@ pub fn refuse_retired_journal(path: &Path) -> Result<(), String> {
     }
 }
 
-/// [`write_atomic`] for daemon-owned runtime state. The destination is the
-/// directory entry at `path`, never what it resolves to: a symlink planted
+/// A durable atomic write for daemon-owned runtime state. The destination is
+/// the directory entry at `path`, never what it resolves to: a symlink planted
 /// there is replaced by the new file, and its target is left untouched. The
-/// stage beside it is opened `O_NOFOLLOW`. Config-file writes keep
-/// [`write_atomic`], which deliberately writes through an operator's symlink.
+/// stage beside it is opened `O_NOFOLLOW`. Config-file writes use
+/// [`stage_atomic`], which deliberately writes through an operator's symlink.
 pub(crate) fn write_state_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
     stage_target(path.to_path_buf(), bytes, true)
         .map_err(|error| AtomicPublishError::NotPublished(name_write_failure(path, &error)))?
@@ -102,12 +105,15 @@ pub(crate) fn write_state_hint(path: &Path, bytes: &[u8]) -> Result<(), AtomicPu
         .publish_with(|_| Ok(()))
 }
 
-/// Write temp file + fsync + rename + fsync dir. Shared with the config
-/// persister so every durable config write goes through the same primitive.
+/// Write temp file + fsync + rename + fsync dir, with no stale-source fence.
+/// The config persister stages through [`stage_atomic`] and publishes with
+/// [`StagedWrite::commit_if`]; this unfenced form remains for the tests that
+/// pin the primitive.
 ///
 /// Failures name the destination path: a bare io error ("No such file or
 /// directory (os error 2)") is useless to an operator who doesn't know
 /// which file the daemon was writing.
+#[cfg(test)]
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
     stage_atomic(path, bytes)
         .map_err(AtomicPublishError::NotPublished)?
@@ -167,14 +173,21 @@ impl StagedWrite {
     }
 
     /// Re-run a caller-owned stale-source fence immediately before publish.
+    /// The fence gets the destination this stage resolved, the file the
+    /// rename replaces: a symlink repointed since then cannot send the check
+    /// to another file.
+    ///
+    /// The fence and the rename are separate steps. A write to the
+    /// destination after the fence reads it is still replaced; without a
+    /// lock every writer takes, no check-then-rename closes that window.
     pub(crate) fn commit_if(
         mut self,
-        fence: impl FnOnce() -> io::Result<()>,
+        fence: impl FnOnce(&Path) -> io::Result<()>,
     ) -> Result<(), AtomicPublishError> {
         self.file
             .sync_all()
             .map_err(AtomicPublishError::NotPublished)?;
-        fence()
+        fence(&self.target)
             .map_err(|error| name_write_failure(&self.target, &error))
             .map_err(AtomicPublishError::NotPublished)?;
         self.publish()

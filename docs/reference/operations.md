@@ -417,8 +417,11 @@ then directly adopts that accepted snapshot for boot restore. The revert is
 unconditional, regardless of how much confirm time remained, because the
 operator's confirming session died with the old process (the NETCONF RFC 6241
 §8.4 rule: session loss cancels a confirmed commit). The unconfirmed candidate
-is saved once as `<recorded-target>.unconfirmed`; the loud boot banner names
-the transaction but redacts locator-carried paths and digests. A damaged,
+is saved once as `<recorded-target>.unconfirmed-<id>`, where `<id>` is 16 hex
+digits derived from that transaction's pending metadata. Each reverted
+transaction therefore keeps its own copy. The loud boot banner names the
+transaction and the `.unconfirmed-<id>` suffix, and redacts locator-carried
+paths and digests. A damaged,
 unsafe, oversized, or
 mismatched locator, metadata, or raw prior refuses boot before candidate
 contents are opened and before candidate or backup mutation.
@@ -438,8 +441,12 @@ recover with rustbgpd v0.64.0, or delete only after proving it
 terminal/intended. Never delete a live v3 locator.
 
 The boot-revert save-aside moves the unconfirmed candidate to
-`<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
-an existing `.unconfirmed`. That needs the config file and its directory to be
+`<config>.unconfirmed-<id>` with an atomic hard-link + unlink, so it never
+clobbers an existing file. A restart that interrupted the same revert finds its
+own earlier save under the same name and continues. If a different file holds
+that name, boot is refused with the candidate, the file and the pending
+authority untouched. The daemon never deletes these copies: remove each one
+once you have recovered what you need from it. That needs the config file and its directory to be
 on a filesystem that supports hard links — every local filesystem does. On a
 filesystem without hard-link support (some FUSE mounts, certain NFS setups),
 the save-aside fails and the daemon **refuses to boot** with the journal left
@@ -1086,6 +1093,36 @@ never patches your text in place.
 Keep the annotated config under version control and treat the daemon's file as
 generated output. A deployment that only ever edits the file and sends SIGHUP
 keeps its comments; SIGHUP alone never writes the file.
+
+A persisted mutation never overwrites an edit the daemon has not adopted.
+Before it writes, the daemon checks that the file still holds the bytes it
+last read (at boot or SIGHUP) or wrote. The check runs when the mutation
+stages its write, before any runtime change, and again just before the
+rename.
+
+- **An edit is pending when the mutation starts.** The mutation is refused
+  with `FAILED_PRECONDITION` (`config persistence failed: … the config file
+  changed on disk after the daemon last read or wrote it`), and nothing
+  changes.
+- **An edit lands while the mutation applies.** The publication is refused
+  and the edit stays on disk.
+  - A config transaction (`rbgp config apply`, rollback, gNMI `Set`)
+    compensates its runtime change and returns `FAILED_PRECONDITION`.
+  - A neighbor, policy, peer-group or FIB-table RPC cannot undo its runtime
+    change. It returns `INTERNAL` and the daemon
+    [fences and exits 70](#runtime-config-settlement-fail-stop). The
+    supervisor restarts it from the edited file.
+
+Either way, `rbgp doctor` reports `daemon.config_freshness` yellow until a
+SIGHUP adopts the edit. After that, mutations write the file again.
+
+The check starts at boot, including after a commit-confirm boot revert. When
+the config path is a symlink, the check reads the file the write will
+replace, the symlink's target. The last check and the rename are still two
+steps. A save in the brief interval between them, while the daemon reads
+and hashes the file, is replaced without a refusal. Editors and the daemon
+share no lock that could close that window. Avoid it by sending SIGHUP
+after each edit and before the next runtime mutation.
 
 ---
 

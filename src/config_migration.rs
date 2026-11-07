@@ -274,7 +274,7 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
     }
     let stage_path = stage.path().to_path_buf();
     stage
-        .commit_if(|| {
+        .commit_if(|_| {
             verify_fence_io(
                 &request.config_path,
                 &resolved,

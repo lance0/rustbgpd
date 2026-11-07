@@ -5143,7 +5143,8 @@ the exact accepted normalized TOML. Metadata binds its provenance, digests,
 length, device, and inode; the config-adjacent locator is the sole pending boot
 authority. A restart checks that locator before candidate contents, verifies
 the complete chain, restores the recorded target, and saves the unconfirmed
-candidate as `<recorded-target>.unconfirmed`.
+candidate as `<recorded-target>.unconfirmed-<id>` (16 hex digits per
+transaction; the boot banner names the suffix).
 
 Confirm and successful rollback become terminal after locator removal and its
 parent-directory `fsync`; later metadata/raw removal and pending-directory

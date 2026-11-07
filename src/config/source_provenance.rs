@@ -315,6 +315,9 @@ pub(crate) struct AcceptedConfigSnapshot {
     /// Unix-seconds mtime of the config file as it was read, for snapshots
     /// loaded from the file. `None` for snapshots derived in memory.
     read_mtime_unix: Option<u64>,
+    /// SHA-256 of the config file bytes this snapshot was read from (boot,
+    /// SIGHUP); `None` for snapshots not read from the config file.
+    read_sha256: Option<[u8; 32]>,
 }
 
 impl AcceptedConfigSnapshot {
@@ -328,6 +331,19 @@ impl AcceptedConfigSnapshot {
     /// one detached external-source capture used by provenance-aware restore.
     pub(crate) fn load_retained(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
         Self::load_retained_with_hook(content, config_path, || {})
+    }
+
+    /// [`Self::load_retained`] for a document the caller writes to the
+    /// config file itself (a commit-confirm boot revert's restore). The
+    /// snapshot records `content` as the file's bytes, so the persister's
+    /// stale-source fence is armed from boot rather than off until the
+    /// daemon's first write or SIGHUP.
+    pub(crate) fn load_restored(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
+        let mut snapshot = Self::load_retained(content, config_path)?;
+        if let Some(fresh) = Arc::get_mut(&mut snapshot) {
+            fresh.read_sha256 = Some(Sha256::digest(content.as_bytes()).into());
+        }
+        Ok(snapshot)
     }
 
     fn load_retained_with_hook(
@@ -364,6 +380,7 @@ impl AcceptedConfigSnapshot {
             sha256,
             source_sha256,
             read_mtime_unix: None,
+            read_sha256: None,
         }))
     }
 
@@ -424,6 +441,7 @@ impl AcceptedConfigSnapshot {
                 Ok((bytes, mtime))
             })
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
+        let read_sha256 = Some(Sha256::digest(&bytes).into());
         let content = String::from_utf8(bytes)
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
         let file_path = absolute_config_path(path)?;
@@ -462,6 +480,7 @@ impl AcceptedConfigSnapshot {
             sha256,
             source_sha256,
             read_mtime_unix,
+            read_sha256,
         })
     }
 
@@ -483,6 +502,7 @@ impl AcceptedConfigSnapshot {
             sha256,
             source_sha256,
             read_mtime_unix: None,
+            read_sha256: None,
         }))
     }
 
@@ -578,6 +598,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             read_mtime_unix: None,
+            read_sha256: None,
         })
     }
 
@@ -606,6 +627,12 @@ impl AcceptedConfigSnapshot {
     /// The config file's mtime when this snapshot's bytes were read from it.
     pub(crate) fn read_mtime_unix(&self) -> Option<u64> {
         self.read_mtime_unix
+    }
+
+    /// SHA-256 of the config file bytes this snapshot was read from, if it
+    /// was read from the file.
+    pub(crate) fn read_sha256(&self) -> Option<[u8; 32]> {
+        self.read_sha256
     }
 }
 
