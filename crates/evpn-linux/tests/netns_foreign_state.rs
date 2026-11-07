@@ -808,6 +808,85 @@ async fn l2_foreign_metadata_vxlan_on_a_recycled_ifindex_gets_no_svd_rows() {
     assert_eq!(err.class(), FailureClass::Transient, "{err}");
 }
 
+/// LAN-2909 L-E3 review: vxlan100 (`nolearning`) is replaced at its
+/// ifindex by a VXLAN with the same VNI but learning enabled. The FDB-NHG
+/// CVE-2025-39851 guard trusts the cached learning state, so the write
+/// must fail rather than accept the replacement as the cached device.
+#[tokio::test]
+async fn l2_foreign_learning_vxlan_on_a_recycled_ifindex_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-learning");
+        setup_l2_topology(&ns);
+        run_inner(
+            &ns,
+            "l2_foreign_learning_vxlan_on_a_recycled_ifindex_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan100/ifindex")
+        .expect("vxlan100 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan100"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxlan100",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "id",
+            "100",
+            "local",
+            L2_LOCAL_IP,
+            "dstport",
+            "4789",
+            "learning",
+        ],
+    );
+    run("ip", &["link", "set", "vxlan100", "master", "br100"]);
+    run("ip", &["link", "set", "vxlan100", "up"]);
+
+    let result = dp.apply(&add.ops[0]).await;
+    let mac = mac_str(l2_mac());
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxlan100"])
+        .lines()
+        .filter(|row| row.starts_with(&mac))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "row programmed on a learning-enabled replacement ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("changed learning state must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
 #[tokio::test]
 async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     if !netns_gate() {

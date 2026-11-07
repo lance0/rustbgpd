@@ -317,7 +317,8 @@ pub(crate) fn unique_fdb_vxlan_target_for_vni(
 /// another device in between, writing to the cached ifindex would put
 /// the row for `vni` on the wrong device. One `RTM_GETLINK` by index
 /// confirms the ifindex still names a VXLAN of the cached shape: the
-/// same fixed VNI, or collect-metadata for an SVD target. An SVD target
+/// same learning state, and the same fixed VNI or collect-metadata for an
+/// SVD target. An SVD target
 /// must also still be enslaved to the same bridge, and that bridge's VLAN
 /// tunnel inventory must still map its bridge VLAN to `vni` on this port.
 /// A metadata VXLAN that merely reuses the ifindex carries no such
@@ -355,6 +356,12 @@ pub(crate) async fn confirm_fdb_vxlan_target(
     }
     let parsed = parse_vxlan_link(&msg, name.unwrap_or_default());
     let live = parsed.info;
+    // The CVE-2025-39851 FDB-NHG guard reads the cached learning state, so
+    // a replacement whose learning state differs must not pass as the
+    // cached device.
+    if live.learning_disabled != target.learning_disabled {
+        return Err(stale("learning state changed"));
+    }
     let Some(binding) = target.svd_binding else {
         return if !live.collect_metadata && live.vni == Some(vni.as_u32()) {
             Ok(())
