@@ -379,7 +379,7 @@ Daemon restart-required fields stay pinned to their live values on every route.
    inside the confirm window triggers a boot-time revert
    (`boot_revert_check()`, per RFC 6241 §8.4): the pre-transaction config is
    restored and the unconfirmed candidate is saved aside as
-   `<config>.unconfirmed`. Torn or unusable v3 state refuses boot rather than
+   `<config>.unconfirmed-<id>`, one copy per reverted transaction. Torn or unusable v3 state refuses boot rather than
    guessing, and so does a retired locator-free
    `<runtime_state_dir>/commit-confirm-journal.json` or retired v2 locator —
    both are left untouched for recovery with rustbgpd v0.64.0. Never create

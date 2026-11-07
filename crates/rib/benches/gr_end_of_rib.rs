@@ -1,15 +1,17 @@
 //! Graceful Restart End-of-RIB cost for one restarting source.
 //!
-//! One unregistered eBGP source announces the fixture table through the
-//! production `RoutesReceived` path, enters Graceful Restart
-//! (`PeerGracefulRestart`: every route in its GR families retained and marked
-//! stale), re-advertises the identical table (stale flags cleared on insert),
-//! and then sends one End-of-RIB per GR family. Each End-of-RIB is timed as one
+//! One eBGP source announces the fixture table through the production
+//! `RoutesReceived` path, enters Graceful Restart (`PeerGracefulRestart`:
+//! every route in its GR families retained and marked stale), registers its
+//! restarted session (`PeerUp`, no families), re-advertises the identical
+//! table (stale flags cleared on insert), and then sends one End-of-RIB per
+//! GR family. Each End-of-RIB is timed as one
 //! production `EndOfRib` dispatch, with the unicast recompute and distribution
 //! split reported separately. `stale_resolution_ns` covers unicast stale
 //! removal and retained local LLGR-tag cleanup together; attribute GC and
 //! exact stale counting retain separate spans. Fixture construction, the
-//! restart, and the re-advertisement stay outside the timed interval.
+//! restart, the registration and the re-advertisement stay outside the timed
+//! interval.
 //!
 //! Modes:
 //! - `dual`: 1,000,000 IPv4 + 200,000 IPv6 routes; GR families IPv4, IPv6
@@ -245,6 +247,7 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
         mode.name()
     );
     manager.bench_gr_restart(PeerId::from_addr(SOURCE), mode.gr_families());
+    manager.bench_register_restarted_source(PeerId::from_addr(SOURCE));
     manager.bench_seed_loc_rib(table(ipv4, ipv6, &attributes));
     drain(&mut receivers);
     let intern = manager.bench_attr_intern_inventory();

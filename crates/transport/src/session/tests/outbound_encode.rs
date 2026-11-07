@@ -54,9 +54,11 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
             rustbgpd_wire::Ipv4UnicastMode::MpReach,
         )
         .unwrap();
+    // RFC 7606 §5.1: MP_REACH_NLRI is encoded first.
     let mut legacy_attrs = base_attrs;
-    legacy_attrs.push(PathAttribute::MpReachNlri(Box::new(
-        rustbgpd_wire::MpReachNlri {
+    legacy_attrs.insert(
+        0,
+        PathAttribute::MpReachNlri(Box::new(rustbgpd_wire::MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop,
@@ -69,8 +71,8 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
             vpn_announced: vec![],
             rtc_announced: vec![],
             vpn_flowspec_announced: vec![],
-        },
-    )));
+        })),
+    );
     let expected = rustbgpd_wire::UpdateMessage::try_build(
         &[],
         &[],
@@ -95,9 +97,10 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
         .fold(0xcbf2_9ce4_8422_2325_u64, |digest, byte| {
             (digest ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
+    // Re-pinned when MP_REACH_NLRI moved first (RFC 7606 §5.1).
     assert_eq!(
-        digest, 0x0a05_bb56_4cca_06e9,
-        "rich IPv6 MP bytes must match the pre-change transport oracle"
+        digest, 0x196b_0fc1_6401_75b3,
+        "rich IPv6 MP bytes must match the pinned transport oracle"
     );
     assert_eq!(
         actual_wire.len(),
@@ -107,7 +110,7 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
     let parsed = actual.parse(true, false, &[]).unwrap();
     assert_eq!(parsed.attributes.len(), 8);
     assert!(matches!(
-        parsed.attributes.last(),
+        parsed.attributes.first(),
         Some(PathAttribute::MpReachNlri(mp))
             if mp.afi == Afi::Ipv6 && mp.safi == Safi::Unicast && mp.announced == entries
     ));

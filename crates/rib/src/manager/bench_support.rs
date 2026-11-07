@@ -2531,9 +2531,9 @@ impl RibManager {
         });
     }
 
-    /// Enter Graceful Restart for an unregistered synthetic source through the
-    /// production `PeerGracefulRestart` path: its routes in `families` are
-    /// retained and marked stale.
+    /// Enter Graceful Restart for a synthetic source through the production
+    /// `PeerGracefulRestart` path: its routes in `families` are retained and
+    /// marked stale.
     pub fn bench_gr_restart(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
         self.handle_update(RibUpdate::PeerGracefulRestart {
             peer,
@@ -2544,6 +2544,33 @@ impl RibManager {
             peer_llgr_capable: false,
             peer_llgr_families: Vec::new(),
             llgr_stale_time: 0,
+        });
+    }
+
+    /// Register a restarted source's session 0 through the production
+    /// `PeerUp` path, sending it no families, as transport does when the
+    /// restarted session reaches Established. The RIB refuses End-of-RIB from
+    /// a peer with no registered session. Session 0 matches the stamp
+    /// `bench_seed_loc_rib` and `bench_end_of_rib` use.
+    pub fn bench_register_restarted_source(&mut self, peer: PeerId) {
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        self.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 64_512,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: Vec::new(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
         });
     }
 

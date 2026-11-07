@@ -417,8 +417,11 @@ then directly adopts that accepted snapshot for boot restore. The revert is
 unconditional, regardless of how much confirm time remained, because the
 operator's confirming session died with the old process (the NETCONF RFC 6241
 §8.4 rule: session loss cancels a confirmed commit). The unconfirmed candidate
-is saved once as `<recorded-target>.unconfirmed`; the loud boot banner names
-the transaction but redacts locator-carried paths and digests. A damaged,
+is saved once as `<recorded-target>.unconfirmed-<id>`, where `<id>` is 16 hex
+digits derived from that transaction's pending metadata. Each reverted
+transaction therefore keeps its own copy. The loud boot banner names the
+transaction and the `.unconfirmed-<id>` suffix, and redacts locator-carried
+paths and digests. A damaged,
 unsafe, oversized, or
 mismatched locator, metadata, or raw prior refuses boot before candidate
 contents are opened and before candidate or backup mutation.
@@ -438,8 +441,12 @@ recover with rustbgpd v0.64.0, or delete only after proving it
 terminal/intended. Never delete a live v3 locator.
 
 The boot-revert save-aside moves the unconfirmed candidate to
-`<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
-an existing `.unconfirmed`. That needs the config file and its directory to be
+`<config>.unconfirmed-<id>` with an atomic hard-link + unlink, so it never
+clobbers an existing file. A restart that interrupted the same revert finds its
+own earlier save under the same name and continues. If a different file holds
+that name, boot is refused with the candidate, the file and the pending
+authority untouched. The daemon never deletes these copies: remove each one
+once you have recovered what you need from it. That needs the config file and its directory to be
 on a filesystem that supports hard links — every local filesystem does. On a
 filesystem without hard-link support (some FUSE mounts, certain NFS setups),
 the save-aside fails and the daemon **refuses to boot** with the journal left
@@ -1087,6 +1094,36 @@ Keep the annotated config under version control and treat the daemon's file as
 generated output. A deployment that only ever edits the file and sends SIGHUP
 keeps its comments; SIGHUP alone never writes the file.
 
+A persisted mutation never overwrites an edit the daemon has not adopted.
+Before it writes, the daemon checks that the file still holds the bytes it
+last read (at boot or SIGHUP) or wrote. The check runs when the mutation
+stages its write, before any runtime change, and again just before the
+rename.
+
+- **An edit is pending when the mutation starts.** The mutation is refused
+  with `FAILED_PRECONDITION` (`config persistence failed: … the config file
+  changed on disk after the daemon last read or wrote it`), and nothing
+  changes.
+- **An edit lands while the mutation applies.** The publication is refused
+  and the edit stays on disk.
+  - A config transaction (`rbgp config apply`, rollback, gNMI `Set`)
+    compensates its runtime change and returns `FAILED_PRECONDITION`.
+  - A neighbor, policy, peer-group or FIB-table RPC cannot undo its runtime
+    change. It returns `INTERNAL` and the daemon
+    [fences and exits 70](#runtime-config-settlement-fail-stop). The
+    supervisor restarts it from the edited file.
+
+Either way, `rbgp doctor` reports `daemon.config_freshness` yellow until a
+SIGHUP adopts the edit. After that, mutations write the file again.
+
+The check starts at boot, including after a commit-confirm boot revert. When
+the config path is a symlink, the check reads the file the write will
+replace, the symlink's target. The last check and the rename are still two
+steps. A save in the brief interval between them, while the daemon reads
+and hashes the file, is replaced without a refusal. Editors and the daemon
+share no lock that could close that window. Avoid it by sending SIGHUP
+after each edit and before the next runtime mutation.
+
 ---
 
 ## Upgrading
@@ -1430,21 +1467,25 @@ accepting. Neither mode latches the peer or sends a NOTIFICATION, and
 `max_prefix_action = "block"` requires the aggregate `max_prefixes` to be
 unset.
 
-For negotiated IPv4/IPv6-unicast Add-Path receive, a nonzero
-`add_path.receive_max` also caps retained path IDs **per prefix**. Unset or
+For every negotiated Add-Path receive family (IPv4/IPv6 unicast, VPNv4/VPNv6
+and IPv4/IPv6 labeled unicast), a nonzero `add_path.receive_max` also caps
+retained path IDs **per prefix** (per RD + prefix for VPN). Unset or
 zero, a default cap of 1024 path IDs per prefix applies and always behaves
 as `"block"`, independent of `max_prefix_action`; it advertises no
-Paths-Limit capability. Either cap counts accepted IDs plus rejected IDs
-only when that family's
+Paths-Limit capability. Either cap counts accepted IDs, plus, for unicast,
+rejected IDs only when that family's
 `max_prefixes_received_*` bound enables rejected-identity tracking. Without
 that bound, a denied path does not occupy a receive-cap slot; rejected-route
 diagnostics remain separately capacity-bounded. An existing ID can be
 replaced at the cap, and a withdrawal releases its slot. Under `"block"`, a
 net-new over-limit ID is withheld; recovery requires peer reannouncement or
 a session reset. Under `"shutdown"`, the peer receives Cease/1 and is latched
-off as above. Under `"warning"`, a configured cap observes the excess and
-accepts it up to a safety ceiling of `max(receive_max, 1024)` path IDs per
-prefix; past the ceiling the excess is withheld and counted as `"block"`. `bgp_add_path_receive_limit_attempts_total`
+off as above, and the attempt counts as `"shutdown"` at any `receive_max`.
+Under `"warning"`, the excess is admitted and counted as a warning only
+below a hard ceiling of `max(receive_max, 1024)` path IDs per prefix; at the
+ceiling it is withheld and counted as `"block"`. So `"warning"` warns only
+between `receive_max` and 1024, and blocks at the cap when `receive_max` is
+1024 or more. `receive_max = 65535` admits up to 65,535 paths per prefix. `bgp_add_path_receive_limit_attempts_total`
 counts net-new ID admission attempts beyond the cap, including repeated
 attempts to send a withheld ID. Replacing an already admitted ID does not
 count. The counter is labeled by peer, family and action; the default cap
@@ -1968,7 +2009,7 @@ name it.
 | `bgp_max_prefix_limit{peer,family,stage}` | Effective finite bound for the same family and stage; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,family,stage}` | Saturating `limit - usage` for a finite bound; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,family,stage}` | 1 while a `max_prefix_action = "block"` episode is open for a finite bound — net-new prefixes are being withheld until usage falls back under the bound; present for every finite bound, reaped with the other capacity series |
-| `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for negotiated `ipv4_unicast` or `ipv6_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
+| `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for a negotiated Add-Path receive family: `ipv4_unicast`, `ipv6_unicast`, `l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast` or `ipv6_labeled_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
 | `bgp_orf_capacity_rejections_total{peer,family}` | Address-Prefix ORF groups rejected because an ADD would exceed the 4,096-entry cap for `ipv4_unicast` or `ipv6_unicast`; the installed filter is retained. Reaped on configured peer deletion |
 | `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Absent while unique-prefix usage is unknown during incomplete admission recovery; restored when known. Series reaped on session teardown |
 | `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |
@@ -2002,7 +2043,7 @@ name it.
 | `bgp_rib_outbound_registration_pending_oldest_seconds` | Age in whole seconds of the oldest wait counted above, 0 when none. A wait starts at the session's `PeerUp`, or at a collision failback onto a survivor whose earlier registration had completed, and ends when the registration completes or the session goes down. It keeps rising while the actor is otherwise idle. An investigation signal, not a readiness condition: legitimate import deferral has no fixed bound |
 | `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); the replacement resets the prior session's RIB state and keeps the superseded session live for failover; its `PeerDown` is matched by session identity |
 | `bgp_rib_stale_peer_down_ignored_total{peer}` | `PeerDown`/`PeerGracefulRestart` events discarded because their session id didn't match the registered session — a stale teardown from a superseded collision-loser session; the surviving session's state is untouched |
-| `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp`. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`, `family_sendable`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, slow-peer state, and a family made sendable mid-session (IPv6 unicast unlocked by a reloaded `local_ipv6_nexthop`) respectively. The registered session's state is untouched |
+| `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp` — and End-of-RIB or route-refresh begin/end/timeout markers (`eor`, `refresh`) from a peer with no registered session, such as one whose routes are retained under Graceful Restart, which must not complete their sweep. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`, `family_sendable`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, slow-peer state, and a family made sendable mid-session (IPv6 unicast unlocked by a reloaded `local_ipv6_nexthop`) respectively. The registered session's state is untouched |
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer outcomes: `still_dirty` when a tick leaves a dirty peer or another retry pending and the timer re-arms; `owing` when a tick leaves only owed private-family routes; runnable debt uses the 10 ms backlog cadence to detect returned credit or channel capacity, while a whole-family drain behind a live operation wakes when that operation completes; `cleared` when a tick drains the work, or when the RIB loop notices at the end of an iteration that a message handler such as session teardown drained it. A drain on a loop path that continues before that check is not counted, so a missing `cleared` does not prove that resync is stalled. Every series is exported at 0 from startup |
 | `bgp_rib_outbound_owing_fallback_total` | Peers that owed private-family routes and fell back to a whole-peer resync instead: the owed routes could not be sent for a reason other than a full channel or spent credit (a missing export encoder, EVPN recovery admission), or a gated update was refused for credit. Expected to stay at 0 |

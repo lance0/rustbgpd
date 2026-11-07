@@ -652,7 +652,14 @@ fn sigkill_in_confirm_window_boots_previous_config_and_saves_candidate_aside() {
         !on_disk.contains("192.0.2.0/24"),
         "boot must restore the pre-transaction config:\n{on_disk}"
     );
-    let backup_path = lab.dir.join("rustbgpd.toml.unconfirmed");
+    // The banner names the suffix the candidate was saved under; that file
+    // must hold this transaction's candidate.
+    let banner = daemon.stderr();
+    let suffix_at = banner
+        .find(".unconfirmed-")
+        .unwrap_or_else(|| panic!("boot banner must name the backup suffix:\n{banner}"));
+    let suffix = &banner[suffix_at..suffix_at + ".unconfirmed-".len() + 16];
+    let backup_path = lab.dir.join(format!("rustbgpd.toml{suffix}"));
     let saved_aside = std::fs::read_to_string(&backup_path)
         .expect("the unconfirmed candidate must be saved aside");
     assert!(
@@ -806,7 +813,14 @@ fn real_binary_refuses_v2_authority_untouched_before_candidate_load() {
     assert_eq!(std::fs::read(&lab.locator_path).unwrap(), locator_before);
     assert_eq!(std::fs::read(&lab.journal_path).unwrap(), journal_before);
     assert_eq!(std::fs::read(&lab.config_path).unwrap(), candidate_before);
-    assert!(!lab.dir.join("rustbgpd.toml.unconfirmed").exists());
+    assert!(
+        std::fs::read_dir(&lab.dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("rustbgpd.toml.unconfirmed")),
+        "no candidate may be saved aside"
+    );
 }
 
 #[test]

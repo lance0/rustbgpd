@@ -34,8 +34,8 @@ pub struct SourceFile {
     pub policies: Vec<PolicyDef>,
     /// `test` blocks.
     pub tests: Vec<TestDef>,
-    /// Name lookups for the walkers that resolve a loop set or a callee per
-    /// statement, built on first use from the complete unit.
+    /// Name lookups for the checks that resolve a definition per reference,
+    /// built on first use from the complete unit.
     pub(crate) names: std::sync::OnceLock<SourceNames>,
 }
 
@@ -43,7 +43,11 @@ pub struct SourceFile {
 /// winning as a linear `find` would.
 #[derive(Debug, Default)]
 pub(crate) struct SourceNames {
+    prefix_sets: std::collections::HashMap<String, usize>,
+    community_sets: std::collections::HashMap<String, usize>,
     asn_sets: std::collections::HashMap<String, usize>,
+    datasets: std::collections::HashMap<String, usize>,
+    fns: std::collections::HashMap<String, usize>,
     policies: std::collections::HashMap<String, usize>,
 }
 
@@ -58,7 +62,11 @@ impl SourceFile {
                 index
             };
             SourceNames {
+                prefix_sets: index(&mut self.prefix_sets.iter().map(|s| &s.name.node)),
+                community_sets: index(&mut self.community_sets.iter().map(|s| &s.name.node)),
                 asn_sets: index(&mut self.asn_sets.iter().map(|s| &s.name.node)),
+                datasets: index(&mut self.datasets.iter().map(|d| &d.name.node)),
+                fns: index(&mut self.fns.iter().map(|f| &f.name.node)),
                 policies: index(&mut self.policies.iter().map(|p| &p.name.node)),
             }
         });
@@ -67,12 +75,44 @@ impl SourceFile {
         names
     }
 
+    /// The first `prefix-set` named `name`.
+    pub(crate) fn prefix_set(&self, name: &str) -> Option<&PrefixSetDef> {
+        self.names()
+            .prefix_sets
+            .get(name)
+            .map(|&position| &self.prefix_sets[position])
+    }
+
+    /// The first `community-set` named `name`.
+    pub(crate) fn community_set(&self, name: &str) -> Option<&CommunitySetDef> {
+        self.names()
+            .community_sets
+            .get(name)
+            .map(|&position| &self.community_sets[position])
+    }
+
     /// The first `asn-set` named `name`.
     pub(crate) fn asn_set(&self, name: &str) -> Option<&AsnSetDef> {
         self.names()
             .asn_sets
             .get(name)
             .map(|&position| &self.asn_sets[position])
+    }
+
+    /// The first dataset declared as `name`.
+    pub(crate) fn dataset(&self, name: &str) -> Option<&DatasetDecl> {
+        self.names()
+            .datasets
+            .get(name)
+            .map(|&position| &self.datasets[position])
+    }
+
+    /// The first `fn` named `name`.
+    pub(crate) fn fn_def(&self, name: &str) -> Option<&FnDef> {
+        self.names()
+            .fns
+            .get(name)
+            .map(|&position| &self.fns[position])
     }
 
     /// The first policy named `name`.

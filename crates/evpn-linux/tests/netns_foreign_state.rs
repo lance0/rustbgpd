@@ -576,6 +576,537 @@ async fn l2_foreign_pvid_stale_operations_are_rechecked_before_apply() {
 /// LAN-283 L2: a foreign `static` FDB row that replaces the owned row
 /// under the same `(vni, mac)` blocks repair, survives withdrawal,
 /// and survives the shutdown drain.
+/// LAN-2909 L-E3: FDB apply resolves the VXLAN target from the link
+/// cache taken at the start of the pass. vxlan100 is deleted and a
+/// different-VNI VXLAN is created with its ifindex before the apply.
+/// The remote-MAC row for VNI 100 must not land on that device.
+#[tokio::test]
+async fn l2_foreign_vxlan_on_a_recycled_ifindex_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-vxlan");
+        setup_l2_topology(&ns);
+        run_inner(
+            &ns,
+            "l2_foreign_vxlan_on_a_recycled_ifindex_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan100/ifindex")
+        .expect("vxlan100 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan100"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxlan200",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "id",
+            "200",
+            "local",
+            L2_LOCAL_IP,
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run("ip", &["link", "set", "vxlan200", "master", "br100"]);
+    run("ip", &["link", "set", "vxlan200", "up"]);
+
+    let result = dp.apply(&add.ops[0]).await;
+    let mac = mac_str(l2_mac());
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxlan200"])
+        .lines()
+        .filter(|row| row.starts_with(&mac))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "VNI 100 row programmed on the recycled VNI 200 device ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("stale target must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
+/// LAN-2909 L-E3, SVD shape: the SVD VXLAN `vxlan0` on `brvlan` maps
+/// bridge VLAN 10 to VNI 100. It is deleted, and an unrelated
+/// collect-metadata VXLAN on another bridge, with no VLAN tunnel for VNI
+/// 100, is created with its ifindex. A VNI 100 flood row must not be
+/// written to that device.
+#[tokio::test]
+async fn l2_foreign_metadata_vxlan_on_a_recycled_ifindex_gets_no_svd_rows() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-svd");
+        ns.exec(
+            "ip",
+            &["addr", "add", &format!("{L2_LOCAL_IP}/32"), "dev", "lo"],
+        );
+        for bridge in ["brvlan", "brother"] {
+            ns.exec(
+                "ip",
+                &[
+                    "link",
+                    "add",
+                    "name",
+                    bridge,
+                    "type",
+                    "bridge",
+                    "vlan_filtering",
+                    "1",
+                    "vlan_default_pvid",
+                    "0",
+                ],
+            );
+            ns.exec("ip", &["link", "set", bridge, "up"]);
+        }
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                "vxlan0",
+                "type",
+                "vxlan",
+                "external",
+                "vnifilter",
+                "dstport",
+                "4789",
+                "nolearning",
+            ],
+        );
+        ns.exec("ip", &["link", "set", "vxlan0", "master", "brvlan"]);
+        ns.exec("ip", &["link", "set", "vxlan0", "up"]);
+        ns.exec(
+            "bridge",
+            &["link", "set", "dev", "vxlan0", "vlan_tunnel", "on"],
+        );
+        ns.exec(
+            "bridge",
+            &["vlan", "add", "vid", "10", "dev", "brvlan", "self"],
+        );
+        ns.exec("bridge", &["vlan", "add", "vid", "10", "dev", "vxlan0"]);
+        ns.exec(
+            "bridge",
+            &[
+                "vlan",
+                "add",
+                "vid",
+                "10",
+                "dev",
+                "vxlan0",
+                "tunnel_info",
+                "id",
+                "100",
+            ],
+        );
+        run_inner(
+            &ns,
+            "l2_foreign_metadata_vxlan_on_a_recycled_ifindex_gets_no_svd_rows",
+        );
+        return;
+    }
+
+    let mut instances = EvpnInstanceTable::new();
+    instances
+        .insert(
+            EvpnInstance::new(
+                EvpnInstanceId::new(L2_VNI).unwrap(),
+                l2_rd(),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: L2_VNI,
+                }],
+                L2_LOCAL_IP.parse::<IpAddr>().unwrap(),
+                Some("brvlan".to_string()),
+                false,
+            )
+            .expect("EvpnInstance")
+            .with_bridge_vlan(Some(rustbgpd_evpn::BridgeVlan::new(10).unwrap())),
+        )
+        .expect("insert");
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let probes = dp.probe(&instances).await;
+    assert_eq!(
+        probes.get(EvpnInstanceId::new(L2_VNI).unwrap()),
+        Some(&rustbgpd_evpn_linux::InstanceProbe::Ready)
+    );
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan0/ifindex")
+        .expect("vxlan0 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan0"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxother",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "external",
+            "vnifilter",
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run("ip", &["link", "set", "vxother", "master", "brother"]);
+    run("ip", &["link", "set", "vxother", "up"]);
+
+    let result = dp
+        .apply(&DataplaneOp::AddFloodFdb {
+            vni: EvpnInstanceId::new(L2_VNI).unwrap(),
+            dst: "10.0.0.2".parse().unwrap(),
+        })
+        .await;
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxother"])
+        .lines()
+        .filter(|row| row.starts_with("00:00:00:00:00:00"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "VNI 100 flood row written to an unrelated metadata VXLAN ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("stale SVD target must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
+/// LAN-2909 L-E3 review: vxlan100 (`nolearning`) is replaced at its
+/// ifindex by a VXLAN with the same VNI but learning enabled. The FDB-NHG
+/// CVE-2025-39851 guard trusts the cached learning state, so the write
+/// must fail rather than accept the replacement as the cached device.
+#[tokio::test]
+async fn l2_foreign_learning_vxlan_on_a_recycled_ifindex_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-learning");
+        setup_l2_topology(&ns);
+        run_inner(
+            &ns,
+            "l2_foreign_learning_vxlan_on_a_recycled_ifindex_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan100/ifindex")
+        .expect("vxlan100 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan100"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxlan100",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "id",
+            "100",
+            "local",
+            L2_LOCAL_IP,
+            "dstport",
+            "4789",
+            "learning",
+        ],
+    );
+    run("ip", &["link", "set", "vxlan100", "master", "br100"]);
+    run("ip", &["link", "set", "vxlan100", "up"]);
+
+    let result = dp.apply(&add.ops[0]).await;
+    let mac = mac_str(l2_mac());
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxlan100"])
+        .lines()
+        .filter(|row| row.starts_with(&mac))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "row programmed on a learning-enabled replacement ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("changed learning state must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
+/// LAN-2909 L-E3 review: vxlan100 is replaced at its ifindex by a VXLAN
+/// with the same VNI on a different bridge. The write carries the
+/// bridge-master flag, so accepting it would program the unrelated bridge.
+#[tokio::test]
+async fn l2_foreign_vxlan_moved_to_another_bridge_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-recycled-bridge");
+        setup_l2_topology(&ns);
+        ns.exec("ip", &["link", "add", "name", "br200", "type", "bridge"]);
+        ns.exec("ip", &["link", "set", "br200", "up"]);
+        run_inner(
+            &ns,
+            "l2_foreign_vxlan_moved_to_another_bridge_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+
+    let ifindex = std::fs::read_to_string("/sys/class/net/vxlan100/ifindex")
+        .expect("vxlan100 ifindex")
+        .trim()
+        .to_string();
+    run("ip", &["link", "del", "vxlan100"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxlan100",
+            "index",
+            &ifindex,
+            "type",
+            "vxlan",
+            "id",
+            "100",
+            "local",
+            L2_LOCAL_IP,
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run("ip", &["link", "set", "vxlan100", "master", "br200"]);
+    run("ip", &["link", "set", "vxlan100", "up"]);
+
+    let result = dp.apply(&add.ops[0]).await;
+    let mac = mac_str(l2_mac());
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "br", "br200"])
+        .lines()
+        .filter(|row| row.starts_with(&mac))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "row programmed through an unrelated bridge ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("a VXLAN on another bridge must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
+/// LAN-2909 L-E3 review: the SVD VXLAN stays in place, but its VLAN 10
+/// tunnel mapping to VNI 100 is removed after the link dump. The
+/// target-scoped VLAN database read must see that, so a VNI 100 flood row
+/// is not written with a stale `src_vni`.
+#[tokio::test]
+async fn l2_foreign_svd_vlan_tunnel_removed_after_the_dump_is_not_programmed() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-svd-tunnel-gone");
+        ns.exec(
+            "ip",
+            &["addr", "add", &format!("{L2_LOCAL_IP}/32"), "dev", "lo"],
+        );
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                "brvlan",
+                "type",
+                "bridge",
+                "vlan_filtering",
+                "1",
+                "vlan_default_pvid",
+                "0",
+            ],
+        );
+        ns.exec("ip", &["link", "set", "brvlan", "up"]);
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                "vxlan0",
+                "type",
+                "vxlan",
+                "external",
+                "vnifilter",
+                "dstport",
+                "4789",
+                "nolearning",
+            ],
+        );
+        ns.exec("ip", &["link", "set", "vxlan0", "master", "brvlan"]);
+        ns.exec("ip", &["link", "set", "vxlan0", "up"]);
+        ns.exec(
+            "bridge",
+            &["link", "set", "dev", "vxlan0", "vlan_tunnel", "on"],
+        );
+        ns.exec(
+            "bridge",
+            &["vlan", "add", "vid", "10", "dev", "brvlan", "self"],
+        );
+        ns.exec("bridge", &["vlan", "add", "vid", "10", "dev", "vxlan0"]);
+        ns.exec(
+            "bridge",
+            &[
+                "vlan",
+                "add",
+                "vid",
+                "10",
+                "dev",
+                "vxlan0",
+                "tunnel_info",
+                "id",
+                "100",
+            ],
+        );
+        run_inner(
+            &ns,
+            "l2_foreign_svd_vlan_tunnel_removed_after_the_dump_is_not_programmed",
+        );
+        return;
+    }
+
+    let mut instances = EvpnInstanceTable::new();
+    instances
+        .insert(
+            EvpnInstance::new(
+                EvpnInstanceId::new(L2_VNI).unwrap(),
+                l2_rd(),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: L2_VNI,
+                }],
+                L2_LOCAL_IP.parse::<IpAddr>().unwrap(),
+                Some("brvlan".to_string()),
+                false,
+            )
+            .expect("EvpnInstance")
+            .with_bridge_vlan(Some(rustbgpd_evpn::BridgeVlan::new(10).unwrap())),
+        )
+        .expect("insert");
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let _ = dp.probe(&instances).await;
+    let flood = DataplaneOp::AddFloodFdb {
+        vni: EvpnInstanceId::new(L2_VNI).unwrap(),
+        dst: "10.0.0.2".parse().unwrap(),
+    };
+    dp.apply(&flood)
+        .await
+        .expect("mapped SVD target accepts the row");
+
+    run(
+        "bridge",
+        &[
+            "vlan",
+            "del",
+            "vid",
+            "10",
+            "dev",
+            "vxlan0",
+            "tunnel_info",
+            "id",
+            "100",
+        ],
+    );
+    let second = DataplaneOp::AddFloodFdb {
+        vni: EvpnInstanceId::new(L2_VNI).unwrap(),
+        dst: "10.0.0.3".parse().unwrap(),
+    };
+    let result = dp.apply(&second).await;
+    let rows: Vec<String> = shell("bridge", &["fdb", "show", "dev", "vxlan0"])
+        .lines()
+        .filter(|row| row.starts_with("00:00:00:00:00:00") && row.contains("10.0.0.3"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.is_empty(),
+        "flood row written after the tunnel mapping was removed ({result:?}): {rows:?}"
+    );
+    let err = result.expect_err("an unmapped SVD target must fail the op");
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+}
+
 #[tokio::test]
 async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     if !netns_gate() {

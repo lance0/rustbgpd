@@ -413,11 +413,13 @@ impl Session {
 
             Event::TcpConnectionFails => {
                 self.increment_connect_retry_counter();
+                // RFC 4271 §8.2.2: the ConnectRetryTimer is set to zero; Idle
+                // runs no timers.
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
                     Action::StopTimer(TimerType::Keepalive),
-                    Action::StartTimer(TimerType::ConnectRetry, self.connect_retry_duration()),
+                    Action::StopTimer(TimerType::ConnectRetry),
                 ];
                 actions.push(self.transition_to(SessionState::Idle));
                 actions
@@ -546,7 +548,8 @@ impl Session {
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
                     Action::StopTimer(TimerType::Keepalive),
-                    Action::StartTimer(TimerType::ConnectRetry, self.connect_retry_duration()),
+                    // RFC 4271 §8.2.2: set to zero, as Idle runs no timers.
+                    Action::StopTimer(TimerType::ConnectRetry),
                 ];
                 actions.push(self.transition_to(SessionState::Idle));
                 actions
@@ -1463,6 +1466,37 @@ mod tests {
             a,
             Action::CloseTcpConnection
         )));
+    }
+
+    /// RFC 4271 §8.2.2: on `TcpConnectionFails` in `OpenConfirm` or
+    /// `Established` the `ConnectRetryTimer` is set to zero. Idle runs no
+    /// timers, so a `ConnectRetry` left armed would later fire as a stale tick.
+    #[test]
+    fn tcp_fails_into_idle_stops_connect_retry() {
+        let mut open_confirm = Session::new(test_config());
+        open_confirm.handle_event(Event::ManualStart);
+        open_confirm.handle_event(Event::TcpConnectionConfirmed);
+        open_confirm.handle_event(Event::OpenReceived(peer_open()));
+        assert_eq!(open_confirm.state(), SessionState::OpenConfirm);
+        for (name, mut s) in [
+            ("OpenConfirm", open_confirm),
+            ("Established", reach_established()),
+        ] {
+            let actions = s.handle_event(Event::TcpConnectionFails);
+            assert_eq!(s.state(), SessionState::Idle, "{name}");
+            assert_eq!(
+                connect_retry_timer_secs(&actions),
+                None,
+                "{name}: {actions:?}"
+            );
+            assert!(
+                has_action(&actions, |a| matches!(
+                    a,
+                    Action::StopTimer(TimerType::ConnectRetry)
+                )),
+                "{name}: {actions:?}"
+            );
+        }
     }
 
     #[test]

@@ -5499,6 +5499,132 @@ async fn repeated_local_notification_while_holding_a_tie_is_not_a_move() {
     }
 }
 
+/// RFC 7432 §15 / §15.1 at the `u32::MAX` ceiling: we yielded to a
+/// lower-IP PE at `u32::MAX`. A local port move is a locally detected move
+/// and counts toward duplicate-MAC detection, but the saturated sequence
+/// still loses the tie, so no route is advertised. Both route shapes.
+#[tokio::test]
+async fn port_move_that_still_loses_at_max_counts_but_does_not_advertise() {
+    for ip in [None, Some("192.0.2.10")] {
+        let contender = evpn_macip_route_with_ip(100, 0xAA, ip, "9.9.9.9", Some(u32::MAX), false);
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        h.routes_tx.send_replace(vec![contender]);
+        h.repoll().await;
+        assert!(
+            h.advertised.lock().await.is_empty(),
+            "{ip:?}: must yield first"
+        );
+        let _ = h.take_log().await;
+
+        h.observe(LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 11,
+        })
+        .await;
+        assert_eq!(
+            h.take_log().await,
+            Vec::new(),
+            "{ip:?}: a still-losing route was advertised"
+        );
+        assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
+    }
+}
+
+/// RFC 7432 §15 with RFC 9721 §6.4/§6.5 peer sync, two MAC/IP bindings.
+/// Both bindings first yield to different-segment contenders at 5. One
+/// poll then delivers three changes: the first binding's contender drops
+/// to 0 from a higher PE IP, so it wins again; the second binding's
+/// contender rises to 20; and a same-segment peer floor of 10 appears.
+/// The first binding must come back once at sequence 10. The second must
+/// stay withdrawn. Adopting 10 against its stale contender at 5 must not
+/// make it inject and then withdraw within the poll.
+#[tokio::test]
+async fn multi_binding_peer_sync_stages_contenders_before_adopting() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let contender = |ip: &str, next_hop: &str, seq| {
+        with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, Some(ip), next_hop, Some(seq), false),
+            segment_esi(2),
+        )
+    };
+    let mut h = PeerSyncHarness::new(segments, Vec::new());
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    for ip in ["192.0.2.10", "192.0.2.11"] {
+        h.observe(LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa(ip),
+        })
+        .await;
+    }
+    h.routes_tx.send_replace(vec![
+        contender("192.0.2.10", "10.0.0.3", 5),
+        contender("192.0.2.11", "10.0.0.3", 5),
+    ]);
+    h.repoll().await;
+    assert!(
+        h.advertised.lock().await.is_empty(),
+        "both bindings must yield first"
+    );
+    let _ = h.take_log().await;
+
+    h.routes_tx.send_replace(vec![
+        contender("192.0.2.10", "10.0.0.3", 0),
+        contender("192.0.2.11", "10.0.0.3", 20),
+        eligible_peer_sync_route(10, None),
+    ]);
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, Some("192.0.2.10")),
+            Some(10)
+        )],
+        "one Inject for the winning binding, nothing for the losing one"
+    );
+}
+
+/// RFC 7432 §15 counts mobility per MAC. A different-segment PE advertises
+/// the bare MAC at sequence 7 while we advertise it as MAC/IP. When the
+/// MAC moves to another local port, the MAC/IP route must be re-advertised
+/// above that contender, not at 1.
+#[tokio::test]
+async fn local_move_of_a_mac_ip_route_bumps_above_a_mac_only_contender() {
+    let contender = evpn_macip_route(100, 0xAA, "10.0.0.2", Some(7), false);
+    let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![contender]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    let _ = h.take_log().await;
+
+    h.observe(LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ifindex: 11,
+    })
+    .await;
+    let log = h.take_log().await;
+    let key = macip_key_with(100, 0xAA, Some("192.0.2.10"));
+    let sequences: Vec<_> = log
+        .iter()
+        .filter_map(|action| match action {
+            RibActionWithSeq::Inject(route_key, sequence) if *route_key == key => *sequence,
+            _ => None,
+        })
+        .collect();
+    assert!(
+        sequences.last().is_some_and(|seq| *seq > 7),
+        "local move must outbid the MAC-only contender at 7: {log:?}"
+    );
+}
+
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
     with_esi(
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),

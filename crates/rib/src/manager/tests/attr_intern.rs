@@ -254,6 +254,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         }],
         llgr_stale_time: 3600,
     });
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.sweep_gr_stale(peer);
     assert!(
         manager
@@ -626,6 +627,7 @@ fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
     manager.handle_bgpls_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
     assert_eq!(manager.attr_intern.len(), 2);
 
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.handle_update(RibUpdate::BeginRouteRefresh {
         session_id: 0,
         peer,
@@ -672,6 +674,7 @@ fn enhanced_route_refresh_vpn_eorr_gcs_attr_intern_for_swept_route() {
     manager.handle_vpn_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
     assert_eq!(manager.attr_intern.len(), 2);
 
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.handle_update(RibUpdate::BeginRouteRefresh {
         session_id: 0,
         peer,

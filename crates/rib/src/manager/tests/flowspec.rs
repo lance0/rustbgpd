@@ -648,6 +648,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     // RFC 4724 §4.1: a route still marked stale at End-of-RIB is removed,
     // so source_a must re-advertise its rule for it to survive (and win
     // the best-path back from source_b).
+    tx.send(registering_peer_up(source_a, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source_a,
@@ -1025,6 +1026,7 @@ async fn flowspec_gr_eor_sweeps_non_readvertised() {
     assert!(stale.iter().all(|r| r.is_stale));
 
     // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1116,6 +1118,7 @@ async fn flowspec_llgr_eor_sweeps_non_readvertised() {
     assert!(promoted.iter().all(|r| r.is_llgr_stale));
 
     // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,

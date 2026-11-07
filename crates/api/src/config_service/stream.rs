@@ -2061,7 +2061,10 @@ mod tests {
         assert!(!has_token(&state, token));
     }
 
-    #[tokio::test]
+    // Paused time keeps the per-case bound off the wall clock: spool creation
+    // and its writes can take seconds on a loaded disk, and the paused clock
+    // does not advance while they run. A guard that idles still trips it.
+    #[tokio::test(start_paused = true)]
     async fn framing_failures_never_handoff_and_always_clean_spool() {
         let runtime = TempDir::new().unwrap();
         let state = state_at(runtime.path(), limits(4, 7));

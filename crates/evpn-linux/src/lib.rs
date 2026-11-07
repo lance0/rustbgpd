@@ -114,7 +114,7 @@ pub use linux::nexthop_raw::{
     NexthopError, NexthopGroupMember, NexthopSocket, NexthopValidationError,
 };
 
-pub use ac_gate::{AcGatePortPlan, AcGateResolution, resolve_ac_gate_plan};
+pub use ac_gate::{AcGateManagedPort, AcGatePortPlan, AcGateResolution, resolve_ac_gate_plan};
 pub use backoff::{BACKOFF_CAP, BACKOFF_FACTOR, BACKOFF_INITIAL, FdbRetrySchedule, RetrySchedule};
 pub use bum_filter::{BumPortFlagPlan, BumPortFlags, compute_flag_plan, diff_flag_plans};
 pub use dataplane::{Dataplane, DataplaneOp, KernelEvent};
