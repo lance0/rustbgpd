@@ -646,6 +646,7 @@ pub(crate) async fn apply_op(
     };
 
     let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
+    super::links::confirm_fdb_vxlan_target(handle, target, vni).await?;
 
     match op {
         DataplaneOp::AddRemoteFdb { dst, vlan, .. }
@@ -794,6 +795,7 @@ pub(crate) async fn apply_flood_op(
     add: bool,
 ) -> Result<(), DataplaneError> {
     let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
+    super::links::confirm_fdb_vxlan_target(handle, target, vni).await?;
     let msg = build_flood_fdb_message(target.ifindex, dst, target.source_vni);
     if !add {
         return match handle.neighbours().del(msg).execute().await {

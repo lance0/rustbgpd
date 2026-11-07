@@ -135,6 +135,7 @@ async fn create_bridge(
         return adopt_existing_bridge(handle, name, bridge, vlan_filtering, ownership_stamp).await;
     }
 
+    let stamped_ifindex = bridge.ifindex;
     let stamp_result = handle
         .link()
         .property_add(bridge.ifindex)
@@ -161,6 +162,16 @@ async fn create_bridge(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        stamped_ifindex,
+        bridge.ifindex,
+        &bridge.altnames,
+        name,
+        ownership_stamp,
+        "managed bridge",
+    )
+    .await?;
     adopt_existing_bridge(handle, name, &bridge, vlan_filtering, ownership_stamp).await
 }
 
@@ -266,6 +277,7 @@ async fn create_vxlan(
         return adopt_existing_vxlan(handle, name, vxlan, spec, ownership_stamp).await;
     }
 
+    let stamped_ifindex = vxlan.ifindex;
     let stamp_result = handle
         .link()
         .property_add(vxlan.ifindex)
@@ -292,6 +304,16 @@ async fn create_vxlan(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        stamped_ifindex,
+        vxlan.ifindex,
+        &vxlan.altnames,
+        name,
+        ownership_stamp,
+        "managed VXLAN",
+    )
+    .await?;
     adopt_existing_vxlan(handle, name, &vxlan, spec, ownership_stamp).await
 }
 
@@ -337,6 +359,10 @@ async fn remove_vxlan(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "create, stamp, stamp confirmation and binding convergence stay in one ordered sequence"
+)]
 async fn create_svd_vxlan(
     handle: &Handle,
     name: &str,
@@ -415,6 +441,7 @@ async fn create_svd_vxlan(
         )
         .await;
     }
+    let stamped_ifindex = vxlan.ifindex;
     if !vxlan.altnames.iter().any(|alt| alt == ownership_stamp) {
         let stamp_result = handle
             .link()
@@ -443,6 +470,16 @@ async fn create_svd_vxlan(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        stamped_ifindex,
+        vxlan.ifindex,
+        &vxlan.altnames,
+        name,
+        ownership_stamp,
+        "managed SVD VXLAN",
+    )
+    .await?;
     ensure_svd_vxlan_converged(handle, name, vxlan, spec, ownership_stamp, &fresh.bridges).await
 }
 
@@ -608,6 +645,7 @@ async fn create_vrf(
         return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
     }
 
+    let stamped_ifindex = vrf.ifindex;
     let stamp_result = handle
         .link()
         .property_add(vrf.ifindex)
@@ -634,6 +672,16 @@ async fn create_vrf(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        stamped_ifindex,
+        vrf.ifindex,
+        &vrf.altnames,
+        name,
+        ownership_stamp,
+        "managed VRF",
+    )
+    .await?;
     ensure_exact_owned_vrf(name, &vrf, spec, ownership_stamp)
 }
 
@@ -719,6 +767,7 @@ async fn create_l3vxlan(
         return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
     }
 
+    let stamped_ifindex = vxlan.ifindex;
     let stamp_result = handle
         .link()
         .property_add(vxlan.ifindex)
@@ -745,6 +794,16 @@ async fn create_l3vxlan(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        stamped_ifindex,
+        vxlan.ifindex,
+        &vxlan.altnames,
+        name,
+        ownership_stamp,
+        "managed L3VXLAN",
+    )
+    .await?;
     ensure_exact_owned_l3vxlan(name, &vxlan, spec, ownership_stamp)
 }
 
@@ -816,6 +875,7 @@ async fn create_vlan_upper(
         rollback_unstamped_create(handle, link.ifindex, name, "managed VLAN upper").await;
         return Err(err);
     }
+    let stamped_ifindex = link.ifindex;
     if !link.altnames.iter().any(|alt| alt == ownership_stamp)
         && let Err(err) = stamp_vlan_upper(handle, link.ifindex, ownership_stamp).await
     {
@@ -826,6 +886,16 @@ async fn create_vlan_upper(
     let Some(link) = fresh.vlan_upper.as_ref() else {
         return Err(missing_vlan_upper_after(name, &fresh, "stamp"));
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        stamped_ifindex,
+        link.ifindex,
+        &link.altnames,
+        name,
+        ownership_stamp,
+        "managed VLAN upper",
+    )
+    .await?;
     adopt_existing_vlan_upper(handle, name, link, spec, ownership_stamp).await
 }
 
@@ -1455,6 +1525,74 @@ async fn rollback_unstamped_create(handle: &Handle, ifindex: u32, name: &str, co
     }
 }
 
+/// What the post-stamp lookup found for a link rustbgpd just created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostStamp {
+    /// The link we stamped carries the stamp.
+    Owned,
+    /// The name now belongs to a different link than the one we created
+    /// and stamped: ours was deleted and replaced in between.
+    Replaced,
+    /// Our link is there without the stamp. The altname add returned
+    /// `EEXIST` because another link already holds the stamp.
+    StampHeldElsewhere,
+}
+
+fn post_stamp_verdict(
+    stamped_ifindex: u32,
+    live_ifindex: u32,
+    altnames: &[String],
+    ownership_stamp: &str,
+) -> PostStamp {
+    if live_ifindex != stamped_ifindex {
+        PostStamp::Replaced
+    } else if altnames.iter().any(|alt| alt == ownership_stamp) {
+        PostStamp::Owned
+    } else {
+        PostStamp::StampHeldElsewhere
+    }
+}
+
+/// Confirm the ownership stamp landed on a link rustbgpd just created.
+///
+/// The stamp step tolerates `EEXIST` from the altname add, which covers
+/// a stamp that is already on this link. The kernel returns the same
+/// errno when another link already holds that altname, and then this
+/// link stays unstamped. An unstamped link reads as foreign and is
+/// never reaped, so roll the create back. The failure is transient, so
+/// the create resumes on backoff once the conflicting altname is freed.
+///
+/// Only the link we stamped (`stamped_ifindex`) is ever deleted. If the
+/// post-stamp lookup by name finds a different link, ours was replaced,
+/// so delete nothing and report a transient race.
+async fn ensure_stamp_landed_or_roll_back(
+    handle: &Handle,
+    stamped_ifindex: u32,
+    live_ifindex: u32,
+    altnames: &[String],
+    name: &str,
+    ownership_stamp: &str,
+    context: &str,
+) -> Result<(), DataplaneError> {
+    match post_stamp_verdict(stamped_ifindex, live_ifindex, altnames, ownership_stamp) {
+        PostStamp::Owned => Ok(()),
+        PostStamp::Replaced => Err(transient_link_race(format!(
+            "{context} {name} was replaced (ifindex {stamped_ifindex} -> {live_ifindex}) \
+             after the stamp; nothing deleted"
+        ))),
+        PostStamp::StampHeldElsewhere => {
+            rollback_unstamped_create(handle, stamped_ifindex, name, context).await;
+            // Transient, not permanent: a permanent failure stays
+            // suppressed while the name is desired, so freeing the
+            // altname would never let the create resume.
+            Err(DataplaneError::Other(format!(
+                "{context} {name}: ownership stamp {ownership_stamp} is held by another link; \
+                 the unstamped create was rolled back and retries on backoff"
+            )))
+        }
+    }
+}
+
 /// Downgrade a would-be-permanent failure from a post-stamp completion
 /// step to the transient class. The link provably carries our exact
 /// ownership stamp at this point, so incomplete follow-on state
@@ -1613,4 +1751,32 @@ fn missing_vlan_upper_bridge(name: &str, bridge: &str, bridge_name_exists: bool)
 
 fn unsafe_managed_vlan_upper(message: String) -> DataplaneError {
     DataplaneError::InvalidArgument(message)
+}
+
+#[cfg(test)]
+mod tests {
+    // LAN-2909 L-E4 review: only the link that was stamped is ever rolled
+    // back. A same-name link with another ifindex is a replacement, and
+    // deleting it would destroy someone else's device.
+    #[test]
+    fn post_stamp_verdict_never_rolls_back_a_replacement() {
+        let stamp = "rustbgpd:bridge:leaf-1:br0";
+        let stamped = vec![stamp.to_string()];
+        assert_eq!(
+            super::post_stamp_verdict(7, 7, &stamped, stamp),
+            super::PostStamp::Owned
+        );
+        assert_eq!(
+            super::post_stamp_verdict(7, 7, &[], stamp),
+            super::PostStamp::StampHeldElsewhere
+        );
+        assert_eq!(
+            super::post_stamp_verdict(7, 9, &[], stamp),
+            super::PostStamp::Replaced
+        );
+        assert_eq!(
+            super::post_stamp_verdict(7, 9, &stamped, stamp),
+            super::PostStamp::Replaced
+        );
+    }
 }
