@@ -465,6 +465,8 @@ fn route_server_topologies_have_exact_control_plane_setup() {
         (
             "m102-routeserver-openbgpd92.clab.yml",
             vec![
+                // A root-owned 0600 token copy keeps `--check --strict` clean.
+                "install -D -m 600 /run/rustbgpd-fixture/grpc-test-only-operator.token /run/rustbgpd/grpc-test-only-operator.token",
                 "ip addr add 10.102.1.1/24 dev eth1",
                 "ip -6 addr add 2001:db8:102:1::1/64 dev eth1 nodad",
                 "ip link set eth1 up",

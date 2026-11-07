@@ -212,10 +212,12 @@ per-attribute RFC 7606 disposition instead of adding a compatibility mode:
 
 Attribute-discard preserves the routes in the UPDATE after removing the
 offending attribute. Treat-as-withdraw removes those routes while keeping the
-session Established. Each recoverable violation uses the existing warning,
-`bgp_update_malformed_total{peer,disposition}`, and the cause series
-`bgp_update_malformed_causes_total{peer,type_code,reason,disposition}`; there
-is no per-neighbor configuration knob.
+session Established. Each recoverable violation is counted in
+`bgp_update_malformed_total{peer,disposition}` and the cause series
+`bgp_update_malformed_causes_total{peer,type_code,reason,disposition}` and
+reported in the per-UPDATE malformed-attribute warning, which is
+rate-limited per connection with every cause at DEBUG; there is no
+per-neighbor configuration knob.
 
 ## Assigned class fence
 

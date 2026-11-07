@@ -4016,6 +4016,8 @@ mod tests {
                     crate::config::EsLinkBinding {
                         interface: "eth2".to_string(),
                         recovery_delay: Duration::from_secs(30),
+                        auto_lacp: false,
+                        incarnation: 0,
                     },
                 ),
                 (
@@ -4023,6 +4025,8 @@ mod tests {
                     crate::config::EsLinkBinding {
                         interface: "eth3".to_string(),
                         recovery_delay: Duration::from_secs(30),
+                        auto_lacp: false,
+                        incarnation: 0,
                     },
                 ),
             ]
@@ -4081,6 +4085,8 @@ mod tests {
                 crate::config::EsLinkBinding {
                     interface: "eth2".to_string(),
                     recovery_delay: Duration::from_secs(30),
+                    auto_lacp: false,
+                    incarnation: 0,
                 },
             )]
             .into_iter()
@@ -4541,6 +4547,8 @@ mod tests {
                 crate::config::EsLinkBinding {
                     interface: "es0".to_string(),
                     recovery_delay: Duration::ZERO,
+                    auto_lacp: false,
+                    incarnation: 0,
                 },
             )]
             .into_iter()
@@ -4634,6 +4642,8 @@ mod tests {
             crate::config::EsLinkBinding {
                 interface: "es0".into(),
                 recovery_delay: Duration::ZERO,
+                auto_lacp: false,
+                incarnation: 0,
             },
         )]));
         for (mode, role, eligible, interface) in [
@@ -4870,6 +4880,8 @@ mod tests {
                             crate::config::EsLinkBinding {
                                 interface: interface.to_string(),
                                 recovery_delay: Duration::ZERO,
+                                auto_lacp: false,
+                                incarnation: 0,
                             },
                         )
                     })

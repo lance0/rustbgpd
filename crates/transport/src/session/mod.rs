@@ -377,8 +377,8 @@ pub(crate) struct PeerSession {
     /// Consecutive falls to Idle caused by a NOTIFICATION (sent or received,
     /// including OPEN exchanges that end in one). Each one doubles the
     /// deferred reconnect wait up to `MAX_NOTIFICATION_IDLE_BACKOFF_SECS`.
-    /// Cleared by an explicit operator start, an administrative reset, or a
-    /// session that stays Established for `HEALTHY_ESTABLISHED`.
+    /// Cleared by an explicit operator start in Idle, an administrative
+    /// reset, or a session that stays Established for `HEALTHY_ESTABLISHED`.
     notification_idle_failures: u32,
     /// The FSM batch being executed tore the session down with a
     /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.
@@ -570,6 +570,9 @@ pub(crate) struct PeerSession {
     known_evpn: HashSet<EvpnRouteKey>,
     /// One warning per unsupported wire route type per TCP connection.
     evpn_discard_warned: [bool; 256],
+    /// Malformed UPDATEs on this TCP connection, attribute-discard then
+    /// stronger; each class's WARNs fire only at its powers of two.
+    malformed_attribute_updates: [u64; 2],
     /// Accepted BGP-LS routes from this peer (RFC 9552 opaque keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_bgpls: HashSet<BgpLsRouteKey>,
@@ -721,12 +724,13 @@ struct MaxPrefixViolation {
 /// Reservations for one UPDATE after its explicit withdrawals have been
 /// accounted. Accepted identities and rejected identities retained by a
 /// received-prefix bound share the per-prefix budget. Excess IDs are never
-/// retained as tombstones.
+/// retained as tombstones. Each exceeded attempt records the action applied
+/// to it: the configured one, or `Block` past the safety ceiling.
 #[derive(Default)]
 struct PathReceiveAdmission {
     reserved: HashSet<(Prefix, u32)>,
     reserved_counts: HashMap<Prefix, usize>,
-    exceeded: Vec<(Prefix, u32, usize)>,
+    exceeded: Vec<(Prefix, u32, usize, MaxPrefixAction)>,
 }
 
 impl PathReceiveAdmission {
@@ -740,7 +744,8 @@ impl PathReceiveAdmission {
         if !retaining || !session.receives_add_path_for_prefix(prefix) {
             return true;
         }
-        let bound = usize::from(session.config.peer.paths_limit_receive_max);
+        let (bound, action) = session.path_receive_limit();
+        let bound = usize::from(bound);
         let identity = (prefix, path_id);
         if session.known_paths.contains(&identity)
             || session.rejected_paths.contains(&identity)
@@ -760,8 +765,18 @@ impl PathReceiveAdmission {
                 .unwrap_or(0)
             + self.reserved_counts.get(&prefix).copied().unwrap_or(0);
         if count >= bound {
-            self.exceeded.push((prefix, path_id, count + 1));
-            if session.config.max_prefix_action != MaxPrefixAction::Warning {
+            // `"warning"` observes the configured cap but never lifts the
+            // safety ceiling: past it the excess is withheld as `"block"`.
+            // `"block"` and `"shutdown"` already act at the cap itself.
+            let action = if action == MaxPrefixAction::Warning
+                && count >= bound.max(usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX))
+            {
+                MaxPrefixAction::Block
+            } else {
+                action
+            };
+            self.exceeded.push((prefix, path_id, count + 1, action));
+            if action != MaxPrefixAction::Warning {
                 return false;
             }
         }
@@ -918,6 +933,14 @@ fn tcp_ao_key_metadata(
 
 /// Outbound channel buffer size.
 const OUTBOUND_BUFFER: usize = 4096;
+
+/// Per-prefix IPv4/IPv6-unicast Add-Path receive cap when
+/// `add_path.receive_max` is unset or zero, and the floor of the safety
+/// ceiling `max(receive_max, this)` that even `"warning"` cannot lift. The
+/// Adj-RIB-In keeps each prefix's path IDs in a scanned list, so an uncapped
+/// peer can make every insert and withdrawal for one prefix linear in its
+/// path count.
+const DEFAULT_ADD_PATH_RECEIVE_MAX: u16 = 1024;
 
 /// Retry cadence for the forced BMP peer-state reset after a dropped
 /// `RouteMonitoring` event (see `PeerSession::bmp_stream_diverged`).
@@ -1077,12 +1100,48 @@ impl PeerSession {
         )
     }
 
-    fn path_receive_admission(&self) -> Option<PathReceiveAdmission> {
-        (self.config.peer.paths_limit_receive_max > 0
-            && [Afi::Ipv4, Afi::Ipv6]
-                .into_iter()
-                .any(|afi| self.receives_add_path_for_family((afi, Safi::Unicast))))
-        .then(PathReceiveAdmission::default)
+    /// Exact per-prefix admission for an UPDATE announcing `prefixes`, or
+    /// `None` when no Add-Path prefix can reach the cap even if every
+    /// announcement were a net-new ID. Skipping it then is equivalent to
+    /// running it, and spares the per-NLRI reservation bookkeeping.
+    fn path_receive_admission(
+        &self,
+        mut prefixes: impl Iterator<Item = Prefix> + Clone,
+    ) -> Option<PathReceiveAdmission> {
+        if ![Afi::Ipv4, Afi::Ipv6]
+            .into_iter()
+            .any(|afi| self.receives_add_path_for_family((afi, Safi::Unicast)))
+        {
+            return None;
+        }
+        let bound = usize::from(self.path_receive_limit().0);
+        let announced = prefixes.clone().count();
+        let fits = |prefix: Prefix| {
+            let retained = self
+                .known_prefix_refcounts
+                .get(&prefix)
+                .copied()
+                .unwrap_or(0)
+                + self
+                    .rejected_prefix_refcounts
+                    .get(&prefix)
+                    .copied()
+                    .unwrap_or(0);
+            !self.receives_add_path_for_prefix(prefix) || retained + announced <= bound
+        };
+        (!prefixes.all(fits)).then(PathReceiveAdmission::default)
+    }
+
+    /// Per-prefix Add-Path receive cap and the action applied past it. A
+    /// configured `receive_max` follows `max_prefix_action`; without one the
+    /// default cap always withholds the excess, so an unconfigured peer is
+    /// not torn down. Either way, admission withholds anything past the
+    /// safety ceiling `max(cap, DEFAULT_ADD_PATH_RECEIVE_MAX)`.
+    fn path_receive_limit(&self) -> (u16, MaxPrefixAction) {
+        match self.config.peer.paths_limit_receive_max {
+            0 => (DEFAULT_ADD_PATH_RECEIVE_MAX, MaxPrefixAction::Block),
+            bound => (bound, self.config.max_prefix_action),
+        }
     }
     fn local_gr_restart_active(&mut self) -> bool {
         if let Some(deadline) = self.config.gr_restart_until {
@@ -1647,13 +1706,14 @@ impl PeerSession {
     /// attempt per family in a session logs; an over-limit identity never
     /// enters accepted or rejected storage under `block` or `shutdown`.
     async fn enforce_path_receive_admission(&mut self, admission: PathReceiveAdmission) -> bool {
-        let action = match self.config.max_prefix_action {
-            MaxPrefixAction::Shutdown => "shutdown",
-            MaxPrefixAction::Block => "block",
-            MaxPrefixAction::Warning => "warning",
-        };
+        let (bound, max_prefix_action) = self.path_receive_limit();
         let mut first = None;
-        for (prefix, path_id, count) in admission.exceeded {
+        for (prefix, path_id, count, action) in admission.exceeded {
+            let action = match action {
+                MaxPrefixAction::Shutdown => "shutdown",
+                MaxPrefixAction::Block => "block",
+                MaxPrefixAction::Warning => "warning",
+            };
             let (index, family, afi) = match prefix {
                 Prefix::V4(_) => (0, "ipv4_unicast", Afi::Ipv4),
                 Prefix::V6(_) => (1, "ipv6_unicast", Afi::Ipv6),
@@ -1667,7 +1727,7 @@ impl PeerSession {
                     %prefix,
                     path_id,
                     count,
-                    bound = self.config.peer.paths_limit_receive_max,
+                    bound,
                     action,
                     "Add-Path receive limit exceeded"
                 );
@@ -1677,12 +1737,12 @@ impl PeerSession {
         let Some((_, count, afi)) = first else {
             return false;
         };
-        if self.config.max_prefix_action != MaxPrefixAction::Shutdown {
+        if max_prefix_action != MaxPrefixAction::Shutdown {
             return false;
         }
         self.shutdown_for_prefix_violation(MaxPrefixViolation {
             count,
-            bound: u32::from(self.config.peer.paths_limit_receive_max),
+            bound: u32::from(bound),
             family: Some((afi, Safi::Unicast)),
             received: true,
             path_limit: true,
@@ -2386,6 +2446,7 @@ impl PeerSession {
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             evpn_discard_warned: [false; 256],
+            malformed_attribute_updates: [0; 2],
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),

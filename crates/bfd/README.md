@@ -29,7 +29,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - `Session` / `SessionConfig` — the sans-IO state machine
   (`Session::new`, `Session::handle`, `Session::administratively_down`).
 - `Event` / `Action` / `TimerKind` — the machine's inputs and outputs.
-- `DiscriminatorAllocator` — unique, non-zero local discriminators.
+- `DiscriminatorAllocator` — unique, non-zero local discriminators drawn from a caller-supplied random source.
 
 ## RFC references
 

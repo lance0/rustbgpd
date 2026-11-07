@@ -316,6 +316,8 @@ pub(crate) struct EvpnRuntimeReloadApply {
     /// Starts the readiness probe the first time a committed config
     /// names an `auto-lacp` bond.
     auto_esi_probe: Option<crate::evpn_auto_esi::AutoEsiProbeStarter>,
+    /// Last incarnation given to a published ADR-0085 binding.
+    link_binding_incarnation: Arc<std::sync::atomic::AtomicU64>,
     /// Test handshake: notified just before the probe round takes the
     /// apply lock.
     #[cfg(test)]
@@ -349,6 +351,7 @@ impl EvpnRuntimeReloadApply {
             core_isolation_tx: None,
             auto_lacp_esis: AutoLacpEsis::default(),
             auto_esi_probe: None,
+            link_binding_incarnation: Arc::default(),
             #[cfg(test)]
             auto_lacp_before_lock: None,
             metrics: BgpMetrics::new(),
@@ -486,8 +489,21 @@ impl EvpnRuntimeReloadApply {
             return;
         };
         match config.resolve_es_link_bindings(&self.auto_lacp_esis) {
-            Ok(bindings) => {
+            Ok(mut bindings) => {
                 tx.send_if_modified(|current| {
+                    // A binding still published keeps its incarnation; one
+                    // that appears, or reappears after its segment left the
+                    // runtime, gets a new one.
+                    for (esi, binding) in &mut bindings {
+                        binding.incarnation = current.get(esi).map_or_else(
+                            || {
+                                self.link_binding_incarnation
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    + 1
+                            },
+                            |published| published.incarnation,
+                        );
+                    }
                     if **current == bindings {
                         return false;
                     }

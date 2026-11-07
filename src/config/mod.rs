@@ -1345,6 +1345,7 @@ impl Config {
                     cert_file: PathBuf::from(cert),
                     key_file: PathBuf::from(key),
                     client_ca_file: PathBuf::from(ca),
+                    client_crl_file: cfg.tls_client_crl_file.as_ref().map(PathBuf::from),
                 }),
                 // Partial TLS config rejected at Config::load via
                 // validate_grpc_tls_config(); the all-None and
@@ -1735,6 +1736,8 @@ impl Config {
                         cfg.recovery_delay_seconds
                             .unwrap_or(DEFAULT_ES_RECOVERY_DELAY_SECS),
                     ),
+                    auto_lacp: cfg.esi == AUTO_LACP_ESI,
+                    incarnation: 0,
                 },
             );
         }
@@ -2088,6 +2091,7 @@ pub struct GrpcTlsPaths {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub client_ca_file: PathBuf,
+    pub client_crl_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7576,6 +7580,14 @@ pub struct EsLinkBinding {
     pub interface: String,
     /// Hold-off between carrier return and link-drain release.
     pub recovery_delay: std::time::Duration,
+    /// `esi = "auto-lacp"`: the binding leaves while the bond has no
+    /// usable LACP partner and returns under the same ESI with it.
+    pub auto_lacp: bool,
+    /// Which presence of the binding this is, assigned when the EVPN
+    /// runtime publishes it: a new value each time the ESI's binding
+    /// appears, so a removal and return that the watch coalesces still
+    /// differ. Resolution leaves it 0.
+    pub incarnation: u64,
 }
 
 /// ADR-0140 core-isolation input published to the hold controller on

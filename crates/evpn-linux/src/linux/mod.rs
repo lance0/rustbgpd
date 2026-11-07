@@ -573,6 +573,7 @@ impl Dataplane for LinuxDataplane {
             };
             snap.insert_link(crate::snapshot::KernelLinkInfo {
                 ifindex: link.ifindex,
+                up: link.up,
                 bridge_name: name.clone(),
                 vlan_filtering: link.vlan_filtering,
                 altnames: link.altnames.clone(),

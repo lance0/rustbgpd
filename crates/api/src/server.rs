@@ -3964,6 +3964,7 @@ mod tests {
                     cert_file,
                     key_file,
                     client_ca_file: ca_file,
+                    client_crl_file: None,
                 }),
             }])
             .unwrap()

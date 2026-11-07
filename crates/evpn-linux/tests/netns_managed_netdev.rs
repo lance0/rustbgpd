@@ -100,6 +100,7 @@ async fn managed_vxlan_create_adopt_and_reap_round_trip_inner() {
     assert!(!link.vnifilter);
     assert_eq!(link.bridge.as_deref(), Some("br100"));
     assert_eq!(link.altnames, vec!["rustbgpd:vxlan:leaf-1:vxmgd100"]);
+    assert!(link.up, "managed VXLAN must be created up");
     let ifindex = link.ifindex;
 
     let mut restarted = LinuxDataplane::connect()
@@ -430,9 +431,55 @@ async fn managed_bridge_and_vxlan_make_instance_ready_round_trip_inner() {
     assert!(!vxlan.collect_metadata);
     assert!(!vxlan.vnifilter);
     assert_eq!(vxlan.altnames, vec!["rustbgpd:vxlan:leaf-1:vxready100"]);
+    // LAN-2894: a created VXLAN that stayed administratively down dropped
+    // every frame while the probe below still reported Ready.
+    assert!(bridge.up, "managed bridge must be created up");
+    assert!(vxlan.up, "managed VXLAN must be created up");
 
     let after = dp.probe(&instances).await;
     assert_eq!(after.get(vni), Some(&InstanceProbe::Ready));
+
+    // An operator `ip link set ... down` makes the instance NotReady, and
+    // the convergent Create the reconciler re-emits raises the owned link.
+    for (link, create) in [
+        (
+            "vxready100",
+            DataplaneOp::CreateManagedVxlan {
+                name: "vxready100".to_string(),
+                spec: ManagedVxlanNetdevSpec {
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    dstport: 4789,
+                    bridge: "brready".to_string(),
+                },
+                ownership_stamp: "rustbgpd:vxlan:leaf-1:vxready100".to_string(),
+            },
+        ),
+        (
+            "brready",
+            DataplaneOp::CreateManagedBridge {
+                name: "brready".to_string(),
+                vlan_filtering: false,
+                ownership_stamp: "rustbgpd:bridge:leaf-1:brready".to_string(),
+            },
+        ),
+    ] {
+        run("ip", &["link", "set", "dev", link, "down"]);
+        let down = dp.probe(&instances).await;
+        assert!(
+            matches!(
+                down.get(vni),
+                Some(InstanceProbe::NotReady { reason }) if reason.contains("administratively down")
+            ),
+            "{link} down must make the instance NotReady: {:?}",
+            down.get(vni)
+        );
+        dp.apply(&create)
+            .await
+            .expect("adopt raises the owned link");
+        let raised = dp.probe(&instances).await;
+        assert_eq!(raised.get(vni), Some(&InstanceProbe::Ready), "{link}");
+    }
 }
 
 #[tokio::test]

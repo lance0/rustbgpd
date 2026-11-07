@@ -22,6 +22,8 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -71,6 +73,132 @@ const MAX_TRANSACTION_RECORDS: usize = 4_000_000;
 
 /// Wire-byte budget for one RTR transaction.
 const MAX_TRANSACTION_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default cap on the RPKI records one cache may hold: VRPs plus ASPA
+/// provider ASNs. The global RPKI publishes about 1.03M VRPs in 2026, so
+/// this is roughly four times one complete set.
+pub const DEFAULT_MAX_CACHE_RECORDS: usize = 4_000_000;
+
+/// Default cap on the RPKI records held across every cache of a daemon,
+/// counted as for [`DEFAULT_MAX_CACHE_RECORDS`]. Three complete caches use
+/// about a third of it.
+pub const DEFAULT_MAX_TOTAL_RECORDS: usize = 10_000_000;
+
+/// Shared cap on the RPKI records held by every [`RtrClient`] attached to
+/// it, counted as VRPs plus ASPA provider ASNs.
+///
+/// Each client charges records while it decodes a transaction, so a cache
+/// is refused before its data is allocated past the cap. Accepted data
+/// stays charged for as long as it exists: queued for the
+/// [`VrpManager`](crate::VrpManager) or held there, until it is replaced,
+/// flushed or expires. A full
+/// resynchronization charges the new set while the old one is still held.
+#[derive(Debug)]
+pub struct RecordBudget {
+    limit: usize,
+    used: AtomicUsize,
+}
+
+impl RecordBudget {
+    /// A budget of `limit` records shared by the clients given it.
+    #[must_use]
+    pub fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            used: AtomicUsize::new(0),
+        })
+    }
+
+    /// The configured record limit.
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Records currently charged by attached clients.
+    #[must_use]
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+
+    fn reserve(&self, records: usize) -> bool {
+        self.used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(records)
+                    .filter(|total| *total <= self.limit)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, records: usize) {
+        self.used.fetch_sub(records, Ordering::AcqRel);
+    }
+}
+
+/// Records charged to a [`RecordBudget`]. A transaction charges one while
+/// it decodes. At End of Data the charge moves with the update to the
+/// manager, which keeps it with that cache's data until the data is
+/// replaced or removed. Dropping it releases the charge.
+#[derive(Debug)]
+pub(crate) struct Reservation {
+    budget: Arc<RecordBudget>,
+    /// All charged records, withdrawals included.
+    records: usize,
+    /// The withdrawals among `records`. They are charged only while their
+    /// update is staged or queued, and released once it is applied.
+    withdrawn: usize,
+}
+
+impl Reservation {
+    pub(crate) fn new(budget: Arc<RecordBudget>) -> Self {
+        Self {
+            budget,
+            records: 0,
+            withdrawn: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.withdrawn = 0;
+        self.budget.release(std::mem::take(&mut self.records));
+    }
+
+    /// Charged announcements, the part that becomes held data.
+    fn announced(&self) -> usize {
+        self.records - self.withdrawn
+    }
+
+    /// Release the withdrawals' share once nothing holds them any more.
+    pub(crate) fn release_withdrawn(&mut self) {
+        let withdrawn = std::mem::take(&mut self.withdrawn);
+        self.records -= withdrawn;
+        self.budget.release(withdrawn);
+    }
+
+    /// A charge of `records` already reserved on `budget`.
+    #[cfg(test)]
+    pub(crate) fn charged(budget: &Arc<RecordBudget>, records: usize, withdrawn: usize) -> Self {
+        assert!(budget.reserve(records + withdrawn));
+        Self {
+            budget: Arc::clone(budget),
+            records: records + withdrawn,
+            withdrawn,
+        }
+    }
+
+    /// Take over `other`'s charge, which must come from the same budget.
+    pub(crate) fn absorb(&mut self, mut other: Self) {
+        debug_assert!(Arc::ptr_eq(&self.budget, &other.budget));
+        self.records += std::mem::take(&mut other.records);
+        self.withdrawn += std::mem::take(&mut other.withdrawn);
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
 
 /// Maximum in-transaction restarts (identity mismatch, Cache Reset)
 /// before the connection is dropped and retries are paced by
@@ -245,6 +373,20 @@ pub struct RtrClient {
     transaction_deadline: Duration,
     max_transaction_records: usize,
     max_transaction_bytes: usize,
+    /// Records this cache may hold; see [`Self::with_record_limits`].
+    max_records: usize,
+    /// Cap shared with the daemon's other clients.
+    record_budget: Arc<RecordBudget>,
+    /// Records counted against `max_records` for the held data. An upper
+    /// bound on this cache's contribution: a full table sets it to the
+    /// transfer's size, and a serial delta adds its announcements without
+    /// subtracting withdrawals, so withdrawing records never held cannot
+    /// lower it.
+    held_records: usize,
+    /// The held data's charge on `record_budget`, kept here only without
+    /// the cache inventory. With it, the charge travels with each update
+    /// and the manager holds it beside the data.
+    held_charge: Option<Reservation>,
     /// Told the effective expire interval (seconds) at start and after
     /// every End of Data; see [`Self::with_expire_observer`].
     expire_observer: Option<Box<dyn Fn(u64) + Send + Sync>>,
@@ -345,9 +487,86 @@ impl RtrClient {
             transaction_deadline: TRANSACTION_DEADLINE,
             max_transaction_records: MAX_TRANSACTION_RECORDS,
             max_transaction_bytes: MAX_TRANSACTION_BYTES,
+            max_records: DEFAULT_MAX_CACHE_RECORDS,
+            record_budget: RecordBudget::new(DEFAULT_MAX_TOTAL_RECORDS),
+            held_records: 0,
+            held_charge: None,
             expire_observer: None,
             dialer: None,
         }
+    }
+
+    /// Cap the RPKI records this cache may hold at `max_records` and charge
+    /// them to `budget`, which the daemon shares across all of its clients.
+    /// Records are VRPs plus ASPA provider ASNs.
+    ///
+    /// A transaction that would exceed either cap is refused while it is
+    /// decoded, before its records are published or applied. With
+    /// [`Self::with_cache_inventory`], each accepted update carries its
+    /// charge to the [`VrpManager`](crate::VrpManager), which releases it
+    /// when that data is replaced or removed, so updates still queued for
+    /// the manager stay charged. Without it, the client keeps the charge
+    /// for its last accepted data and releases it on the next full table,
+    /// on flush or expiry, or when the client is dropped. The session
+    /// ends with [`RtrError::RecordLimit`], the cache's previously accepted
+    /// data is kept, and the next connection asks for a full table with a
+    /// Reset Query. If no full table fits, the kept data is dropped when it
+    /// expires. Without this call a client uses
+    /// [`DEFAULT_MAX_CACHE_RECORDS`] and its own [`DEFAULT_MAX_TOTAL_RECORDS`]
+    /// budget.
+    #[must_use]
+    pub fn with_record_limits(mut self, max_records: usize, budget: Arc<RecordBudget>) -> Self {
+        self.max_records = max_records;
+        self.record_budget = budget;
+        self
+    }
+
+    /// Charge `records` announced by the transaction in progress against
+    /// this cache's cap and the shared budget.
+    fn charge(
+        &self,
+        reservation: &mut Reservation,
+        is_reset: bool,
+        records: usize,
+    ) -> Result<(), RtrError> {
+        // A full table replaces the held data; a delta adds to it.
+        let base = if is_reset { 0 } else { self.held_records };
+        if base
+            .saturating_add(reservation.announced())
+            .saturating_add(records)
+            > self.max_records
+        {
+            return Err(RtrError::RecordLimit(if is_reset {
+                "full table exceeds the per-cache record limit"
+            } else {
+                "serial update would exceed the per-cache record limit"
+            }));
+        }
+        if !self.record_budget.reserve(records) {
+            return Err(RtrError::RecordLimit("total RPKI record limit reached"));
+        }
+        reservation.records += records;
+        Ok(())
+    }
+
+    /// Charge one staged withdrawal against the shared budget only: it adds
+    /// nothing to the cache's held data, but its update takes memory until
+    /// it is applied.
+    fn charge_withdrawal(&self, reservation: &mut Reservation) -> Result<(), RtrError> {
+        if !self.record_budget.reserve(1) {
+            return Err(RtrError::RecordLimit("total RPKI record limit reached"));
+        }
+        reservation.records += 1;
+        reservation.withdrawn += 1;
+        Ok(())
+    }
+
+    /// Forget the held data's count when the data is flushed. With the
+    /// cache inventory, the manager releases the charge when it removes
+    /// the data.
+    fn release_held_records(&mut self) {
+        self.held_records = 0;
+        self.held_charge = None;
     }
 
     /// Route validated cache epochs and connection lifecycle through the
@@ -634,6 +853,7 @@ impl RtrClient {
             self.epoch = None;
             self.last_end_of_data_at = None;
             self.data_expires_at = None;
+            self.release_held_records();
             // Data expiry is the deliberate v2 re-probe point: with
             // nothing held there is no retention to protect, so try the
             // preferred version again in case the cache gained v2
@@ -1064,12 +1284,23 @@ impl RtrClient {
             let mut withdrawn = Vec::new();
             let mut aspa_announced: Vec<AspaRecord> = Vec::new();
             let mut aspa_withdrawn: Vec<AspaRecord> = Vec::new();
+            // Announcements charged to the record caps as they decode.
+            let mut reservation = Reservation::new(Arc::clone(&self.record_budget));
             let is_reset = self.send_query(stream, query).await?;
 
             loop {
                 while let Some(pdu) = self.next_pdu(parse_buf)? {
                     match pdu {
                         RtrPdu::CacheResponse { session_id } => {
+                            // One Cache Response opens one response. A second
+                            // one is a protocol violation, not a restart:
+                            // the transaction ends and nothing it staged is
+                            // kept.
+                            if pending_session.is_some() {
+                                return Err(RtrError::ProtocolViolation(
+                                    "duplicate Cache Response in one response",
+                                ));
+                            }
                             if expected_session.is_some_and(|expected| expected != session_id) {
                                 // The cache is answering from a different
                                 // session than the one our data belongs
@@ -1096,11 +1327,6 @@ impl RtrClient {
                                 });
                             }
                             pending_session = Some(session_id);
-                            records = 0;
-                            announced.clear();
-                            withdrawn.clear();
-                            aspa_announced.clear();
-                            aspa_withdrawn.clear();
                         }
                         RtrPdu::Ipv4Prefix {
                             flags,
@@ -1116,8 +1342,10 @@ impl RtrClient {
                                 origin_asn: asn,
                             };
                             if flags & 1 == 1 {
+                                self.charge(&mut reservation, is_reset, 1)?;
                                 announced.push(entry);
                             } else {
+                                self.charge_withdrawal(&mut reservation)?;
                                 withdrawn.push(entry);
                             }
                             records += 1;
@@ -1139,8 +1367,10 @@ impl RtrClient {
                                 origin_asn: asn,
                             };
                             if flags & 1 == 1 {
+                                self.charge(&mut reservation, is_reset, 1)?;
                                 announced.push(entry);
                             } else {
+                                self.charge_withdrawal(&mut reservation)?;
                                 withdrawn.push(entry);
                             }
                             records += 1;
@@ -1199,8 +1429,14 @@ impl RtrClient {
                                 provider_asns,
                             };
                             if flags & 1 == 1 {
+                                self.charge(
+                                    &mut reservation,
+                                    is_reset,
+                                    record.provider_asns.len().max(1),
+                                )?;
                                 aspa_announced.push(record);
                             } else {
+                                self.charge_withdrawal(&mut reservation)?;
                                 aspa_withdrawn.push(record);
                             }
                             records += 1;
@@ -1265,6 +1501,22 @@ impl RtrClient {
                                 query = QueryKind::Reset;
                                 continue 'transaction;
                             }
+                            // A full table replaces the held count, a delta
+                            // adds to it. The charge leaves the transaction
+                            // with the update below.
+                            self.held_records = if is_reset {
+                                reservation.announced()
+                            } else {
+                                self.held_records + reservation.announced()
+                            };
+                            let mut charge = std::mem::replace(
+                                &mut reservation,
+                                Reservation::new(Arc::clone(&self.record_budget)),
+                            );
+                            // A full table carries no withdrawals onward.
+                            if is_reset {
+                                charge.release_withdrawn();
+                            }
                             self.apply_eod_timers(refresh, retry, expire);
                             let now = TokioInstant::now();
                             self.last_end_of_data_at = Some(now);
@@ -1326,6 +1578,7 @@ impl RtrClient {
                                         server,
                                         entries,
                                         aspa_records,
+                                        charge,
                                         version: self.negotiated_version,
                                         session_id,
                                         serial,
@@ -1343,6 +1596,7 @@ impl RtrClient {
                                         withdrawn,
                                         aspa_announced,
                                         aspa_withdrawn,
+                                        charge,
                                         version: self.negotiated_version,
                                         session_id,
                                         serial,
@@ -1354,6 +1608,14 @@ impl RtrClient {
                                 };
                                 let _ = handle.0.send(update).await;
                             } else {
+                                // The legacy channel cannot carry the
+                                // charge, so the client keeps it, and its
+                                // withdrawals are released here.
+                                charge.release_withdrawn();
+                                match &mut self.held_charge {
+                                    Some(held) if !is_reset => held.absorb(charge),
+                                    held => *held = Some(charge),
+                                }
                                 let _ = self.vrp_tx.send(update).await;
                             }
                             return Ok(());
@@ -1398,6 +1660,16 @@ impl RtrClient {
                                 self.epoch = None;
                             }
                             return Err(RtrError::ServerError { code, text });
+                        }
+                        // A BGPsec router key (RFC 8210 §5.10). The codec has
+                        // checked its framing; this router does not validate
+                        // BGPsec paths, so it carries nothing to apply.
+                        RtrPdu::RouterKey { asn, .. } => {
+                            debug!(
+                                server = %self.config.server_addr,
+                                asn,
+                                "RTR Router Key PDU received (ignored: no BGPsec validation)"
+                            );
                         }
                         _ => {
                             debug!(
@@ -1524,6 +1796,7 @@ fn offending_pdu_bytes(parse_buf: &[u8]) -> Vec<u8> {
 ///         | RtrError::VersionMismatch { .. }
 ///         | RtrError::TransactionTimeout
 ///         | RtrError::TransactionLimit(_)
+///         | RtrError::RecordLimit(_)
 ///         | RtrError::ProtocolViolation(_)
 ///         | RtrError::Expired
 ///         | RtrError::SessionIdMismatch { .. }
@@ -1565,6 +1838,12 @@ pub enum RtrError {
     /// An RTR transaction exceeded a record or byte budget.
     #[error("RTR transaction limit: {0}")]
     TransactionLimit(&'static str),
+    /// Accepting the transaction would exceed the per-cache or total RPKI
+    /// record cap (see [`RtrClient::with_record_limits`]). The epoch is
+    /// void and the previously accepted data is kept until a full table
+    /// that fits replaces it or the data expires.
+    #[error("RPKI record limit: {0}")]
+    RecordLimit(&'static str),
     /// The cache repeatedly violated session identity within one
     /// transaction.
     #[error("RTR protocol violation: {0}")]
@@ -1628,6 +1907,12 @@ impl RtrError {
             RtrError::SessionIdMismatch { .. } | RtrError::ServerError { code: 0, .. } => {
                 SessionEndDisposition::ResyncAndRetain
             }
+            // A record cap is a local resource limit, not evidence that the
+            // held data is wrong (§10: retain the previous data until a
+            // full set arrives). Only a full table has an exact size, so
+            // the next query is a Reset Query; one that still does not fit
+            // fails the same way until the held data expires (§6).
+            RtrError::RecordLimit(_) => SessionEndDisposition::ResyncAndRetain,
             // Remaining Error Reports follow the §12 code table: codes
             // 2 (No Data Available), 4 (Unsupported Protocol Version —
             // "data previously learned need not be flushed"), and 12
@@ -1665,6 +1950,7 @@ mod tests {
     use tokio::time::{advance, timeout};
 
     use super::*;
+    use crate::vrp_manager::CacheInventoryAttachment;
 
     fn test_config(
         server_addr: SocketAddr,
@@ -3261,6 +3547,105 @@ mod tests {
         let _ = client_handle.await;
     }
 
+    /// A cache that serves `BGPsec` router keys interleaves Router Key PDUs
+    /// with prefixes and ASPAs. The client applies everything else, ignores
+    /// the keys, and keeps the session: the next Serial Notify draws a
+    /// Serial Query on the same connection.
+    #[tokio::test]
+    async fn router_key_pdus_are_ignored_and_the_session_stays_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        let v2 = crate::rtr_codec::RTR_VERSION_2;
+        // A Router Key frame: header, 20-octet SKI, AS number, DER SPKI.
+        let router_key = {
+            let spki = [0x30, 0x03, 0x02, 0x01, 0x00];
+            let mut frame = vec![v2, 9, 1, 0];
+            frame.extend_from_slice(&u32::try_from(32 + spki.len()).unwrap().to_be_bytes());
+            frame.extend_from_slice(&[0xab; 20]);
+            frame.extend_from_slice(&65_003u32.to_be_bytes());
+            frame.extend_from_slice(&spki);
+            frame
+        };
+        let prefix = RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: Ipv4Addr::new(198, 51, 100, 0),
+            asn: 65003,
+        };
+        let aspa = AspaRecord {
+            customer_asn: 65_003,
+            provider_asns: vec![65_001],
+        };
+        let mut buf = Vec::new();
+        for (pdu, key_after) in [
+            (RtrPdu::CacheResponse { session_id: 7 }, false),
+            (prefix, true),
+            (
+                RtrPdu::Aspa {
+                    flags: 1,
+                    customer_asn: aspa.customer_asn,
+                    provider_asns: aspa.provider_asns.clone(),
+                },
+                true,
+            ),
+            (
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+                false,
+            ),
+        ] {
+            pdu.encode_with_version(&mut buf, v2).unwrap();
+            if key_after {
+                buf.extend_from_slice(&router_key);
+            }
+        }
+        stream.write_all(&buf).await.unwrap();
+
+        assert_eq!(
+            timeout(Duration::from_secs(5), vrp_rx.recv())
+                .await
+                .expect("the response carrying Router Keys was not applied")
+                .unwrap(),
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(198, 51, 100, 0), 24, 24, 65003)],
+                aspa_records: vec![aspa],
+            }
+        );
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 2,
+            },
+        )
+        .await;
+        assert_eq!(
+            timeout(Duration::from_secs(5), read_pdu(&mut stream))
+                .await
+                .expect("the session did not stay up"),
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 1,
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn record_budget_exceeded_drops_connection_without_publishing() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3293,6 +3678,391 @@ mod tests {
 
         client_handle.abort();
         let _ = client_handle.await;
+    }
+
+    fn host_prefix(flags: u8, last: u8) -> RtrPdu {
+        RtrPdu::Ipv4Prefix {
+            flags,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: Ipv4Addr::new(198, 51, last, 0),
+            asn: 65001,
+        }
+    }
+
+    fn host_entry(last: u8) -> VrpEntry {
+        entry(Ipv4Addr::new(198, 51, last, 0), 24, 24, 65001)
+    }
+
+    /// Send a Serial Notify for session 7 and expect the client's Serial
+    /// Query from `prior`.
+    async fn notify_and_expect_serial_query(stream: &mut TcpStream, serial: u32, prior: u32) {
+        write_pdu(
+            stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial,
+            },
+        )
+        .await;
+        assert_eq!(
+            read_pdu(stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: prior,
+            }
+        );
+    }
+
+    /// A serial delta that would take a cache past its record cap is
+    /// refused while it is still being decoded: nothing is published, the
+    /// held data and its charge stay, and the client resynchronizes with a
+    /// Reset Query. An in-cap delta is applied unchanged, and withdrawing a
+    /// record the cache never sent does not lower the charge.
+    #[tokio::test]
+    async fn serial_update_over_the_cache_record_cap_is_refused_while_decoding() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let budget = RecordBudget::new(100);
+        let client = zero_retry_client(addr, vrp_tx).with_record_limits(3, Arc::clone(&budget));
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+        assert_eq!(budget.used(), 1);
+
+        notify_and_expect_serial_query(&mut stream, 101, 100).await;
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 1),
+                host_prefix(0, 9),
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 101,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        assert_eq!(
+            vrp_rx.recv().await.unwrap(),
+            VrpUpdate::IncrementalUpdate {
+                server: addr,
+                announced: vec![host_entry(1)],
+                withdrawn: vec![host_entry(9)],
+                aspa_announced: vec![],
+                aspa_withdrawn: vec![],
+            }
+        );
+        assert_eq!(budget.used(), 2);
+
+        // Two held plus two announced is over the cap of three. The cache
+        // never sends End of Data: the refusal happens mid-transfer.
+        notify_and_expect_serial_query(&mut stream, 102, 101).await;
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 2),
+                host_prefix(1, 3),
+            ],
+        )
+        .await;
+        let (mut stream2, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the over-cap delta was not refused while decoding")
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        let published = vrp_rx.try_recv();
+        assert!(
+            published.is_err(),
+            "an over-cap delta must not be published, and held data is not flushed: {published:?}"
+        );
+        assert_eq!(budget.used(), 2);
+
+        // A full table at exactly the cap is accepted and replaces the charge.
+        write_pdus(
+            &mut stream2,
+            &[
+                RtrPdu::CacheResponse { session_id: 8 },
+                host_prefix(1, 1),
+                host_prefix(1, 2),
+                host_prefix(1, 3),
+                RtrPdu::EndOfData {
+                    session_id: 8,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        assert_eq!(
+            vrp_rx.recv().await.unwrap(),
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![host_entry(1), host_entry(2), host_entry(3)],
+                aspa_records: vec![],
+            }
+        );
+        assert_eq!(budget.used(), 3);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+        assert_eq!(budget.used(), 0, "a stopped client releases its charge");
+    }
+
+    /// The total budget is shared: once one cache holds most of it, another
+    /// cache's full table is refused while decoding and publishes nothing.
+    #[tokio::test]
+    async fn total_record_budget_is_shared_across_caches() {
+        let budget = RecordBudget::new(3);
+        let mut clients = Vec::new();
+        let mut receivers = Vec::new();
+        let mut listeners = Vec::new();
+        for _ in 0..2 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (vrp_tx, vrp_rx) = mpsc::channel(8);
+            let client = zero_retry_client(listener.local_addr().unwrap(), vrp_tx)
+                .with_record_limits(10, Arc::clone(&budget));
+            clients.push(Some(client));
+            receivers.push(vrp_rx);
+            listeners.push(listener);
+        }
+
+        let first = tokio::spawn(clients[0].take().unwrap().run());
+        let (mut stream, _) = listeners[0].accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 1 },
+                host_prefix(1, 1),
+                host_prefix(1, 2),
+                RtrPdu::EndOfData {
+                    session_id: 1,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        assert!(matches!(
+            receivers[0].recv().await.unwrap(),
+            VrpUpdate::FullTable { .. }
+        ));
+        assert_eq!(budget.used(), 2);
+
+        let second = tokio::spawn(clients[1].take().unwrap().run());
+        let (mut stream, _) = listeners[1].accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 2 },
+                host_prefix(1, 3),
+                host_prefix(1, 4),
+            ],
+        )
+        .await;
+        let (mut stream, _) = timeout(Duration::from_secs(5), listeners[1].accept())
+            .await
+            .expect("the full table over the total budget was not refused while decoding")
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        assert!(receivers[1].try_recv().is_err());
+        assert_eq!(budget.used(), 2);
+
+        for handle in [first, second] {
+            handle.abort();
+            let _ = handle.await;
+        }
+        assert_eq!(budget.used(), 0);
+    }
+
+    /// With the cache inventory attached, a record charge travels with the
+    /// update into the manager's queue and is released only when that data
+    /// is dropped. Full tables queued behind a blocked manager stay
+    /// charged, so repeated resets cannot pile up uncharged snapshots.
+    #[tokio::test]
+    async fn queued_full_tables_stay_charged_until_the_manager_drops_them() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The manager never runs: its update queue only fills.
+        let (attachment, handle, _queries) = CacheInventoryAttachment::new([addr]);
+        let (vrp_tx, _vrp_rx) = mpsc::channel(8);
+        let budget = RecordBudget::new(2);
+        let client = zero_retry_client(addr, vrp_tx)
+            .with_record_limits(10, Arc::clone(&budget))
+            .with_cache_inventory(handle);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        let full_table = |serial: u32, last: u8| {
+            [
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, last),
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ]
+        };
+        write_pdus(&mut stream, &full_table(1, 1)).await;
+        // The client only queries again once it has queued the table.
+        notify_and_expect_serial_query(&mut stream, 2, 1).await;
+        assert_eq!(budget.used(), 1);
+
+        // The cache answers with Cache Reset and a second full table.
+        write_pdu(&mut stream, RtrPdu::CacheReset).await;
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(&mut stream, &full_table(2, 2)).await;
+        notify_and_expect_serial_query(&mut stream, 3, 2).await;
+        assert_eq!(budget.used(), 2, "both queued tables stay charged");
+
+        // A third queued table would exceed the total: refused.
+        write_pdu(&mut stream, RtrPdu::CacheReset).await;
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(&mut stream, &full_table(3, 3)).await;
+        let (mut stream2, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("a third queued full table was not refused")
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert_eq!(budget.used(), 2);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+        drop(attachment);
+        assert_eq!(
+            budget.used(),
+            0,
+            "dropping the queued data releases its charge"
+        );
+    }
+
+    /// A second Cache Response inside one response ends the transaction:
+    /// the client drops the connection and publishes nothing it staged.
+    #[tokio::test]
+    async fn duplicate_cache_response_ends_the_transaction() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 1),
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 2),
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        let (mut again, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("a duplicate Cache Response did not end the transaction")
+            .unwrap();
+        assert_eq!(read_pdu(&mut again).await, RtrPdu::ResetQuery);
+        let published = vrp_rx.try_recv();
+        assert!(published.is_err(), "published {published:?}");
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// Withdrawals in a queued delta take memory until the manager applies
+    /// them, so they are charged against the total budget until then. With
+    /// the manager blocked, queued withdrawals cannot grow past the cap.
+    #[tokio::test]
+    async fn queued_withdrawals_stay_charged_until_the_manager_applies_them() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attachment, handle, _queries) = CacheInventoryAttachment::new([addr]);
+        let (vrp_tx, _vrp_rx) = mpsc::channel(8);
+        let budget = RecordBudget::new(3);
+        let client = zero_retry_client(addr, vrp_tx)
+            .with_record_limits(10, Arc::clone(&budget))
+            .with_cache_inventory(handle);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        let end = |serial| RtrPdu::EndOfData {
+            session_id: 7,
+            serial,
+            refresh: 60,
+            retry: 0,
+            expire: 3600,
+        };
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 1),
+                end(1),
+            ],
+        )
+        .await;
+        notify_and_expect_serial_query(&mut stream, 2, 1).await;
+        // Two withdrawals of records the cache never sent.
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(0, 8),
+                host_prefix(0, 9),
+                end(2),
+            ],
+        )
+        .await;
+        notify_and_expect_serial_query(&mut stream, 3, 2).await;
+        assert_eq!(budget.used(), 3, "queued withdrawals are not charged");
+
+        // One more queued withdrawal would exceed the total: refused.
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(0, 7),
+                end(3),
+            ],
+        )
+        .await;
+        let (mut again, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("a queued withdrawal past the total was not refused")
+            .unwrap();
+        assert_eq!(read_pdu(&mut again).await, RtrPdu::ResetQuery);
+        assert_eq!(budget.used(), 3);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+        drop(attachment);
+        assert_eq!(budget.used(), 0);
     }
 
     #[tokio::test(start_paused = true)]

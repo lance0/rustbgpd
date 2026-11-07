@@ -98,6 +98,7 @@ mod tests {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ip("10.0.0.1"),
                 learning_disabled: Some(true),
@@ -124,6 +125,7 @@ mod tests {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ip("10.0.0.1"),
                 learning_disabled: Some(true),
@@ -161,6 +163,7 @@ mod tests {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ip("10.0.0.1"),
                 learning_disabled: Some(true),

@@ -184,17 +184,19 @@ impl Diagnostics {
         self.render_sources(&[(filename.to_string(), source.to_string())], color)
     }
 
-    /// Render every diagnostic against a multi-module compile
-    /// (LAN-300): `sources[i]` is the `(display path, text)` of module
-    /// `i`, matching each span's `file` index, so an error in an
-    /// imported file renders an excerpt of — and names — that file.
+    /// Render the diagnostics against a multi-module compile (LAN-300):
+    /// `sources[i]` is the `(display path, text)` of module `i`, matching
+    /// each span's `file` index, so an error in an imported file renders
+    /// an excerpt of — and names — that file.
     ///
-    /// # Panics
-    ///
-    /// Never in practice: writing to an in-memory buffer is infallible.
+    /// The output is bounded: at most 50 reports and about 256 KiB, with
+    /// a closing line counting what was left out. The sources are indexed once for
+    /// all reports, so the cost is linear in source size plus the
+    /// reports rendered.
     #[must_use]
     pub fn render_sources(&self, sources: &[(String, String)], color: bool) -> String {
         use ariadne::{Config, Label, Report, ReportKind};
+        use std::fmt::Write as _;
 
         let name_of = |span: &Span| -> String {
             sources
@@ -203,8 +205,16 @@ impl Diagnostics {
                 .map(|(name, _)| name.clone())
                 .unwrap_or_default()
         };
-        let mut out = Vec::new();
-        for diag in &self.0 {
+        // One line index per source for every report; building it per
+        // report made rendering quadratic in the diagnostic count.
+        let mut cache = ariadne::sources(
+            sources
+                .iter()
+                .map(|(name, text)| (name.clone(), text.as_str())),
+        );
+        let mut out = CappedBuffer::default();
+        let mut rendered = 0;
+        for diag in self.0.iter().take(MAX_RENDERED_DIAGNOSTICS) {
             let primary = diag.labels.first().map_or_else(
                 || (name_of(&Span::new(0..0)), 0..0),
                 |(span, _)| (name_of(span), span.range()),
@@ -222,12 +232,54 @@ impl Diagnostics {
             for note in &diag.notes {
                 report = report.with_note(note);
             }
-            report
-                .finish()
-                .write(ariadne::sources(sources.to_vec()), &mut out)
-                .expect("writing a diagnostic to an in-memory buffer cannot fail");
+            if report.finish().write(&mut cache, &mut out).is_err() {
+                break; // the byte cap: the partial report stays, marked below
+            }
+            rendered += 1;
         }
-        String::from_utf8_lossy(&out).into_owned()
+        let truncated = out.full;
+        let mut text = String::from_utf8_lossy(&out.bytes).into_owned();
+        let omitted = self.0.len() - rendered;
+        if truncated {
+            let _ = writeln!(
+                text,
+                "\n... output truncated at {MAX_RENDERED_BYTES} bytes; {omitted} more \
+                 diagnostic(s) not shown"
+            );
+        } else if omitted > 0 {
+            let _ = writeln!(text, "... {omitted} more diagnostic(s) not shown");
+        }
+        text
+    }
+}
+
+/// Reports rendered by [`Diagnostics::render_sources`]; the rest are counted.
+pub const MAX_RENDERED_DIAGNOSTICS: usize = 50;
+
+/// Rendered bytes kept by [`Diagnostics::render_sources`].
+pub const MAX_RENDERED_BYTES: usize = 256 * 1024;
+
+/// An in-memory writer that accepts [`MAX_RENDERED_BYTES`], then fails.
+#[derive(Default)]
+struct CappedBuffer {
+    bytes: Vec<u8>,
+    full: bool,
+}
+
+impl std::io::Write for CappedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = MAX_RENDERED_BYTES - self.bytes.len();
+        if buf.len() > room {
+            self.bytes.extend_from_slice(&buf[..room]);
+            self.full = true;
+            return Err(std::io::Error::other("diagnostic output cap reached"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -267,18 +319,71 @@ pub(crate) fn closest<'a>(
     closest_matches(name, candidates, 1).into_iter().next()
 }
 
+/// Names longer than this get no did-you-mean suggestion: the edit
+/// distance is quadratic in name length.
+const MAX_SUGGESTION_NAME_CHARS: usize = 64;
+
+/// Candidate sets larger than this get no did-you-mean suggestion.
+pub(crate) const MAX_SUGGESTION_CANDIDATES: usize = 1024;
+
+thread_local! {
+    /// Did-you-mean searches left on this thread; see
+    /// [`with_suggestion_budget`]. Unlimited outside one.
+    static SUGGESTIONS_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// Whether this thread has a did-you-mean search left, so a caller can skip
+/// gathering candidates for a search that would not run.
+pub(crate) fn suggestion_budget_left() -> bool {
+    SUGGESTIONS_LEFT.get() > 0
+}
+
+/// Run `work` with at most `budget` did-you-mean searches on this thread.
+/// A compile with many unknown names would otherwise pay one search per
+/// name against every candidate.
+pub(crate) fn with_suggestion_budget<T>(budget: usize, work: impl FnOnce() -> T) -> T {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SUGGESTIONS_LEFT.set(self.0);
+        }
+    }
+    let _restore = Restore(SUGGESTIONS_LEFT.replace(budget));
+    work()
+}
+
 /// Up to `max` candidates to `name` within a small edit distance, closest
 /// first, for "did you mean" suggestions. Candidates further than 1/3 of
 /// the name's length (minimum 2) away are not suggested. Shared by the
 /// `.rpol` frontend and the TOML config diagnostics.
+///
+/// Bounded: a name over 64 characters, a candidate set over 1024 names or
+/// an exhausted per-compile suggestion budget gets no suggestion, and
+/// candidates whose length alone puts them out of range are skipped before
+/// the edit distance runs.
 pub fn closest_matches<'a>(
     name: &str,
     candidates: impl IntoIterator<Item = &'a str>,
     max: usize,
 ) -> Vec<&'a str> {
+    let name_chars = name.chars().count();
+    let left = SUGGESTIONS_LEFT.get();
+    if name_chars > MAX_SUGGESTION_NAME_CHARS || left == 0 {
+        return Vec::new();
+    }
+    SUGGESTIONS_LEFT.set(left - 1);
+    let candidates: Vec<&str> = candidates
+        .into_iter()
+        .take(MAX_SUGGESTION_CANDIDATES + 1)
+        .collect();
+    if candidates.len() > MAX_SUGGESTION_CANDIDATES {
+        return Vec::new();
+    }
     let budget = (name.len() / 3).max(2);
     let mut ranked: Vec<(usize, &str)> = candidates
         .into_iter()
+        // The edit distance is at least the difference in length.
+        .filter(|candidate| candidate.chars().count().abs_diff(name_chars) <= budget)
         .map(|candidate| (edit_distance(name, candidate), candidate))
         .filter(|&(distance, _)| distance <= budget)
         .collect();
@@ -301,6 +406,200 @@ mod tests {
             Some("customers")
         );
         assert_eq!(closest("zzz", ["customers", "bogons"]), None);
+    }
+
+    /// Thousands of diagnostics against a large source render within a fixed
+    /// bound: the sources are indexed once and the output is capped.
+    #[test]
+    fn render_is_bounded_for_many_diagnostics() {
+        use std::fmt::Write as _;
+
+        // Built directly: typecheck itself stops collecting at 256, and this
+        // pins the renderer for any producer.
+        let mut source = String::new();
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..4000 {
+            let start = source.len();
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.nosuch == 1 {{ reject }} }} }}"
+            );
+            diagnostics.0.push(Diagnostic::new(
+                Span::new(start..source.len() - 1),
+                format!("unknown field in p{index}"),
+                "here",
+            ));
+        }
+        let count = diagnostics.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(diagnostics.render("candidate.rpol", &source, false));
+        });
+        let rendered = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("rendering 4000 diagnostics against 280 KB finishes within 10 s");
+        assert!(
+            rendered.len() <= MAX_RENDERED_BYTES + 256,
+            "{}",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains(&format!(
+                "{} more diagnostic(s) not shown",
+                count - MAX_RENDERED_DIAGNOSTICS
+            )),
+            "{}",
+            &rendered[rendered.len().saturating_sub(300)..]
+        );
+    }
+
+    /// A source at the 4 MiB request cap, dense with unknown references to
+    /// long set names, compiles in bounded time: typecheck stops collecting
+    /// diagnostics at its cap, and the did-you-mean searches stop with it
+    /// (a search per unknown name against every set made this quadratic).
+    /// Release takes well under a second; the debug bound is generous.
+    #[test]
+    fn a_source_dense_with_unknown_references_compiles_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let name = |prefix: char, index: usize| format!("{prefix}{index:0>255}");
+        let mut source = String::new();
+        for index in 0..1000 {
+            let _ = writeln!(source, "prefix-set {} {{ 10.0.0.0/8 }}", name('s', index));
+        }
+        let mut index = 0;
+        while source.len() < 4 * 1024 * 1024 - 400 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.prefix in {} {{ reject }} }} }}",
+                name('u', index)
+            );
+            index += 1;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a 4 MiB unknown-reference source compiles within 60 s");
+        let diagnostics = result.expect_err("every reference is unknown");
+        assert!(diagnostics.len() <= 256, "{}", diagnostics.len());
+        eprintln!("compiled {index} unknown references in {elapsed:?}");
+    }
+
+    /// Every typecheck diagnostic goes through the cap, including the
+    /// ordering-comparison check on an unordered field.
+    #[test]
+    fn ordering_comparison_diagnostics_respect_the_cap() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..300 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.rpki >= valid {{ reject }} }} }}"
+            );
+        }
+        let diagnostics = crate::rpol::RpolFile::parse(&source)
+            .map(|_| ())
+            .expect_err("`>=` on route.rpki is an error");
+        assert_eq!(diagnostics.len(), 256);
+    }
+
+    /// 50k sets and 50k unknown references: past the diagnostic cap an
+    /// unknown reference costs one index lookup, not a scan of every set.
+    /// Release takes a fraction of a second; the debug bound is generous.
+    #[test]
+    fn many_sets_and_many_unknown_references_compile_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..50_000 {
+            let _ = writeln!(source, "prefix-set s{index} {{ 10.0.0.0/8 }}");
+        }
+        for index in 0..50_000 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.prefix in missing{index} {{ reject }} }} }}"
+            );
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("50k sets x 50k unknown references compile within 60 s");
+        let diagnostics = result.expect_err("every reference is unknown");
+        assert!(diagnostics.len() <= 256, "{}", diagnostics.len());
+        eprintln!("compiled 50k x 50k in {elapsed:?}");
+    }
+
+    /// 50k asn-sets and 50k policies that probe, loop over and apply unknown
+    /// names: past the diagnostic cap each reference costs index lookups,
+    /// not a scan of every set or policy and a gathered suggestion list,
+    /// and the loop and callee bounds resolve by index too.
+    #[test]
+    fn many_unknown_membership_loop_and_apply_references_compile_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..50_000 {
+            let _ = writeln!(source, "asn-set s{index} {{ 1 }}");
+        }
+        for index in 0..50_000 {
+            let _ = writeln!(
+                source,
+                "policy p{index}(x: u32) {{ term t {{ if x in missing{index} {{ reject }} \
+                 for a in missing{index} {{ reject }} apply missing{index}() }} }}"
+            );
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("50k asn-sets x 50k unknown references compile within 60 s");
+        let diagnostics = result.expect_err("every reference is unknown");
+        assert_eq!(diagnostics.len(), 256);
+        let rendered = diagnostics.to_string();
+        for expected in [
+            "unknown asn-set or community-set `missing0`",
+            "`missing0` is not an iterable set",
+            "unknown policy `missing0`",
+        ] {
+            assert!(rendered.contains(expected), "{expected}: {rendered}");
+        }
+        eprintln!("compiled 50k x 50k in {elapsed:?}");
+    }
+
+    /// One oversized report still stops at the byte cap.
+    #[test]
+    fn render_stops_at_the_byte_cap() {
+        let source = format!("{}\n", "x".repeat(MAX_RENDERED_BYTES * 2));
+        let diags = Diagnostics(vec![
+            Diagnostic::new(Span::new(0..source.len() - 1), "long", "here"),
+            Diagnostic::new(Span::new(0..1), "second", "here"),
+        ]);
+        let rendered = diags.render("long.rpol", &source, false);
+        assert!(
+            rendered.len() <= MAX_RENDERED_BYTES + 256,
+            "{}",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("output truncated"),
+            "{}",
+            &rendered[rendered.len() - 200..]
+        );
     }
 
     #[test]

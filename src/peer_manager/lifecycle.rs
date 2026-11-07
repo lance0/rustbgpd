@@ -2853,6 +2853,17 @@ impl PeerManager {
                 "dampening capacity recovery requires an owned explicit enable".into(),
             ));
         }
+        // ADR-0086: a dynamic peer exists only while a range admits it. Its
+        // release normally follows the range's removal; until then, enable
+        // must not restart a peer no configured range covers.
+        if self.peers.get(&peer).is_some_and(|managed| {
+            managed.is_dynamic && !self.dynamic_peer_still_allowed_by_current_ranges(managed)
+        }) {
+            return Err(PeerLifecycleError::Precondition(format!(
+                "peer {peer} is a dynamic-range peer and no configured dynamic-neighbor range \
+                 admits it any more"
+            )));
+        }
         let address = peer.address;
         // ADR-0067 step 4b: re-enabling a strict peer must re-apply the withhold
         // — start BGP only if BFD is already Up, else withhold until it is.
@@ -2953,6 +2964,7 @@ impl PeerManager {
         );
         // ADR-0067 step 4: drain this peer's BFD session (published disabled).
         self.set_bfd_peer_disabled(address, true);
+        self.mark_unadmitted_disabled_dynamic(&peer);
         info!(peer = %address, "peer disabled");
         Ok(())
     }

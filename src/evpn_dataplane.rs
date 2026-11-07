@@ -4810,6 +4810,78 @@ mod tests {
         assert_eq!(entries[0].1.router_mac, MacAddress::new([0xaa; 6]));
     }
 
+    // RFC 9136 §3.1: a sender SHOULD zero the label of an overlay-index
+    // Type 5, and the receiver MUST resolve it recursively. Both overlay
+    // shapes arrive with label 0 here and resolve under the IP-VRF's L3VNI.
+    #[tokio::test]
+    async fn build_intent_tables_resolves_label_zero_overlay_index_type5() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 60]);
+        let zero_label = |mut route: EvpnRibRoute| {
+            let EvpnRoute::IpPrefix(ip_prefix) = &mut route.route else {
+                panic!("helper must build Type 5");
+            };
+            ip_prefix.label = MplsLabel::new(0);
+            route
+        };
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_host_ip(
+                        100,
+                        0xaa,
+                        Some("192.0.2.10"),
+                        "10.0.0.2",
+                        Some(7),
+                    ),
+                    zero_label(evpn_ip_prefix_route(
+                        "10.1.0.0/24",
+                        "192.0.2.10",
+                        "10.0.0.9",
+                        5000,
+                    )),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.3"),
+                    zero_label(type5_with_esi_and_router_mac(
+                        "10.60.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        0,
+                        [0x02, 0x60, 0, 0, 0, 1],
+                    )),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert_eq!(
+            tables.remote_ip_prefixes.drops().len(),
+            0,
+            "{:?}",
+            tables.remote_ip_prefixes.drops()
+        );
+        let entries: Vec<_> = tables
+            .remote_ip_prefixes
+            .for_vrf(IpVrfId::new(5000).unwrap())
+            .map(|(prefix, entry)| (prefix.to_string(), entry.next_hop, entry.l3vni))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("10.1.0.0/24".to_string(), ipa("10.0.0.2"), 5000),
+                ("10.60.0.0/24".to_string(), ipa("10.0.0.3"), 5000),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn build_intent_tables_resolves_single_active_esi_overlay_type5_through_ead() {
         let instances = local_instance_table(100, Some("br100"));
@@ -5293,6 +5365,7 @@ mod tests {
                 vlan_filtering: false,
                 vxlan: Some(KernelVxlanInfo {
                     ifindex: 200,
+                    up: true,
                     vni: 100,
                     local_ip: ipa("10.0.0.1"),
                     learning_disabled: Some(true),

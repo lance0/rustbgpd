@@ -1448,6 +1448,26 @@ fn insert_test_dynamic_managed_peer(
     mgr.refresh_dynamic_neighbor_capacity_metrics();
 }
 
+/// Attribute a test-harness peer marked dynamic to a configured range, as
+/// an accepted dynamic peer is: a dynamic peer no range admits cannot be
+/// enabled (ADR-0086 amendment).
+fn admit_test_dynamic_peer(mgr: &mut PeerManager, peer: &PeerKey) {
+    let prefix_len = if peer.address.is_ipv4() { 32 } else { 128 };
+    mgr.dynamic_ranges.push(dynamic::DynamicRange {
+        addr: peer.address,
+        prefix_len,
+        peer_group: "test-dynamic".to_string(),
+        remote_asn: 0,
+        description: None,
+        tcp_ao: None,
+    });
+    mgr.peers.get_mut(peer).unwrap().accepted_dynamic_range = Some(AcceptedDynamicRange {
+        addr: peer.address,
+        prefix_len,
+        peer_group: "test-dynamic".to_string(),
+    });
+}
+
 fn process_global_metric(metrics: &BgpMetrics, family_name: &str) -> Option<f64> {
     metrics
         .registry()

@@ -36,7 +36,8 @@ pub const RTR_VERSION_2: u8 = 2;
 ///         | RtrPdu::EndOfData { .. }
 ///         | RtrPdu::CacheReset
 ///         | RtrPdu::ErrorReport { .. }
-///         | RtrPdu::Aspa { .. } => {}
+///         | RtrPdu::Aspa { .. }
+///         | RtrPdu::RouterKey { .. } => {}
 ///     }
 /// }
 /// ```
@@ -122,6 +123,20 @@ pub enum RtrPdu {
         customer_asn: u32,
         /// Authorized provider ASNs (sorted ascending).
         provider_asns: Vec<u32>,
+    },
+    /// Server → Client: `BGPsec` router key (type 9, RFC 8210 §5.10 and
+    /// 8210bis), defined in protocol versions 1 and 2. The client decodes it
+    /// so its framing is checked like any other PDU, then ignores it: this
+    /// router does not validate `BGPsec` paths.
+    RouterKey {
+        /// 1 = announce, 0 = withdraw.
+        flags: u8,
+        /// Subject Key Identifier of the router key (20 octets).
+        ski: [u8; 20],
+        /// AS number the router key belongs to.
+        asn: u32,
+        /// DER-encoded `SubjectPublicKeyInfo`, including its tag and length.
+        spki: Vec<u8>,
     },
 }
 
@@ -215,6 +230,7 @@ const PDU_IPV4_PREFIX: u8 = 4;
 const PDU_IPV6_PREFIX: u8 = 6;
 const PDU_END_OF_DATA: u8 = 7;
 const PDU_CACHE_RESET: u8 = 8;
+const PDU_ROUTER_KEY: u8 = 9;
 pub(crate) const PDU_ERROR_REPORT: u8 = 10;
 const PDU_ASPA: u8 = 11;
 
@@ -420,7 +436,12 @@ impl RtrPdu {
                 }
                 let err_code = session_id; // In Error Report, bytes 2-3 are the error code
                 let encap_len = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
-                if 16 + encap_len > length {
+                // Peer-supplied 32-bit lengths can overflow a 32-bit
+                // `usize` once the fixed octets are added.
+                if encap_len
+                    .checked_add(16)
+                    .is_none_or(|needed| needed > length)
+                {
                     return Err(RtrDecodeError::InvalidLength);
                 }
                 let encap_pdu = buf[12..12 + encap_len].to_vec();
@@ -431,7 +452,11 @@ impl RtrPdu {
                     buf[text_len_offset + 2],
                     buf[text_len_offset + 3],
                 ]) as usize;
-                if text_len_offset + 4 + text_len != length {
+                if text_len_offset
+                    .checked_add(4)
+                    .and_then(|start| start.checked_add(text_len))
+                    != Some(length)
+                {
                     return Err(RtrDecodeError::InvalidLength);
                 }
                 let text =
@@ -479,6 +504,27 @@ impl RtrPdu {
                     flags,
                     customer_asn,
                     provider_asns,
+                }
+            }
+            PDU_ROUTER_KEY => {
+                // RFC 8210 §5.10: the 8-octet header, a 20-octet Subject Key
+                // Identifier and a 4-octet AS number, then the DER
+                // SubjectPublicKeyInfo, which has no length field of its own
+                // and must fill the rest of the PDU exactly.
+                if length < 32 {
+                    return Err(RtrDecodeError::InvalidLength);
+                }
+                let key_info = &buf[32..length];
+                if der_element_len(key_info) != Some(key_info.len()) {
+                    return Err(RtrDecodeError::InvalidLength);
+                }
+                let mut ski = [0u8; 20];
+                ski.copy_from_slice(&buf[8..28]);
+                RtrPdu::RouterKey {
+                    flags: buf[2],
+                    ski,
+                    asn: u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]),
+                    spki: key_info.to_vec(),
                 }
             }
             _ => return Err(RtrDecodeError::InvalidType(pdu_type)),
@@ -620,6 +666,22 @@ impl RtrPdu {
                     buf.extend_from_slice(&asn.to_be_bytes());
                 }
             }
+            RtrPdu::RouterKey {
+                flags,
+                ski,
+                asn,
+                spki,
+            } => {
+                let total_len = checked_total_len("RTR Router Key PDU", 32, &[spki.len()])?;
+                buf.push(version);
+                buf.push(PDU_ROUTER_KEY);
+                buf.push(*flags);
+                buf.push(0);
+                buf.extend_from_slice(&total_len.to_be_bytes());
+                buf.extend_from_slice(ski);
+                buf.extend_from_slice(&asn.to_be_bytes());
+                buf.extend_from_slice(spki);
+            }
             RtrPdu::ErrorReport { code, pdu, text } => {
                 let text_bytes = text.as_bytes();
                 let total_len =
@@ -640,9 +702,128 @@ impl RtrPdu {
     }
 }
 
+/// Total length of the DER SEQUENCE at the start of `der` (tag, length and
+/// contents), or `None` when it is not a well-formed definite-length
+/// SEQUENCE header.
+fn der_element_len(der: &[u8]) -> Option<usize> {
+    const SEQUENCE: u8 = 0x30;
+    let (&tag, rest) = der.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    if tag != SEQUENCE {
+        return None;
+    }
+    if first < 0x80 {
+        return Some(2 + usize::from(first));
+    }
+    let octets = usize::from(first & 0x7f);
+    if octets == 0 || octets > 4 || rest.len() < octets {
+        return None;
+    }
+    let content = rest[..octets]
+        .iter()
+        .fold(0usize, |len, &byte| (len << 8) | usize::from(byte));
+    // A 4-octet length plus the header overflows a 32-bit `usize`.
+    content.checked_add(2 + octets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Router Key frame: header, 20-octet SKI, AS number, then `spki`.
+    fn router_key_frame(version: u8, spki: &[u8]) -> Vec<u8> {
+        let mut frame = vec![version, 9, 1, 0];
+        frame.extend_from_slice(&u32::try_from(32 + spki.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(&[0xab; 20]);
+        frame.extend_from_slice(&65_003u32.to_be_bytes());
+        frame.extend_from_slice(spki);
+        frame
+    }
+
+    /// A minimal well-formed DER SEQUENCE standing in for a key's SPKI.
+    const SPKI: [u8; 5] = [0x30, 0x03, 0x02, 0x01, 0x00];
+
+    /// RFC 8210 §5.10 and 8210bis define the Router Key PDU (type 9) in
+    /// protocol versions 1 and 2. It is a known type, not an Unsupported PDU
+    /// Type: a well-formed one decodes and consumes exactly its frame.
+    #[test]
+    fn router_key_pdu_decodes_at_v1_and_v2() {
+        for version in [RTR_VERSION, RTR_VERSION_2] {
+            let frame = router_key_frame(version, &SPKI);
+            let (_, consumed) =
+                RtrPdu::decode(&frame).expect("a well-formed Router Key PDU was refused");
+            assert_eq!(consumed, frame.len());
+        }
+    }
+
+    /// The Router Key's framing is checked like any other PDU: the decoded
+    /// fields round-trip, and a frame too short for the SKI and AS number, an
+    /// SPKI whose DER length disagrees with the PDU length, or an SPKI that is
+    /// not a SEQUENCE is a decode error.
+    #[test]
+    fn router_key_pdu_framing_is_checked() {
+        let frame = router_key_frame(RTR_VERSION, &SPKI);
+        let (pdu, _) = RtrPdu::decode(&frame).unwrap();
+        assert_eq!(
+            pdu,
+            RtrPdu::RouterKey {
+                flags: 1,
+                ski: [0xab; 20],
+                asn: 65_003,
+                spki: SPKI.to_vec(),
+            }
+        );
+        let mut encoded = Vec::new();
+        pdu.encode(&mut encoded).unwrap();
+        assert_eq!(encoded, frame);
+
+        let mut short = frame[..31].to_vec();
+        short[4..8].copy_from_slice(&31u32.to_be_bytes());
+        let truncated_spki = router_key_frame(RTR_VERSION, &SPKI[..4]);
+        let trailing = router_key_frame(RTR_VERSION, &[SPKI.as_slice(), &[0]].concat());
+        let not_a_sequence = router_key_frame(RTR_VERSION, &[0x04, 0x01, 0x00]);
+        let empty_spki = router_key_frame(RTR_VERSION, &[]);
+        for malformed in [short, truncated_spki, trailing, not_a_sequence, empty_spki] {
+            assert_eq!(
+                RtrPdu::decode(&malformed),
+                Err(RtrDecodeError::InvalidLength),
+                "{malformed:02x?}"
+            );
+        }
+        assert_eq!(
+            RtrPdu::decode(&frame[..frame.len() - 1]),
+            Err(RtrDecodeError::Incomplete)
+        );
+    }
+
+    /// Peer-supplied lengths at the 32-bit maximum must be refused, not
+    /// overflow `usize` on a 32-bit target: a complete 38-octet Router Key
+    /// whose SPKI claims a 0xffffffff-octet body, and Error Reports whose
+    /// encapsulated-PDU or text length is 0xffffffff.
+    #[test]
+    fn maximum_peer_lengths_are_refused_without_overflow() {
+        let router_key = router_key_frame(RTR_VERSION, &[0x30, 0x84, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(router_key.len(), 38);
+        assert_eq!(
+            RtrPdu::decode(&router_key),
+            Err(RtrDecodeError::InvalidLength)
+        );
+
+        let error_report = |encap: u32, text: u32| {
+            let mut frame = vec![RTR_VERSION, PDU_ERROR_REPORT, 0, 0];
+            frame.extend_from_slice(&16u32.to_be_bytes());
+            frame.extend_from_slice(&encap.to_be_bytes());
+            frame.extend_from_slice(&text.to_be_bytes());
+            frame
+        };
+        for frame in [error_report(u32::MAX, 0), error_report(0, u32::MAX)] {
+            assert_eq!(
+                RtrPdu::decode(&frame),
+                Err(RtrDecodeError::InvalidLength),
+                "{frame:02x?}"
+            );
+        }
+    }
 
     fn roundtrip(pdu: &RtrPdu) -> RtrPdu {
         let mut buf = Vec::new();

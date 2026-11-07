@@ -684,6 +684,43 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
     }
 }
 
+/// Load-bearing: a group-writable `runtime_state_dir` lets another local
+/// user plant symlinks under daemon-owned state, so boot must refuse it
+/// rather than continue with a warning.
+#[test]
+fn unsafe_runtime_state_dir_refuses_boot() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let runtime_dir = temp.path().join("runtime");
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o775))
+        .expect("make runtime dir group-writable");
+
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let status = daemon.wait_within(Duration::from_secs(60));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "unsafe state dir must exit 1\n{logs}"
+    );
+    assert!(
+        logs.contains("refusing to start: runtime_state_dir must be"),
+        "{logs}"
+    );
+    // The reason reaches stderr, not only the structured log.
+    let stderr = std::fs::read_to_string(&daemon.stderr_path).unwrap();
+    assert!(
+        stderr.contains("error: refusing to start: runtime_state_dir")
+            && stderr.contains(&runtime_dir.display().to_string())
+            && stderr.contains("775"),
+        "stderr must name the refused directory and why:\n{stderr}"
+    );
+    assert!(
+        std::fs::read_dir(&runtime_dir).unwrap().next().is_none(),
+        "nothing may be written under a refused state dir"
+    );
+}
+
 #[test]
 fn grpc_bind_failure_exits_nonzero() {
     let temp = private_tempdir();

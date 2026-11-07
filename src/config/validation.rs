@@ -805,6 +805,16 @@ impl Config {
                 validate_grpc_pem_file(key, "grpc_tcp.tls_key_file", PemKind::PrivateKey)?;
                 validate_grpc_pem_file(ca, "grpc_tcp.tls_client_ca_file", PemKind::Certificate)?;
             }
+            if let Some(crl) = cfg.tls_client_crl_file.as_deref() {
+                if tls_count != 3 {
+                    return Err(ConfigError::InvalidGrpcConfig {
+                        reason: "grpc_tcp.tls_client_crl_file requires tls_cert_file, \
+                                 tls_key_file, and tls_client_ca_file"
+                            .to_string(),
+                    });
+                }
+                validate_grpc_pem_file(crl, "grpc_tcp.tls_client_crl_file", PemKind::Crl)?;
+            }
             validate_grpc_principal(cfg.principal.as_deref(), "grpc_tcp.principal")?;
             if cfg.principal.is_some() && tls_count == 3 {
                 return Err(ConfigError::InvalidGrpcConfig {
@@ -1343,6 +1353,19 @@ impl Config {
 
         // Validate RPKI cache server config
         if let Some(ref rpki) = self.rpki {
+            let (per_cache, total) = (rpki.max_records_per_cache(), rpki.max_records_total());
+            if per_cache == 0 || total == 0 {
+                return Err(ConfigError::InvalidRpkiConfig {
+                    reason: "max_records_per_cache and max_records_total must be >= 1".to_string(),
+                });
+            }
+            if per_cache > total {
+                return Err(ConfigError::InvalidRpkiConfig {
+                    reason: format!(
+                        "max_records_per_cache ({per_cache}) must be <= max_records_total ({total})"
+                    ),
+                });
+            }
             let mut cache_addresses = HashMap::new();
             for (i, server) in rpki.cache_servers.iter().enumerate() {
                 let address = server.address.parse::<SocketAddr>().map_err(|e| {
@@ -3900,6 +3923,8 @@ enum PemKind {
     Certificate,
     /// A `PRIVATE KEY`, `RSA PRIVATE KEY`, or `EC PRIVATE KEY` block.
     PrivateKey,
+    /// An `X509 CRL` block.
+    Crl,
 }
 
 /// Largest gRPC credential file (PEM bundle or token) config validation
@@ -3917,15 +3942,13 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
             reason: format!("{field_name} must not be empty"),
         });
     }
-    // Bounded and regular-file-only: a FIFO or device path must not block
-    // or exhaust the load.
-    let bytes = rustbgpd_policy::datasets::read_regular_file_bounded(
-        Path::new(path),
-        MAX_GRPC_CREDENTIAL_FILE_BYTES,
-    )
-    .map_err(|e| ConfigError::InvalidGrpcConfig {
-        reason: format!("failed to read {field_name} {path:?}: {e}"),
-    })?;
+    let credential_kind = match kind {
+        PemKind::Certificate | PemKind::Crl => {
+            rustbgpd_api::credential_file::CredentialKind::Public
+        }
+        PemKind::PrivateKey => rustbgpd_api::credential_file::CredentialKind::Secret,
+    };
+    let bytes = read_grpc_credential_file(path, field_name, credential_kind)?;
     if bytes.is_empty() {
         return Err(ConfigError::InvalidGrpcConfig {
             reason: format!("{field_name} {path:?} is empty"),
@@ -3963,6 +3986,7 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
     let acceptable: &[&str] = match kind {
         PemKind::Certificate => &["CERTIFICATE"],
         PemKind::PrivateKey => &["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"],
+        PemKind::Crl => &["X509 CRL"],
     };
     let any_match = begin_lines.iter().any(|line| {
         let trimmed = line.trim_end();
@@ -3984,6 +4008,41 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
     Ok(())
 }
 
+/// Read a gRPC credential file under the shared admission rules
+/// ([`rustbgpd_api::credential_file`]): a refused file fails config load.
+/// Permission warnings are reported by credential staging, once per load.
+/// At most [`MAX_GRPC_CREDENTIAL_FILE_BYTES`] are read; a larger file is
+/// refused rather than buffered.
+fn read_grpc_credential_file(
+    path: &str,
+    field_name: &str,
+    kind: rustbgpd_api::credential_file::CredentialKind,
+) -> Result<Vec<u8>, ConfigError> {
+    use std::io::Read as _;
+    let (file, _warning) = rustbgpd_api::credential_file::open_credential(
+        Path::new(path),
+        field_name,
+        kind,
+        rustbgpd_api::credential_file::DaemonIdentity::current(),
+    )
+    .map_err(|reason| ConfigError::InvalidGrpcConfig { reason })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_GRPC_CREDENTIAL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ConfigError::InvalidGrpcConfig {
+            reason: format!("failed to read {field_name} {path:?}: {e}"),
+        })?;
+    if bytes.len() as u64 > MAX_GRPC_CREDENTIAL_FILE_BYTES {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!(
+                "failed to read {field_name} {path:?}: larger than \
+                 {MAX_GRPC_CREDENTIAL_FILE_BYTES} bytes"
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
 fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), ConfigError> {
     let Some(path) = path else {
         return Ok(());
@@ -3993,16 +4052,13 @@ fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), 
             reason: format!("{field_name} must not be empty"),
         });
     }
-    let token = rustbgpd_policy::datasets::read_regular_file_bounded(
-        Path::new(path),
-        MAX_GRPC_CREDENTIAL_FILE_BYTES,
-    )
-    .and_then(|bytes| {
-        String::from_utf8(bytes)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    })
-    .map_err(|e| ConfigError::InvalidGrpcConfig {
-        reason: format!("failed to read {field_name} {path:?}: {e}"),
+    let bytes = read_grpc_credential_file(
+        path,
+        field_name,
+        rustbgpd_api::credential_file::CredentialKind::Secret,
+    )?;
+    let token = String::from_utf8(bytes).map_err(|_| ConfigError::InvalidGrpcConfig {
+        reason: format!("{field_name} {path:?} is not valid UTF-8"),
     })?;
     if token.trim_end().is_empty() {
         return Err(ConfigError::InvalidGrpcConfig {

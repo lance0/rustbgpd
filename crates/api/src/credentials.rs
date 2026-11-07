@@ -1,6 +1,6 @@
 //! Atomic management-plane credential generations.
 
-use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -9,13 +9,16 @@ use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
 use prometheus::{IntGaugeVec, Opts, Registry};
 use tokio_rustls::rustls::pki_types::pem::PemObject;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::pki_types::{
+    CertificateDer, CertificateRevocationListDer, PrivateKeyDer,
+};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
 use crate::authz_runtime::BearerAuthSecret;
+use crate::credential_file::{CredentialKind, DaemonIdentity, open_credential};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CredentialSource {
@@ -28,6 +31,9 @@ pub struct TlsSource {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub client_ca_file: PathBuf,
+    /// Optional PEM CRLs checked against client certificate chains. Once
+    /// configured, a missing, unparsable or expired CRL fails closed.
+    pub client_crl_file: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -144,6 +150,8 @@ impl std::fmt::Debug for ListenerCredentials {
 pub struct CredentialGeneration {
     sequence: u64,
     listeners: Arc<[ListenerCredentials]>,
+    /// Permission warnings for the files this generation was staged from.
+    file_warnings: Arc<[String]>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +184,14 @@ impl CredentialGeneration {
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Credential files this generation accepted that are readable beyond the
+    /// daemon (see [`crate::credential_file`]). Report them once per load or
+    /// reload.
+    #[must_use]
+    pub fn file_warnings(&self) -> &[String] {
+        &self.file_warnings
     }
 
     pub(crate) fn listener(&self, index: usize) -> &ListenerCredentials {
@@ -268,30 +284,73 @@ fn stage_generation(
     sources: &[CredentialSource],
     sequence: u64,
 ) -> Result<CredentialGeneration, String> {
+    let daemon = DaemonIdentity::current();
+    let mut warnings = Vec::new();
     let listeners = sources
         .iter()
         .enumerate()
-        .map(|(index, source)| stage_listener(index, source))
+        .map(|(index, source)| {
+            let mut files = Files {
+                index,
+                daemon,
+                warnings: &mut warnings,
+            };
+            stage_listener(&mut files, source)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CredentialGeneration {
         sequence,
         listeners: listeners.into(),
+        file_warnings: warnings.into(),
     })
 }
 
-fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCredentials, String> {
+/// Opens one listener's credential files under the shared admission rules,
+/// collecting the warnings for the generation.
+struct Files<'a> {
+    index: usize,
+    daemon: DaemonIdentity,
+    warnings: &'a mut Vec<String>,
+}
+
+impl Files<'_> {
+    fn open(
+        &mut self,
+        label: &str,
+        kind: CredentialKind,
+        path: &Path,
+    ) -> Result<std::fs::File, String> {
+        let (file, warning) = open_credential(path, label, kind, self.daemon)
+            .map_err(|e| format!("listener {}: {e}", self.index))?;
+        if let Some(warning) = warning {
+            self.warnings
+                .push(format!("listener {}: {warning}", self.index));
+        }
+        Ok(file)
+    }
+}
+
+fn stage_listener(
+    files: &mut Files<'_>,
+    source: &CredentialSource,
+) -> Result<ListenerCredentials, String> {
+    let index = files.index;
     let bearer = source
         .token_file
         .as_ref()
         .map(|path| {
             // Zeroizing scrubs this transient read when it drops; the
             // retained copy inside `BearerAuthSecret` scrubs on its own drop.
-            let raw = Zeroizing::new(fs::read_to_string(path).map_err(|e| {
-                format!(
-                    "listener {index}: failed to read token file {}: {e}",
-                    path.display()
-                )
-            })?);
+            let mut raw = Zeroizing::new(String::new());
+            files
+                .open("token", CredentialKind::Secret, path)?
+                .read_to_string(&mut raw)
+                .map_err(|e| {
+                    format!(
+                        "listener {index}: failed to read token file {}: {e}",
+                        path.display()
+                    )
+                })?;
             let token = raw.trim_end();
             if token.is_empty() {
                 return Err(format!(
@@ -305,7 +364,7 @@ fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCre
     let tls = source
         .tls
         .as_ref()
-        .map(|source| build_tls(index, source))
+        .map(|source| build_tls(files, source))
         .transpose()?;
     let (tls, tls_expiry) = match tls {
         Some((config, expiry)) => (Some(config), Some(expiry)),
@@ -320,13 +379,23 @@ fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCre
 
 /// Read a credential file into a buffer that is scrubbed on drop (the TLS
 /// private key in particular must not linger in freed heap after parsing).
-fn read_file(index: usize, label: &str, path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    let bytes = Zeroizing::new(fs::read(path).map_err(|e| {
-        format!(
-            "listener {index}: failed to read {label} file {}: {e}",
-            path.display()
-        )
-    })?);
+fn read_file(
+    files: &mut Files<'_>,
+    label: &str,
+    kind: CredentialKind,
+    path: &Path,
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    let index = files.index;
+    let mut bytes = Zeroizing::new(Vec::new());
+    files
+        .open(label, kind, path)?
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            format!(
+                "listener {index}: failed to read {label} file {}: {e}",
+                path.display()
+            )
+        })?;
     if bytes.is_empty() {
         return Err(format!(
             "listener {index}: {label} file {} is empty",
@@ -336,10 +405,29 @@ fn read_file(index: usize, label: &str, path: &Path) -> Result<Zeroizing<Vec<u8>
     Ok(bytes)
 }
 
-fn build_tls(index: usize, source: &TlsSource) -> Result<(Arc<ServerConfig>, TlsExpiry), String> {
-    let cert_bytes = read_file(index, "certificate", &source.cert_file)?;
-    let key_bytes = read_file(index, "private key", &source.key_file)?;
-    let ca_bytes = read_file(index, "client CA", &source.client_ca_file)?;
+fn build_tls(
+    files: &mut Files<'_>,
+    source: &TlsSource,
+) -> Result<(Arc<ServerConfig>, TlsExpiry), String> {
+    let index = files.index;
+    let cert_bytes = read_file(
+        files,
+        "certificate",
+        CredentialKind::Public,
+        &source.cert_file,
+    )?;
+    let key_bytes = read_file(
+        files,
+        "private key",
+        CredentialKind::Secret,
+        &source.key_file,
+    )?;
+    let ca_bytes = read_file(
+        files,
+        "client CA",
+        CredentialKind::Public,
+        &source.client_ca_file,
+    )?;
     let certs = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .map_err(|e| format!("listener {index}: invalid certificate PEM: {e}"))?;
@@ -374,13 +462,36 @@ fn build_tls(index: usize, source: &TlsSource) -> Result<(Arc<ServerConfig>, Tls
             "listener {index}: client-CA PEM contains invalid certificates"
         ));
     }
-    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+    let mut verifier = WebPkiClientVerifier::builder(Arc::new(roots));
+    if let Some(path) = &source.client_crl_file {
+        // Fail closed once configured: an unreadable or unparsable file
+        // rejects the generation, a chain whose issuer has no CRL is refused
+        // (rustls' default unknown-status policy), and an expired CRL
+        // refuses every client until it is refreshed and reloaded.
+        let crl_bytes = read_file(files, "client CRL", CredentialKind::Public, path)?;
+        let crls = CertificateRevocationListDer::pem_slice_iter(&crl_bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("listener {index}: invalid client-CRL PEM: {e}"))?;
+        if crls.is_empty() {
+            return Err(format!("listener {index}: client-CRL PEM contains no CRLs"));
+        }
+        verifier = verifier.with_crls(crls).enforce_revocation_expiration();
+    }
+    let checks_crl = source.client_crl_file.is_some();
+    let verifier = verifier
         .build()
         .map_err(|e| format!("listener {index}: invalid client-CA verifier: {e}"))?;
     let mut config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
         .map_err(|e| format!("listener {index}: certificate/private-key mismatch: {e}"))?;
+    if checks_crl {
+        // A resumed session skips client-certificate verification, so a
+        // client authenticated before the CRL's nextUpdate could keep
+        // reconnecting after it. Every handshake must consult the CRL.
+        config.session_storage = Arc::new(tokio_rustls::rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
     // tonic's `ServerTlsConfig` advertises HTTP/2 over ALPN; the manual
     // rustls config must do the same, or ALPN-strict gRPC clients
     // (grpc-go: gnmic, gobgp) refuse to negotiate h2 on the TLS session.
@@ -563,6 +674,7 @@ mod tests {
                 cert_file: cert.path().into(),
                 key_file: key.path().into(),
                 client_ca_file: ca.path().into(),
+                client_crl_file: None,
             }),
         }])
         .unwrap();
@@ -592,6 +704,7 @@ mod tests {
                 cert_file: cert_file.path().into(),
                 key_file: key_file.path().into(),
                 client_ca_file: ca_file.path().into(),
+                client_crl_file: None,
             }),
         }])
         .unwrap();
@@ -648,6 +761,53 @@ mod tests {
             expiry_metrics(&registry)["server_leaf"],
             new_expiry.server_leaf.unwrap()
         );
+    }
+
+    /// Load-bearing: load and reload apply the shared file rules. A shared
+    /// token is accepted with one warning per generation, a world-writable
+    /// one is refused and leaves the last good generation active, and a
+    /// directory is refused outright.
+    #[test]
+    fn token_file_permissions_are_judged_on_load_and_reload() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let token = token_file("secret\n");
+        let chmod = |mode| {
+            std::fs::set_permissions(token.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        chmod(0o644);
+        let store = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(token.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap();
+        let warnings = store.load().file_warnings().to_vec();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("listener 0: token file"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("mode 0644"), "{warnings:?}");
+
+        chmod(0o600);
+        assert_eq!(store.reload().unwrap(), 2);
+        assert_eq!(store.load().file_warnings(), [] as [String; 0]);
+
+        chmod(0o666);
+        let error = store.reload().unwrap_err();
+        assert!(error.contains("world-writable"), "{error}");
+        assert_eq!(
+            store.load().sequence(),
+            2,
+            "last good generation stays active"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let error = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(dir.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap_err();
+        assert!(error.contains("not a regular file"), "{error}");
     }
 
     #[test]
@@ -832,6 +992,286 @@ mod tests {
         assert_eq!(store.load().sequence(), total + 1);
     }
 
+    /// A CA that signs a server leaf, a good client and a revoked client,
+    /// plus CRLs for it.
+    struct RevocationFixture {
+        issuer: Issuer<'static, KeyPair>,
+        ca_pem: String,
+        server_pem: String,
+        server_key_pem: String,
+        good: Arc<ClientConfig>,
+        revoked: Arc<ClientConfig>,
+    }
+
+    impl RevocationFixture {
+        const REVOKED_SERIAL: u64 = 0x2926;
+
+        fn new() -> Self {
+            let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+            let mut params = CertificateParams::new(Vec::new()).unwrap();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params.distinguished_name.push(DnType::CommonName, "crl CA");
+            params.key_usages.extend([
+                KeyUsagePurpose::DigitalSignature,
+                KeyUsagePurpose::KeyCertSign,
+                KeyUsagePurpose::CrlSign,
+            ]);
+            let ca_key = KeyPair::generate().unwrap();
+            let ca = params.self_signed(&ca_key).unwrap();
+            let issuer = Issuer::new(params, ca_key);
+            let (server, server_key) =
+                signed_leaf(&issuer, "server", ExtendedKeyUsagePurpose::ServerAuth);
+            let client = |name: &str, serial: u64| {
+                let mut params = CertificateParams::new(Vec::new()).unwrap();
+                params.distinguished_name.push(DnType::CommonName, name);
+                params.serial_number = Some(serial.into());
+                params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+                params
+                    .extended_key_usages
+                    .push(ExtendedKeyUsagePurpose::ClientAuth);
+                let key = KeyPair::generate().unwrap();
+                let cert = params.signed_by(&key, &issuer).unwrap();
+                let mut roots = RootCertStore::empty();
+                roots.add(ca.der().clone()).unwrap();
+                Arc::new(
+                    ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_client_auth_cert(
+                            vec![cert.der().clone()],
+                            PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+                        )
+                        .unwrap(),
+                )
+            };
+            Self {
+                good: client("good", 0x1000),
+                revoked: client("revoked", Self::REVOKED_SERIAL),
+                ca_pem: ca.pem(),
+                server_pem: server.pem(),
+                server_key_pem: server_key.serialize_pem(),
+                issuer,
+            }
+        }
+
+        /// A CRL from this CA revoking `revoked`, valid until `next_year`.
+        fn crl(&self, revoked: &[u64], next_year: i32) -> String {
+            self.crl_with(revoked, |params| {
+                params.next_update = rcgen::date_time_ymd(next_year, 1, 1);
+            })
+        }
+
+        /// A CRL with no revocations whose nextUpdate is `seconds` from now.
+        fn crl_expiring_in(&self, seconds: u64) -> String {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            self.crl_with(&[], |params| {
+                params.next_update = rcgen::date_time_ymd(1970, 1, 1)
+                    + std::time::Duration::from_secs(now.as_secs() + seconds);
+            })
+        }
+
+        fn crl_with(
+            &self,
+            revoked: &[u64],
+            edit: impl FnOnce(&mut rcgen::CertificateRevocationListParams),
+        ) -> String {
+            let mut params = rcgen::CertificateRevocationListParams {
+                this_update: rcgen::date_time_ymd(2000, 1, 1),
+                next_update: rcgen::date_time_ymd(2999, 1, 1),
+                crl_number: 1_u64.into(),
+                issuing_distribution_point: None,
+                revoked_certs: revoked
+                    .iter()
+                    .map(|serial| rcgen::RevokedCertParams {
+                        serial_number: (*serial).into(),
+                        revocation_time: rcgen::date_time_ymd(2000, 1, 1),
+                        reason_code: Some(rcgen::RevocationReason::KeyCompromise),
+                        invalidity_date: None,
+                    })
+                    .collect(),
+                key_identifier_method: rcgen::KeyIdMethod::Sha256,
+            };
+            edit(&mut params);
+            params.signed_by(&self.issuer).unwrap().pem().unwrap()
+        }
+
+        fn stage(&self, crl: Option<&NamedTempFile>) -> (CredentialStore, [NamedTempFile; 3]) {
+            let files = [
+                token_file(&self.server_pem),
+                token_file(&self.server_key_pem),
+                token_file(&self.ca_pem),
+            ];
+            let store = CredentialStore::stage(vec![CredentialSource {
+                token_file: None,
+                tls: Some(TlsSource {
+                    cert_file: files[0].path().to_path_buf(),
+                    key_file: files[1].path().to_path_buf(),
+                    client_ca_file: files[2].path().to_path_buf(),
+                    client_crl_file: crl.map(|file| file.path().to_path_buf()),
+                }),
+            }])
+            .unwrap();
+            (store, files)
+        }
+    }
+
+    /// Run one real mTLS handshake against the store's current generation;
+    /// true when the server accepted the client and a byte crossed it.
+    async fn mtls_handshake(store: &CredentialStore, client: Arc<ClientConfig>) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = store.load().listener(0).tls.clone().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(config).accept(tcp).await?;
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await?;
+            Ok::<_, std::io::Error>(byte)
+        });
+        let client_sent = match connect(client, addr).await {
+            Ok(mut stream) => stream
+                .write_all(b"x")
+                .await
+                .and(stream.flush().await)
+                .is_ok(),
+            Err(_) => false,
+        };
+        let accepted = matches!(server.await.unwrap(), Ok(byte) if byte == *b"x");
+        assert!(!accepted || client_sent);
+        accepted
+    }
+
+    /// Load-bearing: with a CRL configured, a client certificate it revokes
+    /// is refused over a real mTLS handshake, an unrevoked one is accepted,
+    /// and a reload that adds the revocation applies to new handshakes.
+    /// Without the CRL the revoked certificate is accepted, as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn crl_refuses_revoked_client_certificates_and_reloads() {
+        let fixture = RevocationFixture::new();
+        let (store, _files) = fixture.stage(None);
+        assert!(mtls_handshake(&store, fixture.revoked.clone()).await);
+
+        let mut crl = token_file(&fixture.crl(&[RevocationFixture::REVOKED_SERIAL], 2999));
+        let (store, _files) = fixture.stage(Some(&crl));
+        assert!(mtls_handshake(&store, fixture.good.clone()).await);
+        assert!(!mtls_handshake(&store, fixture.revoked.clone()).await);
+
+        overwrite(&mut crl, fixture.crl(&[], 2999).as_bytes());
+        store.reload().unwrap();
+        assert!(mtls_handshake(&store, fixture.revoked.clone()).await);
+        overwrite(
+            &mut crl,
+            fixture
+                .crl(&[RevocationFixture::REVOKED_SERIAL], 2999)
+                .as_bytes(),
+        );
+        store.reload().unwrap();
+        assert!(!mtls_handshake(&store, fixture.revoked.clone()).await);
+        assert!(mtls_handshake(&store, fixture.good.clone()).await);
+    }
+
+    /// One mTLS exchange that reads the server's reply, so the client also
+    /// receives any session ticket; true when the server accepted the client.
+    async fn mtls_round_trip(store: &CredentialStore, client: Arc<ClientConfig>) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = store.load().listener(0).tls.clone().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(config).accept(tcp).await?;
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await?;
+            stream.write_all(&byte).await?;
+            stream.flush().await?;
+            Ok::<_, std::io::Error>(byte)
+        });
+        if let Ok(mut stream) = connect(client, addr).await {
+            let mut byte = [0];
+            let _ = stream.write_all(b"x").await;
+            let _ = stream.flush().await;
+            let _ = stream.read_exact(&mut byte).await;
+        }
+        matches!(server.await.unwrap(), Ok(byte) if byte == *b"x")
+    }
+
+    /// Load-bearing: a resumed TLS session skips client-certificate
+    /// verification, so a CRL-checked listener must not offer resumption.
+    /// A client that connected while the CRL was current, and kept its
+    /// session, is refused once the CRL has expired; a CRL reload that
+    /// revokes it refuses its cached session too. Offering resumption
+    /// accepts the expired-CRL reconnect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn crl_listener_refuses_a_resumed_session() {
+        const VALID_FOR_SECS: u64 = 4;
+        let fixture = RevocationFixture::new();
+        let mut crl = token_file(&fixture.crl_expiring_in(VALID_FOR_SECS));
+        let (store, _files) = fixture.stage(Some(&crl));
+        let started = std::time::Instant::now();
+        assert!(mtls_round_trip(&store, fixture.good.clone()).await);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(VALID_FOR_SECS - 1),
+            "the first handshake must finish while the CRL is current"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(VALID_FOR_SECS + 1)).await;
+        assert!(
+            !mtls_round_trip(&store, fixture.good.clone()).await,
+            "a cached session must not outlive the CRL"
+        );
+
+        overwrite(&mut crl, fixture.crl(&[], 2999).as_bytes());
+        store.reload().unwrap();
+        assert!(mtls_round_trip(&store, fixture.revoked.clone()).await);
+        overwrite(
+            &mut crl,
+            fixture
+                .crl(&[RevocationFixture::REVOKED_SERIAL], 2999)
+                .as_bytes(),
+        );
+        store.reload().unwrap();
+        assert!(!mtls_round_trip(&store, fixture.revoked.clone()).await);
+    }
+
+    /// Load-bearing fail-closed cases: once configured, an expired CRL
+    /// refuses every client, and a missing, empty, or unparsable CRL
+    /// rejects the credential generation, leaving the last good one active.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_crl_fails_closed() {
+        let fixture = RevocationFixture::new();
+        let mut crl = token_file(&fixture.crl(&[], 2001));
+        let (store, _files) = fixture.stage(Some(&crl));
+        assert!(
+            !mtls_handshake(&store, fixture.good.clone()).await,
+            "expired CRL"
+        );
+
+        overwrite(&mut crl, fixture.crl(&[], 2999).as_bytes());
+        store.reload().unwrap();
+        assert!(mtls_handshake(&store, fixture.good.clone()).await);
+        let sequence = store.load().sequence();
+
+        for (bytes, expected) in [
+            (&b"not a crl\n"[..], "contains no CRLs"),
+            (fixture.ca_pem.as_bytes(), "contains no CRLs"),
+            (
+                &b"-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n"[..],
+                "CRL could not be parsed",
+            ),
+        ] {
+            overwrite(&mut crl, bytes);
+            let error = store.reload().unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(store.load().sequence(), sequence);
+        }
+        let path = crl.path().to_path_buf();
+        drop(crl);
+        let error = store.reload().unwrap_err();
+        assert!(error.contains("client CRL file"), "{error}");
+        assert!(!path.exists());
+        assert_eq!(store.load().sequence(), sequence);
+        assert!(mtls_handshake(&store, fixture.good.clone()).await);
+    }
+
     #[tokio::test]
     async fn mtls_rotation_applies_to_new_handshakes_and_keeps_old_connection_alive() {
         let old = tls_bundle("old");
@@ -845,6 +1285,7 @@ mod tests {
                 cert_file: cert.path().to_path_buf(),
                 key_file: key.path().to_path_buf(),
                 client_ca_file: ca.path().to_path_buf(),
+                client_crl_file: None,
             }),
         }])
         .unwrap();

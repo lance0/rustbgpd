@@ -853,9 +853,9 @@ Use exactly one of these deployment paths:
 
 Do not omit the host state bind when overriding the image user. The directory
 baked into the image is owned by uid 999; a root daemon expects uid 0. The
-runtime-state owner guard treats that mismatch as unsafe, logs
-`runtime-state marker/checkpoint storage unavailable`, and disables the
-graceful-restart marker and warm checkpoint storage. v0.69.0 and later images
+runtime-state owner guard treats that mismatch as unsafe and refuses to start
+with `refusing to start: runtime_state_dir must be a directory owned by the
+daemon user and not group- or world-writable`. v0.69.0 and later images
 also reject the default gRPC UDS listener at startup. A root-owned,
 non-group/world-writable bind mount makes the authority match the running uid. The socket parent must allow the daemon
 read/write/search access, with no symlinks or untrusted writable ancestors;

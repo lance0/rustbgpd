@@ -1794,6 +1794,59 @@ mod tests {
         );
     }
 
+    /// RFC 5492 §4 / RFC 7911: an Add-Path tuple for a family we do not model
+    /// is ignored on its own. Decoded from the wire, the peer's IPv4-unicast
+    /// Send tuple still negotiates, so the UPDATEs it then sends with path IDs
+    /// decode with those path IDs rather than as prefix bytes.
+    #[test]
+    fn unmodeled_add_path_tuple_keeps_the_modeled_family() {
+        use bytes::BytesMut;
+        use rustbgpd_wire::{Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Origin, UpdateMessage};
+
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        let mut open = peer_open();
+        // IPv4 unicast Send (mode 2), then AFI 1 / SAFI 200 (unassigned) Send.
+        open.capabilities.push(Capability::Unknown {
+            code: capability_code::ADD_PATH,
+            data: Bytes::from_static(&[0, 1, 1, 2, 0, 1, 200, 2]),
+        });
+        let mut wire = BytesMut::new();
+        open.encode(&mut wire).unwrap();
+        let mut body = wire
+            .freeze()
+            .split_off(rustbgpd_wire::constants::HEADER_LEN);
+        let body_len = body.len();
+        let decoded = OpenMessage::decode(&mut body, body_len).unwrap();
+        let neg = validate_open(&decoded, &cfg).unwrap();
+        let add_path_ipv4 = neg
+            .add_path_families
+            .get(&(Afi::Ipv4, Safi::Unicast))
+            .is_some_and(|mode| matches!(mode, AddPathMode::Receive | AddPathMode::Both));
+        assert!(
+            add_path_ipv4,
+            "IPv4 unicast Add-Path receive must negotiate"
+        );
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let update = UpdateMessage::build(
+            &[Ipv4NlriEntry { path_id: 7, prefix }],
+            &[],
+            &[
+                rustbgpd_wire::PathAttribute::Origin(Origin::Igp),
+                rustbgpd_wire::PathAttribute::AsPath(rustbgpd_wire::AsPath {
+                    segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65002])],
+                }),
+                rustbgpd_wire::PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        );
+        let parsed = update.parse(true, add_path_ipv4, &[]).unwrap();
+        assert_eq!(parsed.announced, vec![Ipv4NlriEntry { path_id: 7, prefix }]);
+    }
+
     #[test]
     fn negotiate_add_path_receive_only() {
         // We want Receive, peer wants Send → we can Receive

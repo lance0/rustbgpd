@@ -12,6 +12,15 @@ use crate::state::SessionState;
 /// at least one second so idle sessions consume negligible bandwidth.
 pub const SLOW_TX_INTERVAL_US: u32 = 1_000_000;
 
+/// Ceiling on how far the peer's advertised Desired Min TX can stretch our
+/// detection time (five minutes). RFC 5880 §6.8.4 sets no upper bound, so
+/// without one a single unauthenticated packet could push detection to the
+/// `u32` microsecond limit (about 71.6 minutes). Five minutes still covers the
+/// largest multiplier (255) at the §6.8.3 one-second slow rate. A peer that
+/// really transmits more slowly tolerates fewer missed packets, and times out
+/// even without loss once its transmit interval exceeds the window.
+const MAX_REMOTE_DETECT_TIME_US: u32 = 300_000_000;
+
 /// Error constructing a [`Session`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SessionError {
@@ -123,6 +132,25 @@ impl Session {
         self.remote_discriminator
     }
 
+    /// Whether a packet with Your Discriminator zero and the given My
+    /// Discriminator may select this session.
+    ///
+    /// RFC 5880 §6.8.6 leaves the selection of a zero-Your-Discriminator
+    /// packet to the receiver, and a packet that selects no session is
+    /// discarded. A Down session accepts it: that is the bootstrap, and a
+    /// Down session runs no detection timer, so a discriminator learned
+    /// before it went Down may be stale (the peer restarted with a new one).
+    /// An Init or Up session has learned the peer's discriminator and accepts
+    /// a zero Your Discriminator only from that discriminator, which is how
+    /// the real peer signals Down after its own detection timeout zeroed
+    /// `bfd.RemoteDiscr` (§6.8.1). Any other such packet matched this session
+    /// by source address alone, which an on-link sender can spoof.
+    #[must_use]
+    pub fn admits_zero_your_discriminator(&self, my_discriminator: u32) -> bool {
+        !matches!(self.state, SessionState::Init | SessionState::Up)
+            || my_discriminator == self.remote_discriminator
+    }
+
     /// Whether this session is down because the remote signaled `AdminDown`
     /// (rather than a detection timeout or remote-signaled `Down`). RFC 5882
     /// §4.2: the BGP coupling uses this to avoid tearing a non-strict BGP
@@ -191,6 +219,10 @@ impl Session {
         }
         if pkt.your_discriminator == 0
             && !matches!(pkt.state, SessionState::Down | SessionState::AdminDown)
+        {
+            return Vec::new();
+        }
+        if pkt.your_discriminator == 0 && !self.admits_zero_your_discriminator(pkt.my_discriminator)
         {
             return Vec::new();
         }
@@ -381,16 +413,19 @@ impl Session {
     /// Desired Min TX of 0, so "have we heard from the peer" is tracked
     /// separately (`remote_seen`) rather than inferred from that field; the
     /// negotiated interval is clamped to ≥1 so the timer is never zero-duration.
+    ///
+    /// The peer's Desired Min TX can stretch that window up to
+    /// [`MAX_REMOTE_DETECT_TIME_US`], never further. Our own Required Min RX
+    /// is not clamped: `remote DetectMult × RequiredMinRx` stays reachable.
     fn detect_time_us(&self) -> Option<u32> {
         if !self.remote_seen {
             return None;
         }
-        let rx = max(
-            self.cfg.required_min_rx_interval_us,
-            self.remote_desired_min_tx_us,
-        )
-        .max(1);
-        let detect = u64::from(self.remote_detect_mult) * u64::from(rx);
+        let mult = u64::from(self.remote_detect_mult);
+        let local_rx = u64::from(self.cfg.required_min_rx_interval_us.max(1));
+        let rx = local_rx.max(u64::from(self.remote_desired_min_tx_us));
+        let ceiling = (mult * local_rx).max(u64::from(MAX_REMOTE_DETECT_TIME_US));
+        let detect = (mult * rx).min(ceiling);
         Some(u32::try_from(detect).unwrap_or(u32::MAX))
     }
 
@@ -671,6 +706,45 @@ mod tests {
         )));
     }
 
+    fn detect_interval(actions: &[Action]) -> Option<u32> {
+        actions.iter().find_map(|a| match a {
+            Action::StartTimer {
+                kind: TimerKind::Detect,
+                interval_us,
+            } => Some(*interval_us),
+            _ => None,
+        })
+    }
+
+    /// The peer's Desired Min TX can stretch detection only up to the
+    /// ceiling; just below it the RFC 5880 §6.8.4 product is used as is.
+    #[test]
+    fn remote_desired_min_tx_cannot_stretch_detection_past_the_ceiling() {
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
+        let mut p = peer(SessionState::Down, 0);
+        p.desired_min_tx_interval = u32::MAX;
+        p.detect_mult = 255;
+        let actions = s.handle(Event::PacketReceived(p));
+        assert_eq!(detect_interval(&actions), Some(MAX_REMOTE_DETECT_TIME_US));
+
+        let mut p = peer(SessionState::Down, 0);
+        p.desired_min_tx_interval = 1_000_000;
+        p.detect_mult = 255;
+        let actions = s.handle(Event::PacketReceived(p));
+        assert_eq!(detect_interval(&actions), Some(255_000_000));
+    }
+
+    /// Our own Required Min RX is local configuration, not peer input: its
+    /// product with the peer's multiplier is never clamped.
+    #[test]
+    fn local_required_min_rx_is_not_clamped() {
+        let mut config = cfg();
+        config.required_min_rx_interval_us = 600_000_000;
+        let (mut s, _) = Session::new(config).expect("non-zero discriminator");
+        let actions = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
+        assert_eq!(detect_interval(&actions), Some(1_800_000_000));
+    }
+
     #[test]
     fn discards_zero_your_discriminator_unless_sender_is_down() {
         let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
@@ -686,6 +760,56 @@ mod tests {
         let actions = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
         assert_eq!(s.state(), SessionState::Init);
         assert_ne!(actions.len(), 0);
+    }
+
+    #[test]
+    fn init_or_up_session_takes_zero_your_discriminator_only_from_the_learned_peer() {
+        let spoof = |state| {
+            let mut p = peer(state, 0);
+            p.my_discriminator = 0xDEAD_BEEF;
+            p
+        };
+
+        // Init: the peer's discriminator is learned; a stranger's bootstrap
+        // packet is discarded, a repeat from the peer itself is accepted.
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
+        let _ = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
+        assert_eq!(s.state(), SessionState::Init);
+        assert_eq!(
+            s.handle(Event::PacketReceived(spoof(SessionState::Down)))
+                .len(),
+            0
+        );
+        assert_eq!(s.remote_discriminator(), 0x0000_00BB);
+        assert_ne!(
+            s.handle(Event::PacketReceived(peer(SessionState::Down, 0)))
+                .len(),
+            0
+        );
+        assert_eq!(s.state(), SessionState::Init);
+
+        // Up: a stranger's Down/AdminDown is discarded; the session and the
+        // learned discriminator are untouched.
+        let (mut s, _) = bring_up();
+        for state in [SessionState::Down, SessionState::AdminDown] {
+            assert_eq!(s.handle(Event::PacketReceived(spoof(state))).len(), 0);
+            assert_eq!(s.state(), SessionState::Up);
+            assert_eq!(s.remote_discriminator(), 0x0000_00BB);
+        }
+        // The peer itself, after its detection timeout zeroed its
+        // `bfd.RemoteDiscr`, still brings the session down at once.
+        let down = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
+        assert_eq!(
+            state_changes(&down),
+            vec![(SessionState::Up, SessionState::Down)]
+        );
+
+        // Down: the learned discriminator may be stale, so a peer that
+        // restarted with a new one can bootstrap again.
+        let restarted = spoof(SessionState::Down);
+        let _ = s.handle(Event::PacketReceived(restarted));
+        assert_eq!(s.state(), SessionState::Init);
+        assert_eq!(s.remote_discriminator(), 0xDEAD_BEEF);
     }
 
     /// Bring a fresh session to Up (Down→Init→Up) and return it.

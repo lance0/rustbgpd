@@ -1553,6 +1553,20 @@ impl AutoLacpDrainRig {
         toml: &str,
         ready: &[(&str, rustbgpd_wire::EthernetSegmentIdentifier)],
     ) -> Self {
+        let rig = Self::started(toml, ready, None).await;
+        let outcome = rig.drain(true).await.expect("operator drain applies");
+        assert!(outcome.drained && outcome.changed);
+        rig
+    }
+
+    /// Start `toml` with the `ready` bonds originating. With `bindings`,
+    /// the apply publishes ADR-0085 interface bindings there, as the
+    /// daemon's does for its link coordinator.
+    async fn started(
+        toml: &str,
+        ready: &[(&str, rustbgpd_wire::EthernetSegmentIdentifier)],
+        bindings: Option<Arc<watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
+    ) -> Self {
         let baseline = load_runtime_test_config(toml, "baseline");
         let esi = ready[0].1;
         let esis = crate::config::AutoLacpEsis::default();
@@ -1578,14 +1592,18 @@ impl AutoLacpDrainRig {
         let mut converger = segment_only_converger(rib_tx, segment.clone(), None);
         converger.es_drain = es_drain.clone();
         let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
-        let apply = EvpnRuntimeReloadApply::new(
+        let mut apply = EvpnRuntimeReloadApply::new(
             coordinator.clone(),
             apply_lock.clone(),
             Arc::new(converger),
             baseline.clone(),
         )
         .with_auto_lacp_esis(esis);
-        let rig = Self {
+        if let Some(bindings) = bindings {
+            apply = apply.with_es_link_bindings_publisher(bindings);
+            apply.publish_es_link_bindings(&baseline);
+        }
+        Self {
             apply,
             apply_lock,
             coordinator,
@@ -1595,10 +1613,7 @@ impl AutoLacpDrainRig {
             injects,
             baseline,
             esi,
-        };
-        let outcome = rig.drain(true).await.expect("operator drain applies");
-        assert!(outcome.drained && outcome.changed);
-        rig
+        }
     }
 
     fn table(
@@ -1724,6 +1739,75 @@ async fn operator_drain_survives_an_auto_lacp_bond_losing_and_regaining_its_part
     let outcome = rig.drain(false).await.expect("undrain applies");
     assert!(outcome.changed && !outcome.drained);
     wait_for_es_route(&rig.injects, rig.esi, "Type 4 after the operator undrain").await;
+    rig.finish().await;
+}
+
+/// ADR-0085 decision 3 across an `auto-lacp` partner flap: the segment that
+/// returns under the same ESI is a recovering attachment circuit, so it
+/// originates only after the recovery hold-off, not at the first probe.
+/// Mutation-red: treating the returning binding as new undrains it at once
+/// and the returning segment originates immediately.
+#[tokio::test(start_paused = true)]
+async fn auto_lacp_segment_returning_under_the_same_esi_waits_for_the_recovery_holdoff() {
+    let (bindings_tx, bindings_rx) = watch::channel(Arc::default());
+    let rig = AutoLacpDrainRig::started(
+        l2vni_auto_lacp_es_runtime_candidate_toml(),
+        &[("bond0", drain_rig_esi(0xaa))],
+        Some(Arc::new(bindings_tx)),
+    )
+    .await;
+    // The bond keeps carrier throughout: only its LACP partner flaps.
+    let (_carrier_tx, carrier_rx) =
+        watch::channel(Arc::new(BTreeMap::from([("bond0".to_string(), true)])));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let link = crate::evpn_es_link_drain::spawn(
+        bindings_rx,
+        crate::evpn_es_link_drain::CarrierFeed::Injected(carrier_rx),
+        crate::evpn_es_link_drain::EsLinkDrainDeps {
+            apply_lock: rig.apply_lock.clone(),
+            coordinator: rig.coordinator.clone(),
+            drain_state: rig.es_drain.clone(),
+            segment: Some(rig.segment.clone()),
+            originator: None,
+            metrics: BgpMetrics::new(),
+        },
+        shutdown.clone(),
+    );
+    let link_drain = || {
+        rig.es_drain
+            .reasons_for(rig.esi)
+            .contains(&crate::evpn_es_drain::EsDrainReason::Link)
+    };
+    let _ = rig.es_class_injections_since(0).await;
+    assert!(!link_drain(), "up at startup originates at once");
+
+    rig.round(None).await;
+    assert!(
+        rig.runtime_esis().is_empty(),
+        "the partner loss parks the ESI"
+    );
+    let _ = rig.es_class_injections_since(0).await;
+
+    let floor = rig.injects.lock().await.len();
+    rig.round(Some(rig.esi)).await;
+    let after_return = rig.es_class_injections_since(floor).await;
+    assert!(
+        after_return.is_empty(),
+        "the returning segment must wait for the hold-off; injected {after_return:?}"
+    );
+    assert!(link_drain(), "the link reason holds through the hold-off");
+
+    // Recovery: the hold-off (30 s by default) releases the link reason.
+    rig.injects.lock().await.clear();
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    wait_for_es_route(&rig.injects, rig.esi, "Type 4 after the recovery hold-off").await;
+    assert!(!link_drain());
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), link)
+        .await
+        .expect("the link coordinator stops")
+        .unwrap();
     rig.finish().await;
 }
 

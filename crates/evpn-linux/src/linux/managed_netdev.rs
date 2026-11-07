@@ -103,7 +103,7 @@ async fn create_bridge(
 ) -> Result<(), DataplaneError> {
     let mut fresh = fresh_bridge_state(handle, name).await?;
     if let Some(bridge) = fresh.bridge.as_ref() {
-        return ensure_exact_owned_bridge(name, bridge, vlan_filtering, ownership_stamp);
+        return adopt_existing_bridge(handle, name, bridge, vlan_filtering, ownership_stamp).await;
     }
     if fresh.name_exists {
         return Err(foreign_link_collision(name));
@@ -131,11 +131,8 @@ async fn create_bridge(
         };
     };
 
-    if !created {
-        return ensure_exact_owned_bridge(name, bridge, vlan_filtering, ownership_stamp);
-    }
-    if bridge.altnames.iter().any(|alt| alt == ownership_stamp) {
-        return ensure_exact_owned_bridge(name, bridge, vlan_filtering, ownership_stamp);
+    if !created || bridge.altnames.iter().any(|alt| alt == ownership_stamp) {
+        return adopt_existing_bridge(handle, name, bridge, vlan_filtering, ownership_stamp).await;
     }
 
     let stamp_result = handle
@@ -163,6 +160,33 @@ async fn create_bridge(
                 "managed bridge {name} vanished after stamp"
             )))
         };
+    };
+    adopt_existing_bridge(handle, name, &bridge, vlan_filtering, ownership_stamp).await
+}
+
+/// LAN-2894: adopt an exactly-ours bridge and raise it when it is
+/// administratively down. Admin state is not a protected attribute
+/// (ADR-0091 Decision 3), so a down link whose stamp and attributes match
+/// is ours to bring up, like the VLAN upper (LAN-290).
+async fn adopt_existing_bridge(
+    handle: &Handle,
+    name: &str,
+    bridge: &BridgeLink,
+    vlan_filtering: bool,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_bridge_stamp_and_attrs(name, bridge, vlan_filtering, ownership_stamp)?;
+    if bridge.up {
+        return Ok(());
+    }
+    set_link_up(handle, bridge.ifindex, "managed bridge set up")
+        .await
+        .map_err(retryable_completion)?;
+    let fresh = fresh_bridge_state(handle, name).await?;
+    let Some(bridge) = fresh.bridge else {
+        return Err(transient_link_race(format!(
+            "managed bridge {name} vanished after set up"
+        )));
     };
     ensure_exact_owned_bridge(name, &bridge, vlan_filtering, ownership_stamp)
 }
@@ -192,7 +216,7 @@ async fn create_vxlan(
 ) -> Result<(), DataplaneError> {
     let mut fresh = fresh_vxlan_state(handle, name).await?;
     if let Some(vxlan) = fresh.vxlan.as_ref() {
-        return ensure_exact_owned_vxlan(name, vxlan, spec, ownership_stamp);
+        return adopt_existing_vxlan(handle, name, vxlan, spec, ownership_stamp).await;
     }
     if fresh.name_exists {
         return Err(foreign_vxlan_collision(name));
@@ -213,7 +237,8 @@ async fn create_vxlan(
     let mut builder = LinkVxlan::new(name, spec.vni)
         .port(spec.dstport)
         .learning(false)
-        .controller(bridge_ifindex);
+        .controller(bridge_ifindex)
+        .up();
     builder = match spec.local_ip {
         IpAddr::V4(addr) => builder.local(addr),
         IpAddr::V6(addr) => builder.local6(addr),
@@ -237,11 +262,8 @@ async fn create_vxlan(
         };
     };
 
-    if !created {
-        return ensure_exact_owned_vxlan(name, vxlan, spec, ownership_stamp);
-    }
-    if vxlan.altnames.iter().any(|alt| alt == ownership_stamp) {
-        return ensure_exact_owned_vxlan(name, vxlan, spec, ownership_stamp);
+    if !created || vxlan.altnames.iter().any(|alt| alt == ownership_stamp) {
+        return adopt_existing_vxlan(handle, name, vxlan, spec, ownership_stamp).await;
     }
 
     let stamp_result = handle
@@ -269,6 +291,31 @@ async fn create_vxlan(
                 "managed VXLAN {name} vanished after stamp"
             )))
         };
+    };
+    adopt_existing_vxlan(handle, name, &vxlan, spec, ownership_stamp).await
+}
+
+/// LAN-2894: adopt an exactly-ours fixed-VNI VXLAN and raise it when it is
+/// administratively down; see [`adopt_existing_bridge`].
+async fn adopt_existing_vxlan(
+    handle: &Handle,
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedVxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_vxlan_stamp_and_attrs(name, vxlan, spec, ownership_stamp)?;
+    if vxlan.up {
+        return Ok(());
+    }
+    set_link_up(handle, vxlan.ifindex, "managed VXLAN set up")
+        .await
+        .map_err(retryable_completion)?;
+    let fresh = fresh_vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan else {
+        return Err(transient_link_race(format!(
+            "managed VXLAN {name} vanished after set up"
+        )));
     };
     ensure_exact_owned_vxlan(name, &vxlan, spec, ownership_stamp)
 }
@@ -971,6 +1018,21 @@ fn ensure_exact_owned_bridge(
     vlan_filtering: bool,
     ownership_stamp: &str,
 ) -> Result<(), DataplaneError> {
+    ensure_bridge_stamp_and_attrs(name, bridge, vlan_filtering, ownership_stamp)?;
+    if !bridge.up {
+        return Err(unsafe_managed_bridge(format!(
+            "managed bridge {name} is administratively down after apply"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_bridge_stamp_and_attrs(
+    name: &str,
+    bridge: &BridgeLink,
+    vlan_filtering: bool,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
     ensure_exact_stamp(name, bridge, ownership_stamp)?;
     if bridge.vlan_filtering != vlan_filtering {
         return Err(unsafe_managed_bridge(format!(
@@ -1001,6 +1063,21 @@ fn ensure_exact_stamp(
 }
 
 fn ensure_exact_owned_vxlan(
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedVxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_vxlan_stamp_and_attrs(name, vxlan, spec, ownership_stamp)?;
+    if !vxlan.up {
+        return Err(unsafe_managed_vxlan(format!(
+            "managed VXLAN {name} is administratively down after apply"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_vxlan_stamp_and_attrs(
     name: &str,
     vxlan: &KernelVxlanLinkInfo,
     spec: &ManagedVxlanNetdevSpec,

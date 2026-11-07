@@ -50,13 +50,15 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 rustbgpd-policy.workspace = true
 rustbgpd-wire.workspace = true
+# Private spool for converter output, released only after a complete
+# conversion (`rbgp diff snapshot from-mrt`).
+tempfile.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
 # Raises and delivers real signals in the TUI signal-restore tests; opens

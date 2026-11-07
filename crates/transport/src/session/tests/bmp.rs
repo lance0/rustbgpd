@@ -106,7 +106,8 @@ async fn bfd_down_hard_reset_bmp_reason_carries_the_full_notification_pdu() {
 async fn inbound_update_emits_bmp_route_monitoring() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     let negotiated = negotiated_session(65002, false);
-    session.negotiated = Some(Arc::new(negotiated));
+    install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     let update = rustbgpd_wire::UpdateMessage::build(
         &[Ipv4NlriEntry {
             path_id: 0,
@@ -262,7 +263,8 @@ async fn ebgp_local_pref_is_ignored_after_pre_policy_bmp_tap() {
     session.config.route_server_client = true;
     session.config.discard_path_attributes = Arc::from([4]);
     let negotiated = negotiated_session(65002, false);
-    session.negotiated = Some(Arc::new(negotiated));
+    install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     let update = UpdateMessage::build(
         &[Ipv4NlriEntry {
             path_id: 0,
@@ -331,7 +333,8 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-    session.negotiated = Some(Arc::new(negotiated));
+    install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
         esi: EthernetSegmentIdentifier::ZERO,
@@ -576,7 +579,8 @@ async fn smet_bmp_preserves_inbound_and_post_policy_outbound_bytes() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-    session.negotiated = Some(Arc::new(negotiated));
+    install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     let key = make_smet_route(0xf2).key();
     for flags in [Some(0xf2), Some(0xfa), None] {
         let inbound = match flags {

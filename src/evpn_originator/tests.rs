@@ -407,11 +407,13 @@ async fn duplicate_mac_suppress_local_withdraws_without_reinjecting() {
             esi: EthernetSegmentIdentifier::ZERO,
         },
     );
+    // A learn on another port against the remote contender is a locally
+    // detected move (RFC 7432 §15.1); a same-port replay would not be.
     handle_observation(
         &LocalMacObservation::Learned {
             vni: vni(100),
             mac: mac(0xAA),
-            ifindex: 10,
+            ifindex: 11,
         },
         &mut state,
         &instances,
@@ -530,11 +532,13 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
             esi: EthernetSegmentIdentifier::ZERO,
         },
     );
+    // A learn on another port against the remote contender is a locally
+    // detected move (RFC 7432 §15.1); a same-port replay would not be.
     handle_observation(
         &LocalMacObservation::Learned {
             vni: vni(100),
             mac: mac(0xAA),
-            ifindex: 10,
+            ifindex: 11,
         },
         &mut state,
         &instances,
@@ -654,11 +658,13 @@ async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
             esi: EthernetSegmentIdentifier::ZERO,
         },
     );
+    // A learn on another port against the remote contender is a locally
+    // detected move (RFC 7432 §15.1); a same-port replay would not be.
     observe_test(
         LocalMacObservation::Learned {
             vni: vni(100),
             mac: mac(0xAA),
-            ifindex: 10,
+            ifindex: 11,
         },
         &mut state,
         &instances,
@@ -5184,7 +5190,14 @@ impl PeerSyncHarness {
         segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
         routes: Vec<EvpnRibRoute>,
     ) -> Self {
-        let instances = instance_table(100);
+        Self::with_instances(instance_table(100), segments, routes)
+    }
+
+    fn with_instances(
+        instances: Arc<EvpnInstanceTable>,
+        segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+        routes: Vec<EvpnRibRoute>,
+    ) -> Self {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let log_clone = log.clone();
@@ -5368,6 +5381,122 @@ async fn same_segment_peer_mac_ip_is_not_a_mobility_contender() {
         "peer-sync MAC/IP re-advertisement must not ratchet the local sequence"
     );
     assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+}
+
+/// A MAC that yielded to a contender must not come back while its segment
+/// is drained: the drain withdrew it for an administrative reason, and only
+/// the undrain replay may advertise it again. Both route shapes.
+#[tokio::test]
+async fn yielded_mac_stays_withdrawn_after_drain_when_contender_leaves() {
+    for ip in [None, Some("192.0.2.10")] {
+        let contender = evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.3", Some(5), false);
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        h.routes_tx.send_replace(vec![contender]);
+        h.repoll().await;
+        let key = macip_key_with(100, 0xAA, ip);
+        assert!(
+            !h.advertised.lock().await.contains_key(&key),
+            "{ip:?}: the higher contender must win first"
+        );
+
+        rib_write::drain_vni_to_withdraws(
+            &mut h.state,
+            &h.instances,
+            vni(100),
+            &h.rib_tx,
+            &h.metrics,
+            &h.counts,
+            &h.segments,
+        )
+        .await;
+        let _ = h.take_log().await;
+        h.routes_tx.send_replace(Vec::new());
+        h.repoll().await;
+        assert_eq!(
+            h.take_log().await,
+            Vec::new(),
+            "{ip:?}: a drained MAC re-advertised when its contender left"
+        );
+    }
+}
+
+/// RFC 7432 §15 with RFC 9721 §6.4/§6.5 peer sync: a same-segment peer's
+/// sequence adopted after we yielded can put us back ahead of the
+/// different-segment contender, with the contender view unchanged. The
+/// route must then be advertised at the adopted sequence, in one Inject and
+/// without a transient withdraw. Both route shapes.
+#[tokio::test]
+async fn peer_sync_sequence_that_beats_the_contender_keeps_the_route_advertised() {
+    for ip in [None, Some("192.0.2.10")] {
+        let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+        let contender = with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.3", Some(5), false),
+            segment_esi(2),
+        );
+        let mut h = PeerSyncHarness::new(segments, Vec::new());
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        let _ = h.take_log().await;
+
+        h.routes_tx
+            .send_replace(vec![contender, eligible_peer_sync_route(10, ip)]);
+        h.repoll().await;
+        let key = macip_key_with(100, 0xAA, ip);
+        let log = h.take_log().await;
+        assert_eq!(
+            log,
+            vec![RibActionWithSeq::Inject(key, Some(10))],
+            "{ip:?}: expected one Inject at the adopted sequence"
+        );
+        let advertised = h.advertised.lock().await;
+        let route = advertised.get(&key).expect("route advertised");
+        assert_eq!(extract_mac_mobility_full(&route.attributes).1, Some(10));
+    }
+}
+
+/// RFC 7432 §15 / §15.1: a repeated local notification is not a move.
+/// We hold an equal-sequence tie against a higher-IP PE (our VTEP is
+/// 10.0.0.1); a same-port `Learned` replay, or a repeated `IpAdded`, must
+/// neither raise the sequence nor count toward duplicate-MAC quarantine.
+#[tokio::test]
+async fn repeated_local_notification_while_holding_a_tie_is_not_a_move() {
+    for ip in [None, Some("192.0.2.10")] {
+        let contender = |seq| evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false);
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![contender(3)]);
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        let moves = if ip.is_some() { 2 } else { 1 };
+        assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, moves);
+        h.routes_tx.send_replace(vec![contender(4)]);
+        h.repoll().await;
+        let _ = h.take_log().await;
+
+        for _ in 0..3 {
+            h.observe(if ip.is_some() {
+                ip_added_aa()
+            } else {
+                learned_aa()
+            })
+            .await;
+        }
+        assert_eq!(
+            h.take_log().await,
+            Vec::new(),
+            "{ip:?}: replay re-advertised"
+        );
+        assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, moves);
+    }
 }
 
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
@@ -7259,10 +7388,15 @@ async fn peer_sync_latest_sequence_supersedes_unacknowledged_inject() {
 }
 
 /// Control: a remote on a *different* Ethernet Segment is a genuine
-/// mobility contender and behaves exactly as before — bump on learn,
-/// count the move, bump again when it re-advertises higher.
+/// mobility contender. A local learn against it bumps above it and counts
+/// one move (RFC 7432 §15, §15.1). When it later re-advertises higher, we
+/// withdraw rather than bump again (RFC 7432 §15: "A PE receiving a MAC/IP
+/// Advertisement route for a MAC address with a different Ethernet segment
+/// identifier and a higher sequence number than that which it had
+/// previously advertised withdraws its MAC/IP Advertisement route"), and
+/// that remote-driven withdrawal is not a locally detected move.
 #[tokio::test]
-async fn different_segment_remote_mac_still_bumps_and_counts() {
+async fn different_segment_remote_mac_higher_sequence_withdraws_ours() {
     let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
     let other = |seq| {
         with_esi(
@@ -7287,17 +7421,14 @@ async fn different_segment_remote_mac_still_bumps_and_counts() {
     h.repoll().await;
     assert_eq!(
         h.take_log().await,
-        vec![RibActionWithSeq::Inject(
-            macip_key_with(100, 0xAA, None),
-            Some(10)
-        )]
+        vec![RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None))]
     );
-    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 2);
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
 }
 
 /// Control for the MAC+IP originator on a different segment.
 #[tokio::test]
-async fn different_segment_remote_mac_ip_still_bumps_and_counts() {
+async fn different_segment_remote_mac_ip_higher_sequence_withdraws_ours() {
     let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
     let other = |seq| {
         with_esi(
@@ -7324,12 +7455,132 @@ async fn different_segment_remote_mac_ip_still_bumps_and_counts() {
     h.repoll().await;
     assert_eq!(
         h.take_log().await,
+        vec![RibActionWithSeq::Withdraw(macip_key_with(
+            100,
+            0xAA,
+            Some("192.0.2.10")
+        ))]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 2);
+}
+
+/// RFC 7432 §15: on an equal sequence the lowest PE IP wins, and the
+/// originator whose own route loses "will withdraw the route". Our VTEP is
+/// 10.0.0.1. A higher-IP contender at our sequence leaves us advertising; a
+/// lower-IP one makes us withdraw. Neither bumps. When the winning
+/// contender disappears, the still-local MAC is advertised again at its
+/// retained sequence.
+#[tokio::test]
+async fn equal_sequence_contention_resolves_by_lowest_pe_ip() {
+    let remote = |next_hop, seq| evpn_macip_route(100, 0xAA, next_hop, Some(seq), false);
+    let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![remote("10.0.0.2", 3)]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
         vec![RibActionWithSeq::Inject(
-            macip_key_with(100, 0xAA, Some("192.0.2.10")),
-            Some(10)
+            macip_key_with(100, 0xAA, None),
+            Some(4)
         )]
     );
-    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 3);
+
+    h.routes_tx.send_replace(vec![remote("10.0.0.2", 4)]);
+    h.repoll().await;
+    assert_eq!(h.take_log().await, Vec::new(), "we hold the lower PE IP");
+
+    h.routes_tx.send_replace(vec![remote("9.9.9.9", 4)]);
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None))]
+    );
+
+    h.routes_tx.send_replace(Vec::new());
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(4)
+        )]
+    );
+}
+
+/// Remote-only churn is not a locally detected MAC move (RFC 7432 §15.1:
+/// "a PE that detects a MAC mobility event via local learning"). A peer
+/// that repeatedly announces and withdraws a higher sequence for a MAC we
+/// learned once must not drive the duplicate-MAC detector into quarantine,
+/// which would withdraw our route and filter remote FDB programming for
+/// the recovery period.
+#[tokio::test]
+async fn remote_only_churn_does_not_trigger_duplicate_mac_quarantine() {
+    let inst = suppress_local_instance_with(100, 5, Duration::from_mins(9));
+    let mut h =
+        PeerSyncHarness::with_instances(instance_table_with(inst), BTreeMap::new(), Vec::new());
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    let _ = h.take_log().await;
+
+    for round in 1..=8u32 {
+        h.routes_tx.send_replace(vec![evpn_macip_route(
+            100,
+            0xAA,
+            "10.0.0.2",
+            Some(round * 10),
+            false,
+        )]);
+        h.repoll().await;
+        h.routes_tx.send_replace(Vec::new());
+        h.repoll().await;
+    }
+
+    assert!(
+        !duplicate_mac_is_quarantined(&h.state, vni(100), mac(0xAA)),
+        "remote-only churn quarantined a locally owned MAC"
+    );
+    assert!(
+        !gather_metrics_text(&h.metrics).contains("evpn_duplicate_mac_moves_total{"),
+        "remote-only churn counted as a duplicate-MAC move"
+    );
+    // The contender is gone and the MAC is still local, so we advertise it.
+    assert_eq!(h.state.mac_originators[&vni(100)].advertised_count(), 1);
+}
+
+/// A genuine flap still trips the M/N window: each round a peer wins the
+/// MAC with a higher sequence and then the kernel learns it locally again,
+/// which is a locally detected move (RFC 7432 §15.1). The fifth move in the
+/// window quarantines the MAC.
+#[tokio::test]
+async fn local_relearn_against_winning_remote_still_detects_duplicate_mac() {
+    let inst = suppress_local_instance_with(100, 5, TEST_QUARANTINE_RECOVERY);
+    let mut h =
+        PeerSyncHarness::with_instances(instance_table_with(inst), BTreeMap::new(), Vec::new());
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+
+    for round in 1..=5u32 {
+        assert!(
+            !duplicate_mac_is_quarantined(&h.state, vni(100), mac(0xAA)),
+            "quarantined early, before round {round}"
+        );
+        h.routes_tx.send_replace(vec![evpn_macip_route(
+            100,
+            0xAA,
+            "10.0.0.2",
+            Some(round * 100),
+            false,
+        )]);
+        h.repoll().await;
+        h.observe(LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10 + round,
+        })
+        .await;
+    }
+
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 5);
+    assert!(duplicate_mac_is_quarantined(&h.state, vni(100), mac(0xAA)));
 }
 
 /// The zero ESI never identifies a shared segment: a single-homed
