@@ -413,12 +413,14 @@ impl ConfigPersister {
         };
         let path = dir.join(LAST_PERSIST_FILE);
         // A torn or missing marker only degrades the freshness check to
-        // comparing against process start. The state writer still matters: it
-        // replaces a planted symlink rather than writing through it.
+        // comparing against process start, so the write is not durable: it
+        // runs on the boot path, where an fsync on a slow disk holds up the
+        // gRPC bind. The state writer still matters: it replaces a planted
+        // symlink rather than writing through it.
         if let Err(error) = std::fs::create_dir_all(dir)
             .map_err(crate::confirm_journal::AtomicPublishError::NotPublished)
             .and_then(|()| {
-                crate::confirm_journal::write_state_atomic(&path, format!("{mtime}\n").as_bytes())
+                crate::confirm_journal::write_state_hint(&path, format!("{mtime}\n").as_bytes())
             })
         {
             warn!(
