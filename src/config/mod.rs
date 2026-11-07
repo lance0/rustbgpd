@@ -1052,17 +1052,34 @@ impl Config {
         CandidateSourceLimits {
             roots,
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
+            // The gNMI dial-out TLS files are read only when a target
+            // connects, so a candidate never names them, but they are the
+            // daemon's credentials all the same.
             protected_files: self
                 .file_path
                 .iter()
                 .cloned()
                 .chain(self.grpc_credential_files().map(PathBuf::from))
+                .chain(
+                    self.gnmi_dialout
+                        .iter()
+                        .flat_map(|section| &section.targets)
+                        .flat_map(|target| {
+                            [
+                                &target.tls_ca_file,
+                                &target.tls_cert_file,
+                                &target.tls_key_file,
+                            ]
+                        })
+                        .filter_map(|path| path.as_deref().map(PathBuf::from)),
+                )
                 .collect(),
             max_graph_bytes: self.policy.rpol_max_graph_bytes,
         }
     }
 
-    /// The gRPC listener credential files config validation reads.
+    /// The gRPC listener credential files config validation reads: every
+    /// file a candidate load opens besides its policy sources.
     fn grpc_credential_files(&self) -> impl Iterator<Item = &str> {
         let telemetry = &self.global.telemetry;
         let tcp = telemetry.grpc_tcp.iter().flat_map(|tcp| {
@@ -1071,6 +1088,7 @@ impl Config {
                 &tcp.tls_cert_file,
                 &tcp.tls_key_file,
                 &tcp.tls_client_ca_file,
+                &tcp.tls_client_crl_file,
             ]
         });
         let uds = telemetry.grpc_uds.iter().map(|uds| &uds.token_file);

@@ -450,6 +450,83 @@ async fn the_running_config_file_is_not_a_candidate_source() {
     assert!(error.contains("is not a file under"), "{error}");
 }
 
+/// The mTLS client CRL is a credential file like the others: config
+/// validation reads it, so below `operator_only` a candidate may only name
+/// the running config's CRL, and that CRL is never a policy source.
+#[tokio::test]
+async fn the_client_crl_is_held_to_the_running_config_and_protected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let policy_dir = tempfile::tempdir().unwrap();
+    let other_dir = tempfile::tempdir().unwrap();
+    let pem = |dir: &Path, name: &str, kind: &str| {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("-----BEGIN {kind}-----\n{SECRET}\n-----END {kind}-----\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    };
+    let cert = pem(policy_dir.path(), "server.pem", "CERTIFICATE");
+    let key = pem(policy_dir.path(), "server.key", "PRIVATE KEY");
+    let ca = pem(policy_dir.path(), "ca.pem", "CERTIFICATE");
+    let crl = pem(policy_dir.path(), "clients.crl", "X509 CRL");
+    let outside = pem(other_dir.path(), "elsewhere.crl", "X509 CRL");
+    let grpc_tcp = |crl: &Path| {
+        format!(
+            "[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:0\"\n\
+             tls_cert_file = {:?}\ntls_key_file = {:?}\n\
+             tls_client_ca_file = {:?}\ntls_client_crl_file = {:?}\n",
+            cert.display().to_string(),
+            key.display().to_string(),
+            ca.display().to_string(),
+            crl.display().to_string(),
+        )
+    };
+    // After the tier wrapper, which refuses a config that already has a
+    // gRPC listener.
+    let with_tls = |toml: String, crl: &Path| {
+        toml.replace(
+            "[global.telemetry.grpc_uds]\n",
+            &format!("{}\n[global.telemetry.grpc_uds]\n", grpc_tcp(crl)),
+        )
+    };
+    let edge = policy_dir.path().join("edge.rpol");
+    let manager = || {
+        let mut manager = manager_with_policy_dir(policy_dir.path());
+        let running = with_tls(
+            tier_authorized_uds_test_config(&format!(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n\
+                 [global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n\n\
+                 [policy]\nrpol_files = [{:?}]\n",
+                edge.display().to_string(),
+            )),
+            &crl,
+        );
+        manager.replace_current_config(
+            Config::load_toml_with_diagnostics(&running, "running mTLS config").unwrap(),
+        );
+        manager
+    };
+
+    let error = diff_error(manager(), with_tls(candidate(&[&edge], ""), &outside)).await;
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(
+        error.contains("is not one the running config uses"),
+        "{error}"
+    );
+    assert!(
+        error.contains("tls_client_crl_file") || error.contains("elsewhere.crl"),
+        "{error}"
+    );
+
+    let error = diff_error(manager(), with_tls(candidate(&[&crl], ""), &crl)).await;
+    assert!(!error.contains(SECRET), "{error}");
+    assert!(error.contains("is not a file under"), "{error}");
+}
+
 /// A config transaction stages an API candidate, which has no file of its
 /// own; the running config file stays protected for the next candidate.
 #[tokio::test]
