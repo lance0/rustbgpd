@@ -10,8 +10,7 @@
   line per UPDATE, logged with the action finally applied and the decoder
   cause behind it, and is
   emitted at power-of-two counts per TCP connection; every cause is still
-  logged at DEBUG. The treat-as-withdraw, validation, and ASPA warnings are
-  unchanged at one line per UPDATE. `bgp_update_malformed_total` still counts
+  logged at DEBUG. `bgp_update_malformed_total` still counts
   every malformed UPDATE.
   **Operator-visible:** `bgp_update_malformed_causes_total` now reports a
   duplicated attribute type, and a prohibited AS-set in repeated `AS_PATH` or

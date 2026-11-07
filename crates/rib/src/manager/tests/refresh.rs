@@ -210,6 +210,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -287,6 +288,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     let route1 = make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1));
     let route2 = make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -368,6 +370,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -434,6 +437,7 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -479,6 +483,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
     let route1 = make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1));
     let route2 = make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -549,6 +554,7 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let v6_prefix = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0), 64);
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -609,6 +615,7 @@ async fn enhanced_route_refresh_bgpls_eorr_sweeps_unreplaced_route() {
     let route2 = make_bgpls_route(peer_addr, 22, 100);
     let key1 = route1.key();
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -672,6 +679,7 @@ async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
     let route = make_bgpls_route(peer_addr, 23, 100);
     let key = route.key();
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -735,6 +743,7 @@ async fn enhanced_route_refresh_vpn_eorr_sweeps_unreplaced_route() {
     let route2 = make_vpn_rib_route(peer_addr, 22, 100, 100);
     let key1 = route1.key();
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer,
@@ -798,6 +807,7 @@ async fn enhanced_route_refresh_vpn_withdraw_clears_stale_marker() {
     let route = make_vpn_rib_route(peer_addr, 23, 100, 100);
     let key = route.key();
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer,
@@ -887,6 +897,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     let omitted = make_vpn_rib_route(source_addr, 25, 100, 100);
     let omitted_key = omitted.key();
 
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,

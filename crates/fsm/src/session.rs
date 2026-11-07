@@ -196,6 +196,9 @@ impl Session {
             Event::HoldTimerExpires => self.ignore_stale_timer(TimerType::Hold),
             Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
 
+            // RFC 4271 §8.2.2: start events are ignored outside Idle.
+            Event::ManualStart => vec![],
+
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
@@ -251,6 +254,9 @@ impl Session {
             // running. Hold/Keepalive ticks are stale.
             Event::HoldTimerExpires => self.ignore_stale_timer(TimerType::Hold),
             Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
+
+            // RFC 4271 §8.2.2: start events are ignored outside Idle.
+            Event::ManualStart => vec![],
 
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
@@ -343,6 +349,9 @@ impl Session {
             Event::ConnectRetryTimerExpires => self.ignore_stale_timer(TimerType::ConnectRetry),
             Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
 
+            // RFC 4271 §8.2.2: start events are ignored outside Idle.
+            Event::ManualStart => vec![],
+
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
@@ -424,6 +433,9 @@ impl Session {
             // RFC 4271: in OpenConfirm, only Hold + Keepalive timers
             // are running. ConnectRetry ticks are stale.
             Event::ConnectRetryTimerExpires => self.ignore_stale_timer(TimerType::ConnectRetry),
+
+            // RFC 4271 §8.2.2: start events are ignored outside Idle.
+            Event::ManualStart => vec![],
 
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
@@ -550,6 +562,9 @@ impl Session {
                 actions.extend(self.enter_idle_with_notification(code, subcode, data));
                 actions
             }
+
+            // RFC 4271 §8.2.2: start events are ignored outside Idle.
+            Event::ManualStart => vec![],
 
             // RFC 4271: in Established, only Hold + Keepalive timers
             // are running. ConnectRetry ticks are stale.
@@ -1493,10 +1508,62 @@ mod tests {
         assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
     }
 
+    /// RFC 4271 §8.2.2: a start event outside Idle is ignored. It must not
+    /// tear the session down or advance the connect-retry backoff.
+    #[test]
+    fn manual_start_outside_idle_is_ignored() {
+        let mut acted = Vec::new();
+        for state in [
+            SessionState::Connect,
+            SessionState::Active,
+            SessionState::OpenSent,
+            SessionState::OpenConfirm,
+            SessionState::Established,
+        ] {
+            // Detour through a TCP failure so the connect-retry counter is
+            // non-zero: a start that reset it would show.
+            let mut s = Session::new(test_config());
+            s.handle_event(Event::ManualStart);
+            s.handle_event(Event::TcpConnectionFails);
+            if state != SessionState::Active {
+                s.handle_event(Event::ConnectRetryTimerExpires);
+            }
+            if !matches!(state, SessionState::Connect | SessionState::Active) {
+                s.handle_event(Event::TcpConnectionConfirmed);
+            }
+            if matches!(state, SessionState::OpenConfirm | SessionState::Established) {
+                s.handle_event(Event::OpenReceived(peer_open()));
+            }
+            if state == SessionState::Established {
+                s.handle_event(Event::KeepaliveReceived);
+            }
+            assert_eq!(s.state(), state);
+            let counter = s.connect_retry_counter();
+            assert!(counter >= 1, "{state:?}");
+            let had_negotiated = s.negotiated().is_some();
+            assert_eq!(
+                had_negotiated,
+                matches!(state, SessionState::OpenConfirm | SessionState::Established),
+                "{state:?}"
+            );
+            let actions = s.handle_event(Event::ManualStart);
+            if s.negotiated().is_some() != had_negotiated {
+                acted.push((state, actions.clone()));
+            }
+            if !actions.is_empty() || s.state() != state || s.connect_retry_counter() != counter {
+                acted.push((state, actions));
+            }
+        }
+        assert!(
+            acted.is_empty(),
+            "ManualStart acted outside Idle: {acted:?}"
+        );
+    }
+
     #[test]
     fn established_unexpected_event_sends_fsm_error() {
         let mut s = reach_established();
-        let actions = s.handle_event(Event::ManualStart);
+        let actions = s.handle_event(Event::OpenReceived(peer_open()));
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));

@@ -423,12 +423,16 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   (sent or received, including an OPEN exchange that ends in one) doubles
   the Idle reconnect wait from `connect_retry_secs`, capped at 300s and
   never below the configured interval. The streak clears after the session
-  stays Established for five minutes, on an explicit operator enable, or on
-  an administrative reset. TCP connection misses in Connect or Active keep
+  stays Established for five minutes, on an explicit operator enable while
+  the session is in Idle, or on an administrative reset. TCP connection misses in Connect or Active keep
   the fast initial retries followed by the existing exponential curve; a TCP
   loss after Established uses the configured fixed Idle interval. Neither
   advances the NOTIFICATION streak, and there is no configuration knob for
   its curve.
+- Start events (RFC 4271 §8.2.2): `ManualStart` acts only in Idle. In
+  Connect, Active, OpenSent, OpenConfirm and Established it is ignored, so
+  enabling an enabled peer sends no NOTIFICATION and leaves the session and
+  its backoff streak unchanged.
 - Initial hold timer before OPEN negotiation: 240s (RFC 4271 "large
   value"), replaced by negotiated value once OPEN exchange completes.
 - `handle_event` never returns `Result` — every (State, Event) pair
@@ -1672,11 +1676,12 @@ is applied only to the matching negotiated Add-Path send direction. This is an
 experimental interoperability feature, not an adopted IETF standard.
 rustbgpd caps what it sends at the peer's advertised limit. It also applies
 its own nonzero advertised limit locally to retained path identities per
-prefix for negotiated IPv4/IPv6-unicast Add-Path receive; other families have
-no local receive enforcement. With `receive_max` unset or 0, nothing is
-advertised and a default local cap of 1024 paths per prefix applies; past
-`max(receive_max, 1024)` the excess is always withheld, even under
-`max_prefix_action = "warning"`. Rejected identities count only when the
+prefix (per RD + prefix for VPN) for every negotiated Add-Path receive family:
+IPv4/IPv6 unicast, VPNv4/VPNv6 and IPv4/IPv6 labeled unicast. With
+`receive_max` unset or 0, nothing is advertised and a default local cap of
+1024 paths per prefix applies. `max_prefix_action = "warning"` admits excess
+IDs only below `max(receive_max, 1024)` and withholds them at that ceiling;
+`"block"` and `"shutdown"` act at the cap. Rejected identities count only when the
 family's received-prefix bound already enables their tracking. This local
 cap is defensive; the draft places the sender-side obligation on the peer.
 If this local cap shuts down a session, Cease/1 carries no optional RFC 4486
@@ -1801,7 +1806,8 @@ carries inactive (absent), unlimited (zero), or finite.
   ID, RFC 1982 serial regression) force a Reset Query resync — never a
   splice. Validated data is retained through reconnect/Cache Reset until
   replaced or expired. Transactions are bounded by deadline and
-  record/byte budgets.
+  record/byte budgets. The expire interval (§6) is enforced at all times,
+  including during an in-flight query and a hung connect.
 - ASPA over RTR v2 uses 8210bis replacement semantics: announce replaces
   the customer's provider set; withdraw removes the customer ASN.
 - Strict acceptance limits (8210bis-27): per-PDU length is capped at
@@ -1828,6 +1834,21 @@ carries inactive (absent), unlimited (zero), or finite.
   parallel active-record index in the client. Duplicate announcements
   and withdrawals of unknown records are normalized silently instead of
   failing the session.
+- Deviation: when the router itself detects a fatal error in a cache's PDUs,
+  it drops the session but keeps that cache's last accepted data until a full
+  table replaces it or the §6 expire interval passes. This covers the Error
+  Codes 5 (Unsupported PDU Type), 8 (Unexpected Protocol Version) and 9 (ASPA
+  Provider List Error) that it sends, and a corrupt PDU other than a Prefix
+  PDU. 8210bis §12 says a fatal error MUST drop the session and the router
+  MUST flush all data learned from that cache. The offending transaction is
+  never applied, so the kept data is the last set the cache delivered intact.
+  Flushing on one malformed PDU would instead remove origin validation for
+  every route that cache alone covers, and for all routes when it is the only
+  cache, until the cache sends a clean table. Fatal evidence about the data
+  itself still flushes: an invalid Prefix PDU (code 0), and a fatal Error
+  Report the cache sends, Cache Shutdown (code 13) included. A received code
+  0 is handled as a Cache Reset, because StayRTR reports a restarted session
+  that way.
 - Best-path step 0.5: Valid > NotFound > Invalid (between stale demotion
   and LOCAL_PREF).
 - `match_rpki_validation` in policy.

@@ -7506,9 +7506,11 @@ impl RibManager {
             "an ORF-receive peer must never be registered in an update group"
         );
         let family = (afi, safi);
-        // At most `MAX_ORF_ENTRIES` per ORF message, so only a real filter
-        // change advances the export-settings generation.
-        let installed = self.orf_filter(peer, family).cloned();
+        // The filter generation moves only when the installed list changes,
+        // so only a real filter change advances the export-settings generation.
+        let installed = self
+            .orf_filter(peer, family)
+            .map(crate::orf::OrfFilterSet::generation);
         let filter = self
             .peer_orf_filters
             .entry(peer)
@@ -7597,7 +7599,11 @@ impl RibManager {
             self.lift_orf_gate(peer, family);
         }
         self.reap_empty_orf_filter(peer, family);
-        if self.orf_filter(peer, family) != installed.as_ref() {
+        if self
+            .orf_filter(peer, family)
+            .map(crate::orf::OrfFilterSet::generation)
+            != installed
+        {
             self.advance_export_settings();
         }
         if reset || when == WhenToRefresh::Immediate {
@@ -10250,8 +10256,8 @@ impl RibManager {
                         .cloned()
                         .unwrap_or_default();
                     // ORF state, resolved before the &mut rib_out borrow below. Cloning
-                    // is cheap: ORF filters are small and present only for peers that
-                    // negotiated ORF (None for everyone else).
+                    // is cheap: each family filter shares its state by reference count, and
+                    // only peers that negotiated ORF have any (None for everyone else).
                     let orf_filters = self.peer_orf_filters.get(&peer).cloned();
                     // ADR-0137 conditional-advertisement gate; `None` unless an
                     // attached definition is suppressing (or pending).

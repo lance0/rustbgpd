@@ -10,8 +10,14 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   `(Afi::Ipv6, Safi::FlowSpecVpn)` family is advertised and
   negotiated like any other; Add-Path is never advertised for it, and
   `graceful_restart_preserves_family` includes it, so it joins the Graceful
-  Restart and LLGR capability families. There is no state-machine change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These crate
+  Restart and LLGR capability families. This family change alters no FSM
+  transition. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These crate
   versions are not published by this change.
+- `Event::ManualStart` outside `Idle` is now ignored and yields no actions, as
+  RFC 4271 §8.2.2 specifies for start events in Connect, Active, OpenSent,
+  OpenConfirm and Established. Previously it hit each state's catch-all: an
+  FSM Error NOTIFICATION, a transition to Idle and, from Established,
+  `Action::SessionDown`. The public API is unchanged.
 - `TcpConnectionFails` in OpenConfirm or Established now emits
   `StopTimer(ConnectRetry)` instead of `StartTimer(ConnectRetry)` before
   entering Idle, as RFC 4271 §8.2.2 sets the timer to zero. A ConnectRetry

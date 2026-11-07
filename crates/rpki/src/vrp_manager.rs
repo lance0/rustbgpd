@@ -624,6 +624,7 @@ impl VrpManager {
     }
 
     async fn handle_update(&mut self, update: VrpUpdate) {
+        let update = canonical_update(update);
         let (server, ready, vrp_delta, changed_customer_asns) = match update {
             VrpUpdate::FullTable {
                 server,
@@ -811,6 +812,38 @@ impl VrpManager {
     }
 }
 
+/// The update with every VRP keyed by its canonical prefix (host bits
+/// cleared). Validation already masks prefixes, so the per-cache set and the
+/// distributed delta must use the same identity.
+fn canonical_update(update: VrpUpdate) -> VrpUpdate {
+    let canonical = |entries: Vec<VrpEntry>| entries.into_iter().map(VrpEntry::canonical).collect();
+    match update {
+        VrpUpdate::FullTable {
+            server,
+            entries,
+            aspa_records,
+        } => VrpUpdate::FullTable {
+            server,
+            entries: canonical(entries),
+            aspa_records,
+        },
+        VrpUpdate::IncrementalUpdate {
+            server,
+            announced,
+            withdrawn,
+            aspa_announced,
+            aspa_withdrawn,
+        } => VrpUpdate::IncrementalUpdate {
+            server,
+            announced: canonical(announced),
+            withdrawn: canonical(withdrawn),
+            aspa_announced,
+            aspa_withdrawn,
+        },
+        other @ VrpUpdate::ServerDown { .. } => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -961,6 +994,45 @@ mod tests {
 
         let update = rib_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 2);
+    }
+
+    /// RTR v1 accepts Prefix PDUs with host bits set, and validation masks
+    /// them. A cache that announces a VRP with host bits and then withdraws
+    /// the canonical form must leave nothing behind, and the same VRP sent
+    /// both ways counts once.
+    #[tokio::test]
+    async fn host_bit_prefixes_share_the_canonical_identity() {
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx);
+        let host_bits = entry(Ipv4Addr::new(10, 0, 0, 1), 8, 8, 65001);
+        let canonical = entry(Ipv4Addr::new(10, 0, 0, 0), 8, 8, 65001);
+        let other = entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 65002);
+
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![host_bits.clone(), canonical.clone(), other.clone()],
+            aspa_records: vec![],
+        })
+        .await;
+        let update = rib_rx.try_recv().unwrap();
+        assert_eq!(update.table.len(), 2, "one VRP sent two ways counted twice");
+
+        mgr.handle_update(VrpUpdate::IncrementalUpdate {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![canonical],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![],
+        })
+        .await;
+        let update = rib_rx.try_recv().unwrap();
+        assert_eq!(
+            update.table.len(),
+            1,
+            "the withdrawn VRP still authorizes its prefix through the host-bit copy"
+        );
+        assert_eq!(mgr.server_tables[&server1()].counts(), (1, 0));
     }
 
     #[tokio::test]

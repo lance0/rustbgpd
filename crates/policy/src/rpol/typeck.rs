@@ -18,9 +18,10 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, clamp};
 use crate::ir::{ArithOp, ValueField};
 
 use super::ast::{
-    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl,
-    DatasetEntryAst, Expr, FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt, NextHopArg,
-    ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, AsnSetDef, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunitySetDef,
+    DatasetDecl, DatasetEntryAst, Expr, FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt,
+    NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg,
+    ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
 
@@ -377,8 +378,45 @@ pub(super) fn value_field_of(field: Field) -> Option<ValueField> {
 /// Typecheck a parsed source file. Returns every diagnostic found.
 #[must_use]
 pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
+    super::diag::with_suggestion_budget(MAX_TYPECHECK_DIAGNOSTICS, || typecheck_inner(file))
+}
+
+/// Diagnostics one typecheck collects; later ones are dropped. A source
+/// dense with errors cannot make the compile, or its did-you-mean
+/// searches, grow with the error count.
+const MAX_TYPECHECK_DIAGNOSTICS: usize = 256;
+
+fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
+    let mut sets = HashMap::new();
+    let named = file
+        .prefix_sets
+        .iter()
+        .map(|s| ("prefix-set", &s.name, None, None))
+        .chain(
+            file.community_sets
+                .iter()
+                .map(|s| ("community-set", &s.name, Some(s), None)),
+        )
+        .chain(
+            file.asn_sets
+                .iter()
+                .map(|s| ("asn-set", &s.name, None, Some(s))),
+        );
+    for (kind, name, community, asn) in named {
+        // First definition wins, as the linear lookups did; a name defined
+        // twice is already a diagnostic.
+        sets.entry(name.node.as_str()).or_insert(SetEntry {
+            kind,
+            span: name.span,
+            community,
+            asn,
+        });
+    }
     let mut checker = Checker {
         file,
+        sets,
+        datasets: index_by_name(&file.datasets, |d| &d.name),
+        fns: index_by_name(&file.fns, |f| &f.name),
         diags: Vec::new(),
     };
     checker.check_declarations();
@@ -404,8 +442,36 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
     checker.diags
 }
 
+/// `items` by name, the first definition winning as a linear `find` would.
+fn index_by_name<'a, T>(
+    items: &'a [T],
+    name: impl Fn(&'a T) -> &'a Spanned<String>,
+) -> HashMap<&'a str, &'a T> {
+    let mut index = HashMap::with_capacity(items.len());
+    for item in items {
+        index.entry(name(item).node.as_str()).or_insert(item);
+    }
+    index
+}
+
+/// One named set in [`Checker::sets`].
+struct SetEntry<'a> {
+    kind: &'static str,
+    span: Span,
+    community: Option<&'a CommunitySetDef>,
+    asn: Option<&'a AsnSetDef>,
+}
+
 struct Checker<'a> {
     file: &'a SourceFile,
+    /// Every named set by name, so a reference resolves in constant time
+    /// rather than by a scan of every set.
+    sets: HashMap<&'a str, SetEntry<'a>>,
+    /// Datasets and functions by name, for the same reason (policies:
+    /// [`SourceFile::policy`]).
+    datasets: HashMap<&'a str, &'a DatasetDecl>,
+    fns: HashMap<&'a str, &'a FnDef>,
+    /// At most [`MAX_TYPECHECK_DIAGNOSTICS`]; see [`Checker::push_diag`].
     diags: Vec<Diagnostic>,
 }
 
@@ -549,11 +615,7 @@ fn call_prepend_bound(
     if depth > MAX_APPLY_DEPTH {
         return 0;
     }
-    let Some(def) = file
-        .policies
-        .iter()
-        .find(|p| p.name.node == call.policy.node)
-    else {
+    let Some(def) = file.policy(&call.policy.node) else {
         return 0;
     };
     let values: Vec<u64> = call
@@ -586,6 +648,25 @@ fn call_prepend_bound(
 }
 
 impl<'a> Checker<'a> {
+    /// Collect a diagnostic unless [`MAX_TYPECHECK_DIAGNOSTICS`] are
+    /// already held; the compile fails either way.
+    /// Whether the diagnostic cap is reached: the compile fails anyway, so
+    /// optional diagnostic work can stop.
+    fn full(&self) -> bool {
+        self.diags.len() >= MAX_TYPECHECK_DIAGNOSTICS
+    }
+
+    /// The named community-set, if `name` is one.
+    fn community_set(&self, name: &str) -> Option<&'a CommunitySetDef> {
+        self.sets.get(name).and_then(|entry| entry.community)
+    }
+
+    fn push_diag(&mut self, diag: Diagnostic) {
+        if self.diags.len() < MAX_TYPECHECK_DIAGNOSTICS {
+            self.diags.push(diag);
+        }
+    }
+
     /// The static prepend cap: one evaluation of the policy can place at
     /// most [`crate::engine::MAX_PREPEND_ASNS`] ASNs in front of a path.
     fn check_prepend_bound(&mut self, def: &PolicyDef) {
@@ -601,7 +682,7 @@ impl<'a> Checker<'a> {
         });
         let limit = crate::engine::MAX_PREPEND_ASNS;
         if bound > limit as u64 {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     def.name.span,
@@ -621,8 +702,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn policy(&self, name: &str) -> Option<&PolicyDef> {
-        self.file.policies.iter().find(|p| p.name.node == name)
+    fn policy(&self, name: &str) -> Option<&'a PolicyDef> {
+        self.file.policy(name)
     }
 
     fn duplicate_check<'n>(
@@ -633,7 +714,7 @@ impl<'a> Checker<'a> {
         let mut seen: HashMap<&str, Span> = HashMap::new();
         for name in names {
             if let Some(&first) = seen.get(name.node.as_str()) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         name.span,
@@ -669,7 +750,7 @@ impl<'a> Checker<'a> {
         for (kind, name) in sets {
             match seen.get(name.node.as_str()) {
                 Some(&(first_kind, first_span)) if first_kind != kind => {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             name.span,
@@ -713,7 +794,7 @@ impl<'a> Checker<'a> {
         self.duplicate_check("dataset", self.file.datasets.iter().map(|d| &d.name));
         for decl in &self.file.datasets {
             if let Some((kind, span)) = self.set_def_of(&decl.name.node) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         decl.name.span,
@@ -746,7 +827,7 @@ impl<'a> Checker<'a> {
         }
         if self.file.datasets.len() > MAX_UNIT_DATASETS {
             let extra = &self.file.datasets[MAX_UNIT_DATASETS];
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 extra.name.span,
                 format!(
@@ -759,7 +840,7 @@ impl<'a> Checker<'a> {
 
     /// The declaration of a dataset by name (LAN-305).
     fn dataset_of(&self, name: &str) -> Option<&'a DatasetDecl> {
-        self.file.datasets.iter().find(|d| d.name.node == name)
+        self.datasets.get(name).copied()
     }
 
     /// The names of every declared dataset of `kind`, for did-you-mean
@@ -777,20 +858,7 @@ impl<'a> Checker<'a> {
 
     /// The kind and definition span of a source-defined set by name.
     fn set_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
-        if let Some(def) = self.file.prefix_sets.iter().find(|s| s.name.node == name) {
-            Some(("prefix-set", def.name.span))
-        } else if let Some(def) = self
-            .file
-            .community_sets
-            .iter()
-            .find(|s| s.name.node == name)
-        {
-            Some(("community-set", def.name.span))
-        } else if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name) {
-            Some(("asn-set", def.name.span))
-        } else {
-            None
-        }
+        self.sets.get(name).map(|entry| (entry.kind, entry.span))
     }
 
     /// The kind and definition span of any user-defined symbol by name
@@ -800,13 +868,7 @@ impl<'a> Checker<'a> {
     fn symbol_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
         self.set_def_of(name)
             .or_else(|| self.dataset_of(name).map(|d| ("dataset", d.name.span)))
-            .or_else(|| {
-                self.file
-                    .fns
-                    .iter()
-                    .find(|f| f.name.node == name)
-                    .map(|f| ("function", f.name.span))
-            })
+            .or_else(|| self.fns.get(name).map(|f| ("function", f.name.span)))
             .or_else(|| self.policy(name).map(|p| ("policy", p.name.span)))
     }
 
@@ -818,7 +880,7 @@ impl<'a> Checker<'a> {
     fn check_fns(&mut self) -> HashMap<&'a str, FnCost> {
         for def in &self.file.fns {
             if VALUE_BUILTINS.iter().any(|(b, _)| *b == def.name.node) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         def.name.span,
@@ -895,7 +957,7 @@ impl<'a> Checker<'a> {
             }
             let mut path: Vec<&str> = Vec::new();
             if let Some((cycle, span)) = find_cycle(name, &edges, &mut path, &mut done) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         span,
@@ -951,7 +1013,7 @@ impl<'a> Checker<'a> {
                 .max_by_key(|&(d, _)| d);
             let depth = match deepest {
                 Some((d, span)) if d > MAX_CALL_DEPTH => {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             span,
@@ -1031,7 +1093,7 @@ impl<'a> Checker<'a> {
             let hw = stmts_slot_high_water(&term.stmts, 0, fns, &mut frame_of);
             let frame = crate::eval::LOCAL_FRAME_SLOTS as u64;
             if hw > frame {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         term.name.span,
@@ -1059,7 +1121,7 @@ impl<'a> Checker<'a> {
         self.duplicate_check("term", policy.terms.iter().map(|t| &t.name));
         for param in &policy.params {
             if let Some(meaning) = reserved_param_meaning(&param.node) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         param.span,
@@ -1089,7 +1151,7 @@ impl<'a> Checker<'a> {
                 && let Some((kind, span)) = self.symbol_def_of(&param.node)
                 && matches!(kind, "prefix-set" | "community-set" | "asn-set" | "dataset")
             {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         param.span,
@@ -1134,7 +1196,7 @@ impl<'a> Checker<'a> {
                     Stmt::For(for_stmt) => for_stmt.span,
                     Stmt::Call(call) => call.span,
                 };
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         span,
@@ -1183,7 +1245,7 @@ impl<'a> Checker<'a> {
         if let ForSource::Set(name) = &for_stmt.source
             && let Some(ty) = scope.typed_param(&name.node)
         {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     name.span,
@@ -1199,7 +1261,7 @@ impl<'a> Checker<'a> {
             );
         }
         if loop_depth == MAX_LOOP_DEPTH {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     for_stmt.span,
@@ -1242,9 +1304,9 @@ impl<'a> Checker<'a> {
     fn check_for_source(&mut self, source: &ForSource) {
         match source {
             ForSource::Field(path) => match resolve_field(path) {
-                Err(diag) => self.diags.push(diag),
+                Err(diag) => self.push_diag(diag),
                 Ok(Field::Communities | Field::AsPath) => {}
-                Ok(Field::LargeCommunities | Field::ExtCommunities) => self.diags.push(
+                Ok(Field::LargeCommunities | Field::ExtCommunities) => self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         path.span,
@@ -1257,7 +1319,7 @@ impl<'a> Checker<'a> {
                          large/ext communities with `has` or `in`",
                     ),
                 ),
-                Ok(_) => self.diags.push(
+                Ok(_) => self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         path.span,
@@ -1274,7 +1336,7 @@ impl<'a> Checker<'a> {
                 // content is a runtime snapshot, so iteration bounds
                 // are not compile-time knowledge the cost DP can use.
                 if let Some(decl) = self.dataset_of(&name.node) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             name.span,
@@ -1288,7 +1350,11 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name.node) {
+                if let Some(def) = self
+                    .sets
+                    .get(name.node.as_str())
+                    .and_then(|entry| entry.asn)
+                {
                     // A range is a probe surface, not a member list: a
                     // loop over `0..4294967295` would have no useful bound.
                     if let Some(range) = def
@@ -1296,7 +1362,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .find(|entry| !matches!(entry.node, crate::sets::AsnMember::Exact(_)))
                     {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 name.span,
@@ -1314,7 +1380,7 @@ impl<'a> Checker<'a> {
                     // the per-loop bound here instead of erroring per
                     // route at runtime.
                     if def.entries.len() > MAX_LOOP_ITERATIONS as usize {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 name.span,
@@ -1332,6 +1398,9 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
+                    return;
+                }
+                if self.full() {
                     return;
                 }
                 let mut diag = Diagnostic::coded(
@@ -1369,7 +1438,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                self.diags.push(diag);
+                self.push_diag(diag);
             }
         }
     }
@@ -1378,7 +1447,7 @@ impl<'a> Checker<'a> {
     /// then every body. `MAX_IF_DEPTH` caps the nesting.
     fn check_if(&mut self, if_stmt: &IfStmt, scope: &mut Scope, loop_depth: u32, if_depth: u32) {
         if if_depth == MAX_IF_DEPTH {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     if_stmt.span(),
@@ -1434,7 +1503,7 @@ impl<'a> Checker<'a> {
                         "this statement can never execute",
                     ),
                 };
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(DiagnosticCode::Typecheck, span, message, label)
                         .with_label(verdict_span, "the branch already decided here"),
                 );
@@ -1452,7 +1521,7 @@ impl<'a> Checker<'a> {
                 }
                 // The parser admits no loop in an `if` body.
                 Stmt::For(for_stmt) => {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         for_stmt.span,
                         "`for` is not allowed in an `if` body",
@@ -1499,7 +1568,7 @@ impl<'a> Checker<'a> {
         }
         *scope_locals += 1;
         if scope.lets.len() == crate::eval::LOCAL_FRAME_SLOTS {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     name.span,
@@ -1517,7 +1586,7 @@ impl<'a> Checker<'a> {
 
     fn check_community_name(&mut self, kind: &str, name: &Spanned<String>) {
         if is_reserved_community_name(&name.node) {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     name.span,
@@ -1538,7 +1607,7 @@ impl<'a> Checker<'a> {
     /// The 65th `let` of one scope (LAN-302, `MAX_LOCALS`): fires once,
     /// at the first binding past the limit.
     fn locals_exceeded(&mut self, span: Span) {
-        self.diags.push(
+        self.push_diag(
             Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 span,
@@ -1562,7 +1631,7 @@ impl<'a> Checker<'a> {
                 if scope.typed_param(&name.node) != Some(ParamType::Ip)
                     && !self.typed_param_misused(name, scope, "an `ip` parameter")
                 {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         name.span,
                         format!("unknown `ip` parameter `{}`", name.node),
@@ -1578,7 +1647,7 @@ impl<'a> Checker<'a> {
                 span,
                 ..
             } if !matches!(arg, CommunityArg::InSet { .. }) => {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         *span,
@@ -1608,7 +1677,7 @@ impl<'a> Checker<'a> {
                     } else {
                         "continue"
                     };
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
@@ -1624,7 +1693,7 @@ impl<'a> Checker<'a> {
                 // LAN-2794: an ASN may be set as a whole value; a community
                 // is not a number.
                 if value_type(expr, scope) == ValueType::Community {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             expr.span(),
@@ -1643,7 +1712,7 @@ impl<'a> Checker<'a> {
                 if lit.node.kind() != *kind {
                     let (kind_word, lit_word) =
                         (kind_keyword(*kind), kind_keyword(lit.node.kind()));
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             lit.span,
@@ -1663,7 +1732,7 @@ impl<'a> Checker<'a> {
                 arg: CommunityArg::All(span),
                 ..
             } => {
-                self.diags.push(Diagnostic::coded(
+                self.push_diag(Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     *span,
                     format!("`add {}` takes a literal value", kind_keyword(*kind)),
@@ -1677,7 +1746,7 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 if *add || *kind != CommunityKind::Large {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         global.span,
                         "large-community wildcard requires `remove large-community`",
@@ -1695,7 +1764,7 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 if *kind != CommunityKind::Standard {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             name.span,
@@ -1724,7 +1793,7 @@ impl<'a> Checker<'a> {
                         || (*ty == ValueType::U32 && !scope.local_is_constant(&name.node))
                 });
                 if let Some(ty) = runtime_value {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             name.span,
@@ -1753,7 +1822,7 @@ impl<'a> Checker<'a> {
                     ) {
                         diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                     }
-                    self.diags.push(diag);
+                    self.push_diag(diag);
                 }
             }
             ActionStmt::Community {
@@ -1778,7 +1847,7 @@ impl<'a> Checker<'a> {
                     if let U32Arg::Lit(asn, span) = arg
                         && *asn == 0
                     {
-                        self.diags.push(Diagnostic::coded(
+                        self.push_diag(Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
                             "AS 0 cannot be prepended (RFC 7607)",
@@ -1789,7 +1858,7 @@ impl<'a> Checker<'a> {
                 match count {
                     U32Arg::Lit(value, span) => {
                         if *value == 0 || *value > 255 {
-                            self.diags.push(Diagnostic::coded(
+                            self.push_diag(Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 *span,
                                 format!("prepend count {value} out of range"),
@@ -1829,7 +1898,7 @@ impl<'a> Checker<'a> {
             // parameter, so `requires_*` analyses stay call-site-local
             // and a call is a pure function of its arguments.
             ValueExprAst::Field(path) if !scope.fields_allowed => {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         path.span,
@@ -1843,10 +1912,10 @@ impl<'a> Checker<'a> {
                 );
             }
             ValueExprAst::Field(path) => match resolve_field(path) {
-                Err(diag) => self.diags.push(diag),
+                Err(diag) => self.push_diag(diag),
                 Ok(resolved) => {
                     if value_field_of(resolved).is_none() {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 path.span,
@@ -1874,7 +1943,7 @@ impl<'a> Checker<'a> {
                 if let (Some(l), Some(r)) = (fold_const(lhs), fold_const(rhs))
                     && let Err(kind) = checked_arith(*op, l, r)
                 {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         *span,
                         format!("this constant expression is invalid: {kind}"),
@@ -1883,7 +1952,7 @@ impl<'a> Checker<'a> {
                 } else if matches!(op, ArithOp::Div | ArithOp::Rem) && !nonzero_divisor(rhs) {
                     // LAN-2791: a divisor that can be zero would make the
                     // route's data decide an error; require one that cannot.
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             rhs.span(),
@@ -1909,9 +1978,9 @@ impl<'a> Checker<'a> {
                     // A user-defined function (LAN-304): arity-checked
                     // here; the call graph and budgets are validated
                     // in `check_fn_graph`.
-                    if let Some(def) = self.file.fns.iter().find(|f| f.name.node == name.node) {
+                    if let Some(def) = self.fns.get(name.node.as_str()).copied() {
                         if def.params.len() != args.len() {
-                            self.diags.push(
+                            self.push_diag(
                                 Diagnostic::coded(
                                     DiagnosticCode::Typecheck,
                                     *span,
@@ -1928,6 +1997,9 @@ impl<'a> Checker<'a> {
                                 .with_label(def.name.span, "function defined here"),
                             );
                         }
+                        return;
+                    }
+                    if self.full() {
                         return;
                     }
                     let mut diag = Diagnostic::coded(
@@ -1970,11 +2042,11 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    self.diags.push(diag);
+                    self.push_diag(diag);
                     return;
                 };
                 if args.len() != arity {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         *span,
                         format!(
@@ -1995,7 +2067,7 @@ impl<'a> Checker<'a> {
                     && let (Some(lo), Some(hi)) = (fold_const(&args[1]), fold_const(&args[2]))
                     && lo > hi
                 {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         *span,
                         format!("clamp bounds are inverted: lo ({lo}) > hi ({hi})"),
@@ -2021,7 +2093,7 @@ impl<'a> Checker<'a> {
                  community-set, or add or remove it"
             }
         };
-        self.diags.push(
+        self.push_diag(
             Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 operand.span(),
@@ -2072,7 +2144,7 @@ impl<'a> Checker<'a> {
             }
         };
         if let Some(problem) = problem {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 span,
                 format!("{} compared with {}", lhs.0.describe(), rhs.0.describe()),
@@ -2116,7 +2188,7 @@ impl<'a> Checker<'a> {
             (ValueType::Community, _) => Some("a community probes a community-set"),
         };
         if let Some(note) = problem {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     ident.span.to(set.span),
@@ -2160,7 +2232,7 @@ impl<'a> Checker<'a> {
         ) {
             diag = diag.with_note(format!("did you mean `{suggestion}`?"));
         }
-        self.diags.push(diag);
+        self.push_diag(diag);
     }
 
     /// A compile-time-constant u32 position (prepend operands/counts,
@@ -2176,7 +2248,7 @@ impl<'a> Checker<'a> {
             return;
         }
         if scope.is_local(&name.node) {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     name.span,
@@ -2196,7 +2268,7 @@ impl<'a> Checker<'a> {
         if let Some(suggestion) = closest(&name.node, scope.params.iter().copied()) {
             diag = diag.with_note(format!("did you mean `{suggestion}`?"));
         }
-        self.diags.push(diag);
+        self.push_diag(diag);
     }
 
     /// A non-`u32` parameter in a position of another type: reports it and
@@ -2210,7 +2282,7 @@ impl<'a> Checker<'a> {
         let Some(ty) = scope.typed_param(&name.node) else {
             return false;
         };
-        self.diags.push(Diagnostic::coded(
+        self.push_diag(Diagnostic::coded(
             DiagnosticCode::Typecheck,
             name.span,
             format!(
@@ -2232,7 +2304,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|ty| format!("`{}`", ty.keyword()))
                 .collect();
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 set.span,
                 format!(
@@ -2257,11 +2329,12 @@ impl<'a> Checker<'a> {
         span: Span,
         scope: &Scope<'_>,
     ) -> Option<&'a PolicyDef> {
-        // Borrow the target through the file field directly so its
-        // lifetime is independent of `self` (diagnostics below need
-        // `&mut self`).
-        let file = self.file;
-        let Some(target) = file.policies.iter().find(|p| p.name.node == policy.node) else {
+        // `policy` returns the `'a` borrow, independent of `self`
+        // (diagnostics below need `&mut self`).
+        let Some(target) = self.policy(&policy.node) else {
+            if self.full() {
+                return None;
+            }
             let mut diag = Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 policy.span,
@@ -2286,12 +2359,12 @@ impl<'a> Checker<'a> {
                         .map(|p| (p.name.node.as_str(), Some(p.name.span))),
                 );
             }
-            self.diags.push(diag);
+            self.push_diag(diag);
             return None;
         };
         self.check_call_args(target, args, Some(scope));
         if target.params.len() != args.len() {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     span,
@@ -2335,7 +2408,7 @@ impl<'a> Checker<'a> {
                 // A `let` shadows a parameter of the same name here as in
                 // value positions, and a binding is a runtime value, not a
                 // compile-time argument.
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         arg.span,
@@ -2358,7 +2431,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(caller) = scope.param_type(name) {
                     if caller != ty {
-                        self.diags.push(Diagnostic::coded(
+                        self.push_diag(Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             arg.span,
                             format!(
@@ -2376,7 +2449,7 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Err(reason) = check_call_arg(self.file, target, index, &arg.node) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         arg.span,
@@ -2461,14 +2534,9 @@ impl<'a> Checker<'a> {
                         ParamType::CommunitySet => Some(DatasetKind::Community),
                         _ => None,
                     }
-                } else if self.file.asn_sets.iter().any(|s| s.name.node == set.node) {
+                } else if self.set_kind_of(&set.node) == Some("asn-set") {
                     Some(DatasetKind::Asn)
-                } else if self
-                    .file
-                    .community_sets
-                    .iter()
-                    .any(|s| s.name.node == set.node)
-                {
+                } else if self.set_kind_of(&set.node) == Some("community-set") {
                     Some(DatasetKind::Community)
                 } else {
                     self.dataset_of(&set.node)
@@ -2479,12 +2547,10 @@ impl<'a> Checker<'a> {
                     self.check_probe_kind(ident, value, set, kind);
                 }
                 if scope.typed_param(&set.node).is_some()
-                    || self.file.asn_sets.iter().any(|s| s.name.node == set.node)
-                    || self
-                        .file
-                        .community_sets
-                        .iter()
-                        .any(|s| s.name.node == set.node)
+                    || matches!(
+                        self.set_kind_of(&set.node),
+                        Some("asn-set" | "community-set")
+                    )
                 {
                     // Resolved above.
                 } else if let Some(decl) = self.dataset_of(&set.node) {
@@ -2492,7 +2558,7 @@ impl<'a> Checker<'a> {
                     // exactly like their in-language kinds; prefix
                     // datasets are not u32-probeable.
                     if decl.kind == DatasetKind::Prefix {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 set.span,
@@ -2505,6 +2571,8 @@ impl<'a> Checker<'a> {
                             .with_label(decl.kind_span, "declared here"),
                         );
                     }
+                } else if self.full() {
+                    // The compile already fails; no diagnostic to build.
                 } else {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
@@ -2543,16 +2611,16 @@ impl<'a> Checker<'a> {
                                 .map(|n| (n.node.as_str(), Some(n.span))),
                         );
                     }
-                    self.diags.push(diag);
+                    self.push_diag(diag);
                 }
             }
             Expr::HasParam { field, param } => match resolve_field(field) {
-                Err(diag) => self.diags.push(diag),
+                Err(diag) => self.push_diag(diag),
                 Ok(Field::Communities) => {
                     if scope.typed_param(&param.node) != Some(ParamType::Community)
                         && !self.typed_param_misused(param, scope, "a `community` parameter")
                     {
-                        self.diags.push(Diagnostic::coded(
+                        self.push_diag(Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             param.span,
                             format!("unknown `community` parameter `{}`", param.node),
@@ -2560,7 +2628,7 @@ impl<'a> Checker<'a> {
                         ));
                     }
                 }
-                Ok(_) => self.diags.push(
+                Ok(_) => self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         field.span.to(param.span),
@@ -2576,10 +2644,10 @@ impl<'a> Checker<'a> {
             // LAN-2790: a presence test for the optional values a
             // condition can see as missing (or as their default).
             Expr::Exists { field, span } => match resolve_field(field) {
-                Err(diag) => self.diags.push(diag),
+                Err(diag) => self.push_diag(diag),
                 Ok(resolved) => {
                     if optional_field(resolved).is_none() {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 *span,
@@ -2595,7 +2663,7 @@ impl<'a> Checker<'a> {
                 }
             },
             Expr::Has { field, lit } => match resolve_field(field) {
-                Err(diag) => self.diags.push(diag),
+                Err(diag) => self.push_diag(diag),
                 Ok(resolved) => {
                     let expected = match resolved {
                         Field::Communities => Some(CommunityKind::Standard),
@@ -2604,7 +2672,7 @@ impl<'a> Checker<'a> {
                         _ => None,
                     };
                     match expected {
-                            None => self.diags.push(
+                            None => self.push_diag(
                                 Diagnostic::coded(
                                     DiagnosticCode::Typecheck,
                                     field.span,
@@ -2615,7 +2683,7 @@ impl<'a> Checker<'a> {
                                     "`has` works on route.communities, route.large-communities, and route.ext-communities",
                                 ),
                             ),
-                            Some(kind) if lit.node.kind() != kind => self.diags.push(
+                            Some(kind) if lit.node.kind() != kind => self.push_diag(
                                 Diagnostic::coded(
                                     DiagnosticCode::Typecheck,
                                     lit.span,
@@ -2639,7 +2707,7 @@ impl<'a> Checker<'a> {
             Expr::Matches { field, pattern } => {
                 self.require_as_path(field, "matches");
                 if let Err(error) = AsPathRegex::new(&pattern.node) {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         pattern.span,
                         error,
@@ -2658,7 +2726,7 @@ impl<'a> Checker<'a> {
                 // A policy with an `apply` statement runs another policy's
                 // terms, which a pure predicate cannot.
                 if let Some(call_span) = first_call_stmt(target) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
@@ -2682,7 +2750,7 @@ impl<'a> Checker<'a> {
                 // given silently divergent semantics. LAN-304 `fn` is
                 // the designed vehicle for composing computed values.
                 if let Some(let_span) = first_let(target) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
@@ -2703,7 +2771,7 @@ impl<'a> Checker<'a> {
                 // predicate has no walk to run them in — same rule as
                 // `let` above.
                 if let Some(loop_span) = first_loop(target) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
@@ -2724,7 +2792,7 @@ impl<'a> Checker<'a> {
                 // `let` bindings, so it rides the same rule — a pure
                 // inlined predicate has no walk to execute binds in.
                 if let Some(call_span) = first_fn_call(target, self.file) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
@@ -2748,9 +2816,9 @@ impl<'a> Checker<'a> {
 
     fn require_as_path(&mut self, field: &FieldPath, op: &str) {
         match resolve_field(field) {
-            Err(diag) => self.diags.push(diag),
+            Err(diag) => self.push_diag(diag),
             Ok(Field::AsPath) => {}
-            Ok(_) => self.diags.push(Diagnostic::coded(
+            Ok(_) => self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 field.span,
                 format!("`{op}` is not defined on `{}`", field.render()),
@@ -2767,7 +2835,7 @@ impl<'a> Checker<'a> {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
             Err(diag) => {
-                self.diags.push(diag);
+                self.push_diag(diag);
                 return;
             }
         };
@@ -2791,7 +2859,7 @@ impl<'a> Checker<'a> {
         }
         let eq_only = |checker: &mut Self| {
             if matches!(op, CmpOp::Ge | CmpOp::Le) {
-                checker.diags.push(Diagnostic::coded(
+                checker.push_diag(Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     field.span.to(rhs.span()),
                     format!("`{}` supports only `==` and `!=`", field.render()),
@@ -2845,20 +2913,19 @@ impl<'a> Checker<'a> {
             Field::PeerAddress => {
                 eq_only(self);
                 if !matches!(rhs, Rhs::Ip(..)) {
-                    self.diags.push(type_mismatch(field, "an IP address", rhs));
+                    self.push_diag(type_mismatch(field, "an IP address", rhs));
                 }
             }
             Field::PeerGroup => {
                 eq_only(self);
                 if !matches!(rhs, Rhs::Str(_)) {
-                    self.diags
-                        .push(type_mismatch(field, "a quoted group name", rhs));
+                    self.push_diag(type_mismatch(field, "a quoted group name", rhs));
                 }
             }
             Field::Prefix => {
                 eq_only(self);
                 if !matches!(rhs, Rhs::Prefix(..)) {
-                    self.diags.push(
+                    self.push_diag(
                         type_mismatch(field, "a prefix literal", rhs)
                             .with_note("for set membership use `route.prefix in <prefix-set>`"),
                     );
@@ -2868,7 +2935,7 @@ impl<'a> Checker<'a> {
             | Field::LargeCommunities
             | Field::ExtCommunities
             | Field::AnyCommunity => {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         field.span.to(rhs.span()),
@@ -2881,7 +2948,7 @@ impl<'a> Checker<'a> {
                 );
             }
             Field::AsPath => {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         field.span.to(rhs.span()),
@@ -2901,7 +2968,7 @@ impl<'a> Checker<'a> {
     fn check_evpn_route_type_rhs(&mut self, field: &FieldPath, rhs: &Rhs) {
         match rhs {
             Rhs::Int(value, span) if !(1..=6).contains(value) => {
-                self.diags.push(Diagnostic::coded(
+                self.push_diag(Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     *span,
                     format!("EVPN route type {value} out of range"),
@@ -2910,8 +2977,7 @@ impl<'a> Checker<'a> {
             }
             Rhs::Int(..) => {}
             other => {
-                self.diags
-                    .push(type_mismatch(field, "an integer EVPN route type", other));
+                self.push_diag(type_mismatch(field, "an integer EVPN route type", other));
             }
         }
     }
@@ -2924,7 +2990,7 @@ impl<'a> Checker<'a> {
             Rhs::Ip(..) => {}
             Rhs::Field(path) => match resolve_field(path) {
                 Ok(Field::PeerAddress) => {}
-                Ok(_) => self.diags.push(
+                Ok(_) => self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         path.span,
@@ -2938,9 +3004,9 @@ impl<'a> Checker<'a> {
                         "strict next-hop is `route.next-hop == peer.address`; other fields have no next-hop comparison",
                     ),
                 ),
-                Err(diag) => self.diags.push(diag),
+                Err(diag) => self.push_diag(diag),
             },
-            other => self.diags.push(type_mismatch(
+            other => self.push_diag(type_mismatch(
                 field,
                 "an IP address or `peer.address`",
                 other,
@@ -2954,9 +3020,7 @@ impl<'a> Checker<'a> {
             Rhs::Ident(name) => {
                 self.check_u32_arg(&U32Arg::Param(name.clone()), scope);
             }
-            other => self
-                .diags
-                .push(type_mismatch(field, "a u32 value or parameter", other)),
+            other => self.push_diag(type_mismatch(field, "a u32 value or parameter", other)),
         }
     }
 
@@ -2968,7 +3032,7 @@ impl<'a> Checker<'a> {
         scope: &Scope<'_>,
     ) {
         let Rhs::Ident(name) = rhs else {
-            self.diags.push(type_mismatch(
+            self.push_diag(type_mismatch(
                 field,
                 &format!("one of {}", member_list(members)),
                 rhs,
@@ -2999,22 +3063,14 @@ impl<'a> Checker<'a> {
         } else if let Some(suggestion) = closest(&name.node, members.iter().copied()) {
             diag = diag.with_note(format!("did you mean `{suggestion}`?"));
         }
-        self.diags.push(diag);
+        self.push_diag(diag);
     }
 
     /// The set kind an `in` membership test needs for a resolved field,
     /// and a description of what mistakenly-referenced kind a name
     /// actually is (for the wrong-kind note).
     fn set_kind_of(&self, name: &str) -> Option<&'static str> {
-        if self.file.prefix_sets.iter().any(|s| s.name.node == name) {
-            Some("prefix-set")
-        } else if self.file.community_sets.iter().any(|s| s.name.node == name) {
-            Some("community-set")
-        } else if self.file.asn_sets.iter().any(|s| s.name.node == name) {
-            Some("asn-set")
-        } else {
-            None
-        }
+        self.sets.get(name).map(|entry| entry.kind)
     }
 
     /// `remove <kind> in SET` / `not in SET`: removal-only, against a
@@ -3031,7 +3087,7 @@ impl<'a> Checker<'a> {
         let keyword = kind_keyword(kind);
         let form = if negate { "not in" } else { "in" };
         if add {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     set.span,
@@ -3043,7 +3099,7 @@ impl<'a> Checker<'a> {
             return;
         }
         if kind == CommunityKind::Any && negate {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     set.span,
@@ -3064,21 +3120,14 @@ impl<'a> Checker<'a> {
             self.check_set_param(set, ty, &[ParamType::CommunitySet]);
             return;
         }
-        if let Some(def) = self
-            .file
-            .community_sets
-            .iter()
-            .find(|s| s.name.node == set.node)
-        {
+        if let Some(def) = self.community_set(&set.node) {
             match removal_set_problem(def, kind, negate) {
                 None => {}
                 Some(RemovalSetProblem::OtherKind { member, span }) => {
-                    self.diags
-                        .push(other_kind_removal(set, member, span, kind, form));
+                    self.push_diag(other_kind_removal(set, member, span, kind, form));
                 }
                 Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
-                    self.diags
-                        .push(ext_not_in_without_rt_ro(set, def.name.span));
+                    self.push_diag(ext_not_in_without_rt_ro(set, def.name.span));
                 }
                 Some(RemovalSetProblem::NoMembers { effect }) => {
                     let mut diag = Diagnostic::coded(
@@ -3100,7 +3149,7 @@ impl<'a> Checker<'a> {
                             community_attribute(kind).remove_all_str()
                         ));
                     }
-                    self.diags.push(diag);
+                    self.push_diag(diag);
                 }
             }
         } else if let Some(decl) = self.dataset_of(&set.node) {
@@ -3108,7 +3157,7 @@ impl<'a> Checker<'a> {
             // runtime and are filtered by kind there, so it gets none of the
             // member checks above.
             if decl.kind != DatasetKind::Community {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         set.span,
@@ -3135,7 +3184,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Diagnose an `in <set>` reference that must resolve to a set of
-    /// `kind`, with wrong-kind and did-you-mean notes.
+    /// `kind`, with wrong-kind and did-you-mean notes. `names` (the
+    /// suggestion candidates) is read only for an unknown reference while
+    /// diagnostics are still being collected.
     fn check_set_reference<'n>(
         &mut self,
         set: &Spanned<String>,
@@ -3143,9 +3194,7 @@ impl<'a> Checker<'a> {
         need: &str,
         names: impl Iterator<Item = &'n Spanned<String>>,
     ) {
-        let candidates: Vec<(&str, Option<Span>)> =
-            names.map(|n| (n.node.as_str(), Some(n.span))).collect();
-        if candidates.iter().any(|&(name, _)| name == set.node) {
+        if self.set_kind_of(&set.node) == Some(kind) || self.full() {
             return;
         }
         let mut diag = Diagnostic::coded(
@@ -3165,9 +3214,13 @@ impl<'a> Checker<'a> {
                 ))
                 .with_label(span, format!("`{}` is defined here", set.node));
         } else {
-            diag = with_suggestion(diag, &set.node, candidates);
+            diag = with_suggestion(
+                diag,
+                &set.node,
+                names.map(|n| (n.node.as_str(), Some(n.span))),
+            );
         }
-        self.diags.push(diag);
+        self.push_diag(diag);
     }
 
     /// LAN-2794: a kind-specific probe or removal of a named community-set
@@ -3182,12 +3235,7 @@ impl<'a> Checker<'a> {
         form: &str,
         instead: &str,
     ) -> bool {
-        let Some(def) = self
-            .file
-            .community_sets
-            .iter()
-            .find(|s| s.name.node == set.node)
-        else {
+        let Some(def) = self.community_set(&set.node) else {
             return false;
         };
         let Some(member) = def
@@ -3198,7 +3246,7 @@ impl<'a> Checker<'a> {
             return false;
         };
         let other = attribute_describe(member.node.attribute());
-        self.diags.push(
+        self.push_diag(
             Diagnostic::coded(
                 DiagnosticCode::Typecheck,
                 set.span,
@@ -3223,7 +3271,7 @@ impl<'a> Checker<'a> {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
             Err(diag) => {
-                self.diags.push(diag);
+                self.push_diag(diag);
                 return;
             }
         };
@@ -3241,7 +3289,7 @@ impl<'a> Checker<'a> {
         };
         if let (Some(expected), Some(decl)) = (expected_kind, self.dataset_of(&set.node)) {
             if decl.kind != expected {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         set.span,
@@ -3302,7 +3350,7 @@ impl<'a> Checker<'a> {
                     .map(|s| &s.name)
                     .chain(self.dataset_names(DatasetKind::Asn)),
             ),
-            _ => self.diags.push(
+            _ => self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     field.span.to(set.span),
@@ -3331,7 +3379,7 @@ impl<'a> Checker<'a> {
             }
             let mut path: Vec<&str> = Vec::new();
             if let Some((cycle, span)) = find_cycle(name, &edges, &mut path, &mut done) {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         span,
@@ -3411,7 +3459,7 @@ impl<'a> Checker<'a> {
                 &mut calls,
                 &mut poisoned,
             ) {
-                self.diags.push(diag);
+                self.push_diag(diag);
             }
             for &dependent in dependents.get(name).into_iter().flatten() {
                 let left = pending.get_mut(dependent).expect("counted above");
@@ -3435,7 +3483,7 @@ impl<'a> Checker<'a> {
             for field in &test.route {
                 let (name, span) = route_field_name(field);
                 if let Some(&first) = seen_fields.get(name) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             span,
@@ -3462,7 +3510,7 @@ impl<'a> Checker<'a> {
                     }
                     RouteField::EvpnRouteType(value, span) => {
                         if *value > 255 {
-                            self.diags.push(Diagnostic::coded(
+                            self.push_diag(Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 *span,
                                 format!("EVPN route type {value} out of range"),
@@ -3494,7 +3542,7 @@ impl<'a> Checker<'a> {
                                     file: value.span.file,
                                 }
                             };
-                            self.diags.push(
+                            self.push_diag(
                                 Diagnostic::coded(
                                     DiagnosticCode::Typecheck,
                                     span,
@@ -3516,7 +3564,7 @@ impl<'a> Checker<'a> {
             let mut seen_datasets: HashMap<&str, Span> = HashMap::new();
             for def in &test.datasets {
                 if let Some(&first) = seen_datasets.get(def.name.node.as_str()) {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             def.name.span,
@@ -3529,6 +3577,9 @@ impl<'a> Checker<'a> {
                     seen_datasets.insert(&def.name.node, def.name.span);
                 }
                 let Some(decl) = self.dataset_of(&def.name.node) else {
+                    if self.full() {
+                        continue;
+                    }
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         def.name.span,
@@ -3554,7 +3605,7 @@ impl<'a> Checker<'a> {
                                 .map(|d| (d.name.node.as_str(), Some(d.name.span))),
                         );
                     }
-                    self.diags.push(diag);
+                    self.push_diag(diag);
                     continue;
                 };
                 for entry in &def.entries {
@@ -3565,7 +3616,7 @@ impl<'a> Checker<'a> {
                             | (DatasetEntryAst::Community(_), DatasetKind::Community)
                     );
                     if !ok {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 entry.span,
@@ -3581,12 +3632,10 @@ impl<'a> Checker<'a> {
                 }
             }
             for call in test.expects.iter().flat_map(|expect| &expect.calls) {
-                let file = self.file;
-                let Some(target) = file
-                    .policies
-                    .iter()
-                    .find(|p| p.name.node == call.policy.node)
-                else {
+                let Some(target) = self.policy(&call.policy.node) else {
+                    if self.full() {
+                        continue;
+                    }
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         call.policy.span,
@@ -3611,12 +3660,12 @@ impl<'a> Checker<'a> {
                                 .map(|p| (p.name.node.as_str(), Some(p.name.span))),
                         );
                     }
-                    self.diags.push(diag);
+                    self.push_diag(diag);
                     continue;
                 };
                 self.check_call_args(target, &call.args, None);
                 if target.params.len() != call.args.len() {
-                    self.diags.push(
+                    self.push_diag(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             call.args
@@ -3650,7 +3699,7 @@ impl<'a> Checker<'a> {
             if let Some(suggestion) = closest(&value.node, members.iter().copied()) {
                 diag = diag.with_note(format!("did you mean `{suggestion}`?"));
             }
-            self.diags.push(diag);
+            self.push_diag(diag);
         }
     }
 
@@ -3661,7 +3710,7 @@ impl<'a> Checker<'a> {
     ) {
         for lit in lits {
             if lit.node.kind() != expected {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         lit.span,
@@ -4022,7 +4071,7 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
             out.record(action);
         }
         for (policy, args) in applies {
-            let Some(callee) = file.policies.iter().find(|p| p.name.node == policy) else {
+            let Some(callee) = file.policy(policy) else {
                 continue;
             };
             let inner = uses(file, callee, depth + 1, memo);
@@ -4195,9 +4244,7 @@ fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>, fns: &HashMap<&str, F
 fn loop_iteration_bound(source: &ForSource, file: &SourceFile) -> u64 {
     match source {
         ForSource::Set(name) => file
-            .asn_sets
-            .iter()
-            .find(|s| s.name.node == name.node)
+            .asn_set(&name.node)
             .map_or(u64::from(MAX_LOOP_ITERATIONS), |s| s.entries.len() as u64),
         ForSource::Field(_) => u64::from(MAX_LOOP_ITERATIONS),
     }
@@ -5102,7 +5149,15 @@ fn with_suggestion<'n>(
     name: &str,
     candidates: impl IntoIterator<Item = (&'n str, Option<Span>)>,
 ) -> Diagnostic {
-    let candidates: Vec<(&str, Option<Span>)> = candidates.into_iter().collect();
+    // `closest` would return nothing; do not gather the candidates first.
+    if !super::diag::suggestion_budget_left() {
+        return diag;
+    }
+    // One past the cap is enough for `closest` to refuse an oversized set.
+    let candidates: Vec<(&str, Option<Span>)> = candidates
+        .into_iter()
+        .take(super::diag::MAX_SUGGESTION_CANDIDATES + 1)
+        .collect();
     let Some(suggestion) = closest(name, candidates.iter().map(|&(candidate, _)| candidate)) else {
         return diag;
     };

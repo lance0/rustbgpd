@@ -1809,9 +1809,11 @@ impl BgpMetrics {
                  made sendable mid-session) discarded \
                  because their session id did not match the registered \
                  session for the peer — a message from a superseded session \
-                 (collision loser) queued behind the replacement's PeerUp. \
-                 The registered session's state is untouched. `kind` is one \
-                 of: {}.",
+                 (collision loser) queued behind the replacement's PeerUp — \
+                 and End-of-RIB or route-refresh begin/end/timeout markers \
+                 from a peer with no registered session, such as one whose \
+                 routes are retained under Graceful Restart. The registered \
+                 session's state is untouched. `kind` is one of: {}.",
                     StaleSessionMessageKind::ALL
                         .iter()
                         .map(|kind| kind.as_str())
@@ -5457,7 +5459,15 @@ impl BgpMetrics {
     /// Count one net-new Add-Path ID attempted beyond the cap. Repeated
     /// withheld IDs count again; an admitted-ID replacement does not.
     pub fn record_add_path_receive_limit_attempt(&self, peer: &str, family: &str, action: &str) {
-        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        debug_assert!(matches!(
+            family,
+            "ipv4_unicast"
+                | "ipv6_unicast"
+                | "l3vpn_ipv4_unicast"
+                | "l3vpn_ipv6_unicast"
+                | "ipv4_labeled_unicast"
+                | "ipv6_labeled_unicast"
+        ));
         debug_assert!(matches!(action, "shutdown" | "block" | "warning"));
         self.0
             .add_path_receive_limit_attempts

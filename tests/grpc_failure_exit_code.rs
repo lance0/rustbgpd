@@ -707,6 +707,14 @@ fn unsafe_runtime_state_dir_refuses_boot() {
         logs.contains("refusing to start: runtime_state_dir must be"),
         "{logs}"
     );
+    // The reason reaches stderr, not only the structured log.
+    let stderr = std::fs::read_to_string(&daemon.stderr_path).unwrap();
+    assert!(
+        stderr.contains("error: refusing to start: runtime_state_dir")
+            && stderr.contains(&runtime_dir.display().to_string())
+            && stderr.contains("775"),
+        "stderr must name the refused directory and why:\n{stderr}"
+    );
     assert!(
         std::fs::read_dir(&runtime_dir).unwrap().next().is_none(),
         "nothing may be written under a refused state dir"

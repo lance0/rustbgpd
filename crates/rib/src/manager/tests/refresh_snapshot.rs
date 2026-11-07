@@ -283,6 +283,7 @@ fn borr_production_writers_bound_inventory_growth() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
     let mut inserted = 0;
     let mut previous = [(0_usize, 0_usize); 7];

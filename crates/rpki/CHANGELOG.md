@@ -36,6 +36,34 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   (10000000) budget. Previously the only limit was the per-transaction record
   budget, which reset with every serial update.
 - The new API is additive, and `RtrError` was already `#[non_exhaustive]`.
+- `VrpManager` keys each cache's VRPs by the canonical prefix, with host bits
+  cleared, as validation already does. RTR v1 accepts Prefix PDUs with host
+  bits set. A withdrawal sent in canonical form could miss its host-bit
+  announcement and leave that VRP authorizing the prefix, and one VRP sent both
+  ways counted twice.
+- A cache that answers the v2 query at a lower version during §7 negotiation is
+  no longer sent a fatal Error Report code 8. That code is for a version that
+  differs from a negotiated one. The client now closes the connection and
+  reconnects at the lower version, as 8210bis §7 allows.
+- Enforce the RTR expire interval (RFC 8210 §6) while a query is in flight and
+  while a reconnect is connecting. Previously the expiry was checked only while
+  the session sat idle and between retries, so a cache that accepted a query and
+  stalled kept expired data published until the 5-minute transaction deadline,
+  and a hung connect kept it indefinitely. The bound covers query writes as
+  well as reads, so a cache that stops reading cannot hold a query write, and
+  the expired data, past the deadline.
+- A v1 session that the client fell back to from v2 now reconnects to probe
+  v2 again at its first refresh at least an hour after the fallback (8210bis
+  §7: each session opens at the highest version, and the version changes only
+  on a new connection). Previously any failure before the first End of Data,
+  such as one connection reset, kept the cache at v1, without ASPA, for the
+  life of the process. A probe the cache refuses falls back to v1 at once and
+  keeps the held v1 data and serial. Only a closed connection or a lower
+  version byte before the cache answers counts as a refusal, besides error
+  code 4. A PDU at the probed version that fails to decode, such as a corrupt
+  Prefix PDU, shows the cache speaks that version: it ends the session under
+  its own §12 handling, flushing the held data where that applies, before or
+  after the Cache Response.
 - Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
   new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
   or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These

@@ -94,13 +94,23 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
         || writer_failure_log_metadata(metadata)
         || malformed_attribute_warn_metadata(metadata)
         || validation_warn_metadata(metadata)
+        || downstream_malformed_warn_metadata(metadata)
         || (*metadata.level() == tracing::Level::WARN
             && ["peer", "family", "route_type", "discarded"]
                 .into_iter()
                 .all(|field| metadata.fields().field(field).is_some()))
 }
 
-/// The ungated `UPDATE validation error` WARN.
+/// The treat-as-withdraw action WARN, the ASPA first-AS WARN, and the OTC
+/// rejection WARN.
+fn downstream_malformed_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::WARN
+        && ["announced", "received_first_as", "rejected"]
+            .into_iter()
+            .any(|field| metadata.fields().field(field).is_some())
+}
+
+/// The `UPDATE validation error` WARN.
 fn validation_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     *metadata.level() == tracing::Level::WARN
         && metadata.fields().field("max_as_path_length").is_some()
@@ -2010,7 +2020,8 @@ fn malformed_attribute_warning_names_the_cause_of_the_applied_disposition() {
     attributes.extend([0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA]); // AS_PATH again, AS_SET
     update.path_attributes = Bytes::from(attributes);
 
-    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    let mut events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    events.retain(|event| !event.contains_key("announced")); // the action, not a cause
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["disposition"], "treat-as-withdraw");
     assert_eq!(events[0]["attr_type"], "2", "{events:?}");
@@ -2108,10 +2119,162 @@ fn decoder_removed_attribute_is_not_reported_again_by_validation() {
     attributes[3] = 9; // ORIGIN value out of range
     update.path_attributes = Bytes::from(attributes);
 
-    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    let mut events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    events.retain(|event| !event.contains_key("announced")); // the action, not a cause
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["attr_type"], "1");
     assert!(events[0].contains_key("decoder_disposition"), "{events:?}");
+}
+
+/// Load-bearing log-volume proof: the treat-as-withdraw, validation and ASPA
+/// WARNs share the summary's per-connection gate, so a repeated malformed
+/// UPDATE warns at counts 1, 2, 4 and 8. Any of them logging once per
+/// UPDATE fails here; metrics still count every UPDATE.
+#[test]
+fn downstream_malformed_update_warnings_share_the_connection_gate() {
+    const UPDATES: usize = 8;
+    const GATED: usize = 4; // counts 1, 2, 4, 8
+    let count = |events: &[SessionLogFields], key: &str| {
+        events.iter().filter(|e| e.contains_key(key)).count()
+    };
+    let stream = |edit: &dyn Fn(&mut UpdateMessage)| {
+        let (runtime, mut session, server, mut update) = malformed_update_fixture();
+        edit(&mut update);
+        let mut events = Vec::new();
+        for _ in 0..UPDATES {
+            events.extend(capture_session_logs(|| {
+                runtime.block_on(session.process_update(update.clone()));
+            }));
+        }
+        session.close_tcp();
+        let rearmed =
+            capture_session_logs(|| runtime.block_on(session.process_update(update.clone())));
+        (session, server, events, rearmed)
+    };
+
+    // Decoder treat-as-withdraw: ORIGIN out of range.
+    let (session, _server, events, rearmed) = stream(&|update| {
+        let mut attributes = update.path_attributes.to_vec();
+        attributes[3] = 9;
+        update.path_attributes = Bytes::from(attributes);
+    });
+    assert_eq!(count(&events, "announced"), GATED, "{events:?}");
+    assert_eq!(count(&events, "decoder_disposition"), GATED);
+    assert_eq!(count(&rearmed, "announced"), 1, "a new connection re-arms");
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
+
+    // Validation treat-as-withdraw: ORIGIN missing.
+    let (session, _server, events, _) = stream(&|update| {
+        update.path_attributes = update.path_attributes.slice(4..);
+    });
+    assert_eq!(count(&events, "max_as_path_length"), GATED, "{events:?}");
+    assert_eq!(count(&events, "announced"), GATED);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
+
+    // ASPA first-AS treat-as-withdraw.
+    let (session, _server, events, rearmed) = stream(&|update| {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        *update = aspa_first_as_update(prefix, 65003, true);
+    });
+    assert_eq!(count(&events, "received_first_as"), GATED, "{events:?}");
+    assert_eq!(count(&rearmed, "received_first_as"), 1);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
+}
+
+/// Process `update` once and return its WARN events.
+fn warn_events(
+    runtime: &tokio::runtime::Runtime,
+    session: &mut PeerSession,
+    update: &UpdateMessage,
+) -> Vec<SessionLogFields> {
+    capture_session_logs(|| runtime.block_on(session.process_update(update.clone())))
+}
+
+fn with_attributes(update: &UpdateMessage, edit: impl FnOnce(&mut Vec<u8>)) -> UpdateMessage {
+    let mut update = update.clone();
+    let mut attributes = update.path_attributes.to_vec();
+    edit(&mut attributes);
+    update.path_attributes = Bytes::from(attributes);
+    update
+}
+
+/// Load-bearing: attribute-discard and treat-as-withdraw UPDATEs keep
+/// separate WARN schedules, so earlier benign discards do not hold back the
+/// first withdrawal's WARNs. One shared counter would put this
+/// treat-as-withdraw at count 3 and log nothing.
+#[test]
+fn attribute_discards_do_not_delay_the_first_withdrawal_warning() {
+    let (runtime, mut session, _server, update) = malformed_update_fixture();
+    // ATOMIC_AGGREGATE with a value byte: a length error, attribute-discard.
+    let discard = with_attributes(&update, |attrs| attrs.extend([0x40, 6, 1, 0]));
+    let withdraw = with_attributes(&update, |attrs| attrs[3] = 9); // ORIGIN 9
+    for _ in 0..2 {
+        warn_events(&runtime, &mut session, &discard);
+    }
+    let events = warn_events(&runtime, &mut session, &withdraw);
+    let count = |key: &str| events.iter().filter(|e| e.contains_key(key)).count();
+    assert_eq!(count("announced"), 1, "{events:?}");
+    assert_eq!(count("decoder_disposition"), 1, "{events:?}");
+    assert_eq!(update_malformed_count(&session, "attribute_discard"), 2);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 1);
+}
+
+/// Load-bearing: the malformed-OTC rejection WARN follows its UPDATE's
+/// gate, while the OTC counters still count every rejected announcement.
+#[test]
+fn malformed_otc_warnings_share_the_connection_gate() {
+    let (runtime, mut session, _server, update) = malformed_update_fixture();
+    // ONLY_TO_CUSTOMER with a three-byte value: a length error.
+    let otc = with_attributes(&update, |attrs| attrs.extend([0xC0, 35, 3, 0, 0, 1]));
+    let warned: Vec<_> = (0..8)
+        .map(|_| {
+            warn_events(&runtime, &mut session, &otc)
+                .iter()
+                .filter(|e| e.contains_key("rejected"))
+                .count()
+        })
+        .collect();
+    assert_eq!(warned, [1, 1, 0, 1, 0, 0, 0, 1]);
+    assert_eq!(session.config.neighbor_counters.otc_routes_blocked(), 8);
+    session.close_tcp();
+    let rearmed = warn_events(&runtime, &mut session, &otc);
+    assert_eq!(
+        rearmed
+            .iter()
+            .filter(|e| e.contains_key("rejected"))
+            .count(),
+        1,
+        "a new connection re-arms: {rearmed:?}"
+    );
+}
+
+/// Load-bearing: an UPDATE that resets the session logs its cause however
+/// many malformed UPDATEs came before it. Here the third withdrawal-class
+/// UPDATE, not a power of two, escalates under RFC 7606 §5.2: ORIGIN is
+/// missing and the only NLRI carrier is an empty `MP_REACH_NLRI`.
+#[test]
+fn session_reset_logs_its_validation_cause_past_the_first_update() {
+    let (runtime, mut session, _server, update) = malformed_update_fixture();
+    let withdraw = with_attributes(&update, |attrs| attrs[3] = 9); // ORIGIN 9
+    for _ in 0..2 {
+        warn_events(&runtime, &mut session, &withdraw);
+    }
+    let mut reset = with_attributes(&update, |attrs| {
+        attrs.drain(..4); // drop ORIGIN
+        // MP_REACH_NLRI: IPv4 unicast, next hop 10.0.0.2, no NLRI.
+        attrs.extend([0x80, 14, 9, 0, 1, 1, 4, 10, 0, 0, 2, 0]);
+    });
+    reset.nlri = Bytes::new();
+    let events = warn_events(&runtime, &mut session, &reset);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.contains_key("max_as_path_length"))
+            .count(),
+        1,
+        "the reset's validation cause must log: {events:?}"
+    );
+    assert_eq!(update_malformed_count(&session, "session_reset"), 1);
 }
 
 #[test]
@@ -2401,4 +2564,70 @@ async fn negotiated_window_counts_our_llgr_time_whatever_the_peers_stale_times()
             "LLGR capability {llgr_capability}"
         );
     }
+}
+
+/// RFC 4271 §8.2.2: an operator Start outside Idle is ignored in every
+/// non-Idle state. The state, the NOTIFICATION backoff streak and the sent
+/// NOTIFICATION count all stay as they were.
+#[tokio::test(start_paused = true)]
+async fn start_outside_idle_keeps_state_streak_and_sends_nothing() {
+    for target in [
+        SessionState::Connect,
+        SessionState::Active,
+        SessionState::OpenSent,
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    ] {
+        let mut session = make_test_session(65001, 65002);
+        notification_cycle(&mut session).await;
+        assert_eq!(notification_cycle(&mut session).await, 60);
+        session.reconnect_timer = None;
+        let mut _peer = None;
+        if matches!(target, SessionState::Connect | SessionState::Active) {
+            session.drive_fsm(Event::ManualStart).await;
+            if let Some(task) = session.connect_task.take() {
+                task.abort();
+            }
+            if target == SessionState::Active {
+                session.drive_fsm(Event::TcpConnectionFails).await;
+            }
+        } else {
+            let (client, server) = connected_stream_pair().await;
+            _peer = Some(server);
+            session.test_install_stream(client);
+            session.drive_fsm(Event::ManualStart).await;
+            if target != SessionState::OpenSent {
+                session.drive_fsm(peer_open(65002)).await;
+            }
+            if target == SessionState::Established {
+                session.drive_fsm(Event::KeepaliveReceived).await;
+            }
+        }
+        assert_eq!(session.fsm.state(), target);
+        let sent = session.config.neighbor_counters.notifications_sent();
+        let _ = session.handle_command(PeerCommand::Start).await;
+        assert_eq!(session.fsm.state(), target, "{target:?}");
+        assert_eq!(session.notification_idle_failures, 2, "{target:?}");
+        assert_eq!(
+            session.config.neighbor_counters.notifications_sent(),
+            sent,
+            "{target:?}"
+        );
+    }
+}
+
+/// An operator Start in Idle while the NOTIFICATION backoff holds the
+/// reconnect starts the session now and clears the streak.
+#[tokio::test(start_paused = true)]
+async fn start_in_idle_during_the_backoff_hold_connects_now() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_some());
+
+    let _ = session.handle_command(PeerCommand::Start).await;
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 0);
 }

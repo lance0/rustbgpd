@@ -1264,11 +1264,6 @@ pub(crate) fn decode_path_attributes_revised_observed(
         let as_path_zero = type_code == attr_type::AS_PATH
             && as_path_contains_zero(value, if four_octet_as { 4 } else { 2 });
         let duplicate = !first_report(&mut seen, type_code, SEEN);
-        // The first AS_PATH's own decode records its AS 0 cause; a repeat
-        // must not record a second one. Its other causes are unaffected.
-        if as_path_zero && !duplicate {
-            first_report(&mut seen, type_code, REPORTED_AS_ZERO);
-        }
         if duplicate {
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal.
             // A duplicate Community Container is treat-as-withdraw; other
@@ -1296,7 +1291,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
                     error: DecodeError::UpdateAttributeError {
                         subcode: update_subcode::MALFORMED_AS_PATH,
                         data: attr_error_data(flags, type_code, value),
-                        detail: "RFC 7607 prohibits AS 0 in AS_PATH".to_string(),
+                        detail: AS_PATH_ZERO_DETAIL.to_string(),
                     },
                 });
             }
@@ -1440,6 +1435,13 @@ pub(crate) fn decode_path_attributes_revised_observed(
                         type_code: Some(type_code),
                     });
                 }
+                // The first AS_PATH's own decode recorded its AS 0 cause, so a
+                // repeat must not record a second one. Only an AS 0 error
+                // counts: a flags or framing error recorded instead leaves a
+                // later AS 0 copy to report it.
+                if as_path_zero && error.to_string().contains(AS_PATH_ZERO_DETAIL) {
+                    first_report(&mut seen, type_code, REPORTED_AS_ZERO);
+                }
                 malformed.push(MalformedAttribute {
                     type_code,
                     disposition,
@@ -1490,6 +1492,9 @@ pub(crate) fn decode_path_attributes_revised_observed(
         evpn_discarded,
     ))
 }
+
+/// RFC 7607 AS 0 diagnostic shared by every `AS_PATH` decode path.
+const AS_PATH_ZERO_DETAIL: &str = "RFC 7607 prohibits AS 0 in AS_PATH";
 
 const SEEN: u8 = 1;
 const REPORTED_DUPLICATE: u8 = 1 << 1;
@@ -2000,7 +2005,7 @@ fn decode_attribute_value(
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::MALFORMED_AS_PATH,
                     data: attr_error_data(flags, type_code, value),
-                    detail: "RFC 7607 prohibits AS 0 in AS_PATH".to_string(),
+                    detail: AS_PATH_ZERO_DETAIL.to_string(),
                 });
             }
             Ok(PathAttribute::AsPath(AsPath { segments }))
@@ -3033,7 +3038,7 @@ fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegme
         if as_path_contains_zero(original, as_size) {
             return Err(DecodeError::MalformedField {
                 message_type: "UPDATE",
-                detail: "RFC 7607 prohibits AS 0 in AS_PATH".to_string(),
+                detail: AS_PATH_ZERO_DETAIL.to_string(),
             });
         }
         return Err(DecodeError::ProhibitedAsSet {
@@ -9172,6 +9177,37 @@ mod tests {
                 .malformed
                 .iter()
                 .all(|m| m.type_code == attr_type::AS_PATH)
+        );
+    }
+
+    /// Load-bearing: a first `AS_PATH` refused for its flags records no AS 0
+    /// cause, so a later valid AS 0 copy must still report one.
+    #[test]
+    fn rfc7607_as_path_zero_after_a_flags_invalid_copy_is_reported() {
+        let mut buf = attr_bytes(attr_flags::OPTIONAL, attr_type::AS_PATH, &[2, 1, 0, 0]);
+        buf.extend(attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0, 0],
+        ));
+        let revised = rfc7607_revised(&buf, false);
+        let zero_causes = revised
+            .malformed
+            .iter()
+            .filter(|m| {
+                matches!(&m.error, DecodeError::UpdateAttributeError { detail, .. }
+                    if detail.contains(AS_PATH_ZERO_DETAIL))
+            })
+            .count();
+        assert_eq!(zero_causes, 1, "{:?}", revised.malformed);
+        assert!(
+            revised.malformed.iter().any(|m| matches!(
+                &m.error,
+                DecodeError::UpdateAttributeError { subcode, .. }
+                    if *subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
+            )),
+            "{:?}",
+            revised.malformed
         );
     }
 

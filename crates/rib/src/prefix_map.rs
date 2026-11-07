@@ -20,7 +20,7 @@ use prefix_trie::PrefixMap;
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix};
 
 /// A `Prefix`-keyed map backed by per-family prefix tries.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FamilyPrefixMap<V> {
     v4: PrefixMap<Ipv4Net, V>,
     v6: PrefixMap<Ipv6Net, V>,
