@@ -254,6 +254,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         }],
         llgr_stale_time: 3600,
     });
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.sweep_gr_stale(peer);
     assert!(
         manager

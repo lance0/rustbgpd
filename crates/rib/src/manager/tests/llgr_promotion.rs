@@ -1403,8 +1403,8 @@ fn run_gr_walk_case(
         }
         GrWalk::EorLlgr => {
             manager.handle_update(gr);
-            manager.sweep_gr_stale(peer);
             manager.handle_update(registering_peer_up(peer, 0));
+            manager.sweep_gr_stale(peer);
             Box::new(move |manager| manager.handle_update(eor))
         }
         GrWalk::ExpiryNoLlgr => {

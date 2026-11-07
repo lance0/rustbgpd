@@ -927,6 +927,88 @@ async fn llgr_eor_clears_llgr_stale() {
     handle.await.unwrap();
 }
 
+/// The restarted session registers inside the GR window but its End-of-RIB
+/// arrives only after the stale-routes timer promoted the routes to
+/// LLGR-stale (RFC 9494 §4.2). That late End-of-RIB is handled in the LLGR phase: the
+/// re-advertised route survives with both stale flags cleared, the other is
+/// removed, and LLGR completes.
+#[tokio::test]
+async fn late_end_of_rib_after_llgr_promotion_from_a_registered_session() {
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
+
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let dropped_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+    let routes = |prefixes: &[Ipv4Prefix]| RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: prefixes
+            .iter()
+            .map(|prefix| make_route(*prefix, Ipv4Addr::new(10, 0, 0, 1)))
+            .collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
+    tx.send(routes(&[kept_prefix, dropped_prefix]))
+        .await
+        .unwrap();
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    })
+    .await
+    .unwrap();
+    // The restarted session comes up within the GR window.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
+    let best = query_best_routes(&tx).await;
+    assert!(best.iter().all(|r| r.is_stale && !r.is_llgr_stale));
+
+    // The PeerUp re-armed the GR deadline at the stale-routes time (5 s). No
+    // End-of-RIB arrives before it, so the routes go LLGR-stale.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 2);
+    assert!(
+        best.iter().all(|r| r.is_llgr_stale),
+        "the routes are promoted to LLGR-stale while the session is registered"
+    );
+
+    tx.send(routes(&[kept_prefix])).await.unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 1, "the unrefreshed LLGR-stale route is removed");
+    assert_eq!(best[0].prefix, Prefix::V4(kept_prefix));
+    assert!(!best[0].is_llgr_stale && !best[0].is_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn llgr_peer_down_aborts_llgr() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
@@ -3498,9 +3580,9 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         }],
         llgr_stale_time: 3600,
     });
+    manager.handle_update(registering_peer_up(peer_v4(llgr), 0));
     manager.sweep_gr_stale(peer_v4(llgr));
     assert!(manager.llgr_peers.contains_key(&peer_v4(llgr)));
-    manager.handle_update(registering_peer_up(peer_v4(llgr), 0));
     announce(
         &mut manager,
         llgr,

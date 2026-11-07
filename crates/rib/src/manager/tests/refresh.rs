@@ -210,6 +210,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -369,6 +370,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -435,6 +437,7 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,

@@ -499,7 +499,6 @@ fn ipv4_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::Unicast)]
 }
 
-/// Sendable families for dual-stack test peers.
 /// A `PeerUp` that registers `session_id` for `peer` and exports nothing to
 /// it. The RIB refuses End-of-RIB and route-refresh markers from a peer with
 /// no registered session, so a test that sends them registers first, as
@@ -526,6 +525,7 @@ fn registering_peer_up(peer: PeerId, session_id: u64) -> RibUpdate {
     }
 }
 
+/// Sendable families for dual-stack test peers.
 fn dual_stack_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
 }

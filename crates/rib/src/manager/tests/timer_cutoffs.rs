@@ -277,6 +277,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
     );
     let handle = tokio::spawn(manager.run());
     tx.send(one_route()).await.unwrap();
+    tx.send(registering_peer_up(source(), 0)).await.unwrap();
     tx.send(RibUpdate::BeginRouteRefresh {
         session_id: 0,
         peer: source(),

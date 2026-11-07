@@ -2343,6 +2343,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     // Stage 1: peer advertises one EVPN Type 3 IMET route.
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
