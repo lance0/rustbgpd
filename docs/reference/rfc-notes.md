@@ -1652,8 +1652,9 @@ its own nonzero advertised limit locally to retained path identities per
 prefix (per RD + prefix for VPN) for every negotiated Add-Path receive family:
 IPv4/IPv6 unicast, VPNv4/VPNv6 and IPv4/IPv6 labeled unicast. With
 `receive_max` unset or 0, nothing is advertised and a default local cap of
-1024 paths per prefix applies; past `max(receive_max, 1024)` the excess is
-always withheld, even under `max_prefix_action = "warning"`. Rejected identities count only when the
+1024 paths per prefix applies. `max_prefix_action = "warning"` admits excess
+IDs only below `max(receive_max, 1024)` and withholds them at that ceiling;
+`"block"` and `"shutdown"` act at the cap. Rejected identities count only when the
 family's received-prefix bound already enables their tracking. This local
 cap is defensive; the draft places the sender-side obligation on the peer.
 If this local cap shuts down a session, Cease/1 carries no optional RFC 4486

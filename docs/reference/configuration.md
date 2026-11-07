@@ -2694,14 +2694,15 @@ unicast, rejected IDs also count when `max_prefixes_received_ipv4_unicast` or
 that family. A replacement of an existing ID needs no new slot, and a
 withdrawal releases one.
 
-Past the cap, `max_prefix_action = "block"` withholds a net-new ID,
-`"shutdown"` sends Cease/1 and latches the peer, and `"warning"` admits the
-ID and counts it as a warning. Under every action, a hard ceiling of
-`max(receive_max, 1024)` path IDs per prefix applies: at the ceiling the
-excess is withheld and counted as `"block"`. So `"warning"` warns only for
-IDs between `receive_max` and 1024; with `receive_max` of 1024 or more it
-blocks at the cap and never warns. An operator-set `receive_max = 65535`
-admits up to 65,535 paths per prefix under any action.
+Past the cap, `max_prefix_action = "block"` withholds a net-new ID and
+counts it as `"block"`. `"shutdown"` sends Cease/1, latches the peer and
+counts the attempt as `"shutdown"`, at any `receive_max`. `"warning"` admits
+the ID and counts it as a warning, but only below a hard ceiling of
+`max(receive_max, 1024)` path IDs per prefix: at the ceiling the excess is
+withheld and counted as `"block"`. So `"warning"` warns only for IDs between
+`receive_max` and 1024; with `receive_max` of 1024 or more it blocks at the
+cap and never warns. An operator-set `receive_max = 65535` admits up to
+65,535 paths per prefix.
 
 Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
 capability but still caps each prefix at 1024 retained path IDs, and past

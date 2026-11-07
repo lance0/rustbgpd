@@ -755,7 +755,7 @@ impl std::fmt::Display for PathCapKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Prefix(prefix) => write!(f, "{prefix}"),
-            Self::Vpn(key) => write!(f, "{key:?}"),
+            Self::Vpn(key) => write!(f, "{} {}", key.route_distinguisher, key.prefix),
         }
     }
 }
