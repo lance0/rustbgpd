@@ -312,9 +312,10 @@ pub(crate) struct AcceptedConfigSnapshot {
     manifest: SourceManifest,
     sha256: [u8; 32],
     source_sha256: [u8; 32],
-    /// Unix-seconds mtime of the config file as it was read, for snapshots
-    /// loaded from the file. `None` for snapshots derived in memory.
-    read_mtime_unix: Option<u64>,
+    /// Full-resolution mtime (since the Unix epoch) of the config file as it
+    /// was read, for snapshots loaded from the file. `None` for snapshots
+    /// derived in memory.
+    read_mtime: Option<std::time::Duration>,
     /// SHA-256 of the config file bytes this snapshot was read from (boot,
     /// SIGHUP); `None` for snapshots not read from the config file.
     read_sha256: Option<[u8; 32]>,
@@ -379,7 +380,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             source_sha256,
-            read_mtime_unix: None,
+            read_mtime: None,
             read_sha256: None,
         }))
     }
@@ -428,14 +429,13 @@ impl AcceptedConfigSnapshot {
         // Stat the open file before reading it, so the mtime describes these
         // bytes even if the operator saves again (in place or by rename)
         // while the load or the reload that follows is still running.
-        let (bytes, read_mtime_unix) = std::fs::File::open(path)
+        let (bytes, read_mtime) = std::fs::File::open(path)
             .and_then(|mut file| {
                 let mtime = file
                     .metadata()
                     .and_then(|meta| meta.modified())
                     .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|since| since.as_secs());
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(&mut file, &mut bytes)?;
                 Ok((bytes, mtime))
@@ -479,7 +479,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             source_sha256,
-            read_mtime_unix,
+            read_mtime,
             read_sha256,
         })
     }
@@ -501,7 +501,7 @@ impl AcceptedConfigSnapshot {
             manifest,
             sha256,
             source_sha256,
-            read_mtime_unix: None,
+            read_mtime: None,
             read_sha256: None,
         }))
     }
@@ -597,7 +597,7 @@ impl AcceptedConfigSnapshot {
             source_sha256: manifest.source_sha256(),
             manifest,
             sha256,
-            read_mtime_unix: None,
+            read_mtime: None,
             read_sha256: None,
         })
     }
@@ -625,8 +625,8 @@ impl AcceptedConfigSnapshot {
     }
 
     /// The config file's mtime when this snapshot's bytes were read from it.
-    pub(crate) fn read_mtime_unix(&self) -> Option<u64> {
-        self.read_mtime_unix
+    pub(crate) fn read_mtime(&self) -> Option<std::time::Duration> {
+        self.read_mtime
     }
 
     /// SHA-256 of the config file bytes this snapshot was read from, if it
