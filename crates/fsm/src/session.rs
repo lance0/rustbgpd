@@ -1506,6 +1506,61 @@ mod tests {
         )));
     }
 
+    /// Only Established input reaches the RIB, so every exit from
+    /// Established must emit `SessionDown` before the Idle transition: the
+    /// transport withdraws the session's routes on it.
+    #[test]
+    fn every_established_exit_emits_session_down_before_idle() {
+        let notification =
+            rustbgpd_wire::NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
+        let events = [
+            Event::ManualStart,
+            Event::ManualStop { reason: None },
+            Event::AdministrativeReset { reason: None },
+            Event::BfdDown,
+            Event::ConnectRetryTimerExpires,
+            Event::HoldTimerExpires,
+            Event::KeepaliveTimerExpires,
+            Event::TcpConnectionConfirmed,
+            Event::TcpConnectionAcknowledged,
+            Event::TcpConnectionFails,
+            Event::OpenReceived(peer_open()),
+            Event::KeepaliveReceived,
+            Event::NotificationReceived(notification.clone()),
+            Event::UpdateReceived,
+            Event::RouteRefreshReceived {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Event::UpdateValidationError(notification),
+            Event::DecodeError(rustbgpd_wire::DecodeError::UnknownMessageType(9)),
+        ];
+        for event in events {
+            let name = event.name();
+            let mut s = reach_established();
+            let actions = s.handle_event(event);
+            let idle = actions.iter().position(|a| {
+                matches!(
+                    a,
+                    Action::StateChanged {
+                        new: SessionState::Idle,
+                        ..
+                    }
+                )
+            });
+            let down = actions
+                .iter()
+                .position(|a| matches!(a, Action::SessionDown));
+            match idle {
+                Some(idle) => assert!(
+                    down.is_some_and(|down| down < idle),
+                    "{name}: Established -> Idle without a preceding SessionDown"
+                ),
+                None => assert!(down.is_none(), "{name}: SessionDown without leaving"),
+            }
+        }
+    }
+
     #[test]
     fn established_manual_stop_with_reason_includes_data() {
         let mut s = reach_established();

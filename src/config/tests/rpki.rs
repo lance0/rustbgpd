@@ -314,6 +314,53 @@ fn rpki_max_expire_interval_not_above_retry_rejected() {
     );
 }
 
+/// `rpki_toml` with `[rpki]` keys placed before the cache table.
+fn rpki_limits_toml(rpki_fields: &str) -> String {
+    rpki_toml("").replace("[rpki]\n", &format!("[rpki]\n{rpki_fields}\n"))
+}
+
+#[test]
+fn rpki_record_limits_default_and_parse() {
+    let config = parse(&rpki_toml("")).unwrap();
+    let rpki = config.rpki.as_ref().unwrap();
+    assert_eq!(rpki.max_records_per_cache, None);
+    assert_eq!(rpki.max_records_per_cache(), 4_000_000);
+    assert_eq!(rpki.max_records_total(), 10_000_000);
+
+    let config = parse(&rpki_limits_toml(
+        "max_records_per_cache = 50000\nmax_records_total = 120000",
+    ))
+    .unwrap();
+    let rpki = config.rpki.as_ref().unwrap();
+    assert_eq!(rpki.max_records_per_cache(), 50_000);
+    assert_eq!(rpki.max_records_total(), 120_000);
+}
+
+#[test]
+fn rpki_record_limits_reject_zero_and_per_cache_above_total() {
+    for fields in ["max_records_per_cache = 0", "max_records_total = 0"] {
+        let err = parse(&rpki_limits_toml(fields)).unwrap_err().to_string();
+        assert!(
+            err.contains("max_records_per_cache and max_records_total must be >= 1"),
+            "{err}"
+        );
+    }
+    let err = parse(&rpki_limits_toml(
+        "max_records_per_cache = 200\nmax_records_total = 100",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("max_records_per_cache (200) must be <= max_records_total (100)"),
+        "{err}"
+    );
+    // The per-cache default is above an explicit lower total.
+    let err = parse(&rpki_limits_toml("max_records_total = 100"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("max_records_per_cache (4000000)"), "{err}");
+}
+
 #[test]
 fn rpki_cache_server_md5_password_parses_and_never_debug_prints() {
     let config = parse(&rpki_toml("md5_password = \"rtr-md5-hunter2\"")).unwrap();

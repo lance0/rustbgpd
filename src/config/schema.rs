@@ -508,6 +508,35 @@ pub struct RpkiConfig {
     /// restart-required like the rest of `[rpki]`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_revalidation: bool,
+    /// Most RPKI records one cache may hold, counting each VRP and each
+    /// ASPA provider ASN. A cache transfer that would exceed it is refused
+    /// while it is received; the cache keeps its last accepted data and
+    /// resynchronizes with a full table. Unset: 4000000. Must be >= 1 and
+    /// <= `max_records_total`. Restart-required like the rest of `[rpki]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_records_per_cache: Option<u64>,
+    /// Most RPKI records held across all caches, counted as for
+    /// `max_records_per_cache`. A full resynchronization counts the cache's
+    /// old and new data together until it completes. Unset: 10000000. Must
+    /// be >= 1. Restart-required like the rest of `[rpki]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_records_total: Option<u64>,
+}
+
+impl RpkiConfig {
+    /// Effective per-cache record cap.
+    #[must_use]
+    pub fn max_records_per_cache(&self) -> u64 {
+        self.max_records_per_cache
+            .unwrap_or(rustbgpd_rpki::DEFAULT_MAX_CACHE_RECORDS as u64)
+    }
+
+    /// Effective total record cap across caches.
+    #[must_use]
+    pub fn max_records_total(&self) -> u64 {
+        self.max_records_total
+            .unwrap_or(rustbgpd_rpki::DEFAULT_MAX_TOTAL_RECORDS as u64)
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1022,6 +1051,11 @@ pub struct GrpcTcpListenerConfig {
     /// always enforces client-cert auth when TLS is on (no
     /// "TLS-without-mTLS" half-mode).
     pub tls_client_ca_file: Option<String>,
+    /// Optional certificate revocation lists (PEM file path, one or more
+    /// `X509 CRL` blocks) checked against every client certificate chain.
+    /// Requires the three TLS fields. Re-read on every credential reload;
+    /// once configured, a missing, unparsable, or expired CRL fails closed.
+    pub tls_client_crl_file: Option<String>,
     /// Warn when a TLS certificate notAfter is within this many seconds,
     /// including past dates. Default 0 disables warnings only; expiry metrics
     /// and successful client handshake metadata remain available. Restart-required.

@@ -1640,6 +1640,13 @@
             "null"
           ]
         },
+        "tls_client_crl_file": {
+          "description": "Optional certificate revocation lists (PEM file path, one or more\n`X509 CRL` blocks) checked against every client certificate chain.\nRequires the three TLS fields. Re-read on every credential reload;\nonce configured, a missing, unparsable, or expired CRL fails closed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tls_expiry_warning_seconds": {
           "description": "Warn when a TLS certificate notAfter is within this many seconds,\nincluding past dates. Default 0 disables warnings only; expiry metrics\nand successful client handshake metadata remain available. Restart-required.",
           "type": "integer",
@@ -3851,6 +3858,24 @@
         "local_revalidation": {
           "description": "RFC 9324 local re-evaluation. When `true`, a session whose import\npolicy matches RPKI or ASPA state keeps its pre-policy IPv4/IPv6\nunicast input (accepted routes plus rejects that validation decided),\nand a VRP or ASPA change is re-evaluated locally instead of requesting\ninbound Route Refresh. A session whose retained rejects exceed the\nper-session bound falls back to Route Refresh. Default `false`;\nrestart-required like the rest of `[rpki]`.",
           "type": "boolean"
+        },
+        "max_records_per_cache": {
+          "description": "Most RPKI records one cache may hold, counting each VRP and each\nASPA provider ASN. A cache transfer that would exceed it is refused\nwhile it is received; the cache keeps its last accepted data and\nresynchronizes with a full table. Unset: 4000000. Must be >= 1 and\n<= `max_records_total`. Restart-required like the rest of `[rpki]`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_records_total": {
+          "description": "Most RPKI records held across all caches, counted as for\n`max_records_per_cache`. A full resynchronization counts the cache's\nold and new data together until it completes. Unset: 10000000. Must\nbe >= 1. Restart-required like the rest of `[rpki]`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false

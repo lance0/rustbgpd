@@ -1645,6 +1645,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     cert_file: paths.cert_file.clone(),
                     key_file: paths.key_file.clone(),
                     client_ca_file: paths.client_ca_file.clone(),
+                    client_crl_file: paths.client_crl_file.clone(),
                 }),
             },
             GrpcListener::Uds { token_file, .. } => CredentialSource {
@@ -1724,6 +1725,36 @@ fn check_tls_expiry_warnings(listeners: &[GrpcListenerConfig]) -> usize {
         }
     }
     warnings
+}
+
+/// `--check` warnings for credential files readable beyond the daemon.
+fn check_credential_file_warnings(listeners: &[GrpcListenerConfig]) -> usize {
+    let Some(listener) = listeners.first() else {
+        return 0;
+    };
+    let generation = listener.credential_store.load();
+    for warning in generation.file_warnings() {
+        print_framed_warning(
+            "gRPC credential file is readable beyond the daemon",
+            &format!(
+                "{warning}.\nA bearer token or private key grants operator access to whoever can read it."
+            ),
+        );
+    }
+    generation.file_warnings().len()
+}
+
+/// Log the staged generation's credential-file warnings, once per load or
+/// reload.
+fn warn_grpc_credential_files(credentials: &rustbgpd_api::credentials::CredentialStore) {
+    let generation = credentials.load();
+    for warning in generation.file_warnings() {
+        warn!(
+            event = "grpc_credential_file_permissions",
+            generation = generation.sequence(),
+            "{warning}"
+        );
+    }
 }
 
 fn warn_grpc_tls_expiry(
@@ -2106,7 +2137,9 @@ fn listener_mss_clamps(
 /// not a defect in the operator's config, so gating on it would make a
 /// correct deployment unshippable.
 fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
-    let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
+    let mut warnings = warn_unpoliced_ebgp(config)
+        + check_tls_expiry_warnings(listeners)
+        + check_credential_file_warnings(listeners);
     #[cfg(target_os = "linux")]
     {
         warnings += host_ipv6_runtime::check(config);
@@ -4621,6 +4654,9 @@ async fn run<T>(
     let grpc_credentials = grpc_listeners
         .first()
         .map(GrpcListenerConfig::credential_store);
+    if let Some(credentials) = &grpc_credentials {
+        warn_grpc_credential_files(credentials);
+    }
     let grpc_tls_expiry_warning = grpc_listeners.iter().find_map(|listener| {
         matches!(listener.endpoint, ListenerEndpoint::Tcp(_)).then_some((
             listener.credential_index,
@@ -5259,6 +5295,13 @@ async fn run<T>(
             RpkiTaskKind::AspaForwarder,
         );
 
+        // One record budget shared by every cache's client.
+        let max_cache_records =
+            usize::try_from(rpki_config.max_records_per_cache()).unwrap_or(usize::MAX);
+        let record_budget = rustbgpd_rpki::RecordBudget::new(
+            usize::try_from(rpki_config.max_records_total()).unwrap_or(usize::MAX),
+        );
+
         // Spawn one RTR client per configured cache server
         for (cache_ordinal, server) in rpki_config.cache_servers.iter().enumerate() {
             let addr: std::net::SocketAddr = match server.address.parse() {
@@ -5282,6 +5325,7 @@ async fn run<T>(
             let expire_metrics = metrics.clone();
             let cache_label = addr.to_string();
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
+                .with_record_limits(max_cache_records, Arc::clone(&record_budget))
                 .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
@@ -7253,6 +7297,7 @@ async fn run<T>(
                                         operation.mark_sighup_accepted_effect();
                                         reload_metrics.record_grpc_credential_reload("success");
                                         info!(generation, "gRPC credential generation reloaded");
+                                        warn_grpc_credential_files(&credentials);
                                         if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
                                             warn_grpc_tls_expiry(&credentials, index, warning_seconds);
                                         }
