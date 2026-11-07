@@ -2462,45 +2462,51 @@ fn validation_table_len(update: &RibUpdate) -> usize {
     }
 }
 
-/// One VRP table update covering `older` then `newer`: the newer table, with
-/// a delta that holds every entry of both, or a full re-evaluation when either
-/// is one or the union outgrows the table itself.
+/// The VRP table update to forward for `newer`, merged into the still-pending
+/// `older` if there is one: the newer table, with a delta that holds every
+/// entry of both. The delta becomes a full re-evaluation when either side is
+/// one, or when it is larger than the newer table, as after most of a table
+/// is withdrawn, so no forwarded delta outgrows its table.
 fn merge_vrp_table_updates(
-    older: rustbgpd_rpki::RpkiTableUpdate,
+    older: Option<rustbgpd_rpki::RpkiTableUpdate>,
     newer: rustbgpd_rpki::RpkiTableUpdate,
 ) -> rustbgpd_rpki::RpkiTableUpdate {
     let table_len = newer.table.len();
-    let delta = older
-        .delta
-        .zip(newer.delta)
-        .map(|(older, newer)| {
+    let delta = match older {
+        None => newer.delta,
+        Some(older) => older.delta.zip(newer.delta).map(|(older, newer)| {
             older
                 .into_iter()
                 .chain(newer)
                 .collect::<std::collections::HashSet<_>>()
-        })
-        .filter(|union| union.len() <= table_len)
-        .map(|union| union.into_iter().collect());
+                .into_iter()
+                .collect()
+        }),
+    }
+    .filter(|delta| delta.len() <= table_len);
     rustbgpd_rpki::RpkiTableUpdate {
         table: newer.table,
         delta,
     }
 }
 
-/// One ASPA table update covering `older` then `newer`, as for
+/// The ASPA table update to forward for `newer`, as for
 /// [`merge_vrp_table_updates`].
 fn merge_aspa_table_updates(
-    older: rustbgpd_rpki::AspaTableUpdate,
+    older: Option<rustbgpd_rpki::AspaTableUpdate>,
     newer: rustbgpd_rpki::AspaTableUpdate,
 ) -> rustbgpd_rpki::AspaTableUpdate {
-    let changed_customer_asns = older
-        .changed_customer_asns
-        .zip(newer.changed_customer_asns)
-        .map(|(mut older, newer)| {
-            older.extend(newer);
-            older
-        })
-        .filter(|union| union.len() <= newer.table.len());
+    let changed_customer_asns = match older {
+        None => newer.changed_customer_asns,
+        Some(older) => older
+            .changed_customer_asns
+            .zip(newer.changed_customer_asns)
+            .map(|(mut older, newer)| {
+                older.extend(newer);
+                older
+            }),
+    }
+    .filter(|changed| changed.len() <= newer.table.len());
     rustbgpd_rpki::AspaTableUpdate {
         table: newer.table,
         changed_customer_asns,
@@ -2514,8 +2520,8 @@ fn merge_aspa_table_updates(
 ///
 /// At most one update is queued in the RIB mailbox at a time: `split` puts the
 /// admission permit in the RIB update, and the RIB drops it once the update is
-/// applied. Updates that arrive meanwhile are combined by `merge` into one
-/// pending update. Every update is a whole table, so a slow RIB holds a fixed
+/// applied. Each update that arrives passes through `merge`, which combines it
+/// with the one already pending, if any, and caps its delta. Every update is a whole table, so a slow RIB holds a fixed
 /// number of them however many the caches send, instead of one per table.
 /// Skipping an intermediate table is sound: the merged delta covers every
 /// entry that changed since the last table the RIB applied.
@@ -2523,7 +2529,7 @@ async fn forward_validation_cache<U>(
     mut updates: mpsc::Receiver<U>,
     rib_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-    mut merge: impl FnMut(U, U) -> U,
+    mut merge: impl FnMut(Option<U>, U) -> U,
     mut split: impl FnMut(
         U,
         tokio::sync::OwnedSemaphorePermit,
@@ -2536,12 +2542,7 @@ async fn forward_validation_cache<U>(
     while open || pending.is_some() {
         tokio::select! {
             update = updates.recv(), if open => match update {
-                Some(update) => {
-                    pending = Some(match pending.take() {
-                        Some(older) => merge(older, update),
-                        None => update,
-                    });
-                }
+                Some(update) => pending = Some(merge(pending.take(), update)),
                 None => open = false,
             },
             permit = Arc::clone(&admission).acquire_owned(), if pending.is_some() => {
@@ -8247,26 +8248,36 @@ mod tests {
         let newer = vrp_table(65_001, 2);
 
         let merged = merge_vrp_table_updates(
-            vrp_update(&older, Some(&[24])),
+            Some(vrp_update(&older, Some(&[24]))),
             vrp_update(&newer, Some(&[24, 25])),
         );
         assert!(Arc::ptr_eq(&merged.table, &newer), "the newer table");
         assert_eq!(delta_lens(&merged), Some(BTreeSet::from([24, 25])));
 
         for (first, second) in [(None, Some(&[24][..])), (Some(&[24][..]), None)] {
-            let merged =
-                merge_vrp_table_updates(vrp_update(&older, first), vrp_update(&newer, second));
+            let merged = merge_vrp_table_updates(
+                Some(vrp_update(&older, first)),
+                vrp_update(&newer, second),
+            );
             assert!(Arc::ptr_eq(&merged.table, &newer));
             assert_eq!(delta_lens(&merged), None, "a full re-evaluation wins");
         }
 
         // Three distinct entries against a two-entry newer table.
         let merged = merge_vrp_table_updates(
-            vrp_update(&older, Some(&[24, 25])),
+            Some(vrp_update(&older, Some(&[24, 25]))),
             vrp_update(&newer, Some(&[26])),
         );
         assert!(Arc::ptr_eq(&merged.table, &newer));
         assert_eq!(delta_lens(&merged), None, "a union larger than the table");
+
+        // Nothing pending: the update's own delta is kept, unless the table
+        // shrank below it.
+        let alone = merge_vrp_table_updates(None, vrp_update(&newer, Some(&[24])));
+        assert_eq!(delta_lens(&alone), Some(BTreeSet::from([24])));
+        let shrunk = merge_vrp_table_updates(None, vrp_update(&newer, Some(&[24, 25, 26])));
+        assert!(Arc::ptr_eq(&shrunk.table, &newer));
+        assert_eq!(delta_lens(&shrunk), None, "a delta larger than its table");
     }
 
     fn aspa_update(
@@ -8305,26 +8316,36 @@ mod tests {
         let newer = aspa_table(1..3);
 
         let merged = merge_aspa_table_updates(
-            aspa_update(&older, Some(&[1])),
+            Some(aspa_update(&older, Some(&[1]))),
             aspa_update(&newer, Some(&[1, 2])),
         );
         assert!(Arc::ptr_eq(&merged.table, &newer), "the newer table");
         assert_eq!(changed(&merged), Some(BTreeSet::from([1, 2])));
 
         for (first, second) in [(None, Some(&[1][..])), (Some(&[1][..]), None)] {
-            let merged =
-                merge_aspa_table_updates(aspa_update(&older, first), aspa_update(&newer, second));
+            let merged = merge_aspa_table_updates(
+                Some(aspa_update(&older, first)),
+                aspa_update(&newer, second),
+            );
             assert!(Arc::ptr_eq(&merged.table, &newer));
             assert_eq!(changed(&merged), None, "a full re-evaluation wins");
         }
 
         // Three changed customers against a two-record newer table.
         let merged = merge_aspa_table_updates(
-            aspa_update(&older, Some(&[1, 2])),
+            Some(aspa_update(&older, Some(&[1, 2]))),
             aspa_update(&newer, Some(&[3])),
         );
         assert!(Arc::ptr_eq(&merged.table, &newer));
         assert_eq!(changed(&merged), None, "a union larger than the table");
+
+        // Nothing pending: the update's own changes are kept, unless the
+        // table shrank below them.
+        let alone = merge_aspa_table_updates(None, aspa_update(&newer, Some(&[1])));
+        assert_eq!(changed(&alone), Some(BTreeSet::from([1])));
+        let shrunk = merge_aspa_table_updates(None, aspa_update(&newer, Some(&[1, 2, 3])));
+        assert!(Arc::ptr_eq(&shrunk.table, &newer));
+        assert_eq!(changed(&shrunk), None, "changes larger than their table");
     }
 
     /// A VRP that changes again and again while a pass is in flight is
@@ -8614,6 +8635,56 @@ mod tests {
         assert!(Arc::ptr_eq(&table, &tables[6]));
         assert_eq!(delta, None, "a skipped full re-evaluation is kept");
         settle(&mut rib_rx).await;
+    }
+
+    /// A table that shrank, with a delta larger than the table itself, is
+    /// forwarded as a full re-evaluation even when nothing is waiting to merge
+    /// with it: no forwarded change list outgrows its table.
+    #[tokio::test(start_paused = true)]
+    async fn a_shrinking_vrp_table_is_forwarded_as_a_full_reevaluation() {
+        let (updates_tx, mut rib_rx, mut peer_mgr_rx) = spawn_vrp_forwarder(64);
+        // 999 of 1000 VRPs withdrawn: a one-entry table, a 999-entry delta.
+        let withdrawn: Vec<_> = (0..999u16)
+            .map(|index| {
+                let [high, low] = index.to_be_bytes();
+                rustbgpd_rpki::VrpEntry {
+                    prefix: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, high, low, 0)),
+                    prefix_len: 24,
+                    max_len: 24,
+                    origin_asn: 65_000,
+                }
+            })
+            .collect();
+        updates_tx
+            .send(rustbgpd_rpki::RpkiTableUpdate {
+                table: vrp_table(65_001, 1),
+                delta: Some(withdrawn),
+            })
+            .await
+            .unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(1), rib_rx.recv())
+            .await
+            .expect("the RIB gets the update")
+            .unwrap();
+        let RibUpdate::RpkiCacheUpdate { delta, .. } = update else {
+            panic!("a VRP table update");
+        };
+        assert_eq!(
+            delta.map(|delta| delta.len()),
+            None,
+            "the RIB rescans fully"
+        );
+        let Some(PeerManagerCommand::SoftResetImportValidationDependents { delta, .. }) =
+            tokio::time::timeout(Duration::from_secs(1), peer_mgr_rx.recv())
+                .await
+                .expect("a revalidation pass")
+        else {
+            panic!("a revalidation pass");
+        };
+        assert!(
+            matches!(delta, rustbgpd_transport::ValidationDelta::Rpki(None)),
+            "sessions re-evaluate fully: {delta:?}"
+        );
     }
 
     /// The forwarder caps the sessions' merged delta at the size of the
