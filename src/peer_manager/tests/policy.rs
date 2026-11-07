@@ -2613,6 +2613,8 @@ async fn local_revalidation_refreshes_only_incomplete_sessions() {
     mgr.current_config.rpki = Some(crate::config::RpkiConfig {
         cache_servers: Vec::new(),
         local_revalidation: true,
+        max_records_per_cache: None,
+        max_records_total: None,
     });
     assert!(mgr.local_revalidation());
     let cases = [
@@ -2729,6 +2731,8 @@ async fn local_revalidation_refreshes_a_peer_with_an_unfired_policy_refresh() {
     mgr.current_config.rpki = Some(crate::config::RpkiConfig {
         cache_servers: Vec::new(),
         local_revalidation: true,
+        max_records_per_cache: None,
+        max_records_total: None,
     });
     insert_test_managed_peer(
         &mut mgr,

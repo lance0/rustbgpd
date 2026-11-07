@@ -1,20 +1,27 @@
 //! Local discriminator allocation (RFC 5880 §6.8.1: each session's
-//! discriminator must be unique and non-zero).
+//! discriminator must be unique and non-zero, and SHOULD be random).
+//!
+//! The allocator is pure: the caller supplies the random source, so the
+//! runtime can draw from the OS CSPRNG and tests can draw deterministically.
 
 use std::collections::BTreeSet;
+
+/// Draws allowed per allocation. With realistic session counts a draw
+/// collides with probability about `sessions / 2^32`, so running out of
+/// draws means the source is not random rather than the space being full.
+const MAX_DRAWS: usize = 64;
 
 /// Local discriminator allocation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DiscriminatorAllocationError {
-    /// Every non-zero 32-bit discriminator is already in use.
-    #[error("BFD discriminator space exhausted")]
+    /// No unused non-zero value came out of the random source.
+    #[error("BFD discriminator allocation drew no unused non-zero value")]
     Exhausted,
 }
 
 /// Hands out unique, non-zero local discriminators and tracks which are in use.
 #[derive(Debug, Default, Clone)]
 pub struct DiscriminatorAllocator {
-    next: u32,
     in_use: BTreeSet<u32>,
 }
 
@@ -22,32 +29,24 @@ impl DiscriminatorAllocator {
     /// Create an empty allocator.
     #[must_use]
     pub fn new() -> DiscriminatorAllocator {
-        DiscriminatorAllocator {
-            next: 1,
-            in_use: BTreeSet::new(),
-        }
+        DiscriminatorAllocator::default()
     }
 
-    /// Allocate the next free non-zero discriminator.
+    /// Allocate a discriminator drawn from `draw`, redrawing zero and values
+    /// already in use. Random values keep a peer from guessing another
+    /// session's discriminator from its own; they do not hide it from a
+    /// sender that can observe the session (RFC 5880 §9).
     ///
     /// # Errors
-    /// Returns [`DiscriminatorAllocationError::Exhausted`] only when every
-    /// non-zero 32-bit discriminator is simultaneously in use.
-    pub fn allocate(&mut self) -> Result<u32, DiscriminatorAllocationError> {
-        self.allocate_with_scan_limit(u64::from(u32::MAX) + 1)
-    }
-
-    fn allocate_with_scan_limit(
+    /// Returns [`DiscriminatorAllocationError::Exhausted`] when `draw` yields
+    /// no unused non-zero value in a bounded number of attempts.
+    pub fn allocate(
         &mut self,
-        scan_limit: u64,
+        mut draw: impl FnMut() -> u32,
     ) -> Result<u32, DiscriminatorAllocationError> {
-        for _ in 0..scan_limit {
-            if self.next == 0 {
-                self.next = 1;
-            }
-            let candidate = self.next;
-            self.next = self.next.wrapping_add(1);
-            if self.in_use.insert(candidate) {
+        for _ in 0..MAX_DRAWS {
+            let candidate = draw();
+            if candidate != 0 && self.in_use.insert(candidate) {
                 return Ok(candidate);
             }
         }
@@ -76,40 +75,63 @@ impl DiscriminatorAllocator {
 mod tests {
     use super::*;
 
+    /// Deterministic xorshift source standing in for the CSPRNG.
+    fn xorshift(mut state: u32) -> impl FnMut() -> u32 {
+        move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        }
+    }
+
     #[test]
     fn allocations_are_unique_and_non_zero() {
         let mut alloc = DiscriminatorAllocator::new();
+        let mut draw = xorshift(0x9e37_79b9);
         let mut seen = BTreeSet::new();
-        for _ in 0..1000 {
-            let d = alloc.allocate().expect("test allocation must succeed");
+        for _ in 0..100_000 {
+            let d = alloc.allocate(&mut draw).expect("allocation succeeds");
             assert_ne!(d, 0);
             assert!(seen.insert(d), "discriminator {d} handed out twice");
         }
-        assert_eq!(alloc.len(), 1000);
+        assert_eq!(alloc.len(), 100_000);
+    }
+
+    #[test]
+    fn zero_and_in_use_draws_are_redrawn() {
+        let mut alloc = DiscriminatorAllocator::new();
+        let mut draws = [0, 9, 9, 3].into_iter();
+        let mut draw = || draws.next().expect("enough draws");
+        assert_eq!(alloc.allocate(&mut draw), Ok(9), "zero is never handed out");
+        assert_eq!(
+            alloc.allocate(&mut draw),
+            Ok(3),
+            "a value in use is redrawn"
+        );
+        assert_eq!(alloc.len(), 2);
     }
 
     #[test]
     fn released_discriminators_become_reusable() {
         let mut alloc = DiscriminatorAllocator::new();
-        let a = alloc.allocate().expect("test allocation must succeed");
-        let b = alloc.allocate().expect("test allocation must succeed");
-        alloc.release(a);
-        assert_eq!(alloc.len(), 1);
-        // Eventually the freed value is handed out again after wraparound.
-        alloc.release(b);
+        assert_eq!(alloc.allocate(|| 7), Ok(7));
+        assert_eq!(
+            alloc.allocate(|| 7),
+            Err(DiscriminatorAllocationError::Exhausted)
+        );
+        alloc.release(7);
         assert!(alloc.is_empty());
+        assert_eq!(alloc.allocate(|| 7), Ok(7));
     }
 
     #[test]
-    fn exhausted_scan_returns_error_instead_of_panicking() {
+    fn a_source_without_unused_values_fails_instead_of_looping() {
         let mut alloc = DiscriminatorAllocator::new();
-        alloc.in_use.insert(1);
-        alloc.next = 1;
-
         assert_eq!(
-            alloc.allocate_with_scan_limit(1),
+            alloc.allocate(|| 0),
             Err(DiscriminatorAllocationError::Exhausted)
         );
-        assert_eq!(alloc.len(), 1);
+        assert!(alloc.is_empty());
     }
 }

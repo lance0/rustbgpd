@@ -10,9 +10,12 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m125-srv6-global-rr.toml:/etc/rustbgpd/config.toml:ro
-        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd-fixture/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
+        # A checkout leaves the fixture world-readable and runner-owned;
+        # install a root-owned 0600 copy where the config names it.
+        - install -D -m 600 /run/rustbgpd-fixture/grpc-test-only-operator.token /run/rustbgpd/grpc-test-only-operator.token
         - ip -6 addr add 2001:db8:125:10::1/64 dev eth1 nodad
         - ip link set eth1 up
         - ip -6 addr add 2001:db8:125:20::1/64 dev eth2 nodad

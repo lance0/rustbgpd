@@ -158,6 +158,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
     negotiated.peer_route_refresh = true;
     negotiated.peer_enhanced_route_refresh = true;
     install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
 
     let nlri =
         |admin: u16| RtcNlri::new(65002, 0x0002_FDEA_0000_0000 | u64::from(admin), 96).unwrap();
@@ -362,6 +363,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
         negotiated.peer_route_refresh = true;
         negotiated.peer_enhanced_route_refresh = true;
         install_test_negotiated_session(&mut session, negotiated);
+        enter_test_fsm_established(&mut session);
 
         let first = nlri(safi, 11);
         let overlap = nlri(safi, 22);

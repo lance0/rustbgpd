@@ -2,6 +2,13 @@
 
 mod commands;
 mod connection;
+#[cfg(unix)]
+#[path = "../../api/src/credential_file.rs"]
+#[allow(
+    dead_code,
+    reason = "doctor judges metadata only; the daemon-side open path is shared source, used by its own tests here"
+)]
+mod credential_file;
 mod error;
 #[cfg(target_os = "linux")]
 #[path = "../../../src/host_ipv6.rs"]

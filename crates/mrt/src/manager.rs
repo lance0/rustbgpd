@@ -235,6 +235,11 @@ impl MrtManager {
     }
 }
 
+// Every test runs on a paused clock. Dumps fsync and rename on the blocking
+// pool, which can take seconds on a loaded host, and tokio does not
+// auto-advance a paused clock while a blocking task is in flight. The
+// timeouts below therefore bound only time the manager spends idle, so they
+// still catch a manager that stops without replying.
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -303,7 +308,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn manager_shuts_down_on_trigger_close() {
         let dir = tempfile::tempdir().unwrap();
         let config = MrtWriterConfig {
@@ -332,7 +337,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn on_demand_trigger_produces_file() {
         let dir = tempfile::tempdir().unwrap();
         let config = MrtWriterConfig {
@@ -416,7 +421,7 @@ mod tests {
         handle.await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn canceled_trigger_skips_dump_before_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let config = MrtWriterConfig {
@@ -475,7 +480,7 @@ mod tests {
         assert_eq!(snapshots, 1, "canceled dump must not query the RIB");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn impossible_output_path_fails_before_rib_snapshot_query() {
         let dir = tempfile::tempdir().unwrap();
         let output_file = dir.path().join("not-a-directory");
@@ -523,7 +528,7 @@ mod tests {
         handle.await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cancellation_while_awaiting_rib_drops_reply_without_file() {
         let dir = tempfile::tempdir().unwrap();
         let output_dir = dir.path().join("lazy-output");
@@ -581,7 +586,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cancellation_while_queueing_on_full_rib_channel_exits_without_dump() {
         let dir = tempfile::tempdir().unwrap();
         let output_dir = dir.path().join("lazy-output");

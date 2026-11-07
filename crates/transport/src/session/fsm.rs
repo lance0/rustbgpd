@@ -950,6 +950,32 @@ impl PeerSession {
                     self.close_tcp();
                 }
                 Action::StateChanged { old, new } => {
+                    // Only Established input reaches the per-session route
+                    // tables, and every FSM exit from Established emits
+                    // SessionDown first, which clears them and withdraws the
+                    // routes. A non-empty table here would leave routes in
+                    // the RIB with no PeerDown to remove them.
+                    debug_assert!(
+                        new != SessionState::Idle || self.known_prefix_count() == 0,
+                        "session reached Idle holding imported routes without SessionDown"
+                    );
+                    if matches!(new, SessionState::Idle | SessionState::Active) {
+                        // Facts about how this connection ended. SessionDown
+                        // consumes them before an Established exit reaches
+                        // Idle; a pre-Established exit (to Idle, or to Active
+                        // on a TCP failure in Connect or OpenSent) has no
+                        // SessionDown, and they must not decide the next
+                        // session's Graceful Restart retention or BMP Peer
+                        // Down reason. The route tables are deliberately not
+                        // cleared here: they are written only in Established,
+                        // and clearing them without a PeerDown would hide a
+                        // leak (see above).
+                        self.last_down_reason = None;
+                        self.notification_teardown = false;
+                        self.received_hard_reset = false;
+                        self.sent_hard_reset = false;
+                        self.suppress_gr_retention = false;
+                    }
                     self.session_telemetry_metric_lease.set_state(new);
                     if new != SessionState::OpenConfirm && self.collision_verdict_pending() {
                         self.collision_hold = CollisionHold::Armed;

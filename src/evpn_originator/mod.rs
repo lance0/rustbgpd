@@ -743,8 +743,16 @@ impl OriginatorState {
             let OriginationAction::Inject { key, .. } = &action else {
                 continue;
             };
+            // An adopted Inject replaces any action for the same key. That
+            // includes a Withdraw from an RFC 7432 §15 yield the adopted
+            // sequence has just reversed, so the route never flaps.
             if let Some(existing) = actions.iter_mut().find(|candidate| {
-                matches!(candidate, OriginationAction::Inject { key: candidate_key, .. } if candidate_key == key)
+                matches!(
+                    candidate,
+                    OriginationAction::Inject { key: candidate_key, .. }
+                        | OriginationAction::Withdraw { key: candidate_key, .. }
+                        if candidate_key == key
+                )
             }) {
                 *existing = action;
             } else {

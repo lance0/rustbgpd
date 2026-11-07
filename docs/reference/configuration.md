@@ -241,7 +241,15 @@ blackhole_discard_install_burst = 20
 
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
 non-root deployments, override the default to a mounted writable path (for
-example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
+example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`). The daemon
+creates a missing directory with mode `0700`. It refuses to start, with exit
+code 1, unless the directory is a real directory (not a symlink) owned by the
+daemon user and not group- or world-writable. Every directory above it, along
+the configured path and its resolved form, must be owned by root or the daemon
+user and not writable by other users: world-writable, or group-writable by a
+group other than the daemon's, is refused unless the directory is sticky, as
+`/tmp` is. The default `/var/lib/rustbgpd`, a systemd `StateDirectory=`, and
+the container images satisfy this.
 
 The **directory holding the config file** must also be writable by the
 rustbgpd process if you use runtime mutation. Every accepted `rbgp neighbor
@@ -447,12 +455,29 @@ repairs. Withdrawals/removals run first and bypass both limits. Limited routes
 remain retryable as `rejected/active_limit_exceeded` or
 `rejected/install_rate_limited`.
 
-Each successful install records its canonical prefix in private
-`<runtime_state_dir>/blackhole-owned.json`. Restart adopts only receipt∩marker;
-unreceipted marker-identical rows remain foreign. Unclaimed receipt rows stay
-`adopted_pending_reap` until the 500 s deferral expires. Receipt release is
-durable before deletion; a failed delete attempts restoration, and any
-publication ambiguity fail-stops later mutations as `ownership_state_unavailable`.
+Private `<runtime_state_dir>/blackhole-owned.json` lists the canonical
+prefixes this daemon may have installed. It is a superset of the daemon's
+kernel discard rows at every instant: each reconcile pass writes its install
+candidates into the receipt before installing them, and deletes kernel rows
+before writing the receipt without them. The receipt is written at most once
+for the pass's installs, once for each batch of removals, and once to drop
+candidates that were not installed. A crash at any point therefore leaves every
+daemon row receipted. Only candidates that can be installed are written ahead:
+no more than the active cap still allows, and no more than the receipt's limit
+of 1,000,000 prefixes, in admission order. The rest report
+`rejected/active_limit_exceeded` and retry on the next pass. Before installing,
+the daemon reads the receipt back, so it never installs on the strength of a
+receipt that was deleted or changed outside it. Restart adopts only receipt∩marker and forgets receipted
+prefixes that have no marker row; unreceipted marker-identical rows remain
+foreign. Unclaimed receipt rows stay `adopted_pending_reap` until the 500 s
+deferral expires.
+
+A failed receipt write (for example a full disk) refuses that pass's new
+installs as `failed/receipt_write_failed` and retries on the next pass.
+Withdrawal and shutdown still remove owned rows, and the receipt keeps naming
+them until a write succeeds. A receipt that is unreadable or changed outside
+the daemon fail-stops later mutations as `ownership_state_unavailable` until
+restart.
 
 Live daemons require distinct runtime-state directories. Stopped receipt
 deletion and pre-receipt upgrade preserve surviving markers as foreign. Do not
@@ -463,8 +488,8 @@ replacement by an identical marker remains the value-identity limit.
 BLACKHOLE-marked best route the daemon has observed: `installed`
 (`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
 (`broad_prefix` / `not_ebgp` / `active_limit_exceeded` / `install_rate_limited`), or `failed` (`foreign_route_exists`,
-`dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`, or the kernel install
-error). The same surface is available as JSON with
+`dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`,
+`receipt_write_failed`, or the kernel install error). The same surface is available as JSON with
 `rbgp -j rib blackholes`. Adoption and reaping are counted by
 `bgp_blackhole_discard_adopted_total` and
 `bgp_blackhole_discard_reaped_total`.
@@ -680,7 +705,7 @@ uses `local-operator`. Without a token, that implicit identity uses
 | `mode`       | u32    | no       | `0o600` | Filesystem socket mode; creation never grants wider access |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
-| `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `token_file` | string | no       | --      | Optional bearer token file for listener auth; see [credential file permissions](#grpc-credential-file-permissions) |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
 
 At bind time the daemon verifies the parent directory and its ancestors;
@@ -723,11 +748,12 @@ container/network exposure.
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
-| `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `token_file` | string | no       | --      | Optional bearer token file for listener auth; see [credential file permissions](#grpc-credential-file-permissions) |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for non-mTLS bearer-token listeners |
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
 | `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
 | `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
+| `tls_client_crl_file` | string | no | --  | PEM-encoded certificate revocation lists (`X509 CRL` blocks) checked against every client certificate chain; requires the three TLS fields. See [client certificate revocation](#grpc-client-certificate-revocation) |
 | `tls_expiry_warning_seconds` | integer (`u32`) | no | `0` | Opt-in certificate expiry warning window in seconds, including past dates; `0` disables warnings only. Restart-required. |
 
 **Native gRPC mTLS.** Setting any of `tls_cert_file` / `tls_key_file` /
@@ -744,6 +770,27 @@ server identity and client CA for every listener, then atomically publishes one
 process-wide credential generation. A malformed or partial rotation leaves the
 last-known-good generation active. Changing a path or TLS/auth mode remains
 **restart-required** and stays visible as drift until restart.
+
+<a id="grpc-client-certificate-revocation"></a>
+**Client certificate revocation.** `tls_client_crl_file` names a PEM file of
+one or more CRLs. When it is set, a client whose certificate chain includes a
+revoked certificate is refused at the TLS handshake. Without it, revocation is
+not checked, as before. Once configured, the daemon fails closed:
+
+- a missing, empty, or unparsable CRL file fails startup and `--check`, and
+  rejects a SIGHUP credential reload, which keeps the last good generation;
+- a CRL past its `nextUpdate` refuses every client until a fresh CRL is
+  installed and reloaded;
+- every certificate in a client chain must be covered by a CRL from its
+  issuer, so a deployment with intermediate CAs needs a CRL from each;
+- the listener offers no TLS session resumption, because a resumed session
+  skips the certificate check, so every connection runs a full handshake
+  against the current CRL.
+
+SIGHUP re-reads the CRL with the other credential files; replace the file
+before its `nextUpdate` and reload. Changing the path, or adding or removing
+the field, is restart-required. The file is public material and is checked
+only as a regular file.
 
 Expiry metrics and successful-client metadata logs are available independently
 of `tls_expiry_warning_seconds`. A positive window adds warnings at startup,
@@ -787,6 +834,30 @@ the unchanged path as part of the all-listener credential generation. New RPCs
 on existing HTTP/2 connections use the new token; already-admitted streaming
 RPCs continue. Invalid or missing material rejects the whole credential reload.
 Changing the path or enabling/disabling token auth remains restart-required.
+
+<a id="grpc-credential-file-permissions"></a>
+**Credential file permissions.** The same rules apply to every listener's
+`token_file`, `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file` at
+config load, at startup, on every SIGHUP credential reload, in both `--check`
+modes, and in `rbgp doctor`. Symlinks are followed and their target is judged.
+
+| Condition | Files | Result |
+|---|---|---|
+| The target is not a regular file (directory, FIFO, device) | all four | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
+| World-writable | `token_file`, `tls_key_file` | Refused |
+| Readable by every local user | `token_file`, `tls_key_file` | Accepted with a warning |
+| Owned by someone other than the daemon user or root | `token_file`, `tls_key_file` | Accepted with a warning |
+| Readable or writable by a group other than the daemon's | `token_file`, `tls_key_file` | Accepted with a warning |
+
+Mode `0600` owned by the daemon user, or `0640` owned by `root:<daemon group>`
+(the packaged config pattern, `root:rustbgpd`), passes silently. A warning
+names the file, its mode and owner, and the remedy. It is logged once per
+load or reload as `grpc_credential_file_permissions`, never per request. It
+counts as a `--check` warning, so `--check --strict` exits 1, and `rbgp doctor`
+reports it as `credentials.<listener>.<field>`. Certificates and CA bundles are
+public and are checked only as regular files. Warnings rather than refusals
+keep existing deployments that mount a shared token, such as the lab and
+Compose examples, running while they are tightened.
 
 **ADR-0064 principals:** `principal` gives `grpc_authz` records a stable
 operator-controlled identity, and it is
@@ -1809,11 +1880,27 @@ BGP.) Genuine failures — a detection timeout or a remote-signaled
 operator disable/delete of the neighbor stops BGP through the normal lifecycle,
 not this path.
 
+A control packet selects its session by Your Discriminator (RFC 5880 §6.8.6),
+whatever its source address. Local discriminators are random, unique and
+non-zero, so a configured peer cannot guess another session's discriminator
+from its own. Link-local and interface-only sessions also drop packets that
+arrive on any interface other than their own. This is not authentication:
+an unauthenticated sender that can observe a session's packets on the same
+segment can still forge that session's state (RFC 5880 §9).
+
 Single-hop sessions use UDP/3784 and require received TTL/Hop-Limit 255.
 Multihop sessions use UDP/4784 and do not enforce a receive minimum TTL. Both
 modes transmit with TTL/Hop-Limit 255; there is no BFD receive minimum-TTL
 knob. Set `[global].listen_addresses` when a multihop session must originate
 from a routed loopback. BFD authentication is not supported.
+
+Detection time follows RFC 5880 §6.8.4: the peer's multiplier times the larger
+of our `min_rx_interval` and the peer's advertised Desired Min TX. The peer's
+Desired Min TX can stretch that window only up to the larger of five minutes
+and our `min_rx_interval` times the peer's multiplier. A peer that really
+transmits more slowly than that ceiling allows keeps the session up while its
+packets arrive inside the window, but tolerates fewer missed packets than its
+multiplier promises, and is declared down once a gap exceeds the window.
 
 Static neighbors attach BFD through their own or their peer group's `bfd`. A
 `[[dynamic_neighbors]]` range attaches it on the range instead (see
@@ -2651,7 +2738,7 @@ receive_max = 3   # advertise and locally cap received unicast paths per prefix
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
-| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local IPv4/IPv6-unicast Add-Path cap per prefix (1..=65535); omit or set 0 for unlimited |
+| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local IPv4/IPv6-unicast Add-Path cap per prefix (1..=65535); omit or set 0 to advertise nothing and apply the default local cap of 1024 |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
@@ -2667,9 +2754,17 @@ prefix's retained path IDs. Accepted IDs count; rejected IDs count only when
 `max_prefixes_received_ipv4_unicast` or `max_prefixes_received_ipv6_unicast` enables received
 identity tracking for that family. `max_prefix_action = "block"` withholds a
 net-new ID beyond the cap, `"shutdown"` sends Cease/1 and latches the peer,
-and `"warning"` reports the over-limit attempt but keeps accepting. A
+and `"warning"` reports the over-limit attempt but keeps accepting up to a
+safety ceiling of `max(receive_max, 1024)` IDs, past which the excess is
+withheld and counted as `"block"`. A
 replacement of an existing ID needs no new slot, and a withdrawal releases
-one. The cap does not locally police other AFI/SAFI families. Changing
+one. Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
+capability but still caps each IPv4/IPv6-unicast prefix at 1024 retained path
+IDs. Past that default it always withholds the excess as `"block"` does,
+whatever `max_prefix_action` says: the session stays up, and `"warning"` does
+not lift the bound. Set `receive_max` explicitly for a peer that legitimately
+sends more paths per prefix. The cap does not locally police other AFI/SAFI
+families. Changing
 `receive_max` rebuilds the session to renegotiate OPEN; the replacement starts
 with fresh accounting. Zero tuples and tuples without matching Add-Path negotiation are
 ignored. Because the draft expired without IETF adoption, deploy this only
@@ -3353,6 +3448,46 @@ address = "[2001:db8::10]:3323"
 | `max_expire_interval` | u64 | no | unset | Ceiling on the effective expire, in seconds: the cache-advertised expire (and `expire_interval`) is clamped down to it, so this cache's VRPs are discarded once older than this no matter what the cache advertises. Must be <= 172800 and > both `refresh_interval` and `retry_interval`. Unset: only the two-day maximum applies |
 | `md5_password` | string | no | unset | TCP MD5 key (RFC 2385, 1..=80 bytes) installed on the RTR socket before connect. Mutually exclusive with `tcp_ao` |
 | `tcp_ao` | table or array of tables | no | unset | TCP-AO keyring (RFC 5925) installed on the RTR socket before connect, in the same shape and with the same validation as a neighbor `tcp_ao`. Mutually exclusive with `md5_password` |
+
+### Record limits
+
+Two `[rpki]` keys bound the memory RTR data can take. Both count RPKI
+records: each VRP is one record, and each ASPA record counts one per provider
+ASN.
+
+| Field | Type | Required | Default | Description |
+|-------|------|:--------:|:-------:|-------------|
+| `max_records_per_cache` | u64 | no | 4000000 | Most records one cache may hold. Must be >= 1 and <= `max_records_total` |
+| `max_records_total` | u64 | no | 10000000 | Most records held across all caches. Must be >= 1 |
+
+The global RPKI publishes about 1.03 million VRPs in 2026, so the per-cache
+default is about four complete sets, and three complete caches use about a
+third of the total. Records are counted as each transfer is received:
+
+- A transfer that would exceed either limit is refused before its records are
+  stored or published. The RTR session ends without an Error Report.
+- The cache's last accepted data stays in the validation table, and the next
+  connection asks for a full table with a Reset Query.
+- A full table counts from zero. An incremental update adds its
+  announcements to the cache's count, and withdrawals do not lower it until
+  the next full table. On a long session with heavy churn, the count can
+  therefore reach the limit and trigger a full table early.
+- While a full table is received, it counts toward `max_records_total`
+  together with the data it replaces. Accepted data still waiting to be
+  applied to the validation table also counts, until it replaces the old data
+  or is removed.
+- If no full table fits, the retained data is discarded when it expires, as
+  for an unreachable cache.
+
+Each refusal is logged as `RTR session ended` with an `RPKI record limit`
+error. The cache shows as disconnected in `bgp_rpki_cache_connected` and in
+`rbgp rpki caches` between attempts.
+
+```toml
+[rpki]
+max_records_per_cache = 4000000
+max_records_total = 10000000
+```
 
 ### Transport authentication
 
@@ -6231,6 +6366,7 @@ quoting it:
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval (...) must be >= refresh_interval` |
 | RPKI `max_expire_interval`, when set, must be <= 172800 and > both `refresh_interval` and `retry_interval` | `max_expire_interval ... must be <= 172800` / `must be > refresh_interval` / `must be > retry_interval` |
 | RPKI cache addresses must be unique numeric `IP:port` endpoints (bracketed for IPv6) | `invalid address` / `duplicate address` |
+| RPKI `max_records_per_cache` and `max_records_total` must be >= 1, and the per-cache limit must not exceed the total | `must be >= 1` / `max_records_per_cache (...) must be <= max_records_total (...)` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `route_server_client requires eBGP` |

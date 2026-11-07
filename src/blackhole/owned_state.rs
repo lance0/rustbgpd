@@ -24,7 +24,8 @@ const FILE_NAME: &str = "blackhole-owned.json";
 const TEMP_PREFIX: &str = ".blackhole-owned.json.tmp";
 const SCHEMA: &str = "rustbgpd.blackhole-owned/v1";
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_PREFIXES: usize = 1_000_000;
+/// Most prefixes one receipt can hold.
+pub(super) const MAX_PREFIXES: usize = 1_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize)]
@@ -38,12 +39,35 @@ struct Receipt {
 pub(super) struct OwnedStateStore {
     directory: Arc<PinnedRuntimeStateDirectory>,
     pub(super) fault: FaultPoint,
+    /// Publication attempts, so tests can count receipt writes per pass.
+    #[cfg(test)]
+    pub(super) writes: AtomicU64,
+    /// Fail this many coming publications at the write step, then succeed.
+    #[cfg(test)]
+    pub(super) fail_next_writes: AtomicU64,
 }
 
+/// The actor's BLACKHOLE ownership: the prefixes this daemon may have
+/// installed. `prefixes` changes in memory and `flush` publishes it as
+/// one receipt write, so a reconcile pass costs O(1) writes however many
+/// prefixes it touches.
+///
+/// Invariant: the receipt is a superset of the kernel rows the actor owns.
+/// Installs are written ahead (receipt, then kernel); removals are written
+/// behind (kernel, then receipt). A crash at any point leaves every owned
+/// row receipted, and restart adopts receipted marker rows and forgets
+/// receipted prefixes with no marker row.
 #[derive(Default)]
 pub(super) struct OwnershipState {
     pub(super) store: Option<OwnedStateStore>,
     pub(super) prefixes: BTreeSet<Prefix>,
+    /// The set the receipt holds, as last written or read back.
+    persisted: BTreeSet<Prefix>,
+    /// A failed publication of this set: the receipt holds either it or
+    /// `persisted`, and the next `flush` retries.
+    attempted: Option<BTreeSet<Prefix>>,
+    /// False once receipt authority is lost (unreadable, or changed
+    /// outside the actor). Kernel mutations stay disabled until restart.
     pub(super) available: bool,
 }
 
@@ -56,7 +80,9 @@ impl OwnershipState {
         match OwnedStateStore::load(directory) {
             Ok((store, prefixes)) => Self {
                 store: Some(store),
+                persisted: prefixes.clone(),
                 prefixes,
+                attempted: None,
                 available: true,
             },
             Err(error) => {
@@ -68,42 +94,101 @@ impl OwnershipState {
 
     #[cfg(test)]
     pub(super) fn ephemeral(prefixes: impl IntoIterator<Item = Prefix>) -> Self {
+        let prefixes: BTreeSet<Prefix> = prefixes.into_iter().collect();
         Self {
             store: None,
-            prefixes: prefixes.into_iter().collect(),
+            persisted: prefixes.clone(),
+            prefixes,
+            attempted: None,
             available: true,
         }
     }
 
-    pub(super) fn replace(&mut self, next: BTreeSet<Prefix>) -> bool {
-        if !self.available {
-            return false;
-        }
-        if let Some(store) = &self.store
-            && let Err(error) = store.replace(&self.prefixes, &next)
-        {
-            warn!(%error, "BLACKHOLE ownership persistence failed; kernel mutations disabled");
+    /// Drop `prefix` in memory. False, and ownership disabled, when it
+    /// was not owned.
+    pub(super) fn remove(&mut self, prefix: Prefix) -> bool {
+        if !self.prefixes.remove(&prefix) {
             self.available = false;
             return false;
         }
-        self.prefixes = next;
         true
     }
 
-    pub(super) fn add(&mut self, prefix: Prefix) -> bool {
-        let mut next = self.prefixes.clone();
-        next.insert(prefix);
-        self.replace(next)
+    /// Publish `prefixes` if the receipt does not already hold it. An I/O
+    /// failure keeps ownership in memory and is retried by the next call;
+    /// a receipt that holds neither the last durable nor the last
+    /// attempted set was changed outside the actor and disables ownership.
+    pub(super) fn flush(&mut self) -> bool {
+        self.publish(false)
     }
 
-    pub(super) fn remove(&mut self, prefix: Prefix) -> bool {
-        if !self.prefixes.contains(&prefix) {
+    /// [`Self::flush`] for the write ahead of kernel installs: the receipt
+    /// is read back and checked even when it needs no write, so an install
+    /// never relies on a receipt that was deleted or changed outside the
+    /// actor.
+    pub(super) fn flush_verified(&mut self) -> bool {
+        self.publish(true)
+    }
+
+    fn publish(&mut self, verify: bool) -> bool {
+        if !self.available {
+            return false;
+        }
+        let Some(store) = &self.store else {
+            self.persisted.clone_from(&self.prefixes);
+            return true;
+        };
+        let unchanged = self.attempted.is_none() && self.prefixes == self.persisted;
+        if unchanged && !verify {
+            return true;
+        }
+        let on_disk = match store.read() {
+            Ok(on_disk) => on_disk.unwrap_or_default(),
+            Err(error) => {
+                warn!(%error, "BLACKHOLE ownership receipt unreadable; kernel mutations disabled");
+                self.available = false;
+                return false;
+            }
+        };
+        if on_disk != self.persisted && self.attempted.as_ref() != Some(&on_disk) {
+            warn!(
+                "BLACKHOLE ownership receipt changed outside the actor; kernel mutations disabled"
+            );
             self.available = false;
             return false;
         }
-        let mut next = self.prefixes.clone();
-        next.remove(&prefix);
-        self.replace(next)
+        self.persisted = on_disk;
+        if unchanged {
+            return true;
+        }
+        match store.replace(&self.persisted, &self.prefixes) {
+            Ok(()) => {
+                self.persisted.clone_from(&self.prefixes);
+                self.attempted = None;
+                true
+            }
+            Err(error) => {
+                // A failed publication leaves the receipt holding either the
+                // set it held or the set being written. Anything else, or an
+                // unreadable receipt, means it changed outside the actor
+                // during publication: ownership can no longer be proven.
+                let intact = store.read().is_ok_and(|on_disk| {
+                    let on_disk = on_disk.unwrap_or_default();
+                    on_disk == self.persisted || on_disk == self.prefixes
+                });
+                if !intact {
+                    warn!(
+                        %error,
+                        "BLACKHOLE ownership receipt changed during publication; kernel mutations disabled"
+                    );
+                    self.available = false;
+                    return false;
+                }
+                warn!(%error, "BLACKHOLE ownership receipt write failed; retrying next pass");
+                self.attempted = Some(self.prefixes.clone());
+                false
+            }
+        }
     }
 }
 
@@ -114,6 +199,10 @@ impl OwnedStateStore {
         let store = Self {
             directory,
             fault: FaultPoint::None,
+            #[cfg(test)]
+            writes: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_next_writes: AtomicU64::new(0),
         };
         let prefixes = store.read()?.unwrap_or_default();
         Ok((store, prefixes))
@@ -148,6 +237,8 @@ impl OwnedStateStore {
         fault: FaultPoint,
         temp_name: &str,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        self.writes.fetch_add(1, Ordering::Relaxed);
         let on_disk = self.read()?;
         if on_disk.as_ref().is_none_or(BTreeSet::is_empty) && current.is_empty() {
             // Missing is empty authority only before anything has been owned.
@@ -174,6 +265,14 @@ impl OwnedStateStore {
         let mut renamed = false;
         let result = (|| -> Result<(), String> {
             fault.fail(FaultPoint::Write)?;
+            #[cfg(test)]
+            if self
+                .fail_next_writes
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err("injected one-shot ownership persistence failure".to_string());
+            }
             let fd = openat(
                 &self.directory.file,
                 temp_name,
@@ -194,6 +293,10 @@ impl OwnedStateStore {
             fault.fail(FaultPoint::FileSync)?;
             temp.sync_all().map_err(|error| error.to_string())?;
             drop(temp);
+            #[cfg(test)]
+            if fault == FaultPoint::Tamper {
+                let _ = unlinkat(&self.directory.file, FILE_NAME, UnlinkatFlags::NoRemoveDir);
+            }
             if self.read()? != on_disk {
                 return Err("BLACKHOLE ownership receipt changed during publication".to_string());
             }
@@ -320,7 +423,7 @@ fn io_error(error: Errno) -> String {
     std::io::Error::from_raw_os_error(error as i32).to_string()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FaultPoint {
     None,
     Write,
@@ -328,6 +431,9 @@ pub(super) enum FaultPoint {
     Rename,
     Unlink,
     DirectorySync,
+    /// Another writer deletes the receipt while this one publishes.
+    #[cfg(test)]
+    Tamper,
 }
 
 impl FaultPoint {
@@ -448,7 +554,8 @@ fn strict_receipt_data_is_refused() {
         std::fs::write(&path, bytes).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut state = OwnershipState::load(Some(store.directory));
-        assert!(!state.available && !state.add(*expected.first().unwrap()));
+        state.prefixes.insert(*expected.first().unwrap());
+        assert!(!state.available && !state.flush());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
     for bytes in [

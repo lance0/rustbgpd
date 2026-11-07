@@ -33,6 +33,34 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   RFC 8956 defines it. In an IPv4 rule, global (SAFI 133) or VPN (SAFI 134),
   it is an unknown component type and the NLRI is malformed (RFC 8955 §4.2);
   earlier releases accepted it.
+- The Add-Path, Extended Next Hop, Long-Lived Graceful Restart, Paths-Limit
+  and Outbound Route Filtering capability decoders now skip only the tuples
+  (or ORF blocks) for an unmodeled AFI/SAFI, or an undefined Add-Path
+  Send/Receive value, and keep the rest (RFC 5492 §4). Earlier releases
+  turned the whole capability into `Capability::Unknown`, so one such tuple
+  lost every family; for Add-Path the peer then still sent path IDs. A
+  decoded capability no longer re-encodes the skipped tuples. A value with no
+  modeled tuple, a length that is not a whole number of tuples, or an ORF
+  structural error still yields `Capability::Unknown`.
+  `orf::decode_capability_value` returns the modeled blocks instead of `None`
+  for an unrecognized AFI/SAFI.
+- `BgpHeader::decode` and `peek_message_length` enforce the RFC 4271 §6.1
+  per-type lengths: OPEN at least 29, UPDATE 23, NOTIFICATION 21, and
+  KEEPALIVE exactly 19. ROUTE-REFRESH is left to the body decoder, so a
+  session with Enhanced Route Refresh can answer RFC 7313 §5.
+  A violation is `DecodeError::InvalidLength`, which maps to Bad Message
+  Length (1/2) carrying the Length field. Earlier releases passed a short
+  OPEN or NOTIFICATION to the body decoder, which reported OPEN Message
+  Error 2/0 with empty data, and a short UPDATE reported 3/1.
+  `DecodeError::InvalidKeepaliveLength` now also carries the length in its
+  NOTIFICATION data.
+- RFC 7606 revised decoding records a repeated attribute type once per
+  cause (duplicate, prohibited AS-set, AS 0) instead of once per occurrence,
+  so decoding allocates the same amount however often a type repeats.
+  `RevisedAttributeDecode` and `RevisedParsedUpdate` gain
+  `coalesced_duplicates`, the repeats represented by an earlier record.
+  Dispositions are unchanged. The new public fields break struct literals
+  and exhaustive struct patterns.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
   types. These crate versions are not published by this change.
 

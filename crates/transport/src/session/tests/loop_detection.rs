@@ -866,6 +866,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
         forwarding_preserved: false,
     }];
     install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:440::".parse().unwrap(), 64));
     let nlri = |path_id| NlriEntry { path_id, prefix };
     let reach = |announced| {
