@@ -123,7 +123,7 @@ struct Args {
     )]
     max_lpm_scan_routes: u64,
 
-    /// Maximum rows inspected by each route-view scan, including primary markers.
+    /// Maximum upstream matching or returned rows per adapter route-view scan.
     #[arg(long, env = "BIRDWATCHER_ADAPTER_MAX_SCAN_ROUTES", default_value_t = 10_000,
         value_parser = clap::value_parser!(u64).range(1..))]
     max_scan_routes: u64,
@@ -3133,7 +3133,7 @@ mod tests {
             let entered = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let finished = Arc::new(Semaphore::new(0));
-            let app = Router::new()
+            let fixture_router = Router::new()
                 .route("/", get(held))
                 .route_layer(axum::middleware::from_fn_with_state(
                     readers.clone(),
@@ -3148,7 +3148,7 @@ mod tests {
             };
             let mut work = Vec::new();
             for _ in 0..MAX_CONCURRENT_ROUTE_REQUESTS {
-                work.push(tokio::spawn(app.clone().oneshot(request())));
+                work.push(tokio::spawn(fixture_router.clone().oneshot(request())));
                 entered.notified().await;
             }
             if deadline {
@@ -3167,7 +3167,7 @@ mod tests {
             }
             assert_eq!(readers.available_permits(), 0);
             assert_eq!(
-                app.oneshot(request()).await.unwrap().status(),
+                fixture_router.oneshot(request()).await.unwrap().status(),
                 StatusCode::SERVICE_UNAVAILABLE
             );
             release.notify_waiters();

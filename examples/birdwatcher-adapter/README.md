@@ -46,7 +46,7 @@ Flags (also settable via env):
 | `--arouteserver-reject-communities-file PATH` | `BIRDWATCHER_ADAPTER_AROUTESERVER_REJECT_COMMUNITIES_FILE` | (unset) | Startup-only artifact emitted by `rs-config-render` for effective `tag_and_reject` peers |
 | `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum RIB-derived route-array response size; must be non-zero |
 | `--max-lpm-scan-routes` | `BIRDWATCHER_ADAPTER_MAX_LPM_SCAN_ROUTES` | `10000` | Maximum route rows scanned by a protocol/export longest-match fallback; must be non-zero |
-| `--max-scan-routes` | `BIRDWATCHER_ADAPTER_MAX_SCAN_ROUTES` | `10000` | Maximum rows inspected by each other route-view scan, including primary markers and retained rejects; must be non-zero |
+| `--max-scan-routes` | `BIRDWATCHER_ADAPTER_MAX_SCAN_ROUTES` | `10000` | Maximum upstream matching or returned rows per adapter route-view scan, including primary markers and retained rejects; must be non-zero |
 
 The command-line token path takes precedence over the environment variable.
 The adapter reads it once at startup, trims trailing whitespace, and rejects
@@ -177,14 +177,21 @@ Every successful response retains Alice-LG's `api.Version` and
 implement Bird's Eye API version 2.1.0. A RIB-derived route-array request whose
 actual size exceeds that maximum returns HTTP 403 instead of truncating.
 
-`--max-scan-routes` also bounds rows inspected while preparing a response,
-including the Loc-RIB primary-marker join, wildcard scans, noexport scans,
-and retained rejects across a filtered table. A scan exceeding this limit
+`--max-scan-routes` limits the upstream view's declared matching-row count
+and the rows consumed by each adapter scan, including the Loc-RIB
+primary-marker join, wildcard scans, noexport scans, and retained rejects
+across a filtered table. A scan exceeding this limit
 returns a sanitized HTTP 403 without a partial result. A nonempty peer view
 can therefore require raising this limit when the full Loc-RIB exceeds
 10,000 routes, even if the peer's rendered view is small. Empty views and
 views already over `--max-routes` finish before the primary-marker join.
 Longest-match fallback scans use `--max-lpm-scan-routes` instead.
+
+These limits bound adapter transfer and retention, not rows examined inside
+the daemon or its CPU time. An exact-prefix query returning zero or one row
+can still scan the native RIB scope. Family-only first-page counts, dirty
+grouped advertised baselines, filtered group traversal, and deferred ordered
+index synchronization can also do more work than the returned page shows.
 
 At most four route requests run concurrently; additional requests receive
 HTTP 503. Each admitted HTTP request has a ten-second deadline and returns
@@ -204,7 +211,7 @@ every Add-Path candidate in daemon order, and when the queried prefix has no
 entry they answer with the view's most-specific covering prefix. Exact and
 fallback pages are scoped to the queried IPv4 or IPv6 unicast family. The
 fallback is a linear scan because there is no covering-prefix RPC filter;
-`--max-lpm-scan-routes` bounds that work separately, while `--max-routes`
+`--max-lpm-scan-routes` bounds the rows consumed by that adapter walk separately, while `--max-routes`
 applies only to the routes returned for the one matched prefix. If the scan
 budget is exhausted before the peer view is complete, the request returns a
 sanitized HTTP 403 and never evaluates the partial view.
@@ -335,7 +342,7 @@ field is `null` when no session in the table is live. A session with
 retention disabled contributes no rows, a peer whose session store the
 daemon reports as gone (`NOT_FOUND`) contributes nothing, an unknown table
 is 404, and the rendered `--max-routes` cap does not apply. The separate
-`--max-scan-routes` inspection limit still applies; within it, the view matches the
+`--max-scan-routes` response-row limit still applies; within it, the view matches the
 peer view. The endpoint adds no truncation beyond each peer's bounded
 retention store. A configured peer that is still dialing has a session task
 and therefore an empty store whose capacity counts.
@@ -453,7 +460,7 @@ the real decision. Precisely what the view contains:
   it never fabricates a "not exported" claim.
 
 **Cost:** each request pages the Loc-RIB and peer Adj-RIB-Out, with each
-scan bounded by `--max-scan-routes`, then makes one `ExplainAdvertisedRoute` call per suppressed prefix. Retained memory
+adapter walk's matching and returned rows bounded by `--max-scan-routes`, then makes one `ExplainAdvertisedRoute` call per suppressed prefix. Native query CPU work remains separate. Retained memory
 is proportional to the advertised prefix-key set plus at most `--max-routes`
 candidate rows: each Loc-RIB page is diffed as it arrives, only suppressed
 candidates are kept, and the cap is applied per page. Each paged

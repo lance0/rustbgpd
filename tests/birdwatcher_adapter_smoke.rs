@@ -836,7 +836,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
             "adapter route inventory must not bypass direct GET registration: {alternate}"
         );
     }
-    let routed_paths: Vec<_> = route_calls
+    let mut routed_paths: Vec<_> = route_calls
         .iter()
         .map(|call| {
             let literal = call
@@ -885,7 +885,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
             path
         })
         .collect();
-    let expected_paths: Vec<_> = concat!(
+    let mut expected_paths: Vec<_> = concat!(
         "/status /protocols/bgp /protocol/{id} /symbols ",
         "/routes/protocol/{id} /routes/export/{id} /routes/table/{table} ",
         "/routes/table/{table}/filtered ",
@@ -895,6 +895,9 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     )
     .split_ascii_whitespace()
     .collect();
+    // Middleware placement changes registration order, not the GET inventory.
+    routed_paths.sort_unstable();
+    expected_paths.sort_unstable();
     assert_eq!(
         routed_paths, expected_paths,
         "adapter route inventory drifted"
@@ -909,12 +912,13 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         .split_once("\n## ")
         .expect("looking-glass disclosure must have a following section")
         .0;
-    let documented_paths: Vec<_> = disclosure
+    let mut documented_paths: Vec<_> = disclosure
         .split('`')
         .skip(1)
         .step_by(2)
         .filter_map(|code| code.strip_prefix("GET "))
         .collect();
+    documented_paths.sort_unstable();
     assert_eq!(
         documented_paths, routed_paths,
         "security disclosure must exactly track every routed GET path"

@@ -6537,7 +6537,7 @@ async fn run<T>(
     };
     let last_sighup_reload: LastSighupReloadState = Arc::new(Mutex::new(None));
     let last_sighup_reload_read = Arc::clone(&last_sighup_reload);
-    let serve_config = ServeConfig {
+    let mut serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
         listen_port: u32::from(config.global.listen_port),
@@ -6684,11 +6684,9 @@ async fn run<T>(
             let rx = blackhole_status_rx.clone();
             Arc::new(move || rx.borrow().iter().map(blackhole_status_to_proto).collect())
         },
-        fib_route_snapshot: make_fib_route_snapshot(fib_status_rx.clone())
-            .await
-            .unwrap_or_else(|error| {
-                fatal_startup_error("failed to prepare FIB status publication", error)
-            }),
+        // Replaced before binding listeners, after fallible preparation enters
+        // the same startup result channel as listener failures.
+        fib_route_snapshot: rustbgpd_api::rib_service::FibRouteSnapshotReader::default(),
         fib_table_control: Some(fib_table_control::make_owned_fib_table_control_fn(
             fib_table_control::FibTableControlDeps {
                 local_forwarding_state: Some(local_forwarding_state.clone()),
@@ -6742,6 +6740,15 @@ async fn run<T>(
     };
     let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
     let mut grpc_handle = tokio::spawn(async move {
+        match make_fib_route_snapshot(fib_status_rx).await {
+            Ok(snapshot) => serve_config.fib_route_snapshot = snapshot,
+            Err(error) => {
+                let _ = grpc_startup_tx.send(Err(format!(
+                    "failed to prepare FIB status publication: {error}"
+                )));
+                return;
+            }
+        }
         rustbgpd_api::server::serve(
             grpc_listeners,
             grpc_rib_tx,
@@ -6760,7 +6767,7 @@ async fn run<T>(
     let mut initial_peer_boot_failed = match grpc_startup_rx.await {
         Ok(Ok(())) => false,
         Ok(Err(error)) => {
-            error!(error = %error, "failed to bind every configured gRPC listener");
+            error!(error = %error, "failed to start configured gRPC services");
             component_failed = true;
             true
         }
@@ -6770,7 +6777,7 @@ async fn run<T>(
             true
         }
     };
-    let grpc_listener_boot_failed = initial_peer_boot_failed;
+    let grpc_service_boot_failed = initial_peer_boot_failed;
     let mut initial_roster_hold = None;
     if !initial_peer_boot_failed && let Ok(path) = std::env::var(TEST_INITIAL_ROSTER_HOLD_ENV) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -6927,8 +6934,8 @@ async fn run<T>(
     }
 
     if initial_peer_boot_failed {
-        if grpc_listener_boot_failed {
-            info!("initiating shortened coordinated shutdown after gRPC listener startup failure");
+        if grpc_service_boot_failed {
+            info!("initiating shortened coordinated shutdown after gRPC service startup failure");
         } else {
             info!(
                 "initiating shortened coordinated shutdown after configured-peer startup failure"
