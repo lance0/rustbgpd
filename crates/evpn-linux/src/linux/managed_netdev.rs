@@ -505,7 +505,22 @@ async fn ensure_svd_vxlan_converged(
     };
     ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, &fresh.bridges)?;
     ensure_svd_vlan_bindings_observed(name, vxlan, spec, &fresh.bridges)
-        .map_err(retryable_completion)
+        .map_err(retryable_completion)?;
+    // LAN-2951: raise an exactly-ours SVD VXLAN that is administratively
+    // down; see [`adopt_existing_bridge`].
+    if vxlan.up {
+        return Ok(());
+    }
+    set_link_up(handle, vxlan.ifindex, "managed SVD VXLAN set up")
+        .await
+        .map_err(retryable_completion)?;
+    let fresh = fresh_vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan.as_ref() else {
+        return Err(transient_link_race(format!(
+            "managed SVD VXLAN {name} vanished after set up"
+        )));
+    };
+    ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, &fresh.bridges)
 }
 
 async fn ensure_svd_vlan_bindings(
@@ -610,7 +625,7 @@ async fn create_vrf(
 ) -> Result<(), DataplaneError> {
     let mut fresh = fresh_vrf_state(handle, name).await?;
     if let Some(vrf) = fresh.vrf.as_ref() {
-        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+        return adopt_existing_vrf(handle, name, vrf, spec, ownership_stamp).await;
     }
     if fresh.name_exists {
         return Err(foreign_vrf_collision(name));
@@ -639,10 +654,10 @@ async fn create_vrf(
     };
 
     if !created {
-        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+        return adopt_existing_vrf(handle, name, vrf, spec, ownership_stamp).await;
     }
     if vrf.altnames.iter().any(|alt| alt == ownership_stamp) {
-        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+        return adopt_existing_vrf(handle, name, vrf, spec, ownership_stamp).await;
     }
 
     let stamped_ifindex = vrf.ifindex;
@@ -709,6 +724,33 @@ async fn remove_vrf(
     }
 }
 
+/// LAN-2951: adopt an exactly-ours VRF and raise it when it is
+/// administratively down; see [`adopt_existing_bridge`]. Every protected
+/// attribute is checked before the link is raised.
+async fn adopt_existing_vrf(
+    handle: &Handle,
+    name: &str,
+    vrf: &KernelVrfLinkInfo,
+    spec: &ManagedVrfNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    if vrf.up {
+        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+    }
+    let mut raised = vrf.clone();
+    raised.up = true;
+    ensure_exact_owned_vrf(name, &raised, spec, ownership_stamp)?;
+    set_link_up(handle, vrf.ifindex, "managed VRF set up")
+        .await
+        .map_err(retryable_completion)?;
+    let Some(vrf) = fresh_vrf_state(handle, name).await?.vrf else {
+        return Err(transient_link_race(format!(
+            "managed VRF {name} vanished after set up"
+        )));
+    };
+    ensure_exact_owned_vrf(name, &vrf, spec, ownership_stamp)
+}
+
 async fn create_l3vxlan(
     handle: &Handle,
     name: &str,
@@ -717,7 +759,7 @@ async fn create_l3vxlan(
 ) -> Result<(), DataplaneError> {
     let mut fresh = fresh_l3vxlan_state(handle, name).await?;
     if let Some(vxlan) = fresh.vxlan.as_ref() {
-        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+        return adopt_existing_l3vxlan(handle, name, vxlan, spec, ownership_stamp).await;
     }
     if fresh.name_exists {
         return Err(foreign_l3vxlan_collision(name));
@@ -761,10 +803,10 @@ async fn create_l3vxlan(
     };
 
     if !created {
-        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+        return adopt_existing_l3vxlan(handle, name, vxlan, spec, ownership_stamp).await;
     }
     if vxlan.altnames.iter().any(|alt| alt == ownership_stamp) {
-        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+        return adopt_existing_l3vxlan(handle, name, vxlan, spec, ownership_stamp).await;
     }
 
     let stamped_ifindex = vxlan.ifindex;
@@ -822,6 +864,32 @@ async fn remove_l3vxlan(
         Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => Ok(()),
         Err(err) => Err(classify_link_apply_error(&err, "managed L3VXLAN remove")),
     }
+}
+
+/// LAN-2951: adopt an exactly-ours L3VXLAN and raise it when it is
+/// administratively down; see [`adopt_existing_vrf`].
+async fn adopt_existing_l3vxlan(
+    handle: &Handle,
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedL3VxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    if vxlan.up {
+        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+    }
+    let mut raised = vxlan.clone();
+    raised.up = true;
+    ensure_exact_owned_l3vxlan(name, &raised, spec, ownership_stamp)?;
+    set_link_up(handle, vxlan.ifindex, "managed L3VXLAN set up")
+        .await
+        .map_err(retryable_completion)?;
+    let Some(vxlan) = fresh_l3vxlan_state(handle, name).await?.vxlan else {
+        return Err(transient_link_race(format!(
+            "managed L3VXLAN {name} vanished after set up"
+        )));
+    };
+    ensure_exact_owned_l3vxlan(name, &vxlan, spec, ownership_stamp)
 }
 
 async fn create_vlan_upper(
