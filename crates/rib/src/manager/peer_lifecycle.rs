@@ -317,7 +317,7 @@ impl RibManager {
     /// session emits while Established (`RoutesReceived`, `EndOfRib`,
     /// `BeginRouteRefresh`/`EndRouteRefresh`, `RouteRefreshRequest`,
     /// `PeerOrfUpdate`). Returns `true` when the message must be
-    /// discarded: a registered or deferred live session owns the peer and
+    /// discarded: no registered or deferred live session owns the peer, or
     /// the stamped id is not that session — a message from a superseded session
     /// (RFC 4271 §6.8 collision window) queued behind the replacement's
     /// `PeerUp`. Without the gate, such a message would mutate the
@@ -328,14 +328,12 @@ impl RibManager {
     /// uses session-stamped staging instead of this data-message gate.
     ///
     /// Before outbound registration completes, the newest live record already
-    /// owns inbound state. Only a peer with neither registration nor a live
-    /// session keeps the pre-stamping legacy accept-all behavior for data;
-    /// [`Self::stale_session_marker`] refuses state-completing markers from
-    /// such a peer. Staged OPEN context remains separate from this
-    /// data-message gate.
+    /// owns inbound state. A peer with neither registration nor a live
+    /// session cannot change inbound state, including routes retained under
+    /// Graceful Restart. Staged OPEN context remains separate from this gate.
     ///
-    /// Discards are logged at INFO (same shape as the stale-teardown
-    /// discard) and counted in
+    /// Superseded-session discards are logged at INFO; unregistered-session
+    /// discards at DEBUG. Both are counted in
     /// `bgp_rib_stale_session_message_ignored_total{peer,kind}`.
     /// `kind` is bounded: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`,
     /// `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`,
@@ -348,13 +346,15 @@ impl RibManager {
         kind: StaleSessionMessageKind,
     ) -> bool {
         let Some(registered) = self.current_session_id(peer) else {
-            // Legacy accept for data from a peer with no registered or live
-            // session. Transport sends data only after PeerUp, so production
-            // never reaches this; markers that complete or sweep session
-            // state are refused in `stale_session_marker` instead. Removing
-            // this accept needs the rib tests to register before seeding
-            // (LAN-2958).
-            return false;
+            debug!(
+                %peer,
+                event,
+                session_id,
+                "discarding a message from an unregistered session"
+            );
+            self.metrics
+                .record_rib_stale_session_message_ignored(&peer.label(), kind);
+            return true;
         };
         if registered == session_id {
             return false;
@@ -374,8 +374,8 @@ impl RibManager {
 
     /// Session gate for markers that complete or sweep a session's state:
     /// End-of-RIB, Beginning- and End-of-RIB-Refresh, and a refresh-window
-    /// timeout. Beyond [`Self::stale_session_message`], a marker from a peer
-    /// with no registered or live session is discarded too. Such a peer may
+    /// timeout. Like [`Self::stale_session_message`], this refuses markers
+    /// with no registered or live session. Such a peer may
     /// hold routes retained under Graceful Restart (RFC 4724), and an
     /// End-of-RIB from a session that never registered must not complete
     /// their sweep before the restarted session re-advertises them.

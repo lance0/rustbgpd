@@ -1858,39 +1858,195 @@ async fn active_session_messages_flow_after_replacement() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
-async fn unregistered_session_message_keeps_legacy_accept_behavior() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
-
-    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+fn session_route_messages(address: Ipv4Addr, session_id: u64) -> [(&'static str, RibUpdate); 5] {
+    let peer = peer_v4(address);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 44, 0, 0), 24);
+    [
+        (
+            "routes",
+            RibUpdate::RoutesReceived {
+                peer,
+                session_id,
+                announced: vec![make_route(prefix, address)],
+                withdrawn: vec![],
+                flowspec_announced: vec![make_flowspec_route(address)],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![make_evpn_imet(address, 100)],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            },
+        ),
+        (
+            "bgpls",
+            RibUpdate::BgpLsRoutesReceived {
+                peer,
+                session_id,
+                announced: vec![make_bgpls_route(address, 1, 100)],
+                withdrawn: vec![],
+            },
+        ),
+        (
+            "vpn",
+            RibUpdate::VpnRoutesReceived {
+                peer,
+                session_id,
+                announced: vec![make_vpn_rib_route(address, 1, 100, 100)],
+                withdrawn: vec![],
+            },
+        ),
+        (
+            "labeled",
+            RibUpdate::LabeledRoutesReceived {
+                peer,
+                session_id,
+                announced: vec![make_labeled_rib_route(address, 1, 100, 100)],
+                withdrawn: vec![],
+            },
+        ),
+        (
+            "rtc",
+            RibUpdate::RtcRoutesReceived {
+                peer,
+                session_id,
+                announced: vec![make_rtc_rib_route(address, 1, 100)],
+                withdrawn: vec![],
+            },
+        ),
+    ]
+}
 
-    tx.send(RibUpdate::RoutesReceived {
-        session_id: 77,
+#[test]
+fn unregistered_session_route_messages_are_discarded_and_counted() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let address = Ipv4Addr::new(10, 0, 0, 2);
+    let peer = peer_v4(address);
+    for (kind, update) in session_route_messages(address, 77) {
+        manager.handle_update(update);
+        drain_route_chunks(&mut manager);
+        assert!(
+            !manager.ribs.contains_key(&peer),
+            "unregistered {kind} mutated the RIB"
+        );
+        let count = counter_metric_value(
+            &manager.metrics,
+            "bgp_rib_stale_session_message_ignored_total",
+            &[("peer", &peer.label()), ("kind", kind)],
+        );
+        assert!(
+            (count - 1.0).abs() < f64::EPSILON,
+            "{kind} discard not counted"
+        );
+    }
+    // The same envelopes become admissible only after a real PeerUp.
+    manager.handle_update(registering_peer_up(peer, 77));
+    for (kind, update) in session_route_messages(address, 77) {
+        manager.handle_update(update);
+        drain_route_chunks(&mut manager);
+        let count = counter_metric_value(
+            &manager.metrics,
+            "bgp_rib_stale_session_message_ignored_total",
+            &[("peer", &peer.label()), ("kind", kind)],
+        );
+        assert!(
+            (count - 1.0).abs() < f64::EPSILON,
+            "registered {kind} was discarded"
+        );
+    }
+    let rib = &manager.ribs[&peer];
+    assert_eq!(
+        [
+            rib.len(),
+            rib.flowspec_len(),
+            rib.evpn_len(),
+            rib.bgpls_len(),
+            rib.vpn_len(),
+            rib.labeled_len(),
+            rib.rtc_len()
+        ],
+        [1; 7]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn unregistered_session_routes_cannot_replace_or_withdraw_gr_retained_routes() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let address = Ipv4Addr::new(10, 0, 0, 2);
+    let peer = peer_v4(address);
+    manager.handle_update(registering_peer_up(peer, 77));
+    let (_, initial) = session_route_messages(address, 77)
+        .into_iter()
+        .next()
+        .unwrap();
+    manager.handle_update(initial);
+    drain_route_chunks(&mut manager);
+    let retained = manager.ribs[&peer].iter().next().unwrap().clone();
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
         peer,
-        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
-        withdrawn: vec![],
+        session_id: 77,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    assert!(manager.current_session_id(peer).is_none());
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        session_id: 88,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 45, 0, 0), 24),
+            address,
+        )],
+        withdrawn: vec![(retained.prefix, retained.path_id)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
         validated_with: None,
-    })
-    .await
-    .unwrap();
-
-    let received = query_received_routes(&tx, peer).await;
-    assert!(
-        received
-            .iter()
-            .any(|route| route.prefix == Prefix::V4(prefix)),
-        "unregistered data messages intentionally retain the legacy accept behavior"
+    });
+    drain_route_chunks(&mut manager);
+    let rib = &manager.ribs[&peer];
+    assert_eq!(rib.len(), 1);
+    let route = rib.get(&retained.prefix, retained.path_id).unwrap();
+    assert!(route.is_stale);
+    assert_eq!(route.attributes, retained.attributes);
+    let count = counter_metric_value(
+        &manager.metrics,
+        "bgp_rib_stale_session_message_ignored_total",
+        &[("peer", &peer.label()), ("kind", "routes")],
     );
+    assert!((count - 1.0).abs() < f64::EPSILON);
+}
 
-    drop(tx);
-    handle.await.unwrap();
+#[test]
+fn deferred_registered_session_accepts_all_route_envelopes() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let address = Ipv4Addr::new(10, 0, 0, 2);
+    let peer = peer_v4(address);
+    register_deferred_test_peer(&mut manager, &tx, peer, 77);
+    for (_, update) in session_route_messages(address, 77) {
+        manager.handle_update(update);
+        drain_route_chunks(&mut manager);
+    }
+    let rib = &manager.ribs[&peer];
+    assert_eq!(
+        [
+            rib.len(),
+            rib.flowspec_len(),
+            rib.evpn_len(),
+            rib.bgpls_len(),
+            rib.vpn_len(),
+            rib.labeled_len(),
+            rib.rtc_len()
+        ],
+        [1; 7]
+    );
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(!manager.outbound_peers.contains_key(&peer));
 }
 
 // ---------------------------------------------------------------------------

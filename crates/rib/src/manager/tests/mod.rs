@@ -500,8 +500,8 @@ fn ipv4_sendable() -> Vec<(Afi, Safi)> {
 }
 
 /// A `PeerUp` that registers `session_id` for `peer` and exports nothing to
-/// it. The RIB refuses End-of-RIB and route-refresh markers from a peer with
-/// no registered session, so a test that sends them registers first, as
+/// it. The RIB refuses data and session markers from a peer with no registered
+/// session, so a test that sends them registers first, as
 /// transport does when the session reaches Established.
 fn registering_peer_up(peer: PeerId, session_id: u64) -> RibUpdate {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
