@@ -27,6 +27,17 @@ pub enum DecodeError {
         length: u16,
     },
 
+    /// Message length violates a bound specific to its message type.
+    #[error("invalid {message_type} length {length} (expected {expected})")]
+    InvalidTypeLength {
+        /// Message type whose length rule was violated.
+        message_type: crate::header::MessageType,
+        /// The invalid length value from the wire.
+        length: u16,
+        /// Required bound, such as "at least 29" or "at most 4096".
+        expected: &'static str,
+    },
+
     /// Message type byte is not a known BGP message type.
     #[error("unknown message type {0}")]
     UnknownMessageType(
@@ -157,7 +168,7 @@ impl DecodeError {
                 1, // Connection Not Synchronized
                 Bytes::new(),
             ),
-            Self::InvalidLength { length } => {
+            Self::InvalidLength { length } | Self::InvalidTypeLength { length, .. } => {
                 let mut data = BytesMut::with_capacity(2);
                 data.put_u16(*length);
                 (
@@ -254,6 +265,19 @@ impl From<DecodeError> for UpdateDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhanced_route_refresh_length_error_displays_exact_bound() {
+        let err = DecodeError::InvalidTypeLength {
+            message_type: crate::header::MessageType::RouteRefresh,
+            length: 24,
+            expected: "23",
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid ROUTE-REFRESH length 24 (expected 23)"
+        );
+    }
 
     #[test]
     fn invalid_marker_maps_to_header_error() {
