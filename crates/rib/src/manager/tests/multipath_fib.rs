@@ -638,6 +638,85 @@ async fn multipath_send_split_horizon() {
     handle.await.unwrap();
 }
 
+/// The Add-Path initial dump applies the same split horizon: a deferred
+/// registration accepts the target's own route before its dump runs, and
+/// the dump must not echo that path back.
+#[test]
+fn multipath_initial_dump_split_horizon_after_deferred_registration() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    register_test_peer(&mut manager, peer1, 0);
+
+    // Queued work defers the target's outbound registration.
+    let (reply, _response) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    manager.initial_dump_defer_min_routes = 0;
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    assert!(manager.pending_initial_registrations.contains(&target));
+
+    for (peer, next_hop, asn, local_pref) in [
+        (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (target, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: vec![make_multipath_route(
+                prefix,
+                next_hop,
+                vec![asn],
+                local_pref,
+            )],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+    assert_eq!(manager.ribs[&target].len(), 1, "the own route is accepted");
+    assert!(out_rx.try_recv().is_err(), "nothing sent before the dump");
+
+    manager.advance_pending_initial_registration();
+    let mut next_hops = Vec::new();
+    while let Ok(update) = out_rx.try_recv() {
+        next_hops.extend(
+            delivered(update)
+                .announce
+                .iter()
+                .map(|route| route.next_hop),
+        );
+    }
+    assert_eq!(
+        next_hops,
+        [IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))],
+        "the initial dump must exclude the target's own path"
+    );
+}
+
 #[tokio::test]
 async fn multipath_withdrawal_on_candidate_removal() {
     let (tx, rx) = mpsc::channel(64);
