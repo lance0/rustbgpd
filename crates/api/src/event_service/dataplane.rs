@@ -1,16 +1,16 @@
 use tokio::sync::broadcast;
 
 use crate::proto;
-use crate::rib_service::{BlackholeDiscardSnapshotFn, FibRouteSnapshotFn};
+use crate::rib_service::{BlackholeDiscardSnapshotFn, FibRouteSnapshotReader};
 
 use super::{DATAPLANE_EVENT_POLL_INTERVAL, DataplaneEventBroadcaster};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DataplaneSummary {
-    pub(super) source: &'static str,
-    pub(super) installed: u64,
-    pub(super) rejected: u64,
-    pub(super) failed: u64,
+pub(crate) struct DataplaneSummary {
+    pub(crate) source: &'static str,
+    pub(crate) installed: u64,
+    pub(crate) rejected: u64,
+    pub(crate) failed: u64,
 }
 
 impl DataplaneSummary {
@@ -39,7 +39,7 @@ fn count_blackhole_statuses(rows: &[proto::BlackholeDiscard]) -> DataplaneSummar
     summary
 }
 
-fn count_fib_statuses(rows: &[proto::FibRouteStatus]) -> DataplaneSummary {
+pub(crate) fn count_fib_statuses(rows: &[proto::FibRouteStatus]) -> DataplaneSummary {
     let mut summary = DataplaneSummary {
         source: "fib",
         installed: 0,
@@ -60,6 +60,7 @@ fn count_fib_statuses(rows: &[proto::FibRouteStatus]) -> DataplaneSummary {
     summary
 }
 
+#[cfg(test)]
 pub(super) fn dataplane_summaries(
     blackholes: &[proto::BlackholeDiscard],
     fib_routes: &[proto::FibRouteStatus],
@@ -68,6 +69,16 @@ pub(super) fn dataplane_summaries(
         count_blackhole_statuses(blackholes),
         count_fib_statuses(fib_routes),
     ]
+}
+
+fn read_dataplane_summaries(
+    blackhole_snapshot: &BlackholeDiscardSnapshotFn,
+    fib_snapshot: &FibRouteSnapshotReader,
+) -> Vec<DataplaneSummary> {
+    let fib = fib_snapshot.with_snapshot(crate::rib_service::FibRouteSnapshot::summary);
+    // This provider can project an unrelated table. Do not pin the FIB
+    // publication while it runs or while counting its rows.
+    vec![count_blackhole_statuses(&blackhole_snapshot()), fib]
 }
 
 fn changed_dataplane_summaries(
@@ -95,10 +106,10 @@ pub(crate) fn spawn_dataplane_poller(
     tx: broadcast::Sender<proto::BgpEvent>,
     shared_tx: DataplaneEventBroadcaster,
     blackhole_snapshot: BlackholeDiscardSnapshotFn,
-    fib_snapshot: FibRouteSnapshotFn,
+    fib_snapshot: FibRouteSnapshotReader,
 ) {
     tokio::spawn(async move {
-        let mut previous = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
+        let mut previous = read_dataplane_summaries(&blackhole_snapshot, &fib_snapshot);
         let mut interval = tokio::time::interval(DATAPLANE_EVENT_POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -113,7 +124,7 @@ pub(crate) fn spawn_dataplane_poller(
                 }
             }
 
-            let current = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
+            let current = read_dataplane_summaries(&blackhole_snapshot, &fib_snapshot);
             for summary in changed_dataplane_summaries(&previous, &current) {
                 let _ = tx.send(super::convert::dataplane_summary_to_bgp_event(summary));
             }
@@ -125,6 +136,45 @@ pub(crate) fn spawn_dataplane_poller(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blackhole_projection_does_not_pin_fib_publication() {
+        use crate::rib_service::FibRouteSnapshot;
+        use std::sync::{Arc, Mutex, mpsc};
+        let (tx, rx) = tokio::sync::watch::channel(FibRouteSnapshot::default());
+        let reader = FibRouteSnapshotReader::new(rx);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            publish_rx.recv().unwrap();
+            started_tx.send(()).unwrap();
+            tx.send_replace(FibRouteSnapshot::default());
+            finished_tx.send(()).unwrap();
+        });
+        let receivers = Mutex::new((started_rx, finished_rx));
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = completed.clone();
+        let blackhole: BlackholeDiscardSnapshotFn = Arc::new(move || {
+            publish_tx.send(()).unwrap();
+            let receivers = receivers.lock().unwrap();
+            receivers.0.recv().unwrap();
+            observed.store(
+                receivers
+                    .1
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .is_ok(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Vec::new()
+        });
+        read_dataplane_summaries(&blackhole, &reader);
+        publisher.join().unwrap();
+        assert!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            "blackhole conversion held the FIB publication borrow"
+        );
+    }
 
     #[test]
     fn legacy_three_bucket_summary_ignores_unresolved_rows() {

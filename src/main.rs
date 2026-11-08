@@ -2795,6 +2795,79 @@ fn blackhole_status_to_proto(
     }
 }
 
+/// Publish complete read indexes independently of FIB reconciliation.
+async fn fib_route_snapshots(
+    mut source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
+) -> Result<
+    tokio::sync::watch::Receiver<rustbgpd_api::rib_service::FibRouteSnapshot>,
+    tokio::task::JoinError,
+> {
+    let rows = source.borrow_and_update().clone();
+    let initial = tokio::task::spawn_blocking(move || project_fib_route_snapshot(rows)).await?;
+    let (tx, rx) = tokio::sync::watch::channel(initial);
+    tokio::spawn(refresh_fib_route_snapshots(
+        source,
+        tx,
+        project_fib_route_snapshot,
+    ));
+    Ok(rx)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FIB_SNAPSHOT_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn project_fib_route_snapshot(
+    rows: Arc<Vec<fib_runtime::FibRuntimeStatus>>,
+) -> rustbgpd_api::rib_service::FibRouteSnapshot {
+    #[cfg(test)]
+    FIB_SNAPSHOT_PROJECTIONS.with(|count| count.set(count.get() + 1));
+    let projected = rows.iter().map(fib_status_to_proto).collect();
+    drop(rows);
+    rustbgpd_api::rib_service::FibRouteSnapshot::new(projected)
+}
+
+async fn refresh_fib_route_snapshots(
+    mut source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
+    tx: tokio::sync::watch::Sender<rustbgpd_api::rib_service::FibRouteSnapshot>,
+    project: impl Fn(
+        Arc<Vec<fib_runtime::FibRuntimeStatus>>,
+    ) -> rustbgpd_api::rib_service::FibRouteSnapshot
+    + Send
+    + Sync
+    + 'static,
+) {
+    let project = Arc::new(project);
+    while source.changed().await.is_ok() {
+        let rows = source.borrow_and_update().clone();
+        let project = project.clone();
+        let published = tx.clone();
+        match tokio::task::spawn_blocking(move || {
+            // Publication and retired-row destruction stay off executor threads.
+            published.send_replace(project(rows));
+        })
+        .await
+        {
+            // Publish every finished generation before coalescing later changes.
+            Ok(()) => {}
+            Err(error) => {
+                error!(%error, "FIB status projection stopped; retaining last complete snapshot");
+                break;
+            }
+        }
+    }
+}
+
+/// Share a prepared FIB publication with all API listeners and event readers.
+async fn make_fib_route_snapshot(
+    source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
+) -> Result<rustbgpd_api::rib_service::FibRouteSnapshotReader, tokio::task::JoinError> {
+    fib_route_snapshots(source)
+        .await
+        .map(rustbgpd_api::rib_service::FibRouteSnapshotReader::new)
+}
+
 /// Project one FIB status row into the public API.
 fn fib_status_to_proto(
     status: &fib_runtime::FibRuntimeStatus,
@@ -6284,7 +6357,7 @@ async fn run<T>(
     // an empty `[[fib_tables]]` list returns `None` and leaves
     // route-server / route-reflector deployments control-plane-only.
     let (fib_status_tx, fib_status_rx) =
-        tokio::sync::watch::channel(Vec::<fib_runtime::FibRuntimeStatus>::new());
+        tokio::sync::watch::channel(Arc::new(Vec::<fib_runtime::FibRuntimeStatus>::new()));
     // LAN-1014: tokio broadcast allocates its full slot array at
     // construction. The reconciler's existence is fixed at startup — with no
     // `[[fib_tables]]` it never spawns, and both SIGHUP reload and FIB-table
@@ -6567,7 +6640,7 @@ async fn run<T>(
     };
     let last_sighup_reload: LastSighupReloadState = Arc::new(Mutex::new(None));
     let last_sighup_reload_read = Arc::clone(&last_sighup_reload);
-    let serve_config = ServeConfig {
+    let mut serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
         listen_port: u32::from(config.global.listen_port),
@@ -6714,10 +6787,9 @@ async fn run<T>(
             let rx = blackhole_status_rx.clone();
             Arc::new(move || rx.borrow().iter().map(blackhole_status_to_proto).collect())
         },
-        fib_route_snapshot: {
-            let rx = fib_status_rx.clone();
-            Arc::new(move || rx.borrow().iter().map(fib_status_to_proto).collect())
-        },
+        // Replaced before binding listeners, after fallible preparation enters
+        // the same startup result channel as listener failures.
+        fib_route_snapshot: rustbgpd_api::rib_service::FibRouteSnapshotReader::default(),
         fib_table_control: Some(fib_table_control::make_owned_fib_table_control_fn(
             fib_table_control::FibTableControlDeps {
                 local_forwarding_state: Some(local_forwarding_state.clone()),
@@ -6771,6 +6843,15 @@ async fn run<T>(
     };
     let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
     let mut grpc_handle = tokio::spawn(async move {
+        match make_fib_route_snapshot(fib_status_rx).await {
+            Ok(snapshot) => serve_config.fib_route_snapshot = snapshot,
+            Err(error) => {
+                let _ = grpc_startup_tx.send(Err(format!(
+                    "failed to prepare FIB status publication: {error}"
+                )));
+                return;
+            }
+        }
         rustbgpd_api::server::serve(
             grpc_listeners,
             grpc_rib_tx,
@@ -6789,7 +6870,7 @@ async fn run<T>(
     let mut initial_peer_boot_failed = match grpc_startup_rx.await {
         Ok(Ok(())) => false,
         Ok(Err(error)) => {
-            error!(error = %error, "failed to bind every configured gRPC listener");
+            error!(error = %error, "failed to start configured gRPC services");
             component_failed = true;
             true
         }
@@ -6799,7 +6880,7 @@ async fn run<T>(
             true
         }
     };
-    let grpc_listener_boot_failed = initial_peer_boot_failed;
+    let grpc_service_boot_failed = initial_peer_boot_failed;
     let mut initial_roster_hold = None;
     if !initial_peer_boot_failed && let Ok(path) = std::env::var(TEST_INITIAL_ROSTER_HOLD_ENV) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -6956,8 +7037,8 @@ async fn run<T>(
     }
 
     if initial_peer_boot_failed {
-        if grpc_listener_boot_failed {
-            info!("initiating shortened coordinated shutdown after gRPC listener startup failure");
+        if grpc_service_boot_failed {
+            info!("initiating shortened coordinated shutdown after gRPC service startup failure");
         } else {
             info!(
                 "initiating shortened coordinated shutdown after configured-peer startup failure"
@@ -8172,6 +8253,229 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    fn fib_read_status(table_id: u32) -> fib_runtime::FibRuntimeStatus {
+        fib_runtime::FibRuntimeStatus {
+            table_name: "edge".to_string(),
+            table_id,
+            metric: 200,
+            prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                "192.0.2.0".parse().unwrap(),
+                24,
+            )),
+            next_hop: None,
+            next_hops: Vec::new(),
+            peer: None,
+            peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            state: fib_runtime::FibRuntimeState::Installed,
+            reason: "owned".to_string(),
+            sampling: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn fib_snapshot_reuses_projection_between_publications() {
+        let status = fib_read_status(1000);
+        let (_tx, rx) = tokio::sync::watch::channel(Arc::new(vec![status]));
+        FIB_SNAPSHOT_PROJECTIONS.with(|count| count.set(0));
+        let provider = make_fib_route_snapshot(rx).await.unwrap();
+        assert_eq!(
+            FIB_SNAPSHOT_PROJECTIONS.with(std::cell::Cell::get),
+            0,
+            "initial projection ran on the executor"
+        );
+        provider.with_snapshot(|first| {
+            assert_eq!(first.len(), 1);
+            provider.with_snapshot(|second| {
+                assert_eq!(
+                    first.as_ptr(),
+                    second.as_ptr(),
+                    "unchanged publication was converted again"
+                );
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn fib_snapshot_rebuild_releases_source_and_publishes_before_coalescing() {
+        let (source_tx, source_rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (published_tx, mut published_rx) =
+            tokio::sync::watch::channel(rustbgpd_api::rib_service::FibRouteSnapshot::default());
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let executor_thread = std::thread::current().id();
+        let worker = tokio::spawn(refresh_fib_route_snapshots(
+            source_rx,
+            published_tx,
+            move |rows| {
+                assert_ne!(std::thread::current().id(), executor_thread);
+                started_tx.send(rows[0].table_id).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                project_fib_route_snapshot(rows)
+            },
+        ));
+
+        source_tx.send_replace(Arc::new(vec![fib_read_status(1)]));
+        assert_eq!(started_rx.recv().await, Some(1));
+        // A publication must not wait for the reader's paused index builder.
+        let changes = tokio::task::spawn_blocking(move || {
+            source_tx.send_replace(Arc::new(vec![fib_read_status(2)]));
+            source_tx.send_replace(Arc::new(vec![fib_read_status(3)]));
+            source_tx
+        });
+        let publication = tokio::time::timeout(std::time::Duration::from_secs(5), changes).await;
+        release_tx.send(()).unwrap();
+        let source_tx = publication
+            .expect("FIB publication waited for a reader rebuild")
+            .unwrap();
+        assert_eq!(started_rx.recv().await, Some(3));
+        let first = published_rx.borrow_and_update()[0].clone();
+        assert_eq!(first.table_id, 1, "completed generation must be published");
+        release_tx.send(()).unwrap();
+        published_rx.changed().await.unwrap();
+        assert_eq!(published_rx.borrow()[0].table_id, 3);
+        assert_eq!(
+            first.table_id, 1,
+            "retained publication must stay immutable"
+        );
+        drop(source_tx);
+        worker.await.unwrap();
+    }
+
+    fn fib_measurement_rows(
+        count: u32,
+        generation: u32,
+        shape: &str,
+    ) -> Arc<Vec<fib_runtime::FibRuntimeStatus>> {
+        Arc::new(
+            (0..count)
+                .map(|i| {
+                    let mut row = fib_read_status(1000);
+                    row.metric = generation;
+                    row.prefix = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                        (0x0a00_0000 + i).into(),
+                        32,
+                    ));
+                    row.peer = Some(
+                        std::net::Ipv4Addr::new(198, 51, 100, u8::try_from(i % 8 + 1).unwrap())
+                            .into(),
+                    );
+                    if shape == "all" {
+                        row.table_name = format!("table{}", i % 4);
+                        row.table_id += i % 4;
+                        row.state = [
+                            fib_runtime::FibRuntimeState::Installed,
+                            fib_runtime::FibRuntimeState::Rejected,
+                            fib_runtime::FibRuntimeState::Failed,
+                        ][i as usize % 3];
+                        row.reason = format!("reason{}", i % 2);
+                    }
+                    row
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn report_fib_measurement_memory(phase: &str) {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        for line in status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+        {
+            eprintln!("fib_memory phase={phase} {line}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "large FIB publication overlap measurement"]
+    async fn fib_publication_overlap_receipt() {
+        let count: u32 = std::env::var("FIB_READ_RECEIPT_ROUTES")
+            .map_or(100_000, |value| value.parse().unwrap());
+        let shape =
+            std::env::var("FIB_READ_RECEIPT_SHAPE").unwrap_or_else(|_| "common".to_string());
+        assert!(["common", "all"].contains(&shape.as_str()));
+        let (source_tx, source_rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (published_tx, mut published_rx) =
+            tokio::sync::watch::channel(rustbgpd_api::rib_service::FibRouteSnapshot::default());
+        let (built_tx, mut built_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor_thread = std::thread::current().id();
+        let worker = tokio::spawn(refresh_fib_route_snapshots(
+            source_rx,
+            published_tx,
+            move |rows| {
+                assert_ne!(std::thread::current().id(), executor_thread);
+                let generation = rows[0].metric;
+                let started = std::time::Instant::now();
+                let snapshot = project_fib_route_snapshot(rows);
+                eprintln!(
+                    "fib_build generation={generation} rows={} elapsed_ms={}",
+                    snapshot.len(),
+                    started.elapsed().as_millis()
+                );
+                built_tx.send(generation).unwrap();
+                snapshot
+            },
+        ));
+        let first = fib_measurement_rows(count, 1, &shape);
+        let first_start = std::time::Instant::now();
+        source_tx.send_replace(first);
+        published_rx.changed().await.unwrap();
+        assert_eq!(built_rx.recv().await, Some(1));
+        assert_eq!(published_rx.borrow_and_update()[0].metric, 1);
+        eprintln!(
+            "fib_publish shape={shape} generation=1 rows={count} lag_ms={}",
+            first_start.elapsed().as_millis()
+        );
+        report_fib_measurement_memory("first");
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let held = published_rx.clone();
+        let reader = tokio::task::spawn_blocking(move || {
+            let snapshot = held.borrow();
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            assert_eq!(snapshot[0].metric, 1);
+        });
+        entered_rx.await.unwrap();
+        let second = fib_measurement_rows(count, 2, &shape);
+        source_tx.send_replace(second);
+        assert_eq!(built_rx.recv().await, Some(2));
+        assert!(
+            !published_rx.has_changed().unwrap(),
+            "held reader must pin the old publication"
+        );
+        report_fib_measurement_memory("old_and_prepared");
+        let third = fib_measurement_rows(count, 3, &shape);
+        let latest_start = std::time::Instant::now();
+        source_tx.send_replace(third);
+        eprintln!(
+            "fib_source_publish rows={count} elapsed_ms={}",
+            latest_start.elapsed().as_millis()
+        );
+        report_fib_measurement_memory("old_prepared_and_latest_source");
+        release_tx.send(()).unwrap();
+        reader.await.unwrap();
+        loop {
+            published_rx.changed().await.unwrap();
+            if published_rx.borrow_and_update()[0].metric == 3 {
+                break;
+            }
+        }
+        assert_eq!(built_rx.recv().await, Some(3));
+        eprintln!(
+            "fib_publish shape={shape} generation=3 rows={count} lag_ms={}",
+            latest_start.elapsed().as_millis()
+        );
+        report_fib_measurement_memory("latest");
+        drop(source_tx);
+        worker.await.unwrap();
+        tokio::task::spawn_blocking(move || drop(published_rx))
+            .await
+            .unwrap();
+        report_fib_measurement_memory("released");
+    }
 
     /// Each validation forwarder keeps one revalidation pass in flight and
     /// merges the deltas that arrive meanwhile into one, sent when that pass

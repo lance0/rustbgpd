@@ -27,7 +27,7 @@ use filters::{
 use crate::actor_read::{peer_manager_read, rib_manager_read};
 use crate::peer_types::{PeerManagerCommand, SessionEvent};
 use crate::proto;
-use crate::rib_service::{BlackholeDiscardSnapshotFn, FibRouteSnapshotFn};
+use crate::rib_service::{BlackholeDiscardSnapshotFn, FibRouteSnapshotReader};
 use rustbgpd_rib::RibUpdate;
 #[cfg(test)]
 use rustbgpd_rib::RouteEventType;
@@ -57,7 +57,7 @@ pub struct EventService {
     rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
     peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-    fib_route_snapshot: FibRouteSnapshotFn,
+    fib_route_snapshot: FibRouteSnapshotReader,
     dataplane_events: DataplaneEventBroadcaster,
     dataplane_route_events: DataplaneRouteEventBroadcaster,
     bfd_events: BfdEventBroadcaster,
@@ -87,7 +87,7 @@ impl EventService {
             rib_tx,
             peer_mgr_tx,
             std::sync::Arc::new(Vec::new),
-            std::sync::Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
         )
     }
 
@@ -97,7 +97,7 @@ impl EventService {
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-        fib_route_snapshot: FibRouteSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotReader,
     ) -> Self {
         Self::with_dataplane_snapshots_and_broadcaster(
             rib_tx,
@@ -114,7 +114,7 @@ impl EventService {
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-        fib_route_snapshot: FibRouteSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotReader,
         dataplane_events: DataplaneEventBroadcaster,
     ) -> Self {
         Self::with_dataplane_snapshots_broadcaster_and_metrics(
@@ -138,7 +138,7 @@ impl EventService {
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-        fib_route_snapshot: FibRouteSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotReader,
         dataplane_events: DataplaneEventBroadcaster,
         dataplane_route_events: DataplaneRouteEventBroadcaster,
         bfd_events: BfdEventBroadcaster,
@@ -656,7 +656,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             None,
             None,
@@ -1179,7 +1179,7 @@ mod tests {
             rib_tx_a,
             peer_tx_a,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             shared.clone(),
         );
         let (rib_tx_b, _) = spawn_fake_rib();
@@ -1188,7 +1188,7 @@ mod tests {
             rib_tx_b,
             peer_tx_b,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             shared.clone(),
         );
 
@@ -1222,16 +1222,16 @@ mod tests {
     #[tokio::test]
     async fn dataplane_summary_event_emits_on_aggregate_change() {
         let blackholes = Arc::new(Mutex::new(Vec::<proto::BlackholeDiscard>::new()));
-        let fib_routes = Arc::new(Mutex::new(Vec::<proto::FibRouteStatus>::new()));
+        let (fib_routes, fib_rx) =
+            tokio::sync::watch::channel(crate::rib_service::FibRouteSnapshot::default());
         let blackholes_for_service = blackholes.clone();
-        let fib_routes_for_service = fib_routes.clone();
         let (rib_tx, _) = spawn_fake_rib();
         let (peer_tx, _, _) = spawn_fake_peer_manager();
         let service = EventService::with_dataplane_snapshots(
             rib_tx,
             peer_tx,
             Arc::new(move || blackholes_for_service.lock().unwrap().clone()),
-            Arc::new(move || fib_routes_for_service.lock().unwrap().clone()),
+            FibRouteSnapshotReader::new(fib_rx),
         );
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -1243,10 +1243,10 @@ mod tests {
         let mut stream = response.into_inner();
 
         tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL * 2).await;
-        *fib_routes.lock().unwrap() = vec![
+        fib_routes.send_replace(crate::rib_service::FibRouteSnapshot::new(vec![
             fib_status(proto::FibRouteState::Installed),
             fib_status(proto::FibRouteState::Failed),
-        ];
+        ]));
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
             .await
@@ -1280,7 +1280,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             Some(route_tx.clone()),
             None,
@@ -1378,7 +1378,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             None,
             Some(bfd_tx.clone()),
@@ -1429,7 +1429,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             None,
             Some(bfd_tx.clone()),
@@ -1466,7 +1466,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             Some(fib_route_tx),
             Some(bfd_tx.clone()),
@@ -2516,7 +2516,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             None,
             None,
@@ -2557,7 +2557,7 @@ mod tests {
             rib_tx,
             peer_tx,
             Arc::new(Vec::new),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
             dataplane_event_broadcaster(),
             None,
             None,
