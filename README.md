@@ -55,6 +55,9 @@ BMP/MRT feeds, route injection, FlowSpec, and gRPC integration. FlowSpec local
 origination, reconciliation, and committed advertisements have a
 [scoped controller contract](docs/reference/v1-stable-contract.md#flowspec-controller-boundary);
 receive-side validation and dataplane enforcement remain outside it.
+Opt-in controller origination of IPv4/IPv6 VPN FlowSpec is outside v1
+([VPN FlowSpec API](docs/reference/api.md#vpn-flowspec-controller-api));
+received VPN FlowSpec is decoded and discarded, with no VRF import or forwarding.
 
 [Monitoring recipe](docs/cookbook/monitoring-feed.md) · [API reference](docs/reference/api.md) ·
 [DDoS example](examples/ddos-mitigation/config.toml)

@@ -316,6 +316,11 @@ it is:
 | `4` | Context shape mismatch — arouteserver output changed | pin the arouteserver version or update the renderer |
 | `8` | Output unusable — the output directory could not be created or written | fix the path, ownership, or free space; the previous config stays live |
 
+This table covers the render step. Codes `5`, `6` and `7` come from
+`activate` and `ixp-manager-lifecycle` runs, and `9` from IXP Manager strict
+checking; the full table is in the
+[`rs-config-render` README](../../tools/rs-config-render/README.md#exit-codes).
+
 Exit `3` is the fail-stale case the pipeline exists for: a transient
 upstream outage must never strip a member's filters, so nothing is
 emitted and the daemon keeps serving the last good generation.

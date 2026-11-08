@@ -53,7 +53,7 @@ prints the result as `SIGHUP reload route`:
 
 The sequential route applies peer-group edits as `SetPeerGroup` definitions,
 which cannot carry the config-file-only group fields: `admin_down`,
-`admin_down_reason`, `role`, `strict_role`,
+`admin_down_reason`, `tcp_mss`, `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`, the slow-peer knobs,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,

@@ -40,6 +40,11 @@ Prefix ORF, FlowSpec (with opt-in RFC 9117 feasibility validation, and
 [guarded controller mutations](../reference/api.md#guarded-flowspec-mutations)
 that fence late-committing adds and deletes with mutation windows and rule
 revisions), Route Reflector, large and extended communities.
+IPv4/IPv6 VPN FlowSpec (SAFI 134) supports opt-in controller origination
+with explicit RD/RT scope, outside v1; received VPN FlowSpec is decoded and
+discarded, with no VRF import or forwarding. See the
+[VPN FlowSpec controller API](../reference/api.md#vpn-flowspec-controller-api)
+and [limitations](../reference/limitations.md).
 Per-RFC conformance notes: [RFC implementation notes](../reference/rfc-notes.md).
 
 ## Origin and path validation

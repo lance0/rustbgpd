@@ -97,7 +97,8 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
   canonical configuration/control-plane labels for the supported pairs;
   BGP-LS is `linkstate` / `linkstate_vpn` on that surface.
 - **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–6; route keys implement `Ord`),
-  **FlowSpec** (`FlowSpecRule`),
+  **FlowSpec** (`FlowSpecRule`, plus `VpnFlowSpecRule` for IPv4/IPv6 VPN
+  FlowSpec, SAFI 134, from wire 0.28.0),
   **VPNv4/v6** (`vpn` module), **BGP-LS** (`bgpls` module), **ORF** (`orf` module),
   **PMSI Tunnel**, **Route Distinguisher** (`Display`/`FromStr` for the three
   structured RFC 4364 forms and the exact `0x<16-hex-digits>` display fallback

@@ -3206,7 +3206,7 @@ by interface:
   the link. A bound neighbor's session is checked as
   `peer.<learned>%<if>.*`, like any other peer.
 - `interface_only.<if>.bmp` is yellow when the neighbor's session reports
-  nothing to BMP (`bmp_identity_excluded`), or when its learned address was
+  nothing to BMP (`NeighborState.bmp_identity_excluded`), or when its learned address was
   refused with `bmp_identity_conflict` because another BMP-monitored
   neighbor holds it. `interface_only.<if>.admission` is yellow when the
   address was refused with `shared_address_feature`. Either refusal replaces

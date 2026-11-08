@@ -3017,7 +3017,7 @@ up on the `rs_control` export-explain rung.
 
 Full community matrix and evaluation ladder:
 [the route-server cookbook](../cookbook/route-server.md) and
-[RFC_NOTES.md](rfc-notes.md#rfc-7947-232--rfc-8195--route-server-control-communities).
+[rfc-notes.md](rfc-notes.md#rfc-7947-232--rfc-8195--route-server-control-communities).
 
 To audit the result after neighbor, peer-group, and derived defaults are
 resolved, use `rbgp neighbor <address>`. Its Effective Posture block reports

@@ -4695,8 +4695,8 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
 | `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed. Supported live changes include single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive build-up, atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as deletes -> redefines -> `ip_vrf` relinks -> adds. L2VNI add/delete republishes the current instance table to the segment actor so later ES add/redefine can bind a VNI added at runtime, including the first segment on a daemon started without one; ES-member L2VNI redefine rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. L3VNI/device/table IP-VRF identity changes remain restart-required by design. Unsupported dependency cycles fail closed before commit; mid-sequence convergence failures stop after already committed generations; unrestored failures pin the coordinator and increment `evpn_runtime_decomposed_fail_stops_total`. |
 
-Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
-of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
+No per-instance create or delete RPC exists; instance changes go through
+`ApplyEvpnRuntime` as a full candidate. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
 coordinator generation. At startup this is generation `1`, lifecycle
 `active`, and mutation state `idle` when the coordinator is available.
 `ApplyEvpnRuntime` accepts a full candidate rustbgpd TOML document so the

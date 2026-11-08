@@ -427,7 +427,7 @@ ordering rationale.
 
 ### Channel boundaries
 
-All inter-task communication uses bounded `tokio::mpsc` channels (capacity 4096 by default). This provides natural backpressure without locks.
+Inter-task channels are bounded `tokio::mpsc` channels (capacity 4096 by default), except the intentional unbounded set enumerated in Design Invariant #3. Bounded channels provide natural backpressure without locks.
 
 | Channel | Producer | Consumer | On full |
 |---------|----------|----------|---------|
