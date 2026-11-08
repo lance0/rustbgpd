@@ -1978,6 +1978,104 @@ async fn llgr_reestablish_carries_llgr_stale_until_eor() {
     handle.await.unwrap();
 }
 
+/// Re-advertised routes already use canonical fresh attributes. `EoR`
+/// removes the unrefreshed route; a later refresh preserves that sharing.
+#[tokio::test]
+async fn llgr_reconnect_refresh_and_eor_preserve_canonical_fresh_attributes() {
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let family = vec![(Afi::Ipv4, Safi::Unicast)];
+    let _initial_out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    let routes = |count| {
+        (1..=count)
+            .map(|octet| {
+                make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(192, 168, octet, 0), 24),
+                    Ipv4Addr::new(10, 0, 0, 1),
+                )
+            })
+            .collect()
+    };
+    let announce = |announced| RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    tx.send(announce(routes(3))).await.unwrap();
+    tx.send(gr_with_llgr(source, 2, family.clone(), family, 60))
+        .await
+        .unwrap();
+    assert!(
+        query_best_routes(&tx)
+            .await
+            .iter()
+            .all(|route| route.is_stale)
+    );
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        query_best_routes(&tx)
+            .await
+            .iter()
+            .all(|route| route.is_llgr_stale)
+    );
+    let _out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    tx.send(announce(routes(2))).await.unwrap();
+    let refreshed = query_best_routes(&tx).await;
+    assert_eq!(refreshed.len(), 3, "the unrefreshed route waits for EoR");
+    let fresh: Vec<_> = refreshed
+        .iter()
+        .filter(|route| !route.is_llgr_stale)
+        .collect();
+    assert_eq!(fresh.len(), 2);
+    assert!(Arc::ptr_eq(&fresh[0].attributes, &fresh[1].attributes));
+    let canonical = Arc::clone(&fresh[0].attributes);
+
+    send_eor(&tx, source, Afi::Ipv4, Safi::Unicast).await;
+    let completed = query_best_routes(&tx).await;
+    assert_eq!(completed.len(), 2, "EoR sweeps the unrefreshed route");
+    for route in completed {
+        assert!(!route.is_stale && !route.is_llgr_stale);
+        assert!(
+            !route
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
+        assert!(Arc::ptr_eq(&canonical, &route.attributes));
+    }
+    // Transport admits BoRR for a GR family only after its initial EoR.
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer: source,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    tx.send(announce(routes(2))).await.unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: source,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let after_refresh = query_best_routes(&tx).await;
+    assert_eq!(after_refresh.len(), 2);
+    for route in after_refresh {
+        assert!(Arc::ptr_eq(&canonical, &route.attributes));
+    }
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Reconnect-before-expiry across every LLGR-capable family on one peer
 /// (unicast, VPN, labeled, EVPN, RTC): promotion marks all five families
 /// LLGR-stale; the peer re-establishes, re-advertises everything, and

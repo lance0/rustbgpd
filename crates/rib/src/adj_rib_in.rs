@@ -16,10 +16,16 @@ use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 // differs fundamentally from the anonymous-client scenario SipHash defends:
 //   1. Peers are explicitly configured + (typically) authenticated — not
 //      arbitrary internet clients.
-//   2. Per-peer prefix count is bounded by enforced `max_prefixes` (the
-//      transport session is torn down past the limit, see
-//      `transport::session::inbound`), which caps any collision chain. Set it
-//      for lower-trust neighbors.
+//   2. Nothing bounds collision-chain length below a map's total key count,
+//      and that count has no default bound. `max_prefixes` and the
+//      per-family bounds are optional with no default, and `warning` keeps
+//      accepting past them. They count unique prefixes, with the Add-Path
+//      paths of one prefix sharing a slot, so `(Prefix, path_id)` keys can
+//      reach a bound times the per-prefix Add-Path receive cap
+//      (`transport::session`), and interned attribute sets are bounded only
+//      by the route count. Set a bound with `shutdown` or `block` for
+//      lower-trust neighbors to cap total table size; it does not make the
+//      hasher collision-resistant.
 //   3. A peer able to mount this already has strictly higher-impact vectors
 //      (route hijack / leak / churn flood) that dominate the threat model.
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.

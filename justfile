@@ -188,6 +188,7 @@ gate-rib:
     cargo check --locked -p rustbgpd --features bench-internals --benches
     cargo check --locked -p rustbgpd-rib --features bench-internals --benches
     cargo check --locked -p rustbgpd-transport --features bench-internals --benches
+    cargo check --locked -p rustbgpd-transport --features retention-probe --tests
     cargo check --locked -p rustbgpd-api --features bench-internals --benches
     cargo check --locked -p rustbgpd-api --features bench-internals,vpn-query-allocation --bench vpn_query_allocation
 

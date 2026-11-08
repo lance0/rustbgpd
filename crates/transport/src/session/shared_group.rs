@@ -140,7 +140,11 @@ pub(super) enum StreamTerminal {
 struct ProgressiveStateInner {
     // ponytail: unlike the route inventory, retirement does not pace these
     // chunks; whichever holds the cell's last reference drops them in one
-    // turn: the last envelope, or the RIB's staged update-group pass.
+    // turn. Envelopes give up their reference once a member's cursor holds
+    // the stream, so that is normally the last member's cursor, cleared when
+    // its stream completes or fails or when `begin_retirement` tears it down
+    // in the session turn. An unstarted follower or the RIB's staged
+    // update-group pass can still hold the last reference briefly.
     // Measured with release jemalloc dropping 1M chunks: 10.6 ms at one
     // allocation each, 18.8 ms with an extra shared header each, 0.1 ms as
     // 2,500 grouped 4 KiB chunks, all under the 50 ms stall bar. Release
@@ -277,6 +281,21 @@ impl ProgressiveGroupEncode {
     pub(super) fn test_snapshot(&self) -> (usize, Option<StreamTerminal>) {
         let (chunks, terminal) = self.snapshot_from(0, usize::MAX);
         (chunks.len(), terminal)
+    }
+
+    /// Logical wire bytes and chunk-vector allocation; excludes allocator
+    /// overhead and any spare capacity hidden behind `Bytes`.
+    #[cfg(test)]
+    pub(super) fn test_retained_bytes(&self) -> (usize, usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.chunks.len(),
+            state.chunks.iter().map(|chunk| chunk.bytes.len()).sum(),
+            state.chunks.capacity() * std::mem::size_of::<SharedAnnounceChunk>(),
+        )
     }
 }
 
