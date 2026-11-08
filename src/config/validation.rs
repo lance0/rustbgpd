@@ -683,11 +683,21 @@ impl Config {
             })
     }
 
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_inner(true)
+    }
+
+    /// Validate in-memory mutations that preserve the accepted gRPC credentials.
+    /// Loads, reloads, and full config candidates must use `validate` instead.
+    pub(crate) fn validate_structure(&self) -> Result<(), ConfigError> {
+        self.validate_inner(false)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "validation keeps related operator diagnostics in one ordered pass"
     )]
-    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+    fn validate_inner(&self, read_credentials: bool) -> Result<(), ConfigError> {
         if self.global.asn == 0 {
             return Err(ConfigError::InvalidLocalAsn {
                 value: self.global.asn,
@@ -771,7 +781,11 @@ impl Config {
                 .map_err(|e| ConfigError::InvalidGrpcConfig {
                     reason: format!("invalid grpc_tcp.address {addr:?}: {e}"),
                 })?;
-            validate_grpc_token_file(cfg.token_file.as_deref(), "grpc_tcp.token_file")?;
+            validate_grpc_token_file(
+                cfg.token_file.as_deref(),
+                "grpc_tcp.token_file",
+                read_credentials,
+            )?;
             // mTLS: all three of cert / key / client_ca must be set
             // together, or none. Partial config rejected.
             let tls_set = [
@@ -801,9 +815,24 @@ impl Config {
                     .tls_client_ca_file
                     .as_deref()
                     .expect("tls_count == 3 means all three TLS paths are Some");
-                validate_grpc_pem_file(cert, "grpc_tcp.tls_cert_file", PemKind::Certificate)?;
-                validate_grpc_pem_file(key, "grpc_tcp.tls_key_file", PemKind::PrivateKey)?;
-                validate_grpc_pem_file(ca, "grpc_tcp.tls_client_ca_file", PemKind::Certificate)?;
+                validate_grpc_pem_file(
+                    cert,
+                    "grpc_tcp.tls_cert_file",
+                    PemKind::Certificate,
+                    read_credentials,
+                )?;
+                validate_grpc_pem_file(
+                    key,
+                    "grpc_tcp.tls_key_file",
+                    PemKind::PrivateKey,
+                    read_credentials,
+                )?;
+                validate_grpc_pem_file(
+                    ca,
+                    "grpc_tcp.tls_client_ca_file",
+                    PemKind::Certificate,
+                    read_credentials,
+                )?;
             }
             if let Some(crl) = cfg.tls_client_crl_file.as_deref() {
                 if tls_count != 3 {
@@ -813,7 +842,12 @@ impl Config {
                             .to_string(),
                     });
                 }
-                validate_grpc_pem_file(crl, "grpc_tcp.tls_client_crl_file", PemKind::Crl)?;
+                validate_grpc_pem_file(
+                    crl,
+                    "grpc_tcp.tls_client_crl_file",
+                    PemKind::Crl,
+                    read_credentials,
+                )?;
             }
             validate_grpc_principal(cfg.principal.as_deref(), "grpc_tcp.principal")?;
             if cfg.principal.is_some() && tls_count == 3 {
@@ -845,7 +879,11 @@ impl Config {
                     reason: format!("grpc_uds.mode {:o} exceeds 0o777", cfg.mode),
                 });
             }
-            validate_grpc_token_file(cfg.token_file.as_deref(), "grpc_uds.token_file")?;
+            validate_grpc_token_file(
+                cfg.token_file.as_deref(),
+                "grpc_uds.token_file",
+                read_credentials,
+            )?;
             validate_grpc_principal(cfg.principal.as_deref(), "grpc_uds.principal")?;
         }
 
@@ -3936,11 +3974,19 @@ const MAX_GRPC_CREDENTIAL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Checks readability and PEM framing/block kind. Startup and both `--check`
 /// modes additionally resolve the gRPC listeners through credential staging,
 /// which parses the TLS material and checks the certificate/private-key match.
-fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result<(), ConfigError> {
+fn validate_grpc_pem_file(
+    path: &str,
+    field_name: &str,
+    kind: PemKind,
+    read_contents: bool,
+) -> Result<(), ConfigError> {
     if path.trim().is_empty() {
         return Err(ConfigError::InvalidGrpcConfig {
             reason: format!("{field_name} must not be empty"),
         });
+    }
+    if !read_contents {
+        return Ok(());
     }
     let credential_kind = match kind {
         PemKind::Certificate | PemKind::Crl => {
@@ -4019,6 +4065,8 @@ fn read_grpc_credential_file(
     kind: rustbgpd_api::credential_file::CredentialKind,
 ) -> Result<Vec<u8>, ConfigError> {
     use std::io::Read as _;
+    #[cfg(test)]
+    credential_read_probe::hold(path);
     let (file, _warning) = rustbgpd_api::credential_file::open_credential(
         Path::new(path),
         field_name,
@@ -4043,7 +4091,11 @@ fn read_grpc_credential_file(
     Ok(bytes)
 }
 
-fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), ConfigError> {
+fn validate_grpc_token_file(
+    path: Option<&str>,
+    field_name: &str,
+    read_contents: bool,
+) -> Result<(), ConfigError> {
     let Some(path) = path else {
         return Ok(());
     };
@@ -4051,6 +4103,9 @@ fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), 
         return Err(ConfigError::InvalidGrpcConfig {
             reason: format!("{field_name} must not be empty"),
         });
+    }
+    if !read_contents {
+        return Ok(());
     }
     let bytes = read_grpc_credential_file(
         path,
@@ -4338,4 +4393,45 @@ fn same_address_names(group: &[&Neighbor]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" and ")
+}
+
+#[cfg(test)]
+pub(crate) mod credential_read_probe {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    struct Probe {
+        path: PathBuf,
+        entered: Sender<&'static str>,
+        release: Receiver<()>,
+    }
+
+    thread_local! {
+        static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn arm(path: PathBuf, entered: Sender<&'static str>, release: Receiver<()>) {
+        PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(Probe {
+                path,
+                entered,
+                release,
+            });
+        });
+    }
+
+    pub(super) fn hold(path: &str) {
+        PROBE.with(|probe| {
+            let mut probe = probe.borrow_mut();
+            if probe
+                .as_ref()
+                .is_some_and(|probe| probe.path == std::path::Path::new(path))
+            {
+                let probe = probe.take().unwrap();
+                probe.entered.send("credential_read").unwrap();
+                probe.release.recv().unwrap();
+            }
+        });
+    }
 }

@@ -10,6 +10,8 @@ use std::net::IpAddr;
 use rustbgpd_wire::{LargeCommunity, Prefix};
 
 use crate::engine::{CommunityMatch, PolicyAction};
+use crate::ir::CommunityAttribute;
+use crate::sets::{CommunityMember, CommunityPattern};
 
 use super::diag::{Span, Spanned};
 
@@ -34,8 +36,8 @@ pub struct SourceFile {
     pub policies: Vec<PolicyDef>,
     /// `test` blocks.
     pub tests: Vec<TestDef>,
-    /// Name lookups for the checks that resolve a definition per reference,
-    /// built on first use from the complete unit.
+    /// Definition and community-kind indexes for per-reference checks and
+    /// lowering, built on first use from the complete unit.
     pub(crate) names: std::sync::OnceLock<SourceNames>,
 }
 
@@ -44,11 +46,48 @@ pub struct SourceFile {
 #[derive(Debug, Default)]
 pub(crate) struct SourceNames {
     prefix_sets: std::collections::HashMap<String, usize>,
-    community_sets: std::collections::HashMap<String, usize>,
+    community_sets: std::collections::HashMap<String, CommunitySetIndex>,
     asn_sets: std::collections::HashMap<String, usize>,
     datasets: std::collections::HashMap<String, usize>,
     fns: std::collections::HashMap<String, usize>,
     policies: std::collections::HashMap<String, usize>,
+}
+
+/// First members by attribute preserve the earliest conflicting diagnostic span.
+#[derive(Debug)]
+struct CommunitySetIndex {
+    position: usize,
+    first: [Option<usize>; 3],
+    has_rt_or_ro: bool,
+}
+
+impl CommunitySetIndex {
+    fn new(position: usize, def: &CommunitySetDef) -> Self {
+        let mut index = Self {
+            position,
+            first: [None; 3],
+            has_rt_or_ro: false,
+        };
+        for (member, entry) in def.entries.iter().enumerate() {
+            let kind = match entry.node.attribute() {
+                CommunityAttribute::Standard => 0,
+                CommunityAttribute::Extended => 1,
+                CommunityAttribute::Large => 2,
+            };
+            index.first[kind].get_or_insert(member);
+            index.has_rt_or_ro |= match &entry.node {
+                CommunityMember::Exact(cm) => matches!(
+                    cm,
+                    CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. }
+                ),
+                CommunityMember::Pattern(pattern) => matches!(
+                    **pattern,
+                    CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. }
+                ),
+            };
+        }
+        index
+    }
 }
 
 impl SourceFile {
@@ -63,7 +102,15 @@ impl SourceFile {
             };
             SourceNames {
                 prefix_sets: index(&mut self.prefix_sets.iter().map(|s| &s.name.node)),
-                community_sets: index(&mut self.community_sets.iter().map(|s| &s.name.node)),
+                community_sets: {
+                    let mut index = std::collections::HashMap::new();
+                    for (position, def) in self.community_sets.iter().enumerate() {
+                        index
+                            .entry(def.name.node.clone())
+                            .or_insert_with(|| CommunitySetIndex::new(position, def));
+                    }
+                    index
+                },
                 asn_sets: index(&mut self.asn_sets.iter().map(|s| &s.name.node)),
                 datasets: index(&mut self.datasets.iter().map(|d| &d.name.node)),
                 fns: index(&mut self.fns.iter().map(|f| &f.name.node)),
@@ -88,7 +135,33 @@ impl SourceFile {
         self.names()
             .community_sets
             .get(name)
-            .map(|&position| &self.community_sets[position])
+            .map(|index| &self.community_sets[index.position])
+    }
+
+    /// The first member of a named community-set outside `attribute`.
+    pub(crate) fn other_community_member(
+        &self,
+        name: &str,
+        attribute: CommunityAttribute,
+    ) -> Option<&Spanned<CommunityMember>> {
+        let index = self.names().community_sets.get(name)?;
+        let def = &self.community_sets[index.position];
+        index
+            .first
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&position| def.entries[position].node.attribute() != attribute)
+            .min()
+            .map(|position| &def.entries[position])
+    }
+
+    /// Whether a named community-set includes a route-target or route-origin criterion.
+    pub(crate) fn community_set_has_rt_or_ro(&self, name: &str) -> bool {
+        self.names()
+            .community_sets
+            .get(name)
+            .is_some_and(|index| index.has_rt_or_ro)
     }
 
     /// The first `asn-set` named `name`.

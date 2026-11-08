@@ -48,7 +48,7 @@ jobs:
     # hosted receipts establish a safe tighter bound.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Need history and tags: the stable-surface check reads released
           # fixtures from their tags.
@@ -145,13 +145,13 @@ jobs:
       # nothing else executes its checker's failure cases.
       - name: Prove release preflight checks
         run: python3 -m unittest -v scripts/test_check_release_preflight.py
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
       # PRs restore main caches; only main saves Rust artifacts to limit duplication.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Prove exact fail-closed fuzz target inventory
@@ -435,14 +435,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # `core` checks that the bench targets compile, not that they run.
@@ -477,15 +477,15 @@ jobs:
       matrix:
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       # Both shards share one key; shard 2 also builds rustdoc, so it saves.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 2 }}
       # The exact release archive comes from its content-addressed cache entry,
@@ -500,7 +500,7 @@ jobs:
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
       - name: Restore exact v0.64 validator archive cache
         id: v064-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz
           key: rustbgpd-v0.64.0-linux-amd64-${{ steps.v064-pin.outputs.sha256 }}
@@ -514,7 +514,7 @@ jobs:
             "$RUNNER_TEMP/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz"
       - name: Save verified v0.64 validator archive cache
         if: steps.v064-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz
           key: rustbgpd-v0.64.0-linux-amd64-${{ steps.v064-pin.outputs.sha256 }}
@@ -559,17 +559,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # test-rrharness-driver resolves a retained pin commit and creates a
           # detached worktree at that exact revision.
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install receipt-tool dependencies
@@ -695,7 +695,7 @@ jobs:
           python3 bench/tests/test_verify_mrt_growth_campaign.py
       - name: Upload reload settlement regression logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: reloadstall-settlement
           path: ${{ runner.temp }}/reloadstall-settlement
@@ -739,12 +739,12 @@ jobs:
     # file alongside `Cargo.toml` and `Dockerfile`.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@v1 # 1.95
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (1.95)
         with:
           toolchain: "1.95"
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # Distinct cache key from the `check` job so MSRV builds don't
@@ -778,7 +778,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Configure Docker Hub cache mirror
         run: |
@@ -786,7 +786,7 @@ jobs:
           sudo systemctl restart docker
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         with:
           buildkitd-config-inline: |
             [registry."docker.io"]
@@ -797,7 +797,7 @@ jobs:
       - name: Build netns-test harness image
         id: netns_image
         continue-on-error: true
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: crates/evpn-linux/tests/docker/Dockerfile
@@ -812,7 +812,7 @@ jobs:
 
       - name: Retry Build netns-test harness image
         if: steps.netns_image.outcome == 'failure'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: crates/evpn-linux/tests/docker/Dockerfile
@@ -860,10 +860,10 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"RECOVERY_MEMORY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}\n")
           PY
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
@@ -917,7 +917,7 @@ jobs:
           exit "$status"
       - name: Upload recovery evidence even after refusal or failure
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: update-group-recovery-memory-${{ matrix.profile }}-${{ matrix.cell }}${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-memory
@@ -953,11 +953,11 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"RECOVERY_MASS_DIRTY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}\n")
           PY
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
@@ -1016,7 +1016,7 @@ jobs:
           exit "$status"
       - name: Upload mass-dirty evidence even after refusal or failure
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ matrix.cohort }}-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-mass-dirty

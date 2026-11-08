@@ -451,7 +451,10 @@ def check_container_deployment_docs(
         )
 
     try:
-        runtime = dockerfile.split("FROM debian:bookworm-slim AS runtime", 1)[1]
+        runtime = re.split(
+            r"(?m)^FROM debian:bookworm-slim@sha256:[0-9a-f]{64} AS runtime$",
+            dockerfile, maxsplit=1,
+        )[1]
     except IndexError:
         errors.append("container image contract: production runtime stage missing")
         return

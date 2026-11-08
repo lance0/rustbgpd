@@ -32,12 +32,57 @@ with those and with the probe code in `crates/evpn-linux/src/linux/probe.rs`.
 
 ## Prerequisites
 
-- Linux kernel with VXLAN + bridge + VRF support.
+- Linux kernel with VXLAN + bridge support, plus VRF support for IP-VRFs.
+  See the feature floors below before choosing a kernel.
 - `CAP_NET_ADMIN` for the `ip link` commands.
 - A routed underlay reachable on each VTEP's `local_vtep_ip`.
 - VXLAN UDP destination port **4789** (IANA / EVPN) open in the underlay.
   The Linux default is `8472`; you must set `dstport 4789` to interop
   with FRR and most EVPN peers.
+
+### Linux kernel feature floors
+
+These are upstream feature introduction versions, not qualification of every
+kernel release at or above them. Distribution backports can provide a feature
+on an older version. VTEP and all Linux dataplane behavior remain
+[alpha](../reference/stability.md); use a maintained kernel with the required
+features and fixes.
+
+| Mode or feature | Upstream kernel floor | Required mechanism |
+|---|---|---|
+| Fixed-VNI L2, single-destination remote MACs and ingress replication | **4.12** | User-space `NTF_EXT_LEARNED` bridge FDB installs and VXLAN externally learned entry handling |
+| Fixed-VNI with ARP/ND suppression | **4.15** | Bridge-port `IFLA_BRPORT_NEIGH_SUPPRESS` |
+| Fixed-VNI with FDB nexthop groups (all-active ECMP) | **5.8** | `NHA_FDB` nexthops and VXLAN `NDA_NH_ID` |
+| SVD / collect-metadata L2 | **5.18** | `IFLA_VXLAN_VNIFILTER`, plus VLAN-to-VNI tunnel mappings |
+
+The fixed-VNI L2 floor covers operator-provisioned interfaces, not every IRB
+or managed-netdev feature. Fixed-VNI FDB writes do not use `RTM_GETVLAN`.
+SVD writes recheck the port's mapping through `RTM_GETVLAN` (introduced in
+5.6) and `BRIDGE_VLANDB_ENTRY_TUNNEL_INFO` (5.7); both predate its 5.18 floor.
+For manual SVD provisioning, upstream **iproute2 5.19** adds `ip link ...
+vnifilter` and `bridge vni`; older distribution packages need equivalent
+backports.
+
+rustbgpd does **not** compare `uname` against these versions. The L2 readiness
+probe checks the reported topology and attributes. A selected SVD target
+without `vnifilter` is `NotReady` with a reason ending `vnifilter is disabled`;
+missing interfaces or VLAN mappings can fail an earlier predicate instead.
+Fixed-VNI targets have no blanket below-floor `NotReady` result: missing
+`IFLA_VXLAN_LEARNING` produces `cannot verify nolearning`, but a topology can
+pass while a later FDB operation fails or the kernel lacks the required
+externally learned entry semantics. `Ready` is not proof that every optional
+kernel operation is supported. Inspect `rbgp evpn instances` and reconciliation
+errors as well as the kernel's feature set.
+
+Upstream sources: Linux [4.12 bridge FDB](https://github.com/torvalds/linux/blob/v4.12/net/bridge/br_fdb.c)
+and [VXLAN](https://github.com/torvalds/linux/blob/v4.12/drivers/net/vxlan.c),
+[4.15 bridge-port attributes](https://github.com/torvalds/linux/blob/v4.15/include/uapi/linux/if_link.h),
+[5.8 FDB nexthops](https://github.com/torvalds/linux/commit/38428d68719c),
+[5.6 VLAN database](https://github.com/torvalds/linux/blob/v5.6/net/bridge/br_vlan.c),
+[5.7 tunnel options](https://github.com/torvalds/linux/blob/v5.7/net/bridge/br_vlan_options.c),
+[5.18 VXLAN VNI filtering](https://github.com/torvalds/linux/blob/v5.18/drivers/net/vxlan/vxlan_core.c),
+and iproute2 [5.19 VXLAN options](https://github.com/iproute2/iproute2/blob/v5.19.0/ip/iplink_vxlan.c)
+and [VNI commands](https://github.com/iproute2/iproute2/blob/v5.19.0/bridge/vni.c).
 
 ## L2VNI VTEP (Type 2 / MAC-VRF)
 

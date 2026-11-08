@@ -6,6 +6,8 @@
 //! the config file there and then releases the hold. The transaction must
 //! fail, compensate its runtime change, and leave the edit on disk.
 
+#![cfg(debug_assertions)]
+
 #[path = "support/mod.rs"]
 mod support;
 

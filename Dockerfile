@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 # rustbgpd container image.
 #
@@ -40,7 +40,7 @@
 # kernel-dataplane.yml. If you hit a parse error on the cache mounts,
 # either upgrade Docker or set `DOCKER_BUILDKIT=1` explicitly.
 
-FROM rust:1.95-bookworm AS chef
+FROM rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     mold \
@@ -121,7 +121,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # Ships the daemon + CLI plus the development-only helpers the
 # containerlab topologies and soak harnesses expect. Runs as root so
 # labs can program links/netns freely.
-FROM debian:bookworm-slim AS dev
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS dev
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
@@ -153,7 +153,7 @@ CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
 # that don't, e.g. some Kubernetes setups). Kernel-dataplane features
 # (Linux FIB / EVPN VTEP) additionally need CAP_NET_ADMIN — see
 # docs/how-to/deployment.md.
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

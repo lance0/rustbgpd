@@ -18,7 +18,7 @@ runs:
 
     - name: Restore exact gnmic archive cache
       id: cache
-      uses: actions/cache/restore@v6
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
         key: gnmic-v0.46.0-linux-x86_64-${{ steps.pin.outputs.sha256 }}
@@ -33,7 +33,7 @@ runs:
 
     - name: Save verified gnmic archive cache
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
         key: gnmic-v0.46.0-linux-x86_64-${{ steps.pin.outputs.sha256 }}

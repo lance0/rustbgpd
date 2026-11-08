@@ -333,6 +333,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tonic",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 ARG BIRD_VERSION=2.19.3
 ARG BIRD_SHA256=853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd

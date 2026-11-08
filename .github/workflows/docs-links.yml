@@ -31,11 +31,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: List tracked Markdown
         run: git ls-files '*.md' > "${RUNNER_TEMP}/tracked-markdown.txt"
       - name: Check internal links
-        uses: lycheeverse/lychee-action@v2.9.0
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: >-
             --files-from "${{ runner.temp }}/tracked-markdown.txt"
@@ -52,11 +52,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: List tracked Markdown
         run: git ls-files '*.md' > "${RUNNER_TEMP}/tracked-markdown.txt"
       - name: Restore link cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .lycheecache
           key: >-
@@ -65,7 +65,7 @@ jobs:
           restore-keys: |
             docs-links-${{ runner.os }}-lychee-0.24.2-
       - name: Check external links
-        uses: lycheeverse/lychee-action@v2.9.0
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: >-
             --files-from "${{ runner.temp }}/tracked-markdown.txt"

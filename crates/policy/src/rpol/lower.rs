@@ -464,11 +464,7 @@ impl<'a> Lowerer<'a> {
     /// The declared kind of a dataset, for the test runner's override
     /// construction (LAN-305).
     pub(super) fn dataset_kind(&self, name: &str) -> Option<crate::datasets::DatasetKind> {
-        self.file
-            .datasets
-            .iter()
-            .find(|d| d.name.node == name)
-            .map(|d| d.kind)
+        self.file.dataset(name).map(|d| d.kind)
     }
 
     /// Dataset names referenced during the current build that had no
@@ -489,9 +485,7 @@ impl<'a> Lowerer<'a> {
         }
         let decl = self
             .file
-            .datasets
-            .iter()
-            .find(|d| d.name.node == name)
+            .dataset(name)
             .expect("callers check the declaration exists");
         match self.bindings.get(name) {
             Some(handle) if handle.kind() == decl.kind => {
@@ -628,12 +622,7 @@ impl<'a> Lowerer<'a> {
         bindings: &DatasetBindings,
     ) -> CompiledPolicy {
         self.begin_chain(bindings);
-        let def = self
-            .file
-            .policies
-            .iter()
-            .find(|p| p.name.node == name)
-            .expect("typechecked: policy exists");
+        let def = self.file.policy(name).expect("typechecked: policy exists");
         self.lower_policy(def, args, store)
     }
 
@@ -1155,7 +1144,7 @@ impl<'a> Lowerer<'a> {
                 let set = &self.bound_set(set);
                 // LAN-305: a dataset reference lowers to a pinned
                 // runtime probe — content is external and never folds.
-                if self.file.datasets.iter().any(|d| d.name.node == set.node) {
+                if self.file.dataset(&set.node).is_some() {
                     let probe = match resolve_field(field).expect("typechecked") {
                         Field::Prefix => DatasetProbe::Prefix,
                         Field::OriginAs => DatasetProbe::OriginAs,
@@ -1196,7 +1185,7 @@ impl<'a> Lowerer<'a> {
                 // LAN-305: `<binding|param> in <dataset>` stays a
                 // runtime probe either way — dataset content swaps at
                 // runtime, so even a parameter probe cannot fold.
-                if let Some(decl) = self.file.datasets.iter().find(|d| d.name.node == set.node) {
+                if let Some(decl) = self.file.dataset(&set.node) {
                     let asn_kind = decl.kind == crate::datasets::DatasetKind::Asn;
                     let probe = if let Some(slot) = lets.lookup(&ident.node) {
                         let name = ident.node.clone().into_boxed_str();
@@ -1280,9 +1269,7 @@ impl<'a> Lowerer<'a> {
                 let args = self.reference_args(args, env);
                 let def = self
                     .file
-                    .policies
-                    .iter()
-                    .find(|p| p.name.node == policy.node)
+                    .policy(&policy.node)
                     .expect("typechecked: apply target exists");
                 let inlined = self.lower_policy(def, &args, store);
                 accept_predicate(&inlined)
@@ -1360,9 +1347,7 @@ impl<'a> Lowerer<'a> {
         let args = self.reference_args(&call.args, env);
         let def = self
             .file
-            .policies
-            .iter()
-            .find(|p| p.name.node == call.policy.node)
+            .policy(&call.policy.node)
             .expect("typechecked: called policy exists");
         let scope = lets.mark();
         let flag = lets.declare(RETURN_FLAG);
@@ -2231,7 +2216,7 @@ impl<'a> Lowerer<'a> {
         negate: bool,
     ) -> Vec<TermAction> {
         let name = self.bound_set(set).node;
-        let set = if self.file.datasets.iter().any(|d| d.name.node == name) {
+        let set = if self.file.dataset(&name).is_some() {
             match self.dataset_ref(&name) {
                 Some(id) => CommunitySetRef::Dataset(id),
                 // Missing binding: the caller discards this chain
@@ -2337,7 +2322,7 @@ impl<'a> Lowerer<'a> {
             ValueExprAst::Call { name, args, .. } => {
                 // A user-defined function inlines (LAN-304); the
                 // builtins keep their dedicated IR nodes below.
-                if let Some(def) = self.file.fns.iter().find(|f| f.name.node == name.node) {
+                if let Some(def) = self.file.fn_def(&name.node) {
                     return self.inline_call(def, args, names, lets, binds);
                 }
                 let mut args: Vec<ValueExpr> = args

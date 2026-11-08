@@ -4,9 +4,9 @@
 
 pub(crate) mod v3;
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 /// Exact publication boundary for an atomic write.
@@ -93,12 +93,32 @@ pub(crate) fn write_state_atomic(path: &Path, bytes: &[u8]) -> Result<(), Atomic
         .commit()
 }
 
+/// Publish beneath a retained runtime-state directory authority.
+pub(crate) fn write_state_at(
+    directory: &File,
+    path: &Path,
+    bytes: &[u8],
+    durable: bool,
+) -> Result<(), AtomicPublishError> {
+    let stage = directory
+        .try_clone()
+        .and_then(|parent| stage_target_at(parent, path.to_path_buf(), bytes, durable))
+        .map_err(AtomicPublishError::NotPublished)?;
+    if durable {
+        stage.commit()
+    } else {
+        let mut stage = stage;
+        stage.publish_with(|_| Ok(()))
+    }
+}
+
 /// [`write_state_atomic`] without durability, for a hint whose loss after a
 /// crash is harmless. It is just as symlink-safe: the stage is opened
 /// `O_NOFOLLOW` and identity-checked, and the rename replaces a symlink at
 /// `path` rather than writing through it. It never fsyncs the file or the
 /// directory, so a slow disk cannot hold up the caller (the daemon writes the
 /// config last-persist marker on its boot path).
+#[cfg(test)]
 pub(crate) fn write_state_hint(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
     stage_target(path.to_path_buf(), bytes, false)
         .map_err(|error| AtomicPublishError::NotPublished(name_write_failure(path, &error)))?
@@ -134,6 +154,7 @@ pub(crate) struct StagedWrite {
     tmp: PathBuf,
     target: PathBuf,
     file: File,
+    parent: File,
     tmp_dev: u64,
     tmp_ino: u64,
 }
@@ -173,33 +194,46 @@ impl StagedWrite {
     }
 
     /// Re-run a caller-owned stale-source fence immediately before publish.
-    /// The fence gets the destination this stage resolved, the file the
-    /// rename replaces: a symlink repointed since then cannot send the check
-    /// to another file.
+    /// The fence gets the retained parent and resolved destination name,
+    /// so it checks the same directory entry the rename replaces.
     ///
     /// The fence and the rename are separate steps. A write to the
     /// destination after the fence reads it is still replaced; without a
     /// lock every writer takes, no check-then-rename closes that window.
     pub(crate) fn commit_if(
         mut self,
-        fence: impl FnOnce(&Path) -> io::Result<()>,
+        fence: impl FnOnce(&File, &Path) -> io::Result<()>,
     ) -> Result<(), AtomicPublishError> {
         self.file
             .sync_all()
             .map_err(AtomicPublishError::NotPublished)?;
-        fence(&self.target)
+        let resolved_parent =
+            fs::metadata(parent_dir(&self.target).map_err(AtomicPublishError::NotPublished)?)
+                .map_err(AtomicPublishError::NotPublished)?;
+        let retained_parent = self
+            .parent
+            .metadata()
+            .map_err(AtomicPublishError::NotPublished)?;
+        if (resolved_parent.dev(), resolved_parent.ino())
+            != (retained_parent.dev(), retained_parent.ino())
+        {
+            return Err(AtomicPublishError::NotPublished(io::Error::other(
+                "config parent directory changed while the write was staged",
+            )));
+        }
+        fence(&self.parent, &self.target)
             .map_err(|error| name_write_failure(&self.target, &error))
             .map_err(AtomicPublishError::NotPublished)?;
         self.publish()
     }
 
     fn publish(&mut self) -> Result<(), AtomicPublishError> {
-        self.publish_with(fsync_dir)
+        self.publish_with(sync_directory)
     }
 
     fn publish_with(
         &mut self,
-        sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+        sync_directory: impl FnOnce(&File) -> io::Result<()>,
     ) -> Result<(), AtomicPublishError> {
         self.verify_owned_temp()
             .map_err(AtomicPublishError::NotPublished)?;
@@ -209,9 +243,15 @@ impl StagedWrite {
                 "injected pre-rename config publication failure",
             )));
         }
-        fs::rename(&self.tmp, &self.target)
-            .map_err(|error| name_write_failure(&self.target, &error))
-            .map_err(AtomicPublishError::NotPublished)?;
+        nix::fcntl::renameat(
+            &self.parent,
+            self.tmp.file_name().expect("stage name"),
+            &self.parent,
+            self.target.file_name().expect("target name"),
+        )
+        .map_err(io::Error::from)
+        .map_err(|error| name_write_failure(&self.target, &error))
+        .map_err(AtomicPublishError::NotPublished)?;
         self.tmp = PathBuf::new();
         #[cfg(debug_assertions)]
         if std::env::var("RUSTBGPD_TEST_CONFIG_PUBLISH_FAILURE").as_deref()
@@ -221,8 +261,7 @@ impl StagedWrite {
                 "injected post-rename directory fsync failure",
             )));
         }
-        let parent = parent_dir(&self.target).map_err(AtomicPublishError::PublicationAmbiguous)?;
-        sync_directory(parent).map_err(|error| {
+        sync_directory(&self.parent).map_err(|error| {
             AtomicPublishError::PublicationAmbiguous(io::Error::new(
                 error.kind(),
                 format!("post-rename directory fsync failed; durability ambiguous: {error}"),
@@ -238,14 +277,24 @@ impl StagedWrite {
         self.file
             .sync_all()
             .map_err(AtomicPublishError::NotPublished)?;
-        self.publish_with(sync_directory)
+        let target = self.target.clone();
+        self.publish_with(|_| sync_directory(parent_dir(&target)?))
     }
 
     fn verify_owned_temp(&self) -> io::Result<()> {
-        let metadata = fs::symlink_metadata(&self.tmp)?;
-        if !metadata.file_type().is_file()
-            || metadata.nlink() != 1
-            || (metadata.dev(), metadata.ino()) != (self.tmp_dev, self.tmp_ino)
+        use nix::fcntl::AtFlags;
+        use nix::sys::stat::{SFlag, fstatat};
+        let metadata = fstatat(
+            &self.parent,
+            self.tmp
+                .file_name()
+                .ok_or_else(|| io::Error::other("stage already published"))?,
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(io::Error::from)?;
+        if SFlag::from_bits_truncate(metadata.st_mode).intersection(SFlag::S_IFMT) != SFlag::S_IFREG
+            || metadata.st_nlink != 1
+            || (metadata.st_dev as u64, metadata.st_ino as u64) != (self.tmp_dev, self.tmp_ino)
         {
             return Err(io::Error::other("atomic stage pathname identity changed"));
         }
@@ -276,7 +325,11 @@ impl Drop for StagedWrite {
         if !self.tmp.as_os_str().is_empty() && self.verify_owned_temp().is_ok() {
             #[cfg(test)]
             STAGED_DROP_REMOVALS.with(|count| count.set(count.get() + 1));
-            let _ = fs::remove_file(&self.tmp);
+            let _ = nix::unistd::unlinkat(
+                &self.parent,
+                self.tmp.file_name().expect("stage name"),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            );
         }
     }
 }
@@ -325,6 +378,18 @@ fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
 /// Write `bytes` to a locked, identity-checked stage beside `target`, and
 /// fsync it when `durable`.
 fn stage_target(target: PathBuf, bytes: &[u8], durable: bool) -> io::Result<StagedWrite> {
+    let parent = File::open(parent_dir(&target)?)?;
+    stage_target_at(parent, target, bytes, durable)
+}
+
+fn stage_target_at(
+    parent: File,
+    target: PathBuf,
+    bytes: &[u8],
+    durable: bool,
+) -> io::Result<StagedWrite> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
     let mut tmp = target.clone().into_os_string();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -332,21 +397,37 @@ fn stage_target(target: PathBuf, bytes: &[u8], durable: bool) -> io::Result<Stag
     // (which may carry secrets such as TCP-MD5 passwords), and a permissive
     // umask must not make them world-readable. The rename below preserves
     // the temp file's mode — it moves the inode.
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .mode(0o600)
-        .open(&tmp)?;
-    let target_metadata = fs::metadata(&target).ok();
+    let file = File::from(
+        openat(
+            &parent,
+            tmp.file_name()
+                .ok_or_else(|| io::Error::other("stage has no name"))?,
+            OFlag::O_RDWR
+                | OFlag::O_CREAT
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_NONBLOCK
+                | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(io::Error::from)?,
+    );
+    let target_metadata = nix::sys::stat::fstatat(
+        &parent,
+        target
+            .file_name()
+            .ok_or_else(|| io::Error::other("target has no name"))?,
+        nix::fcntl::AtFlags::empty(),
+    )
+    .ok();
     let metadata = file.metadata()?;
-    if !metadata.file_type().is_file()
-        || metadata.nlink() != 1
-        || target_metadata
-            .as_ref()
-            .is_some_and(|target| (metadata.dev(), metadata.ino()) == (target.dev(), target.ino()))
-    {
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "stat device and inode field widths differ across Unix targets"
+    )]
+    let same_as_target = target_metadata.as_ref().is_some_and(|target| {
+        (metadata.dev(), metadata.ino()) == (target.st_dev as u64, target.st_ino as u64)
+    });
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 || same_as_target {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "atomic stage is not an independent regular file",
@@ -362,13 +443,6 @@ fn stage_target(target: PathBuf, bytes: &[u8], durable: bool) -> io::Result<Stag
             ));
         }
     }
-    let path_metadata = fs::symlink_metadata(&tmp)?;
-    if !path_metadata.file_type().is_file()
-        || path_metadata.nlink() != 1
-        || (path_metadata.dev(), path_metadata.ino()) != (metadata.dev(), metadata.ino())
-    {
-        return Err(io::Error::other("atomic stage pathname identity changed"));
-    }
     // The locked, identity-checked temp is ours from here: a payload write or
     // fsync failure (ENOSPC, EIO) returns through the stage's `Drop`, which
     // removes the partial file instead of leaving it next to the target.
@@ -376,9 +450,11 @@ fn stage_target(target: PathBuf, bytes: &[u8], durable: bool) -> io::Result<Stag
         tmp,
         target,
         file,
+        parent,
         tmp_dev: metadata.dev(),
         tmp_ino: metadata.ino(),
     };
+    stage.verify_owned_temp()?;
     stage
         .file
         .set_permissions(fs::Permissions::from_mode(0o600))?;
@@ -408,12 +484,12 @@ fn parent_dir(path: &Path) -> io::Result<&Path> {
     })
 }
 
-fn fsync_dir(dir: &Path) -> io::Result<()> {
+fn sync_directory(directory: &File) -> io::Result<()> {
     #[cfg(debug_assertions)]
     if std::env::var_os("RUSTBGPD_TEST_MIGRATION_DIR_FSYNC_FAILURE").is_some() {
         return Err(io::Error::other("injected directory fsync failure"));
     }
-    File::open(dir)?.sync_all()
+    directory.sync_all()
 }
 
 #[cfg(test)]
@@ -518,6 +594,38 @@ mod tests {
         assert!(matches!(result, Err(AtomicPublishError::NotPublished(_))));
         assert_eq!(fs::read(&target).unwrap(), b"accepted");
         assert!(!target.with_extension("toml.tmp").exists());
+    }
+
+    #[test]
+    fn staged_state_commit_and_cleanup_keep_the_original_parent() {
+        for commit in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("state");
+            let moved = root.path().join("retained");
+            fs::create_dir(&path).unwrap();
+            let stage = stage_target_at(
+                File::open(&path).unwrap(),
+                path.join("marker"),
+                b"retained",
+                true,
+            )
+            .unwrap();
+            fs::rename(&path, &moved).unwrap();
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("marker.tmp"), b"unrelated").unwrap();
+            if commit {
+                stage.commit().unwrap();
+            } else {
+                stage.discard();
+            }
+            assert_eq!(fs::read(path.join("marker.tmp")).unwrap(), b"unrelated");
+            assert!(!path.join("marker").exists());
+            assert!(!moved.join("marker.tmp").exists());
+            assert_eq!(moved.join("marker").exists(), commit);
+            if commit {
+                assert_eq!(fs::read(moved.join("marker")).unwrap(), b"retained");
+            }
+        }
     }
 
     /// The hint writer never takes the durable path: with the staged payload

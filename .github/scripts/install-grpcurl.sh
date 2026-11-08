@@ -293,10 +293,13 @@ EOF
         fail_self_test "a same-run grpcurl producer remains"
     fi
     consumer_action="$repo_root/.github/actions/install-grpcurl-artifact/action.yml"
+    for seam in restore save; do
+        [[ $(grep -cE "^[[:space:]]*uses: actions/cache/$seam@[0-9a-f]{40} # v6[[:space:]]*$" \
+            "$consumer_action") -eq 1 ]] \
+            || fail_self_test "consumer action must have exactly one SHA-pinned cache/$seam v6"
+    done
     for seam in \
-        'uses: actions/cache/restore@v6' \
         '--prepare-archive' \
-        'uses: actions/cache/save@v6' \
         "if: steps.cache.outputs.cache-hit != 'true'" \
         '--install-archive'; do
         [[ $(grep -cF -- "$seam" "$consumer_action") -eq 1 ]] \

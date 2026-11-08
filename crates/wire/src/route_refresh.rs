@@ -144,8 +144,10 @@ impl RouteRefreshMessage {
     /// and unknown subtypes are preserved.
     pub fn decode(buf: &mut impl Buf, body_len: usize) -> Result<Self, DecodeError> {
         if body_len < BODY_LEN {
-            return Err(DecodeError::InvalidLength {
+            return Err(DecodeError::InvalidTypeLength {
+                message_type: crate::header::MessageType::RouteRefresh,
                 length: u16::try_from(HEADER_LEN + body_len).unwrap_or(u16::MAX),
+                expected: "at least 23",
             });
         }
         if buf.remaining() < body_len {

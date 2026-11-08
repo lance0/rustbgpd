@@ -92,6 +92,21 @@ In particular:
 For operational boundaries and non-goals, see
 [`LIMITATIONS.md`](limitations.md).
 
+## EVPN Linux kernel requirements
+
+For operator-provisioned fixed-VNI L2, the upstream feature floor is **Linux
+4.12** for single-destination FDB programming and ingress replication;
+ARP/ND suppression needs **4.15**, and FDB nexthop groups need **5.8**.
+SVD / collect-metadata L2 needs **5.18** for `vnifilter`.
+These are feature floors, not a tested release matrix or a v1 support promise;
+VTEP, IRB, managed netdevs and all Linux dataplane behavior remain alpha.
+
+Read the [kernel setup requirements](../how-to/evpn-vtep-setup.md#linux-kernel-feature-floors)
+for upstream sources, iproute2 requirements and backport caveats. The daemon
+checks reported topology, not the kernel version: an SVD target missing
+`vnifilter` is `NotReady` once selected, while fixed-VNI topology readiness
+does not guarantee that later kernel writes support every required feature.
+
 ## Readiness and operating evidence
 
 Operational readiness and soak acceptance are separate from compatibility.
