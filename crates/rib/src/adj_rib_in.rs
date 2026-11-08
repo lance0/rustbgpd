@@ -546,23 +546,23 @@ impl AdjRibIn {
     /// Retire a detached table after selection and withdrawal consumers finish.
     pub(crate) fn retire_with(mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.release_with(checkpoint);
-        for paths in self.prefix_index.values_mut() {
-            std::mem::take(paths).retire_with(checkpoint);
-        }
-        self.prefix_index.release_with(checkpoint);
+        self.prefix_index
+            .release_values_with(checkpoint, PathIndex::retire_with);
         crate::adj_rib_out::release_sharded_map(&mut self.flowspec_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.evpn_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_routes.map, checkpoint);
-        for (_, paths) in self.vpn_key_index.iter_mut() {
-            std::mem::take(paths).retire_with(checkpoint);
-        }
-        crate::adj_rib_out::release_sharded_map(&mut self.vpn_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map_values(
+            &mut self.vpn_key_index,
+            checkpoint,
+            |(_, paths), checkpoint| paths.retire_with(checkpoint),
+        );
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
-        for (_, paths) in self.labeled_key_index.iter_mut() {
-            std::mem::take(paths).retire_with(checkpoint);
-        }
-        crate::adj_rib_out::release_sharded_map(&mut self.labeled_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map_values(
+            &mut self.labeled_key_index,
+            checkpoint,
+            |(_, paths), checkpoint| paths.retire_with(checkpoint),
+        );
         crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.llgr_stale_local_tags, checkpoint);
         crate::adj_rib_out::release_sharded_map(
