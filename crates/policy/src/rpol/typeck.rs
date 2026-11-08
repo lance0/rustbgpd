@@ -23,7 +23,7 @@ use super::ast::{
     NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg,
     ValueExprAst,
 };
-use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
+use super::diag::{Diagnostic, DiagnosticCode, MAX_DIAGNOSTICS, Span, Spanned, closest};
 
 /// A resolved route/peer context field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,13 +378,8 @@ pub(super) fn value_field_of(field: Field) -> Option<ValueField> {
 /// Typecheck a parsed source file. Returns every diagnostic found.
 #[must_use]
 pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
-    super::diag::with_suggestion_budget(MAX_TYPECHECK_DIAGNOSTICS, || typecheck_inner(file))
+    super::diag::with_suggestion_budget(MAX_DIAGNOSTICS, || typecheck_inner(file))
 }
-
-/// Diagnostics one typecheck collects; later ones are dropped. A source
-/// dense with errors cannot make the compile, or its did-you-mean
-/// searches, grow with the error count.
-const MAX_TYPECHECK_DIAGNOSTICS: usize = 256;
 
 fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
     let mut sets = HashMap::new();
@@ -454,7 +449,7 @@ struct Checker<'a> {
     /// rather than by a scan of every set (other definitions: the
     /// [`SourceFile`] lookups).
     sets: HashMap<&'a str, SetEntry<'a>>,
-    /// At most [`MAX_TYPECHECK_DIAGNOSTICS`]; see [`Checker::push_diag`].
+    /// At most [`MAX_DIAGNOSTICS`]; see [`Checker::push_diag`].
     diags: Vec<Diagnostic>,
 }
 
@@ -631,12 +626,12 @@ fn call_prepend_bound(
 }
 
 impl<'a> Checker<'a> {
-    /// Collect a diagnostic unless [`MAX_TYPECHECK_DIAGNOSTICS`] are
+    /// Collect a diagnostic unless [`MAX_DIAGNOSTICS`] are
     /// already held; the compile fails either way.
     /// Whether the diagnostic cap is reached: the compile fails anyway, so
     /// optional diagnostic work can stop.
     fn full(&self) -> bool {
-        self.diags.len() >= MAX_TYPECHECK_DIAGNOSTICS
+        self.diags.len() >= MAX_DIAGNOSTICS
     }
 
     /// The named community-set, if `name` is one.
@@ -645,7 +640,7 @@ impl<'a> Checker<'a> {
     }
 
     fn push_diag(&mut self, diag: Diagnostic) {
-        if self.diags.len() < MAX_TYPECHECK_DIAGNOSTICS {
+        if self.diags.len() < MAX_DIAGNOSTICS {
             self.diags.push(diag);
         }
     }

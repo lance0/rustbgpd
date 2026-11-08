@@ -747,21 +747,22 @@ pub fn check_rpol(source: &str) -> CheckReport {
 /// rejected here; [`RpolFile::load`] is the import-capable path.
 fn front(source: &str) -> Result<(ast::SourceFile, Vec<Diagnostic>), Diagnostics> {
     let (file, mut diags) = parser::parse(source);
-    for import in &file.imports {
-        diags.push(
-            Diagnostic::coded(
-                DiagnosticCode::Resolve,
-                import.span,
-                "`import` is not available for inline sources",
-                "imports need file-based loading",
-            )
-            .with_note(
-                "load this policy from a file (config `rpol_files` or `rbgp policy check`) \
-                 to use imports",
-            ),
-        );
+    let imports = file.imports.iter().map(|import| {
+        Diagnostic::coded(
+            DiagnosticCode::Resolve,
+            import.span,
+            "`import` is not available for inline sources",
+            "imports need file-based loading",
+        )
+        .with_note(
+            "load this policy from a file (config `rpol_files` or `rbgp policy check`) \
+             to use imports",
+        )
+    });
+    diag::extend_capped(&mut diags, imports);
+    if diags.len() < diag::MAX_DIAGNOSTICS {
+        diag::extend_capped(&mut diags, typeck::typecheck(&file));
     }
-    diags.extend(typeck::typecheck(&file));
     if diags.is_empty() {
         Ok((file, Vec::new()))
     } else {

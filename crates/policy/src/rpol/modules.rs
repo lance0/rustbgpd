@@ -45,7 +45,9 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::ast;
-use super::diag::{Diagnostic, DiagnosticCode, Diagnostics, Span, Spanned};
+use super::diag::{
+    Diagnostic, DiagnosticCode, Diagnostics, MAX_DIAGNOSTICS, Span, Spanned, extend_capped,
+};
 use super::parser;
 
 /// Maximum import nesting depth (ADR-0103 Decision 3): the main file
@@ -396,8 +398,8 @@ impl Resolver<'_> {
         self.canon.push(canon.clone());
         let text_len = text.len();
         self.total_bytes += text_len;
-        let (ast, mut parse_diags) = parser::parse_module(&text, id);
-        self.diags.append(&mut parse_diags);
+        let (ast, parse_diags) = parser::parse_module(&text, id);
+        extend_capped(&mut self.diags, parse_diags);
         let digest = digest_hex(&raw_sha256);
         self.modules.push(ModuleSource {
             path: display,
@@ -417,6 +419,11 @@ impl Resolver<'_> {
         let imports = ast.imports.clone();
         let mut edges = Vec::with_capacity(imports.len());
         for import in &imports {
+            // At the diagnostic cap the load fails anyway; stop resolving.
+            // One resolution records at most one diagnostic of its own.
+            if self.diags.len() >= MAX_DIAGNOSTICS {
+                break;
+            }
             if let Some(dep) = self.resolve_import(id, import, depth) {
                 edges.push(dep);
             }
@@ -593,6 +600,30 @@ mod tests {
     }
 
     const BOGONS: &str = "prefix-set bogons { 10.0.0.0/8 le 32, 192.168.0.0/16 le 32 }";
+
+    /// The diagnostic cap covers the whole graph: parse errors from every
+    /// module and failed imports together stop at it.
+    #[test]
+    fn module_graph_diagnostics_share_one_cap() {
+        use crate::rpol::diag::MAX_DIAGNOSTICS;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "lib.rpol", &"policy\n".repeat(200));
+        write(
+            dir.path(),
+            "main.rpol",
+            &format!(
+                "import \"lib.rpol\"\n{}{}",
+                "import \"missing.rpol\"\n".repeat(200),
+                "policy\n".repeat(200)
+            ),
+        );
+        let Err(err) = load(dir.path(), "main.rpol") else {
+            panic!("load unexpectedly succeeded");
+        };
+        let diagnostics = err.diagnostics().expect("compile error");
+        assert_eq!(diagnostics.len(), MAX_DIAGNOSTICS);
+    }
 
     #[test]
     fn import_resolves_relative_to_the_importing_file() {

@@ -21,7 +21,7 @@
 
 use logos::Logos;
 
-use super::diag::{Diagnostic, DiagnosticCode, Span};
+use super::diag::{Diagnostic, DiagnosticCode, MAX_DIAGNOSTICS, Span};
 
 /// One `.rpol` token kind. Text is recovered by slicing the source
 /// with the token's span.
@@ -356,7 +356,8 @@ pub struct Token {
 /// (0 for a single-source compile). Unrecognized characters become
 /// diagnostics (one per contiguous bad region) and lexing continues,
 /// so the parser still sees — and can report on — the rest of the
-/// file.
+/// file. At [`MAX_DIAGNOSTICS`] bad regions lexing stops: the compile
+/// fails anyway, and the parser sees end of file there.
 #[must_use]
 pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
     let mut tokens = Vec::new();
@@ -371,6 +372,9 @@ pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
             {
                 last_span.end = span.end;
                 continue;
+            }
+            if diagnostics.len() == MAX_DIAGNOSTICS {
+                break;
             }
             diagnostics.push(Diagnostic::coded(
                 DiagnosticCode::Lex,
