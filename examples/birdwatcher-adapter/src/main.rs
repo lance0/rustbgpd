@@ -156,13 +156,14 @@ async fn bounded_route_request(
             .scope(deadline, next.run(request))
             .await
     });
+    // Tokio polls ready work before its timer, so check the absolute deadline too.
     match tokio::time::timeout_at(deadline, &mut work).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
+        Ok(Ok(response)) if tokio::time::Instant::now() < deadline => response,
+        Ok(Err(error)) if tokio::time::Instant::now() < deadline => {
             error!(%error, "route request worker failed");
             json_error(StatusCode::INTERNAL_SERVER_ERROR, "Route request failed").into_response()
         }
-        Err(_) => json_error(
+        _ => json_error(
             StatusCode::GATEWAY_TIMEOUT,
             "Route request deadline exceeded",
         )
@@ -3117,6 +3118,82 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use tower::ServiceExt as _;
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_route_worker_cannot_override_expired_deadline() {
+        use std::future::{Future as _, poll_fn};
+        use std::task::Poll;
+        use tokio::sync::{Notify, Semaphore};
+
+        type Held = (Arc<Notify>, Arc<Notify>, Arc<Notify>, bool);
+        async fn held(
+            State((entered, release, finished, upstream)): State<Held>,
+        ) -> axum::response::Response {
+            entered.notify_one();
+            release.notified().await;
+            let response = if upstream {
+                match BearerInterceptor::default().call(Request::new(())) {
+                    Ok(_) => StatusCode::OK.into_response(),
+                    Err(error) => bad_gateway("ListAdvertisedRoutes", &error).into_response(),
+                }
+            } else {
+                StatusCode::OK.into_response()
+            };
+            finished.notify_one();
+            response
+        }
+
+        let mut statuses = Vec::new();
+        for elapsed in [
+            ROUTE_REQUEST_TIMEOUT
+                .checked_sub(std::time::Duration::from_millis(1))
+                .unwrap(),
+            ROUTE_REQUEST_TIMEOUT,
+            ROUTE_REQUEST_TIMEOUT + std::time::Duration::from_millis(1),
+        ] {
+            for upstream in [false, true] {
+                let readers = Arc::new(Semaphore::new(MAX_CONCURRENT_ROUTE_REQUESTS));
+                let entered = Arc::new(Notify::new());
+                let release = Arc::new(Notify::new());
+                let finished = Arc::new(Notify::new());
+                let router = Router::new()
+                    .route("/", get(held))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        readers.clone(),
+                        bounded_route_request,
+                    ))
+                    .with_state((entered.clone(), release.clone(), finished.clone(), upstream));
+                let request = axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                let mut response = Box::pin(router.oneshot(request));
+                poll_fn(|cx| {
+                    assert!(response.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                entered.notified().await;
+                // Hold the middleware unpolled until both its timer and worker can be ready.
+                tokio::time::advance(elapsed).await;
+                release.notify_one();
+                finished.notified().await;
+                assert_eq!(readers.available_permits(), MAX_CONCURRENT_ROUTE_REQUESTS);
+                statuses.push(response.await.unwrap().status());
+            }
+        }
+        assert_eq!(
+            statuses,
+            [
+                StatusCode::OK,
+                StatusCode::OK,
+                StatusCode::GATEWAY_TIMEOUT,
+                StatusCode::GATEWAY_TIMEOUT,
+                StatusCode::GATEWAY_TIMEOUT,
+                StatusCode::GATEWAY_TIMEOUT,
+            ]
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn route_deadline_and_disconnect_keep_admission_until_work_settles() {
