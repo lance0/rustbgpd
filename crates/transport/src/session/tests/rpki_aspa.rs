@@ -760,6 +760,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
     })
     .await
     .unwrap();
+    register_test_source(&tx, session.rib_peer(), session.session_identity.id).await;
     tx.send(update).await.unwrap();
     let inserted = received_validation_routes(&tx, session.peer_ip).await;
     assert_eq!(
@@ -885,6 +886,7 @@ async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates
     })
     .await
     .unwrap();
+    register_test_source(&tx, session.rib_peer(), session.session_identity.id).await;
     tx.send(update).await.unwrap();
     assert_eq!(
         received_validation_routes(&tx, session.peer_ip).await[0].validation_state,
@@ -937,6 +939,10 @@ async fn rib_stored_verdicts(
     })
     .await
     .unwrap();
+    let RibUpdate::RoutesReceived { session_id, .. } = &update else {
+        panic!("fixture must carry received routes");
+    };
+    register_test_source(&tx, PeerId::from_addr(peer), *session_id).await;
     tx.send(update).await.unwrap();
     let mut verdicts: Vec<_> = received_validation_routes(&tx, peer)
         .await
