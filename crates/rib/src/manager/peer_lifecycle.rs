@@ -330,7 +330,10 @@ impl RibManager {
     /// Before outbound registration completes, the newest live record already
     /// owns inbound state. A peer with neither registration nor a live
     /// session cannot change inbound state, including routes retained under
-    /// Graceful Restart. Staged OPEN context remains separate from this gate.
+    /// Graceful Restart (RFC 4724): an End-of-RIB or refresh marker from a
+    /// session that never registered must not complete their sweep before
+    /// the restarted session re-advertises them. Staged OPEN context
+    /// remains separate from this gate.
     ///
     /// Superseded-session discards are logged at INFO; unregistered-session
     /// discards at DEBUG. Both are counted in
@@ -370,36 +373,6 @@ impl RibManager {
         self.metrics
             .record_rib_stale_session_message_ignored(&peer.label(), kind);
         true
-    }
-
-    /// Session gate for markers that complete or sweep a session's state:
-    /// End-of-RIB, Beginning- and End-of-RIB-Refresh, and a refresh-window
-    /// timeout. Like [`Self::stale_session_message`], this refuses markers
-    /// with no registered or live session. Such a peer may
-    /// hold routes retained under Graceful Restart (RFC 4724), and an
-    /// End-of-RIB from a session that never registered must not complete
-    /// their sweep before the restarted session re-advertises them.
-    /// Discards are logged at DEBUG and counted with the stale-session
-    /// discards.
-    pub(super) fn stale_session_marker(
-        &self,
-        peer: PeerId,
-        session_id: u64,
-        event: &'static str,
-        kind: StaleSessionMessageKind,
-    ) -> bool {
-        if self.current_session_id(peer).is_none() {
-            debug!(
-                %peer,
-                event,
-                session_id,
-                "discarding a state-completing marker from an unregistered session"
-            );
-            self.metrics
-                .record_rib_stale_session_message_ignored(&peer.label(), kind);
-            return true;
-        }
-        self.stale_session_message(peer, session_id, event, kind)
     }
 
     /// Hand the outbound registration to the most recent surviving live
