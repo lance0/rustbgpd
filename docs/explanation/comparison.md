@@ -54,7 +54,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
 | IPv6 FlowSpec | Yes | Yes | Yes | Yes | Yes |
-| VPN FlowSpec | No | No | No | Yes | No |
+| VPN FlowSpec | Partial[^vpn-fs] | No | No | Yes | No |
 | BGP-LS (RFC 9552) | Partial | Yes | No | Yes | No |
 | SR Policy | No | No | No | Yes | No |
 
@@ -73,6 +73,11 @@ IPv4/IPv6 `Prefix` routes.
 
 [^mpls-rr]: RR/controller-feed only. No VRF import, MPLS label forwarding,
     CE-facing attachment, or MPLS FIB programming.
+
+[^vpn-fs]: Opt-in controller origination of IPv4/IPv6 VPN FlowSpec (SAFI 134)
+    with explicit RD/RT scope, outside v1. Received VPN FlowSpec rules are
+    decoded and discarded; no VRF import or forwarding. See the
+    [VPN FlowSpec controller API](../reference/api.md#vpn-flowspec-controller-api).
 
 [^rtc]: Reflector side complete: RT membership from a peer that negotiated
     RT-Constrain filters both VPNv4/VPNv6 and EVPN export to that peer (EVPN

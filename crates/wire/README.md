@@ -453,7 +453,7 @@ later registry additions land without a breaking release.
 | 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
 | 8669 | BGP Prefix-SID attribute (type 40): generic TLV framing validation with attribute-discard on malformed framing; values are retained opaquely |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
-| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes; `FlowSpecAction::TrafficAction::terminal` is the §7.3 Terminal Action bit as carried on the wire, so `true` means later FlowSpec rules are still evaluated and `false` means evaluation stops at this rule (the field documentation through `0.21.0` stated the reverse; encoding and decoding never changed) |
+| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; VPN FlowSpec (SAFI 134, RFC 8955 §8) for both AFIs via `VpnFlowSpecRule`; IPv6 prefix offsets use the RFC 8956 pattern-length framing and reject invalid offset bounds; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes; `FlowSpecAction::TrafficAction::terminal` is the §7.3 Terminal Action bit as carried on the wire, so `true` means later FlowSpec rules are still evaluated and `false` means evaluation stops at this rule (the field documentation through `0.21.0` stated the reverse; encoding and decoding never changed) |
 | 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
@@ -609,6 +609,9 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   code 77), graceful restart, Outbound Route Filtering, etc.
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §6 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
+- **`VpnFlowSpecRule`** — one VPN FlowSpec NLRI (`Safi::FlowSpecVpn`, SAFI 134):
+  a Route Distinguisher plus a `FlowSpecRule`; `decode_vpn_flowspec_nlri_for_afi`
+  and `try_encode_vpn_flowspec_nlri_for_afi` select IPv4 or IPv6 explicitly
 - **`FlowSpecAction`** — FlowSpec traffic actions, converted with
   `ExtendedCommunity::as_flowspec_action` / `from_flowspec_action`; includes
   the direct target-IP `RedirectToIp { addr, copy }` (IPv4, type 0x010c),
@@ -684,7 +687,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   exhaustiveness](#enum-exhaustiveness)), so downstream matches need a wildcard
   arm and later registry additions are not breaking. `CONFIGURED_FAMILIES`,
   `parse_family`, and `family_label` provide the canonical configuration and
-  control-plane vocabulary for the thirteen AFI/SAFI pairs rustbgpd supports;
+  control-plane vocabulary for the fourteen AFI/SAFI pairs rustbgpd supports;
   BGP-LS uses `linkstate` / `linkstate_vpn` there.
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /

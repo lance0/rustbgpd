@@ -205,6 +205,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
 export streams rule changes to collectors for audit. MRT dumps capture
 point-in-time snapshots for post-incident analysis.
 
+**VPN FlowSpec:** controller origination of IPv4/IPv6 VPN FlowSpec (SAFI 134)
+with explicit RD/RT scope is opt-in and outside v1. Received VPN FlowSpec is
+decoded and discarded, with no VRF import or forwarding. See the
+[VPN FlowSpec API](../reference/api.md#vpn-flowspec-controller-api).
+
 ---
 
 ## 2. IXP Route Server

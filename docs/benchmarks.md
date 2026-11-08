@@ -243,18 +243,19 @@ measures nothing. `cargo bench --workspace` is not a substitute either: seven
 targets are standalone CLIs rather than criterion harnesses and reject
 criterion's flags.
 
-Run each target explicitly with `-p <crate> --bench <name>`. Twenty-one exist.
+Run each target explicitly with `-p <crate> --bench <name>`. Twenty-two exist.
 Eight build with default features (wire/`codec`, rib/`rib_ops`,
 rib/`export_roster`, policy/`policy_eval`, rpki/`validate`,
 mrt/`snapshot_allocation`, api/`import_roster`,
-transport/`shared_payload_drop`); thirteen are
+transport/`shared_payload_drop`); fourteen are
 `bench-internals`-gated (transport/`fanout`, transport/`inbound_attrs`,
 transport/`explain_snapshot`, transport/`outbound_encode`,
 rustbgpd/`fib_projection`, rib/`route_paging`, rib/`evpn_dataplane_query`,
 rib/`dataplane_prefix_paging`, rib/`selection_deferral_release`,
-rib/`gr_end_of_rib`, rib/`contested_prefix_scoped`, api/`vpn_query_timing`,
+rib/`gr_end_of_rib`, rib/`contested_prefix_scoped`, rib/`orf_distribution`,
+api/`vpn_query_timing`,
 api/`vpn_query_allocation` — the last also requires the api crate's
-`vpn-query-allocation` feature). Seven of the twenty-one —
+`vpn-query-allocation` feature). Seven of the twenty-two —
 `snapshot_allocation`, `route_paging`, `dataplane_prefix_paging`,
 `selection_deferral_release`, `gr_end_of_rib`, `vpn_query_timing`, and
 `vpn_query_allocation` — are standalone measurement CLIs with their own
@@ -309,6 +310,10 @@ cargo bench -p rustbgpd-rpki --bench validate
 
 # Policy chain evaluation
 cargo bench -p rustbgpd-policy --bench policy_eval
+
+# Distribution with and without a full prefix-ORF table, RFC 5291/5292
+# (requires bench-internals)
+cargo bench -p rustbgpd-rib --features bench-internals --bench orf_distribution
 
 # Real import-explain context clones and bounded-cache writes (requires bench-internals)
 cargo bench -p rustbgpd-transport --features bench-internals --bench explain_snapshot

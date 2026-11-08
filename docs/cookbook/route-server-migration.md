@@ -18,7 +18,9 @@ traffic.
 ```bash
 # 1. Translate the structure; the report lists every warning and stanza that
 #    needs review, with source line numbers where available (exit 0 only
-#    when neither exists; 2 = translated but needs review; 3 = nothing).
+#    when neither exists; 1 = error: unreadable, unrecognized or
+#    unparseable source, or the output could not be written; 2 = translated
+#    but needs review; 3 = nothing).
 rbgp config import bird.conf --out config.toml
 
 # 2. Hand-translate the reported policy stanzas to .rpol
@@ -91,19 +93,40 @@ max_prefixes = 50000
 import_policy_chain = ["reject-rpki-invalid", "ixp-hygiene", "prefer-rpki-valid"]
 ```
 
-For path hiding, prefer Add-Path receive on the member:
+For path hiding, prefer Add-Path receive on the member. The
+`[neighbors.add_path]` table belongs to the `[[neighbors]]` block above it:
 
 ```toml
+[[neighbors]]
+address = "198.51.100.2"
+remote_asn = 64501
+description = "member-alpha"
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+role = "route_server"
+max_prefixes = 50000
+import_policy_chain = ["reject-rpki-invalid", "ixp-hygiene", "prefer-rpki-valid"]
+
 [neighbors.add_path]
 send = true
 send_max = 8
 ```
 
 For members that cannot receive Add-Path, use the RFC 7947 §2.3 per-client-best
-fallback:
+fallback. `per_client_best` is a per-neighbor key and requires
+`route_server_client = true`:
 
 ```toml
+[[neighbors]]
+address = "198.51.100.3"
+remote_asn = 64502
+description = "member-beta"
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
 per_client_best = true
+role = "route_server"
+max_prefixes = 50000
+import_policy_chain = ["reject-rpki-invalid", "ixp-hygiene", "prefer-rpki-valid"]
 ```
 
 ## FRR

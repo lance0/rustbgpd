@@ -8,8 +8,9 @@ newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
 `rustbgpd-rpki` 0.10.0 moves to wire `0.28.0` and bounds the RTR records a
-client holds by default; existing verifier and RTR signatures are unchanged. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10
-together when exchanging public wire types. See the
+client holds by default; existing verifier and RTR signatures are unchanged.
+Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together when exchanging public wire
+types. See the
 [wire changelog](../wire/CHANGELOG.md).
 
 `rustbgpd-rpki` 0.9.0 moves to wire `0.27.0`; verifier and RTR signatures
@@ -182,7 +183,8 @@ The crate-root facade exports the primary application surface:
 - `VrpEntry`, `VrpTable`, `CoveringVrp`, `CoveringVrps`,
   `MAX_COVERING_VRPS`, `AspaRecord`, and `AspaTable`
 - `AspaInvalidHop`, `AspaVerificationResult`, and `ValidationSnapshot`
-- `RtrClient`, `RtrClientConfig`, `VrpUpdate`, and `RTR_EXPIRE_MAX_SECS`
+- `RtrClient`, `RtrClientConfig`, `VrpUpdate`, `RTR_EXPIRE_MAX_SECS`,
+  `RecordBudget`, `DEFAULT_MAX_CACHE_RECORDS`, and `DEFAULT_MAX_TOTAL_RECORDS`
 - `CacheInventoryAttachment`, `CacheUpdateHandle`, `CacheQueryHandle`,
   `CacheList`, `CacheState`, `AcceptedCacheState`, and `CacheQueryError` for
   atomic accepted-epoch inventory when the optional attachment is used
@@ -206,9 +208,10 @@ The first `0.1.x` line used wire `0.19`; `0.2.x` used wire `0.20`. The
 `0.3.x` line uses wire `0.21` and adopts the enum policy below. The
 `0.4.x` line moves the public wire dependency to `0.22`, the `0.5.x` line
 moves it to `0.23`, the `0.6.x` line moves it to `0.24`, the `0.7.x` line
-moves it to `0.25`, the `0.8.x` line moves it to `0.26`, the `0.9.x` line
-moves it to `0.27`, and the `0.10.x` line moves it to `0.28`, each with
-verifier and RTR method signatures unchanged.
+moves it to `0.25`, the `0.8.x` line moves it to `0.26`, the `0.9.x`
+line moves it to `0.27`, and the `0.10.x` line moves it to `0.28`, each with
+verifier and RTR method signatures unchanged. The `0.10.x` line also adds
+the record-limit API (`RtrClient::with_record_limits`) and default record limits.
 
 ## Enum exhaustiveness
 
@@ -240,9 +243,11 @@ fn needs_more_bytes(error: &RtrDecodeError) -> bool {
 
 Treat an unfamiliar error as an error, and give unfamiliar PDUs an explicit
 unsupported-case policy in a custom protocol consumer. A wildcard is not a
-reason to treat unknown data as valid. This release adds no variants and does
-not change decoding, encoding, or client error handling; Router Key PDUs remain
-unsupported.
+reason to treat unknown data as valid. The `0.10.0` release adds the
+`RtrPdu::RouterKey` variant (RFC 8210 §5.10; decoded, framing-checked and
+ignored by the client) and the `RtrError::RecordLimit` variant for the record
+limits. Both enums were already `#[non_exhaustive]`, so downstream matches
+already carry a fallback arm.
 
 Adding these attributes breaks exhaustive matches accepted by `0.2.x`, including
 irrefutable destructuring of the single `RtrEncodeError` variant. The change is

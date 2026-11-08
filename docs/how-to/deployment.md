@@ -1215,7 +1215,7 @@ scaling out.
 
    A check that finds nothing to flag prints `config OK`. A check that
    flags something still exits 0, but the summary reads
-   `config VALID, <n> WARNINGS — NOT a clean check` and the warnings are
+   `config VALID, <n> WARNING(S) — NOT a clean check` and the warnings are
    framed on stderr above it. The warnings identify: a configured eBGP neighbor
    or dynamic range with no explicit policy in a direction (unfiltered when
    `[global] ebgp_requires_policy` is off, carrying no routes in that
