@@ -30,7 +30,7 @@ reader behind `rbgp diff snapshot from-bmp` is fuzzed through `crates/cli/fuzz`.
 | `decode_update` | wire | UPDATE body + path attributes, incl. MP_REACH/MP_UNREACH for every family (unicast, VPNv4/v6 RD+label stacks, EVPN, BGP-LS NLRI + attr 29 TLVs, RTC, FlowSpec, labeled-unicast), 2/4-octet AS_PATH, Add-Path across all families | never panics |
 | `decode_open` | wire | OPEN body + the full optional-parameter/capability codec (MP-BGP, Add-Path, ORF, unknown caps) | lossless round-trip |
 | `decode_route_refresh` | wire | ROUTE-REFRESH body, RFC 7313 subtypes, RFC 5291 ORF section (Address-Prefix entries, raw/malformed group preservation) | lossless round-trip |
-| `decode_flowspec` | wire | RFC 8955/8956 FlowSpec NLRI, both AFIs | never panics |
+| `decode_flowspec` | wire | RFC 8955/8956 FlowSpec NLRI, both AFIs, plus VPN FlowSpec (SAFI 134) for both AFIs | never panics; a decoded VPN FlowSpec NLRI re-encodes and decodes back to the same rules |
 | `decode_evpn` | wire | EVPN route types 1–6 (RFC 7432/9136/9251) | value round-trip |
 | `encode_evpn` | wire | Constructor-space EVPN encode (inputs the decoder alone cannot reach) | encode is a function |
 | `encode_update` | wire | Bounded canonical structured IPv4 UPDATEs with encoder-admitted path attributes and NLRI | full encode length is exact; decode consumes all bytes with no malformed attributes; canonical value and re-encoding are stable |

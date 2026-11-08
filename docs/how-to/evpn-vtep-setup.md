@@ -160,7 +160,7 @@ fixed-VNI member has the instance VNI while an SVD member's VLAN/tunnel mapping
 binds the configured VLAN to that VNI, both target shapes are present; the probe
 reports `NotReady` before choosing either. For managed creation or adoption of
 the SVD shape, see `[[managed_netdevs.svd_vxlans]]` in
-[CONFIGURATION.md](../reference/configuration.md).
+[configuration reference](../reference/configuration.md).
 
 (No `bridge` configured ⇒ `Unbound`, not `NotReady`.)
 

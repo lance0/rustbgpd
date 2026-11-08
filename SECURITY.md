@@ -166,7 +166,7 @@ published by CISA and partner agencies recommending memory-safe languages
 for software that processes untrusted network input. The enforcement
 mechanism is the crate-root `#![deny(unsafe_code)]` invariant described
 under Design Principles above: no `unsafe` in shipped paths beyond the
-three documented, scoped modules.
+four documented, scoped modules.
 
 One concrete bound this pins: `AS_PATH` matching is length-bounded under
 RFC 8654 Extended Messages. The policy engine matches the rendered path

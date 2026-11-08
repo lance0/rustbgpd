@@ -46,8 +46,8 @@ rbgp neighbor 10.0.0.42 add --remote-asn 65000 --peer-group rr-clients --descrip
 rbgp dynamic-neighbor add 10.0.9.0/24 --peer-group rr-clients
 ```
 
-Both persist to the daemon's config file — the `CONFIG_PATH` argument,
-or `/etc/rustbgpd/config.toml` when it is omitted — before the RPC
+Both persist to the daemon's config file (the `rustbgpd [CONFIG_PATH]`
+argument, default `/etc/rustbgpd/config.toml`) before the RPC
 returns. The static neighbor inherits RR-client, family, and GR settings from
 `rr-clients` without materializing CLI defaults. Verify with `rbgp neighbor --wide`
 — the `RRC` column marks reflector clients. Uniform clients join the
