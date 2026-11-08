@@ -5804,6 +5804,11 @@ async fn run<T>(
         Box::pin(peer_mgr.run()).await;
     });
 
+    // Serialize persisted runtime mutations and SIGHUP with boot history.
+    // The persister releases its initial permit after recording on the
+    // blocking pool, so gRPC can bind while storage is slow.
+    let runtime_config_lock = RuntimeConfigCoordinator::new();
+
     // Spawn config persister (converts gRPC config events → disk writes).
     //
     // Two inputs feed the persister:
@@ -5836,7 +5841,10 @@ async fn run<T>(
             Arc::clone(&accepted),
             runtime_state_directory.clone(),
         );
-        tokio::spawn(persister.run());
+        let boot_permit = runtime_config_lock
+            .try_acquire()
+            .expect("new coordinator has no other owners");
+        tokio::spawn(persister.run(boot_permit));
         tokio::spawn(run_config_bridge_accepted(
             event_rx,
             bridge_replace_rx,
@@ -6560,12 +6568,6 @@ async fn run<T>(
         },
         evpn_es_link_drain_shutdown.clone(),
     );
-    // Coordinator lock serializing persisted runtime config mutations with
-    // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, policy/peer-group
-    // catalog CRUD, and the SIGHUP reload path hold it across their
-    // read/apply/persist sequence so stale TOML snapshots cannot clobber
-    // accepted runtime changes.
-    let runtime_config_lock = RuntimeConfigCoordinator::new();
     // The gate and watchdog are process singletons shared by every watched
     // runtime-config owner and the readiness/admission surfaces.
     let daemon_gate = DaemonGate::new();

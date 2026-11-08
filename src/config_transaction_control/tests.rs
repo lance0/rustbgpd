@@ -2556,7 +2556,7 @@ fn deps_value(
         peer_mgr_tx,
         rib_tx: None,
         config_tx,
-        lock: rustbgpd_api::server::RuntimeConfigCoordinator::new(),
+        lock: crate::RuntimeConfigCoordinator::new(),
         config_mutation_gate: None,
         startup_tables,
         confirm_journal_path: None,
@@ -2581,7 +2581,7 @@ fn deps(
 
 #[tokio::test(start_paused = true)]
 async fn apply_times_out_before_coordinator_ownership_without_mutation() {
-    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let coordinator = crate::RuntimeConfigCoordinator::new();
     let blocker = coordinator.acquire().await.expect("coordinator owner");
     let (peer_tx, mut peer_rx) = mpsc::channel(1);
     let (fib_tx, mut fib_rx) = mpsc::channel(1);
@@ -3204,7 +3204,7 @@ async fn stale_auto_revert_waiter_does_not_revert_a_re_armed_transaction() {
 
 #[tokio::test(start_paused = true)]
 async fn apply_close_before_deadline_is_unavailable_without_mutation() {
-    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let coordinator = crate::RuntimeConfigCoordinator::new();
     let _owner = coordinator.acquire().await.expect("coordinator owner");
     let (peer_tx, mut peer_rx) = mpsc::channel(1);
     let (fib_tx, mut fib_rx) = mpsc::channel(1);
@@ -4387,7 +4387,7 @@ families = ["ipv4_unicast"]
             peer_mgr_tx: peer_tx,
             rib_tx: None,
             config_tx: Some(config_tx),
-            lock: rustbgpd_api::server::RuntimeConfigCoordinator::new(),
+            lock: crate::RuntimeConfigCoordinator::new(),
             config_mutation_gate: None,
             startup_tables: vec![original],
             confirm_journal_path: Some(journal.clone()),
@@ -7985,7 +7985,11 @@ async fn peer_session_reshape_unwritable_directory_refuses_before_runtime() {
             Arc::clone(&initial),
             None,
         )
-        .run(),
+        .run(
+            crate::RuntimeConfigCoordinator::new()
+                .try_acquire()
+                .unwrap(),
+        ),
     );
     tokio::spawn(crate::reload::run_config_bridge_accepted(
         event_rx,
@@ -11384,7 +11388,7 @@ async fn register_test_owner() -> (
     OwnedRuntimeConfigOperation,
     rustbgpd_api::runtime_config_settlement::RuntimeConfigExecutorGuard,
 ) {
-    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let coordinator = crate::RuntimeConfigCoordinator::new();
     let permit = coordinator.acquire().await.unwrap();
     RuntimeConfigSettlementWatchdog::new().register_owned(
         RuntimeConfigOperationKind::Apply,

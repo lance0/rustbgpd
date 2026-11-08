@@ -2750,7 +2750,11 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
     let (bridge_tx, bridge_rx) = mpsc::channel(16);
     let (mutation_tx, mutation_rx) = mpsc::channel(16);
     let persister = tokio::spawn(
-        ConfigPersister::new_accepted(mutation_rx, fixture.config_path.clone(), prior, None).run(),
+        ConfigPersister::new_accepted(mutation_rx, fixture.config_path.clone(), prior, None).run(
+            crate::RuntimeConfigCoordinator::new()
+                .try_acquire()
+                .unwrap(),
+        ),
     );
     let bridge = tokio::spawn(run_config_bridge_accepted(
         events_rx,

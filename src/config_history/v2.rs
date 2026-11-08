@@ -288,7 +288,10 @@ fn record_with_parent(
     result.map(|()| (true, original_count - rows.len()))
 }
 
-fn open_or_create_writer_directory(path: &Path, parent: Option<&File>) -> io::Result<File> {
+pub(crate) fn open_or_create_writer_directory(
+    path: &Path,
+    parent: Option<&File>,
+) -> io::Result<File> {
     use nix::fcntl::{OFlag, open};
     use nix::sys::stat::{Mode, fchmod};
     use nix::unistd::geteuid;

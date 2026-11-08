@@ -4865,6 +4865,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::RuntimeConfigCoordinator;
     use crate::config_persister::ConfigPersister;
     use crate::peer_manager::{PeerManager, TransactionConfigScope};
     use crate::test_support::{
@@ -14261,7 +14262,7 @@ remote_asn = 65002
                 Arc::clone(&initial_accepted),
                 None,
             )
-            .run(),
+            .run(RuntimeConfigCoordinator::new().try_acquire().unwrap()),
         );
         let (accepted_tx, _accepted_rx) = watch::channel(initial_accepted);
         let bridge = tokio::spawn(run_config_bridge_accepted(
