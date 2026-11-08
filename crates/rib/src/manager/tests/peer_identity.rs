@@ -64,6 +64,10 @@ async fn a_stale_handle_message_after_delete_and_re_add_is_dropped() {
     // Re-added at the same endpoint: a new handle.
     let new = scoped("fe80::1", "eth0");
     assert_ne!(new, old);
+    // The late session re-registers before announcing, so only the
+    // deleted-handle drop can keep the announcement out; the unregistered
+    // session gate never sees it.
+    tx.send(registering_peer_up(old, 1)).await.unwrap();
     announce(&tx, old, 1).await;
     assert!(
         query_received_routes(&tx, old).await.is_empty(),
