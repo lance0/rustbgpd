@@ -393,6 +393,20 @@ struct ReplacementFanoutState {
     expected_inventory: HashSet<Prefix>,
 }
 
+fn register_fanout_source(manager: &mut RibManager) {
+    let before = manager
+        .bench_adj_rib_out_fanout_receipt()
+        .pristine_otc_reconcile_candidates;
+    manager.bench_register_restarted_source(PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1)));
+    assert_eq!(
+        manager
+            .bench_adj_rib_out_fanout_receipt()
+            .pristine_otc_reconcile_candidates,
+        before + 1,
+        "the empty ingress PeerUp must contribute exactly one setup reconciliation"
+    );
+}
+
 /// Build a manager with `n_peers` registered and `CHANGED` best paths seeded.
 /// The receivers are returned so the caller keeps the bounded channels open
 /// across the measured `distribute_changes`.
@@ -417,6 +431,7 @@ fn build(n_peers: usize, export_policy: Option<PolicyChain>) -> FanoutState {
         CHANNEL_CAP,
         fanout_bench_export_encoder,
     );
+    register_fanout_source(&mut mgr);
     mgr.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
     mgr.bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     let changed: HashSet<Prefix> = prefixes.into_iter().collect();
@@ -451,6 +466,7 @@ fn build_ixp_with_policy(
         CHANNEL_CAP,
         fanout_bench_route_server_export_encoder,
     );
+    register_fanout_source(&mut manager);
     manager.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
     manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     let changed = prefixes.into_iter().collect();
@@ -465,6 +481,10 @@ fn expected_fanout_receipt(
     peers: usize,
     routes_received_dispatches: usize,
 ) -> AdjRibOutFanoutBenchReceipt {
+    assert!(
+        routes_received_dispatches <= 1,
+        "receipt is either the initial seed or one prepared replacement"
+    );
     AdjRibOutFanoutBenchReceipt {
         update_groups: 2, // one exporter group plus the proven empty ingress group
         grouped_peers: peers + 1,
@@ -482,12 +502,15 @@ fn expected_fanout_receipt(
         successful_enqueues: peers,
         family_gauge_writes: peers,
         last_family_gauge_write_mask: 0x01,
+        // Initial PeerUp also reconciles the proven empty ingress source once.
+        // Receipt resets exclude that setup work from timed replacements.
         pristine_otc_reconcile_candidates: peers
             * if routes_received_dispatches == 0 {
                 1
             } else {
                 2
-            },
+            }
+            + usize::from(routes_received_dispatches != 0),
         private_extra_prefix_scans: 0,
         first_peer_family_values: [
             i64::try_from(CHANGED).expect("fixture size fits i64"),
@@ -505,6 +528,10 @@ fn expected_private_single_best_receipt(
     peers: usize,
     routes_received_dispatches: usize,
 ) -> AdjRibOutFanoutBenchReceipt {
+    assert!(
+        routes_received_dispatches <= 1,
+        "receipt is either the initial seed or one prepared replacement"
+    );
     AdjRibOutFanoutBenchReceipt {
         update_groups: 1, // only the proven empty ingress group
         grouped_peers: 1,
@@ -522,7 +549,8 @@ fn expected_private_single_best_receipt(
         successful_enqueues: peers,
         family_gauge_writes: peers,
         last_family_gauge_write_mask: 0x01,
-        pristine_otc_reconcile_candidates: peers,
+        // Include the source's initial reconciliation only in the setup receipt.
+        pristine_otc_reconcile_candidates: peers + usize::from(routes_received_dispatches != 0),
         private_extra_prefix_scans: 0,
         first_peer_family_values: [CHANGED as i64, 0, 0, 0, 0, 0, 0],
     }
