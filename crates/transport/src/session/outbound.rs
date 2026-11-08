@@ -562,6 +562,37 @@ fn own_if_last<T>(owned: &mut std::vec::IntoIter<T>, shared: &mut Arc<Vec<T>>) {
     }
 }
 
+/// The family name and direction the first-pass senders log for `phase`,
+/// so a resumed send reports a teardown the same way.
+fn resumed_log_names(phase: OutboundPhase, afi: Afi, safi: Safi) -> (&'static str, bool) {
+    use OutboundPhase as P;
+    let family = match phase {
+        P::Announce | P::Withdraw if afi == Afi::Ipv4 => "IPv4 unicast",
+        P::Announce | P::Withdraw => "IPv6 unicast",
+        P::FlowspecAnnounce | P::FlowspecWithdraw if safi == Safi::FlowSpecVpn => "VPN FlowSpec",
+        P::FlowspecAnnounce | P::FlowspecWithdraw => "FlowSpec",
+        P::EvpnAnnounce | P::EvpnWithdraw => "EVPN",
+        P::BgplsAnnounce | P::BgplsWithdraw => "BGP-LS",
+        P::VpnAnnounce | P::VpnWithdraw => "VPN",
+        P::LabeledAnnounce | P::LabeledWithdraw => "labeled",
+        P::RtcAnnounce | P::RtcWithdraw => "RTC",
+        P::Requests | P::Begin | P::End | P::Eor => {
+            unreachable!("markers have their own guarded sender")
+        }
+    };
+    let withdrawal = matches!(
+        phase,
+        P::Withdraw
+            | P::FlowspecWithdraw
+            | P::EvpnWithdraw
+            | P::BgplsWithdraw
+            | P::VpnWithdraw
+            | P::LabeledWithdraw
+            | P::RtcWithdraw
+    );
+    (family, withdrawal)
+}
+
 impl PendingOutbound {
     fn new(
         mut update: OutboundRouteUpdate,
@@ -3226,6 +3257,11 @@ impl PeerSession {
                 }
                 GroupWire::Eor(afi, safi) => self.send_eor_frame(export, afi, safi)?,
                 wire => {
+                    let (afi, safi) = match wire {
+                        GroupWire::Mp { afi, safi, .. } => (afi, safi),
+                        _ => (Afi::Ipv4, Safi::Unicast),
+                    };
+                    let (family, withdrawal) = resumed_log_names(slice.phase, afi, safi);
                     let attrs = slice.attributes(group, &pending.update, export);
                     let rows = &group.rows[group.next..];
                     let build = |chunk: &[usize]| {
@@ -3244,7 +3280,8 @@ impl PeerSession {
                             )
                         )
                     {
-                        self.send_v4_chunked(rows, max_len, "resumed", |chunk| {
+                        let kind = if withdrawal { "withdraw" } else { "announce" };
+                        self.send_v4_chunked(rows, max_len, kind, |chunk| {
                             build(chunk).expect("validated unicast chunk")
                         })?
                     } else if matches!(
@@ -3254,7 +3291,12 @@ impl PeerSession {
                             | OutboundPhase::FlowspecAnnounce
                             | OutboundPhase::FlowspecWithdraw
                     ) {
-                        self.send_mp_chunked(rows, max_len, "resumed", "update", build)?
+                        let kind = if withdrawal {
+                            "withdrawal"
+                        } else {
+                            "announcement"
+                        };
+                        self.send_mp_chunked(rows, max_len, family, kind, build)?
                     } else {
                         let initial_chunk = if matches!(
                             slice.phase,
@@ -3264,7 +3306,13 @@ impl PeerSession {
                         } else {
                             1000
                         };
-                        self.send_resumed_family_chunked(rows, max_len, initial_chunk, build)?
+                        self.send_resumed_family_chunked(
+                            rows,
+                            max_len,
+                            initial_chunk,
+                            (family, withdrawal),
+                            build,
+                        )?
                     }
                 }
             };
@@ -3288,6 +3336,7 @@ impl PeerSession {
         rows: &[usize],
         max_len: usize,
         mut chunk_size: usize,
+        (family, withdrawal): (&'static str, bool),
         mut build: impl FnMut(&[usize]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
     ) -> Result<usize, ()> {
         let mut next = 0;
@@ -3299,6 +3348,13 @@ impl PeerSession {
             let message = build(&rows[next..end]).expect("previously validated family chunk");
             if message.encoded_len() > max_len {
                 if chunk_size == 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = message.encoded_len(),
+                        max = max_len,
+                        "single {family} {} exceeds maximum message length — sending Cease/Out-of-Resources and tearing down",
+                        if withdrawal { "withdrawal" } else { "route" }
+                    );
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
@@ -3307,8 +3363,15 @@ impl PeerSession {
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
             }
-            self.enqueue_bulk(&Message::Update(message))
-                .map_err(|_| ())?;
+            if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
+                warn!(
+                    peer = %self.peer_label,
+                    %error,
+                    "failed to send {family} {} UPDATE",
+                    if withdrawal { "withdrawal" } else { "announce" }
+                );
+                return Err(());
+            }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             next = end;
