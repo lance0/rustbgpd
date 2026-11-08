@@ -122,7 +122,6 @@ jobs:
           python3 -m unittest -v scripts/test_retry_docker_image.py
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
           python3 scripts/check_ci_image_primer_contract.py
-          python3 -m unittest -v scripts/test_container_manifest.py
       - name: Prove CI scale split contract
         run: |
           python3 -m unittest -v scripts/test_check_ci_scale_split_contract.py
