@@ -160,13 +160,20 @@ impl FibRouteSnapshot {
         let matching = self.matching(filters);
         let total_count = u64::try_from(matching.len()).unwrap_or(u64::MAX);
         let Some(page) = page else {
-            let mut original_order = matching.to_vec();
-            original_order.sort_unstable();
-            return Ok(proto::ListFibRoutesResponse {
-                routes: original_order
+            let routes = if matching.len() == self.rows.len() {
+                self.rows.clone()
+            } else {
+                let mut original_order = matching.to_vec();
+                #[cfg(test)]
+                FIB_UNPAGED_REORDER_ROWS.with(|rows| rows.set(rows.get() + original_order.len()));
+                original_order.sort_unstable();
+                original_order
                     .into_iter()
                     .map(|i| self.rows[i].clone())
-                    .collect(),
+                    .collect()
+            };
+            return Ok(proto::ListFibRoutesResponse {
+                routes,
                 next_page_token: String::new(),
                 total_count,
             });
@@ -1031,6 +1038,7 @@ struct FibRouteFilters {
 #[cfg(test)]
 thread_local! {
     static FIB_FILTER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FIB_UNPAGED_REORDER_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl FibRouteFilters {
@@ -8611,6 +8619,84 @@ mod tests {
             }
         );
         assert_eq!(FibRouteSnapshot::default().summary().source, "fib");
+    }
+
+    #[test]
+    fn fib_unpaged_reorders_only_partial_matches() {
+        let rows: Vec<_> = [3, 1, 4, 2]
+            .into_iter()
+            .map(|peer| {
+                fib_status(
+                    "edge",
+                    "203.0.113.0",
+                    24,
+                    &format!("198.51.100.{peer}"),
+                    if peer % 2 == 0 {
+                        proto::FibRouteState::Installed
+                    } else {
+                        proto::FibRouteState::Failed
+                    },
+                    "owned",
+                )
+            })
+            .collect();
+        let snapshot = FibRouteSnapshot::new(rows.clone());
+        for (request, expected, reordered) in [
+            (proto::ListFibRoutesRequest::default(), rows.clone(), 0),
+            (
+                proto::ListFibRoutesRequest {
+                    table_name: "edge".into(),
+                    reason: "owned".into(),
+                    ..Default::default()
+                },
+                rows.clone(),
+                0,
+            ),
+            (
+                proto::ListFibRoutesRequest {
+                    state: proto::FibRouteState::Installed as i32,
+                    ..Default::default()
+                },
+                vec![rows[2].clone(), rows[3].clone()],
+                2,
+            ),
+            (
+                proto::ListFibRoutesRequest {
+                    table_name: "missing".into(),
+                    ..Default::default()
+                },
+                Vec::new(),
+                0,
+            ),
+        ] {
+            let filters = FibRouteFilters::from_request(&request, None).unwrap();
+            FIB_UNPAGED_REORDER_ROWS.with(|rows| rows.set(0));
+            let response = snapshot.list(&filters, None).unwrap();
+            assert_eq!(response.routes, expected);
+            assert_eq!(response.total_count, expected.len() as u64);
+            assert_eq!(response.next_page_token, "");
+            assert_eq!(
+                FIB_UNPAGED_REORDER_ROWS.with(std::cell::Cell::get),
+                reordered
+            );
+        }
+        let snapshot = FibRouteSnapshot::default();
+        for table_name in ["", "edge"] {
+            let filters = FibRouteFilters::from_request(
+                &proto::ListFibRoutesRequest {
+                    table_name: table_name.into(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            FIB_UNPAGED_REORDER_ROWS.with(|rows| rows.set(0));
+            let response = snapshot.list(&filters, None).unwrap();
+            assert_eq!(response.routes, []);
+            assert_eq!(response.total_count, 0);
+            assert_eq!(response.next_page_token, "");
+            assert_eq!(FIB_UNPAGED_REORDER_ROWS.with(std::cell::Cell::get), 0);
+        }
     }
 
     #[test]
