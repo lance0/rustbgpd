@@ -1,4 +1,4 @@
-# rpol decision corpus: 272 programs, 1929 cases. Regenerate with
+# rpol decision corpus: 273 programs, 1929 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -473,6 +473,7 @@ tests/fixtures/v1-stable/v0.78.0/route-server/hygiene.rpol = tests/fixtures/v1-s
 tests/fixtures/v1-stable/v0.79.0/route-server/hygiene.rpol = examples/route-server/hygiene.rpol
 tests/fixtures/v1-stable/v0.80.0/route-server/hygiene.rpol = examples/route-server/hygiene.rpol
 tests/fixtures/v1-stable/v0.81.0/route-server/hygiene.rpol = examples/route-server/hygiene.rpol
+tests/fixtures/v1-stable/v0.82.0/route-server/hygiene.rpol = examples/route-server/hygiene.rpol
 
 ## term names (every lowered row of every instantiation, with what it holds)
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-in | row member-in default => #2 accept
