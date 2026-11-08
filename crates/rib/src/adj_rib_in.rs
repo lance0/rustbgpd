@@ -3653,8 +3653,16 @@ mod tests {
     }
 
     #[repr(transparent)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, Eq)]
     pub(super) struct CountedPathId(u32);
+
+    // Counted by hand: a derived `eq` would let a linear `==` scan score zero.
+    impl PartialEq for CountedPathId {
+        fn eq(&self, other: &Self) -> bool {
+            PATH_COMPARISONS.with(|count| count.set(count.get() + 1));
+            self.0 == other.0
+        }
+    }
 
     impl Ord for CountedPathId {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
