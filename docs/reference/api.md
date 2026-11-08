@@ -2994,13 +2994,22 @@ optional pagination over the filtered status rows; `page_size = 0` keeps the
 legacy full-snapshot response, and `page_token` is valid only when
 `page_size > 0`. The response includes `next_page_token` and `total_count`.
 
-Reads use the last complete indexed status publication. Conversion and index
-construction run outside the FIB reconciler and API executor; while a newer
-publication is being prepared, reads can lag native reconciliation. Paged
-queries find exact filter counts through prepared indexes and clone only their
-returned rows. Unpaged reads still allocate and return the complete matching
-result. The legacy dataplane event summary uses three counts prepared with the
-same publication, so polling it does not walk the FIB rows.
+A scoped peer selector such as `fe80::1%eth0` matches the row's retained
+address and interface. Rows with another interface or no recorded interface do
+not match that selector.
+
+Reads use the last complete status publication. Conversion, base ordering and
+summary counts run outside the FIB reconciler and API executor; while a newer
+publication is being prepared, reads can lag native reconciliation. Each
+publication prepares only its unfiltered order eagerly. The first request for
+a filter combination can sort the full publication on a blocking worker;
+later requests reuse that index for exact counts and clone only returned rows.
+Index preparations are serialized across listeners. Canceling a request leaves
+its started preparation running to completion without holding the publication
+lock, so newer status rows can still be published. Unpaged reads still allocate
+and return the complete matching result. The legacy dataplane event summary
+uses three counts prepared with the same publication, so polling it does not
+walk the FIB rows.
 
 CLI JSON output remains a route array unless `--limit` is given (1 or
 more; omit it for the full snapshot), in which case it emits an object with `routes`,

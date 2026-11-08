@@ -4891,6 +4891,133 @@ mod tests {
         assert_eq!(numbered_row.peer_scope, AspaContextId::DEFAULT);
     }
 
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one production-path regression follows accepted config through FIB projection, publication and API pagination"
+    )]
+    async fn scoped_fib_projection_keeps_same_address_peers_separate_in_api_pages() {
+        use rustbgpd_api::proto::rib_service_server::RibService as _;
+        use rustbgpd_api::{proto, rib_service::RibService};
+
+        let source = crate::test_support::tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65001
+router_id = "192.0.2.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth0"
+remote_asn = 65002
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth1"
+remote_asn = 65003
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+"#,
+        );
+        let accepted = crate::config::Config::load_toml_with_diagnostics(&source, "fixture")
+            .expect("same-address neighbors with a FIB table are accepted");
+        let candidates: Vec<_> = accepted
+            .neighbors
+            .iter()
+            .enumerate()
+            .flat_map(|(peer_index, peer)| {
+                (0..2).map(move |route_index| {
+                    let prefix = Prefix::V4(Ipv4Prefix::new(
+                        Ipv4Addr::new(
+                            203,
+                            0,
+                            113,
+                            u8::try_from(peer_index * 2 + route_index).unwrap(),
+                        ),
+                        32,
+                    ));
+                    let mut best = route_from_peer(
+                        prefix,
+                        ip("192.0.2.2"),
+                        RouteOrigin::Ebgp,
+                        0,
+                        peer.address.parse().unwrap(),
+                    );
+                    best.aspa_context = AspaContextId::intern_scoped(
+                        rustbgpd_wire::AspaValidationContext::default(),
+                        peer.interface.as_deref(),
+                    );
+                    FibInstallCandidate {
+                        next_hops: vec![FibInstallNextHop {
+                            next_hop: best.next_hop,
+                            link_local_next_hop: None,
+                            next_hop_scope: None,
+                            peer: best.peer,
+                            path_id: 0,
+                            weight: 1,
+                        }],
+                        best,
+                    }
+                })
+            })
+            .collect();
+        let intent = crate::fib::project_fib_intent(&accepted.fib_tables, &candidates);
+        assert_eq!(intent.routes.len(), 4);
+        assert_eq!(intent.drops, Vec::new());
+        let rows = intent
+            .routes
+            .values()
+            .map(|route| status_for_route(route, FibRuntimeState::Installed, "owned".to_string()))
+            .collect();
+        let (_source, receiver) = watch::channel(Arc::new(rows));
+        let (tx, _rx) = mpsc::channel(1);
+        let service = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            crate::make_fib_route_snapshot(receiver).await.unwrap(),
+        );
+        for interface in ["eth0", "eth1"] {
+            for page_size in [0, 1] {
+                let mut token = String::new();
+                let mut prefixes = Vec::new();
+                loop {
+                    let response = service
+                        .list_fib_routes(tonic::Request::new(proto::ListFibRoutesRequest {
+                            peer_address: format!("fe80::1%{interface}"),
+                            page_size,
+                            page_token: token,
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    assert_eq!(response.total_count, 2, "{interface} page_size={page_size}");
+                    for row in response.routes {
+                        assert_eq!(row.peer_interface, interface);
+                        prefixes.push(row.prefix);
+                    }
+                    token = response.next_page_token;
+                    if token.is_empty() {
+                        break;
+                    }
+                }
+                let expected = if interface == "eth0" {
+                    ["203.0.113.0", "203.0.113.1"]
+                } else {
+                    ["203.0.113.2", "203.0.113.3"]
+                };
+                assert_eq!(prefixes, expected);
+            }
+        }
+    }
+
     /// ADR-0079: reordering `[[fib_tables]]` stanzas is not a config
     /// change — the signature comparison is per table and set-wise, so
     /// every owned route survives and no quarantine evidence is written.
