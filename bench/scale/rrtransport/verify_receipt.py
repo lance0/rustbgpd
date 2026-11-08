@@ -126,7 +126,8 @@ def verify(directory, tiny=False):
             "shared_group_encode_classification": "one_arc_all_members",
             "shared_announce_classification": "one_arc_all_members",
             "shared_route_count": prefixes, "community": "65000:200",
-            "update_groups": 1, "grouped_peers": peers, "ungrouped_peers": 0,
+            # The untimed leg has one empty ingress group beside the exporters.
+            "update_groups": 2, "grouped_peers": peers + 1, "ungrouped_peers": 0,
             "dirty_peers": 0, "grouped_unicast_routes": prefixes,
             "private_unicast_routes": 0,
         },

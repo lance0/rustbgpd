@@ -3499,10 +3499,9 @@ mod tests {
     /// Acceptance: an MRT snapshot taken before an interface-only neighbor
     /// learns a new address (`RebindPeer`) and encoded after it attributes
     /// each route to the endpoint that held it when the RIB built the
-    /// snapshot. The neighbor here has no session, so its entry comes from
-    /// the routes: dropping the snapshot's capture of route sources, or
-    /// resolving the address in the encoder, files the routes under the
-    /// new address.
+    /// snapshot. The neighbor's session has ended under graceful restart:
+    /// resolving its address in the encoder would file the retained routes
+    /// under the new address.
     #[tokio::test]
     async fn a_snapshot_encoded_after_a_rebind_keeps_the_endpoint_it_was_built_with() {
         use rustbgpd_rib::update::RibUpdate;
@@ -3532,6 +3531,27 @@ mod tests {
             peer,
             ..make_route(prefix, old, "2001:db8::1".parse().unwrap())
         };
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            session_id: 1,
+            peer_asn: 65001,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 1,
             peer,
@@ -3545,8 +3565,21 @@ mod tests {
         })
         .await
         .unwrap();
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer,
+            session_id: 1,
+            restart_time: 120,
+            stale_routes_time: 360,
+            gr_families: vec![(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        })
+        .await
+        .unwrap();
         let before = snapshot(&tx).await;
         assert_eq!(before.routes.len(), 1);
+        assert!(before.routes[0].is_stale);
 
         tx.send(RibUpdate::RebindPeer {
             peer,

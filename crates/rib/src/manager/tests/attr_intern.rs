@@ -118,6 +118,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -1045,6 +1046,8 @@ async fn unicast_attr_gc_withdraw_all_reaches_floor_without_waiting() {
     let withdrawals = (0..=ATTR_INTERN_GC_DISPLACED_LIMIT)
         .map(|index| (diverse_unicast_route(index, 0).prefix, 0))
         .collect::<Vec<_>>();
+
+    register_test_peer(&mut manager, peer, 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -1102,6 +1105,8 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
             None,
         );
     }
+
+    register_test_peer(&mut manager, peer, 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,

@@ -91,6 +91,9 @@ fn manager() -> RibManager {
     // Inventory visit counts assume staging runs: the default row credit,
     // whatever a credit sweep sets.
     manager.outbound_row_credit_override = None;
+    for source in SOURCES {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
     manager
 }
 

@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test publishable-crate derivation
         run: python3 -m unittest -v scripts/test_check_semver_publishable_crates.py
       - name: Derive the publishable crate set
@@ -63,7 +63,7 @@ jobs:
           python3 scripts/check_semver_publishable_crates.py \
             "$RUNNER_TEMP/metadata.json" .github/workflows/semver-checks.yml \
             | tee -a "$GITHUB_OUTPUT"
-      - uses: obi1kenobi/cargo-semver-checks-action@v2.9
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
         with:
           package: ${{ steps.publishable.outputs.packages }}
           # The action installs the latest stable toolchain itself (its

@@ -1,7 +1,9 @@
 //! `rbgp topology nodes|links` — RFC 9107 ORR topology derived from the
 //! BGP-LS Adj-RIB-In union across peers.
 
-use crate::commands::rib::ROUTE_PAGE_SIZE;
+use std::collections::HashSet;
+
+use crate::commands::rib::{ROUTE_PAGE_SIZE, check_page_token};
 use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
@@ -19,6 +21,7 @@ pub async fn nodes(connection: Connection, json: bool) -> Result<(), CliError> {
         ..Default::default()
     };
     let mut nodes = Vec::new();
+    let mut seen_tokens = HashSet::new();
     loop {
         let page = read_rpc(
             "ListOrrTopologyNodes",
@@ -26,6 +29,7 @@ pub async fn nodes(connection: Connection, json: bool) -> Result<(), CliError> {
         )
         .await?
         .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
         nodes.extend(page.nodes);
         if page.next_page_token.is_empty() {
             break;
@@ -43,6 +47,7 @@ pub async fn links(connection: Connection, json: bool) -> Result<(), CliError> {
         ..Default::default()
     };
     let mut links = Vec::new();
+    let mut seen_tokens = HashSet::new();
     loop {
         let page = read_rpc(
             "ListOrrTopologyLinks",
@@ -50,6 +55,7 @@ pub async fn links(connection: Connection, json: bool) -> Result<(), CliError> {
         )
         .await?
         .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
         links.extend(page.links);
         if page.next_page_token.is_empty() {
             break;
@@ -202,6 +208,47 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[tokio::test]
+    async fn topology_walks_reject_repeated_and_cyclic_tokens() {
+        use rustbgpd_api::proto as server_proto;
+
+        for tokens in [vec!["a", "a"], vec!["a", "b", "a"]] {
+            let server = spawn_mock_server(None).await;
+            *server.state.orr_node_pages.lock().await = tokens
+                .iter()
+                .map(|token| server_proto::ListOrrTopologyNodesResponse {
+                    next_page_token: (*token).into(),
+                    ..Default::default()
+                })
+                .collect();
+            *server.state.orr_link_pages.lock().await = tokens
+                .iter()
+                .map(|token| server_proto::ListOrrTopologyLinksResponse {
+                    next_page_token: (*token).into(),
+                    ..Default::default()
+                })
+                .collect();
+            let result = nodes(connect(&server.addr, None).await.unwrap(), true).await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.contains("repeated page token")),
+                "{result:?}"
+            );
+            assert_eq!(
+                server.state.orr_node_page_requests.lock().await.len(),
+                tokens.len()
+            );
+            let result = links(connect(&server.addr, None).await.unwrap(), true).await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.contains("repeated page token")),
+                "{result:?}"
+            );
+            assert_eq!(
+                server.state.orr_link_page_requests.lock().await.len(),
+                tokens.len()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn topology_nodes_calls_rpc_and_renders_rows() {

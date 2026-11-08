@@ -368,6 +368,29 @@ fn checksum(prefixes: &BTreeSet<Ipv4Prefix>) -> u64 {
     })
 }
 
+/// Register a synthetic ingress source without making it an export target.
+fn source_peer_up(source: Ipv4Addr) -> RibUpdate {
+    let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+    RibUpdate::PeerUp {
+        peer: PeerId::from_ipv4(source),
+        session_id: 0,
+        peer_asn: 64512,
+        peer_router_id: source,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: Vec::new(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    }
+}
+
 async fn smoke() -> Result<()> {
     let metrics = BgpMetrics::new();
     let (rib_tx, rib_rx) = mpsc::channel(1024);
@@ -384,6 +407,7 @@ async fn smoke() -> Result<()> {
     let expected = Arc::new((0..PREFIXES).map(prefix).collect::<BTreeSet<_>>());
     for source_index in 0..SOURCES {
         let source = source(source_index);
+        rib_tx.send(source_peer_up(source)).await?;
         let announced = (source_index * (PREFIXES / SOURCES)
             ..(source_index + 1) * (PREFIXES / SOURCES))
             .map(|index| route(prefix(index), source))

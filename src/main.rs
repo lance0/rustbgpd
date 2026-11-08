@@ -382,9 +382,10 @@ struct WarmCheckpointPlan {
 /// authority, so replacing a pathname or planting a final symlink cannot
 /// redirect shutdown state.
 #[derive(Debug)]
-struct PinnedRuntimeStateDirectory {
+pub(crate) struct PinnedRuntimeStateDirectory {
     file: File,
     display_path: PathBuf,
+    real_path: PathBuf,
 }
 
 impl PinnedRuntimeStateDirectory {
@@ -460,9 +461,17 @@ impl PinnedRuntimeStateDirectory {
             ));
         }
         verify_runtime_state_ancestors(path, geteuid().as_raw(), nix::unistd::getegid().as_raw())?;
+        let real_path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+        let resolved = std::fs::metadata(&real_path).map_err(|error| error.to_string())?;
+        if (metadata.dev(), metadata.ino()) != (resolved.dev(), resolved.ino()) {
+            return Err(
+                "runtime-state directory changed while resolving its durable identity".to_string(),
+            );
+        }
         Ok(Self {
             file,
             display_path: path.to_path_buf(),
+            real_path,
         })
     }
 
@@ -489,9 +498,41 @@ impl PinnedRuntimeStateDirectory {
     }
 }
 
+/// Open a direct child through its retained parent; final symlinks are refused.
+fn open_state_child_directory(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    create: bool,
+) -> std::io::Result<File> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, mkdirat};
+    if create {
+        match mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
+            Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let directory = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(std::io::Error::other(
+            "unsafe runtime-state child directory owner or type",
+        ));
+    }
+    Ok(directory)
+}
+
 /// Refuse a runtime-state directory reachable through a directory another
-/// user could rewrite. Some state writers still use the pathname, so after
-/// `prepare` an ancestor swap must not be able to redirect them elsewhere.
+/// user could rewrite. Runtime writers use the retained descriptor; this
+/// check also keeps durable recovery paths beneath trusted ancestors.
 /// Every directory traversed is checked, sshd `StrictModes` style: those
 /// along the path as written and along its canonical form. Each must be owned
 /// by root or the daemon user, and must not be world-writable, or writable by
@@ -2754,6 +2795,79 @@ fn blackhole_status_to_proto(
     }
 }
 
+/// Publish complete read indexes independently of FIB reconciliation.
+async fn fib_route_snapshots(
+    mut source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
+) -> Result<
+    tokio::sync::watch::Receiver<rustbgpd_api::rib_service::FibRouteSnapshot>,
+    tokio::task::JoinError,
+> {
+    let rows = source.borrow_and_update().clone();
+    let initial = tokio::task::spawn_blocking(move || project_fib_route_snapshot(rows)).await?;
+    let (tx, rx) = tokio::sync::watch::channel(initial);
+    tokio::spawn(refresh_fib_route_snapshots(
+        source,
+        tx,
+        project_fib_route_snapshot,
+    ));
+    Ok(rx)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FIB_SNAPSHOT_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn project_fib_route_snapshot(
+    rows: Arc<Vec<fib_runtime::FibRuntimeStatus>>,
+) -> rustbgpd_api::rib_service::FibRouteSnapshot {
+    #[cfg(test)]
+    FIB_SNAPSHOT_PROJECTIONS.with(|count| count.set(count.get() + 1));
+    let projected = rows.iter().map(fib_status_to_proto).collect();
+    drop(rows);
+    rustbgpd_api::rib_service::FibRouteSnapshot::new(projected)
+}
+
+async fn refresh_fib_route_snapshots(
+    mut source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
+    tx: tokio::sync::watch::Sender<rustbgpd_api::rib_service::FibRouteSnapshot>,
+    project: impl Fn(
+        Arc<Vec<fib_runtime::FibRuntimeStatus>>,
+    ) -> rustbgpd_api::rib_service::FibRouteSnapshot
+    + Send
+    + Sync
+    + 'static,
+) {
+    let project = Arc::new(project);
+    while source.changed().await.is_ok() {
+        let rows = source.borrow_and_update().clone();
+        let project = project.clone();
+        let published = tx.clone();
+        match tokio::task::spawn_blocking(move || {
+            // Publication and retired-row destruction stay off executor threads.
+            published.send_replace(project(rows));
+        })
+        .await
+        {
+            // Publish every finished generation before coalescing later changes.
+            Ok(()) => {}
+            Err(error) => {
+                error!(%error, "FIB status projection stopped; retaining last complete snapshot");
+                break;
+            }
+        }
+    }
+}
+
+/// Share a prepared FIB publication with all API listeners and event readers.
+async fn make_fib_route_snapshot(
+    source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
+) -> Result<rustbgpd_api::rib_service::FibRouteSnapshotReader, tokio::task::JoinError> {
+    fib_route_snapshots(source)
+        .await
+        .map(rustbgpd_api::rib_service::FibRouteSnapshotReader::new)
+}
+
 /// Project one FIB status row into the public API.
 fn fib_status_to_proto(
     status: &fib_runtime::FibRuntimeStatus,
@@ -3460,11 +3574,29 @@ fn main() -> ExitCode {
         Err(e) => warn!(error = %e, "failed to raise the soft nofile limit"),
     }
 
-    // Panic hygiene: write a bounded, secret-free crash report under
-    // `<runtime_state_dir>/crash/` for `rbgp doctor` to sweep into
-    // support bundles. Installed after config resolution so reports
-    // land under the operator's runtime_state_dir.
-    install_panic_hook(config.runtime_state_dir().join("crash"));
+    let runtime_state_path = config.runtime_state_dir();
+    // Pin the shared authority before any marker, receipt, or bundle access.
+    // Every daemon-owned state file lives here, so an unusable directory, an
+    // unsafe owner or mode, or a final symlink refuses boot.
+    let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
+        Ok(directory) => Arc::new(directory),
+        Err(error) => {
+            error!(
+                path = %runtime_state_path.display(),
+                %error,
+                "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
+            );
+            // The log may go to stdout or a collector; a refusal to start
+            // must also say why where a supervisor shows it.
+            eprintln!(
+                "error: refusing to start: runtime_state_dir {}: {error}",
+                runtime_state_path.display()
+            );
+            process::exit(1);
+        }
+    };
+    // Panic reports use the same retained authority as all other runtime state.
+    install_panic_hook(Arc::clone(&runtime_state_directory));
 
     #[cfg(feature = "dhat-heap")]
     let profiler = Some(
@@ -3489,6 +3621,7 @@ fn main() -> ExitCode {
         accepted,
         boot_revert_notice,
         launch_identity.expect("daemon boot resolved launch config identity"),
+        runtime_state_directory,
         profiler,
     ));
     shutdown_daemon_runtime(rt);
@@ -3635,7 +3768,7 @@ struct PanicReport<'a> {
 /// `crash_dir` before delegating to the previous hook (the default
 /// stderr backtrace). `rbgp doctor` sweeps these reports into support
 /// bundles.
-fn install_panic_hook(crash_dir: std::path::PathBuf) {
+fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let message = info
@@ -3650,13 +3783,31 @@ fn install_panic_hook(crash_dir: std::path::PathBuf) {
             .unwrap_or("unnamed")
             .to_string();
         // Best-effort: a failing report write must never mask the panic.
-        let _ = write_panic_report(&crash_dir, &message, &location, &thread);
+        let _ = open_state_child_directory(&directory.file, std::ffi::OsStr::new("crash"), true)
+            .and_then(|crash| {
+                let metadata = crash.metadata()?;
+                if metadata.mode() & 0o022 != 0 {
+                    return Err(std::io::Error::other("unsafe crash directory mode"));
+                }
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                write_panic_report_in(
+                    &crash,
+                    &directory.display_path.join("crash"),
+                    now,
+                    &message,
+                    &location,
+                    &thread,
+                )
+            });
         previous(info);
     }));
 }
 
 /// Write one panic report and prune the crash directory to the most
 /// recent [`PANIC_REPORTS_KEPT`] reports.
+#[cfg(test)]
 fn write_panic_report(
     crash_dir: &Path,
     message: &str,
@@ -3670,7 +3821,27 @@ fn write_panic_report(
 }
 
 /// [`write_panic_report`] with the clock read by the caller.
+#[cfg(test)]
 fn write_panic_report_at(
+    crash_dir: &Path,
+    now: Duration,
+    message: &str,
+    location: &str,
+    thread: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(crash_dir)?;
+    write_panic_report_in(
+        &File::open(crash_dir)?,
+        crash_dir,
+        now,
+        message,
+        location,
+        thread,
+    )
+}
+
+fn write_panic_report_in(
+    directory: &File,
     crash_dir: &Path,
     now: Duration,
     message: &str,
@@ -3680,7 +3851,6 @@ fn write_panic_report_at(
     /// Distinguishes reports written by this process in one millisecond.
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    std::fs::create_dir_all(crash_dir)?;
     let report = PanicReport {
         message,
         location,
@@ -3703,30 +3873,43 @@ fn write_panic_report_at(
     // Staged under `<name>.toml.tmp` and renamed into place, so a process
     // that dies mid-write leaves no empty or truncated report; the prune
     // below and `rbgp doctor` only read `*.toml`.
-    confirm_journal::write_state_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
-    prune_panic_reports(crash_dir);
+    confirm_journal::write_state_at(directory, &path, body.as_bytes(), true)
+        .map_err(std::io::Error::other)?;
+    prune_panic_reports(directory);
     Ok(())
 }
 
 /// Remove the oldest `panic-*.toml` reports beyond [`PANIC_REPORTS_KEPT`].
-fn prune_panic_reports(crash_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(crash_dir) else {
+fn prune_panic_reports(directory: &File) {
+    let Ok(mut entries) = nix::dir::Dir::openat(
+        directory,
+        ".",
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    ) else {
         return;
     };
     let mut names: Vec<String> = entries
+        .iter()
         .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| {
-            n.starts_with("panic-")
-                && Path::new(n)
+        .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+        .filter(|name| {
+            name.starts_with("panic-")
+                && Path::new(name)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
         })
         .collect();
     names.sort();
-    while names.len() > PANIC_REPORTS_KEPT {
-        let oldest = names.remove(0);
-        let _ = std::fs::remove_file(crash_dir.join(oldest));
+    for oldest in names
+        .iter()
+        .take(names.len().saturating_sub(PANIC_REPORTS_KEPT))
+    {
+        let _ = nix::unistd::unlinkat(
+            directory,
+            oldest.as_str(),
+            nix::unistd::UnlinkatFlags::NoRemoveDir,
+        );
     }
 }
 
@@ -4474,6 +4657,7 @@ async fn run<T>(
     accepted: Arc<AcceptedConfigSnapshot>,
     boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
     launch_identity: confirm_journal::v3::LaunchIdentity,
+    runtime_state_directory: Arc<PinnedRuntimeStateDirectory>,
     profiler: Option<T>,
 ) -> bool {
     // Install every Unix signal handler before startup can bind or spawn an
@@ -4508,27 +4692,7 @@ async fn run<T>(
 
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
-    let runtime_state_path = config.runtime_state_dir();
-    // Pin the shared authority before any marker, receipt, or bundle access.
-    // Every daemon-owned state file lives here, so an unusable directory, an
-    // unsafe owner or mode, or a final symlink refuses boot.
-    let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
-        Ok(directory) => Some(Arc::new(directory)),
-        Err(error) => {
-            error!(
-                path = %runtime_state_path.display(),
-                %error,
-                "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
-            );
-            // The log may go to stdout or a collector; a refusal to start
-            // must also say why where a supervisor shows it.
-            eprintln!(
-                "error: refusing to start: runtime_state_dir {}: {error}",
-                runtime_state_path.display()
-            );
-            process::exit(1);
-        }
-    };
+    let runtime_state_directory = Some(runtime_state_directory);
     let gr_restart_marker_store = runtime_state_directory
         .as_ref()
         .map(|directory| GrRestartMarkerStore::new(Arc::clone(directory)));
@@ -5640,6 +5804,11 @@ async fn run<T>(
         Box::pin(peer_mgr.run()).await;
     });
 
+    // Serialize persisted runtime mutations and SIGHUP with boot history.
+    // The persister releases its initial permit after recording on the
+    // blocking pool, so gRPC can bind while storage is slow.
+    let runtime_config_lock = RuntimeConfigCoordinator::new();
+
     // Spawn config persister (converts gRPC config events → disk writes).
     //
     // Two inputs feed the persister:
@@ -5666,13 +5835,16 @@ async fn run<T>(
         let (accepted_tx, accepted_rx) = accepted_watch
             .take()
             .expect("accepted watch is created whenever a config file path exists");
-        let persister = ConfigPersister::new_accepted(
+        let persister = ConfigPersister::new_pinned(
             mutation_rx,
             path.clone(),
             Arc::clone(&accepted),
-            Some(config.runtime_state_dir()),
+            runtime_state_directory.clone(),
         );
-        tokio::spawn(persister.run());
+        let boot_permit = runtime_config_lock
+            .try_acquire()
+            .expect("new coordinator has no other owners");
+        tokio::spawn(persister.run(boot_permit));
         tokio::spawn(run_config_bridge_accepted(
             event_rx,
             bridge_replace_rx,
@@ -6193,7 +6365,7 @@ async fn run<T>(
     // an empty `[[fib_tables]]` list returns `None` and leaves
     // route-server / route-reflector deployments control-plane-only.
     let (fib_status_tx, fib_status_rx) =
-        tokio::sync::watch::channel(Vec::<fib_runtime::FibRuntimeStatus>::new());
+        tokio::sync::watch::channel(Arc::new(Vec::<fib_runtime::FibRuntimeStatus>::new()));
     // LAN-1014: tokio broadcast allocates its full slot array at
     // construction. The reconciler's existence is fixed at startup — with no
     // `[[fib_tables]]` it never spawns, and both SIGHUP reload and FIB-table
@@ -6217,6 +6389,7 @@ async fn run<T>(
         fib_runtime::FibRuntimeConfig {
             tables: config.fib_tables.clone(),
             owned_state_path: Some(config.runtime_state_dir().join("fib-owned.json")),
+            owned_state_directory: runtime_state_directory.clone(),
             multipath_relax: config.global.multipath_relax,
             link_bandwidth_weighted: config.global.link_bandwidth_weighted,
         },
@@ -6395,12 +6568,6 @@ async fn run<T>(
         },
         evpn_es_link_drain_shutdown.clone(),
     );
-    // Coordinator lock serializing persisted runtime config mutations with
-    // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, policy/peer-group
-    // catalog CRUD, and the SIGHUP reload path hold it across their
-    // read/apply/persist sequence so stale TOML snapshots cannot clobber
-    // accepted runtime changes.
-    let runtime_config_lock = RuntimeConfigCoordinator::new();
     // The gate and watchdog are process singletons shared by every watched
     // runtime-config owner and the readiness/admission surfaces.
     let daemon_gate = DaemonGate::new();
@@ -6444,7 +6611,18 @@ async fn run<T>(
         )
         .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
         .with_preloaded_planner(peer_mgr_internal_tx.clone())
-        .with_confirm_v3_launch(launch_identity);
+        .with_state_directory(Arc::clone(
+            runtime_state_directory
+                .as_ref()
+                .expect("runtime state pinned"),
+        ))
+        .with_confirm_v3_launch(
+            launch_identity.with_pending_directory(Arc::clone(
+                runtime_state_directory
+                    .as_ref()
+                    .expect("runtime state pinned"),
+            )),
+        );
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
     // stops admitting persisted config mutations and inbound BGP sessions.
@@ -6464,7 +6642,7 @@ async fn run<T>(
     };
     let last_sighup_reload: LastSighupReloadState = Arc::new(Mutex::new(None));
     let last_sighup_reload_read = Arc::clone(&last_sighup_reload);
-    let serve_config = ServeConfig {
+    let mut serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
         listen_port: u32::from(config.global.listen_port),
@@ -6611,10 +6789,9 @@ async fn run<T>(
             let rx = blackhole_status_rx.clone();
             Arc::new(move || rx.borrow().iter().map(blackhole_status_to_proto).collect())
         },
-        fib_route_snapshot: {
-            let rx = fib_status_rx.clone();
-            Arc::new(move || rx.borrow().iter().map(fib_status_to_proto).collect())
-        },
+        // Replaced before binding listeners, after fallible preparation enters
+        // the same startup result channel as listener failures.
+        fib_route_snapshot: rustbgpd_api::rib_service::FibRouteSnapshotReader::default(),
         fib_table_control: Some(fib_table_control::make_owned_fib_table_control_fn(
             fib_table_control::FibTableControlDeps {
                 local_forwarding_state: Some(local_forwarding_state.clone()),
@@ -6668,6 +6845,15 @@ async fn run<T>(
     };
     let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
     let mut grpc_handle = tokio::spawn(async move {
+        match make_fib_route_snapshot(fib_status_rx).await {
+            Ok(snapshot) => serve_config.fib_route_snapshot = snapshot,
+            Err(error) => {
+                let _ = grpc_startup_tx.send(Err(format!(
+                    "failed to prepare FIB status publication: {error}"
+                )));
+                return;
+            }
+        }
         rustbgpd_api::server::serve(
             grpc_listeners,
             grpc_rib_tx,
@@ -6686,7 +6872,7 @@ async fn run<T>(
     let mut initial_peer_boot_failed = match grpc_startup_rx.await {
         Ok(Ok(())) => false,
         Ok(Err(error)) => {
-            error!(error = %error, "failed to bind every configured gRPC listener");
+            error!(error = %error, "failed to start configured gRPC services");
             component_failed = true;
             true
         }
@@ -6696,7 +6882,7 @@ async fn run<T>(
             true
         }
     };
-    let grpc_listener_boot_failed = initial_peer_boot_failed;
+    let grpc_service_boot_failed = initial_peer_boot_failed;
     let mut initial_roster_hold = None;
     if !initial_peer_boot_failed && let Ok(path) = std::env::var(TEST_INITIAL_ROSTER_HOLD_ENV) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -6853,8 +7039,8 @@ async fn run<T>(
     }
 
     if initial_peer_boot_failed {
-        if grpc_listener_boot_failed {
-            info!("initiating shortened coordinated shutdown after gRPC listener startup failure");
+        if grpc_service_boot_failed {
+            info!("initiating shortened coordinated shutdown after gRPC service startup failure");
         } else {
             info!(
                 "initiating shortened coordinated shutdown after configured-peer startup failure"
@@ -8069,6 +8255,229 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    fn fib_read_status(table_id: u32) -> fib_runtime::FibRuntimeStatus {
+        fib_runtime::FibRuntimeStatus {
+            table_name: "edge".to_string(),
+            table_id,
+            metric: 200,
+            prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                "192.0.2.0".parse().unwrap(),
+                24,
+            )),
+            next_hop: None,
+            next_hops: Vec::new(),
+            peer: None,
+            peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            state: fib_runtime::FibRuntimeState::Installed,
+            reason: "owned".to_string(),
+            sampling: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn fib_snapshot_reuses_projection_between_publications() {
+        let status = fib_read_status(1000);
+        let (_tx, rx) = tokio::sync::watch::channel(Arc::new(vec![status]));
+        FIB_SNAPSHOT_PROJECTIONS.with(|count| count.set(0));
+        let provider = make_fib_route_snapshot(rx).await.unwrap();
+        assert_eq!(
+            FIB_SNAPSHOT_PROJECTIONS.with(std::cell::Cell::get),
+            0,
+            "initial projection ran on the executor"
+        );
+        provider.with_snapshot(|first| {
+            assert_eq!(first.len(), 1);
+            provider.with_snapshot(|second| {
+                assert_eq!(
+                    first.as_ptr(),
+                    second.as_ptr(),
+                    "unchanged publication was converted again"
+                );
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn fib_snapshot_rebuild_releases_source_and_publishes_before_coalescing() {
+        let (source_tx, source_rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (published_tx, mut published_rx) =
+            tokio::sync::watch::channel(rustbgpd_api::rib_service::FibRouteSnapshot::default());
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let executor_thread = std::thread::current().id();
+        let worker = tokio::spawn(refresh_fib_route_snapshots(
+            source_rx,
+            published_tx,
+            move |rows| {
+                assert_ne!(std::thread::current().id(), executor_thread);
+                started_tx.send(rows[0].table_id).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                project_fib_route_snapshot(rows)
+            },
+        ));
+
+        source_tx.send_replace(Arc::new(vec![fib_read_status(1)]));
+        assert_eq!(started_rx.recv().await, Some(1));
+        // A publication must not wait for the reader's paused index builder.
+        let changes = tokio::task::spawn_blocking(move || {
+            source_tx.send_replace(Arc::new(vec![fib_read_status(2)]));
+            source_tx.send_replace(Arc::new(vec![fib_read_status(3)]));
+            source_tx
+        });
+        let publication = tokio::time::timeout(std::time::Duration::from_secs(5), changes).await;
+        release_tx.send(()).unwrap();
+        let source_tx = publication
+            .expect("FIB publication waited for a reader rebuild")
+            .unwrap();
+        assert_eq!(started_rx.recv().await, Some(3));
+        let first = published_rx.borrow_and_update()[0].clone();
+        assert_eq!(first.table_id, 1, "completed generation must be published");
+        release_tx.send(()).unwrap();
+        published_rx.changed().await.unwrap();
+        assert_eq!(published_rx.borrow()[0].table_id, 3);
+        assert_eq!(
+            first.table_id, 1,
+            "retained publication must stay immutable"
+        );
+        drop(source_tx);
+        worker.await.unwrap();
+    }
+
+    fn fib_measurement_rows(
+        count: u32,
+        generation: u32,
+        shape: &str,
+    ) -> Arc<Vec<fib_runtime::FibRuntimeStatus>> {
+        Arc::new(
+            (0..count)
+                .map(|i| {
+                    let mut row = fib_read_status(1000);
+                    row.metric = generation;
+                    row.prefix = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                        (0x0a00_0000 + i).into(),
+                        32,
+                    ));
+                    row.peer = Some(
+                        std::net::Ipv4Addr::new(198, 51, 100, u8::try_from(i % 8 + 1).unwrap())
+                            .into(),
+                    );
+                    if shape == "all" {
+                        row.table_name = format!("table{}", i % 4);
+                        row.table_id += i % 4;
+                        row.state = [
+                            fib_runtime::FibRuntimeState::Installed,
+                            fib_runtime::FibRuntimeState::Rejected,
+                            fib_runtime::FibRuntimeState::Failed,
+                        ][i as usize % 3];
+                        row.reason = format!("reason{}", i % 2);
+                    }
+                    row
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn report_fib_measurement_memory(phase: &str) {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        for line in status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+        {
+            eprintln!("fib_memory phase={phase} {line}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "large FIB publication overlap measurement"]
+    async fn fib_publication_overlap_receipt() {
+        let count: u32 = std::env::var("FIB_READ_RECEIPT_ROUTES")
+            .map_or(100_000, |value| value.parse().unwrap());
+        let shape =
+            std::env::var("FIB_READ_RECEIPT_SHAPE").unwrap_or_else(|_| "common".to_string());
+        assert!(["common", "all"].contains(&shape.as_str()));
+        let (source_tx, source_rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (published_tx, mut published_rx) =
+            tokio::sync::watch::channel(rustbgpd_api::rib_service::FibRouteSnapshot::default());
+        let (built_tx, mut built_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor_thread = std::thread::current().id();
+        let worker = tokio::spawn(refresh_fib_route_snapshots(
+            source_rx,
+            published_tx,
+            move |rows| {
+                assert_ne!(std::thread::current().id(), executor_thread);
+                let generation = rows[0].metric;
+                let started = std::time::Instant::now();
+                let snapshot = project_fib_route_snapshot(rows);
+                eprintln!(
+                    "fib_build generation={generation} rows={} elapsed_ms={}",
+                    snapshot.len(),
+                    started.elapsed().as_millis()
+                );
+                built_tx.send(generation).unwrap();
+                snapshot
+            },
+        ));
+        let first = fib_measurement_rows(count, 1, &shape);
+        let first_start = std::time::Instant::now();
+        source_tx.send_replace(first);
+        published_rx.changed().await.unwrap();
+        assert_eq!(built_rx.recv().await, Some(1));
+        assert_eq!(published_rx.borrow_and_update()[0].metric, 1);
+        eprintln!(
+            "fib_publish shape={shape} generation=1 rows={count} lag_ms={}",
+            first_start.elapsed().as_millis()
+        );
+        report_fib_measurement_memory("first");
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let held = published_rx.clone();
+        let reader = tokio::task::spawn_blocking(move || {
+            let snapshot = held.borrow();
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            assert_eq!(snapshot[0].metric, 1);
+        });
+        entered_rx.await.unwrap();
+        let second = fib_measurement_rows(count, 2, &shape);
+        source_tx.send_replace(second);
+        assert_eq!(built_rx.recv().await, Some(2));
+        assert!(
+            !published_rx.has_changed().unwrap(),
+            "held reader must pin the old publication"
+        );
+        report_fib_measurement_memory("old_and_prepared");
+        let third = fib_measurement_rows(count, 3, &shape);
+        let latest_start = std::time::Instant::now();
+        source_tx.send_replace(third);
+        eprintln!(
+            "fib_source_publish rows={count} elapsed_ms={}",
+            latest_start.elapsed().as_millis()
+        );
+        report_fib_measurement_memory("old_prepared_and_latest_source");
+        release_tx.send(()).unwrap();
+        reader.await.unwrap();
+        loop {
+            published_rx.changed().await.unwrap();
+            if published_rx.borrow_and_update()[0].metric == 3 {
+                break;
+            }
+        }
+        assert_eq!(built_rx.recv().await, Some(3));
+        eprintln!(
+            "fib_publish shape={shape} generation=3 rows={count} lag_ms={}",
+            latest_start.elapsed().as_millis()
+        );
+        report_fib_measurement_memory("latest");
+        drop(source_tx);
+        worker.await.unwrap();
+        tokio::task::spawn_blocking(move || drop(published_rx))
+            .await
+            .unwrap();
+        report_fib_measurement_memory("released");
+    }
 
     /// Each validation forwarder keeps one revalidation pass in flight and
     /// merges the deltas that arrive meanwhile into one, sent when that pass
@@ -10748,6 +11157,28 @@ mod tests {
         // Human-panic pattern: never environment or argv material.
         assert!(value.get("env").is_none());
         assert!(value.get("args").is_none());
+    }
+
+    #[test]
+    fn panic_report_stays_in_the_pinned_directory_after_a_chained_symlink_swap() {
+        let state = crate::test_support::RuntimeStateRedirect::new();
+        let pinned = PinnedRuntimeStateDirectory::prepare(&state.path).unwrap();
+        let crash = state.path.join("crash");
+        std::fs::create_dir(&crash).unwrap();
+        state.redirect();
+        let directory =
+            open_state_child_directory(&pinned.file, std::ffi::OsStr::new("crash"), true).unwrap();
+        write_panic_report_in(
+            &directory,
+            &crash,
+            Duration::from_secs(1),
+            "test panic",
+            "test location",
+            "test thread",
+        )
+        .unwrap();
+        assert_eq!(read_panic_reports(&state.original.join("crash")).len(), 1);
+        assert_eq!(std::fs::read_dir(&state.replacement).unwrap().count(), 0);
     }
 
     /// Every `panic-*.toml` report in `dir`, parsed.

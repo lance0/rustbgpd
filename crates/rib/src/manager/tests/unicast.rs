@@ -109,6 +109,7 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
     let handle = tokio::spawn(manager.run());
     let target = PeerId::from_addr("192.0.2.90".parse().unwrap());
     let source = PeerId::from_addr("198.51.100.90".parse().unwrap());
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
@@ -305,6 +306,7 @@ async fn partial_community_attributes_survive_policy_update_group_and_wire_encod
     let handle = tokio::spawn(manager.run());
     let target = PeerId::from_addr("192.0.2.91".parse().unwrap());
     let source = PeerId::from_addr("198.51.100.91".parse().unwrap());
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
@@ -388,8 +390,14 @@ async fn seed_three_dual_stack_candidates(
     let v6 = Ipv6Prefix::new("2001:db8:700::".parse().unwrap(), 48);
     for host in 1..=3 {
         let v4_route = make_route(v4, Ipv4Addr::new(10, 0, 0, host));
+        tx.send(registering_peer_up(v4_route.peer, 0))
+            .await
+            .unwrap();
         tx.send(received(v4_route)).await.unwrap();
         let v6_route = make_v6_route(v6, format!("2001:db8:700::{host}").parse().unwrap());
+        tx.send(registering_peer_up(v6_route.peer, 0))
+            .await
+            .unwrap();
         tx.send(received(v6_route)).await.unwrap();
     }
     let (reply, result) = oneshot::channel();
@@ -614,6 +622,9 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     let source = Ipv4Addr::new(198, 51, 100, 10);
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -654,7 +665,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         IpAddr::V6(_) => unreachable!("fixture is IPv4"),
     };
     tx.send(RibUpdate::RoutesReceived {
-        session_id: 0,
+        session_id: 7,
         peer: target,
         announced: vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24),
@@ -688,6 +699,9 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     .unwrap();
     let v6 = Ipv6Prefix::new("2001:db8:676::".parse().unwrap(), 64);
     let v6_route = make_v6_route(v6, "2001:db8:676::1".parse().unwrap());
+    tx.send(registering_peer_up(v6_route.peer, 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: v6_route.peer,
@@ -829,6 +843,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
     let source = peer_v4(Ipv4Addr::new(198, 51, 100, 10));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 10));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1045,6 +1060,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
 
     let advertised_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let advertised = make_route(advertised_prefix, Ipv4Addr::new(198, 51, 100, 1));
+    tx.send(registering_peer_up(advertised.peer, 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: advertised.peer,
@@ -1059,7 +1077,11 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.map(delivered).unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .map(delivered)
+            .unwrap();
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(update.otc_blocked.is_empty());
@@ -1080,7 +1102,11 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.map(delivered).unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .map(delivered)
+            .unwrap();
         assert!(update.announce.is_empty());
         assert_eq!(
             update.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -1101,6 +1127,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         make_route(never_advertised_prefix, Ipv4Addr::new(198, 51, 100, 2)),
         64512,
     );
+    tx.send(registering_peer_up(never_advertised.peer, 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: never_advertised.peer,
@@ -1115,7 +1144,11 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (peer, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.map(delivered).unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .map(delivered)
+            .unwrap();
         assert!(update.announce.is_empty());
         assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.otc_blocked.len(), 1);
@@ -1178,7 +1211,11 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         .unwrap();
     }
     for (_, out_rx) in &mut receivers {
-        let refresh = out_rx.recv().await.map(delivered).unwrap();
+        let refresh = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .map(delivered)
+            .unwrap();
         assert_eq!(refresh.refresh_markers.len(), 2);
         assert!(
             refresh.otc_blocked.is_empty(),
@@ -1201,7 +1238,11 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.map(delivered).unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .map(delivered)
+            .unwrap();
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(
@@ -1229,9 +1270,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .unwrap();
     for (_, out_rx) in &mut receivers {
         assert_eq!(
-            out_rx
-                .recv()
+            tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
                 .await
+                .expect("outbound update timed out")
                 .map(delivered)
                 .unwrap()
                 .otc_blocked
@@ -1275,9 +1316,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     assert_eq!(
-        rejoined_rx
-            .recv()
+        tokio::time::timeout(Duration::from_secs(5), rejoined_rx.recv())
             .await
+            .expect("outbound update timed out")
             .map(delivered)
             .unwrap()
             .otc_blocked
@@ -1339,6 +1380,7 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
         ),
         64512,
     );
+    tx.send(registering_peer_up(blocked.peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: blocked.peer,
@@ -1360,7 +1402,11 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
     }
     drain_eor(&mut out_rx).await;
     tokio::time::advance(Duration::from_secs(2)).await;
-    let recovered = out_rx.recv().await.map(delivered).unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .map(delivered)
+        .unwrap();
     assert!(recovered.announce.is_empty());
     assert_eq!(recovered.otc_blocked.len(), 1);
     let (reply, result) = oneshot::channel();
@@ -1441,6 +1487,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
         64512,
     );
     let blocked_key = (blocked.prefix, blocked.path_id);
+    tx.send(registering_peer_up(blocked.peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: blocked.peer,
@@ -1480,6 +1527,9 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24),
         Ipv4Addr::new(198, 51, 100, 22),
     );
+    tx.send(registering_peer_up(permitted.peer, 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: permitted.peer,
@@ -1493,7 +1543,11 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     })
     .await
     .unwrap();
-    let recovered = out_rx.recv().await.map(delivered).unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .map(delivered)
+        .unwrap();
     assert_eq!(recovered.announce.len(), 1);
     assert_eq!(recovered.announce[0].prefix, permitted.prefix);
     assert!(
@@ -1803,6 +1857,9 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     let mut v6_routes = Vec::new();
     for host in 1..=3 {
         let v4_route = make_route(v4, Ipv4Addr::new(10, 0, 0, host));
+        tx.send(registering_peer_up(v4_route.peer, 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: v4_route.peer,
@@ -1819,6 +1876,9 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
         v4_routes.push(v4_route);
 
         let v6_route = make_v6_route(v6, format!("2001:db8::{host}").parse().unwrap());
+        tx.send(registering_peer_up(v6_route.peer, 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: v6_route.peer,
@@ -1967,6 +2027,7 @@ async fn routes_received_and_queried() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -2021,6 +2082,7 @@ async fn large_routes_received_batch_preserves_final_state() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let next_hop = Ipv4Addr::new(10, 0, 0, 1);
     let routes: Vec<Route> = (0..2500).map(|i| make_indexed_route(i, next_hop)).collect();
 
@@ -2093,6 +2155,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
 
     // Flood 2500 routes (3 chunks at the 1024 chunk size) from a source peer.
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let next_hop = Ipv4Addr::new(10, 0, 0, 1);
     let route_count = 2500_u32;
     let routes: Vec<Route> = (0..route_count)
@@ -2145,6 +2208,7 @@ async fn query_channel_observes_partial_progress_during_large_batch() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let next_hop = Ipv4Addr::new(10, 0, 0, 1);
     let route_count = 20_000_u32;
     let routes: Vec<Route> = (0..route_count)
@@ -2195,6 +2259,7 @@ async fn peer_down_clears_routes() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -2233,6 +2298,7 @@ async fn withdrawal_removes_route() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -2282,7 +2348,9 @@ async fn query_all_peers() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2335,7 +2403,9 @@ async fn best_routes_returns_winner() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
 
     // Peer1: local_pref 100
     tx.send(RibUpdate::RoutesReceived {
@@ -2391,7 +2461,9 @@ async fn peer_down_promotes_second_best() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2453,7 +2525,9 @@ async fn withdrawal_updates_best() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2523,7 +2597,9 @@ async fn different_best_per_prefix() {
     let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 16);
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
 
     // Peer1 wins prefix_a (higher LP), peer2 wins prefix_b (higher LP)
     tx.send(RibUpdate::RoutesReceived {
@@ -2595,6 +2671,7 @@ async fn peer_up_triggers_initial_table_dump() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -2637,7 +2714,7 @@ async fn peer_up_triggers_initial_table_dump() {
     .unwrap();
 
     // Should receive initial table dump
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(update.unicast_withdrawals().count(), 0);
@@ -2677,6 +2754,7 @@ async fn route_change_distributes_to_peer() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2692,7 +2770,7 @@ async fn route_change_distributes_to_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -2734,6 +2812,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
     route.path_id = 42;
 
+    tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: route.peer,
@@ -2748,7 +2827,11 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .map(delivered)
+        .unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(update.announce[0].path_id, 0);
@@ -2893,6 +2976,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
 
     // Source: iBGP peer
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2948,6 +3032,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
 
     // Source: iBGP peer
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2988,7 +3073,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     .unwrap();
 
     // Initial dump includes the route (iBGP→eBGP is allowed)
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -3007,6 +3092,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
 
     // Source: eBGP peer
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -3047,7 +3133,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     .unwrap();
 
     // Initial dump includes the route (eBGP→iBGP is allowed)
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -3066,6 +3152,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
 
     // Setup: eBGP source announces route, iBGP target receives it
     let ebgp_source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(ebgp_source, 0)).await.unwrap();
     let ibgp_target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -3107,7 +3194,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
 
     // Now the eBGP source goes down, replaced by iBGP source
@@ -3119,11 +3206,12 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     .unwrap();
 
     // Withdraw should be sent to iBGP target
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.unicast_withdrawals().count(), 1);
 
     // iBGP source announces the same prefix
     let ibgp_source = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    tx.send(registering_peer_up(ibgp_source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: ibgp_source,
@@ -3544,6 +3632,7 @@ async fn distribute_changes_filters_unsendable_families() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -3583,7 +3672,7 @@ async fn distribute_changes_filters_unsendable_families() {
     .unwrap();
 
     // Should only receive IPv4 route
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
     assert_eq!(update.unicast_withdrawals().count(), 0);
@@ -3606,6 +3695,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -3670,7 +3760,7 @@ async fn send_initial_table_filters_unsendable_families() {
     .unwrap();
 
     // Initial table dump should only contain IPv4
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
     assert_eq!(update.unicast_withdrawals().count(), 0);
@@ -3693,6 +3783,7 @@ async fn dual_stack_peer_receives_both_families() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -3756,7 +3847,7 @@ async fn dual_stack_peer_receives_both_families() {
     .unwrap();
 
     // Should receive both routes in initial dump
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 2);
 
     drop(tx);
@@ -4005,6 +4096,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 
     // Register target first (Loc-RIB empty, clean EoR)
@@ -4096,6 +4188,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
     // eBGP source sends a route
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 5));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -4110,7 +4203,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(
         !update.announce.is_empty(),
         "eBGP route should reach iBGP non-client"
@@ -4230,6 +4323,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     let prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48);
     let mut route = make_v6_route(prefix, source);
     route.link_local_next_hop = Some("fe80::1".parse().unwrap());
+    tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: PeerId::from_addr(IpAddr::V6(source)),
@@ -4244,8 +4338,9 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     .await
     .unwrap();
     let _ = query_best_routes(&tx).await;
-    let announced = out_rx
-        .try_recv()
+    let announced = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .map(delivered)
         .expect("initial route is announced");
     assert_eq!(announced.announce.len(), 1);
@@ -4269,8 +4364,9 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     .await
     .unwrap();
     let _ = query_best_routes(&tx).await;
-    let re_advertised = out_rx
-        .try_recv()
+    let re_advertised = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .map(delivered)
         .expect("link-local-only next-hop change is re-advertised");
     assert_eq!(re_advertised.announce.len(), 1);
@@ -4317,6 +4413,7 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
     let prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48);
     let mut route = make_v6_route(prefix, source);
     route.next_hop = "fe80::1".parse().unwrap();
+    tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
     for (step, ifindex) in [Some(7), Some(8), None, Some(7), Some(7)]
         .into_iter()
         .enumerate()
@@ -4350,8 +4447,9 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
             ));
             continue;
         }
-        let update = out_rx
-            .try_recv()
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
             .map(delivered)
             .expect("scope change is re-advertised");
         assert_eq!(update.announce.len(), 1);
@@ -4410,6 +4508,7 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let route = with_otc(make_route(prefix, Ipv4Addr::new(198, 51, 100, 1)), 64512);
+        tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -4423,7 +4522,11 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
         })
         .await
         .unwrap();
-        let update = out_rx.recv().await.map(delivered).unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .map(delivered)
+            .unwrap();
         assert!(update.otc_blocked.is_empty(), "role {role:?}");
         assert_eq!(update.announce.len(), 1, "role {role:?}");
         assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
@@ -4569,6 +4672,10 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::LocalPref(200),
     ]);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -4718,6 +4825,10 @@ async fn unchanged_reinjection_keeps_rpki_state_and_selection() {
         attrs.retain(|attr| !matches!(attr, PathAttribute::LocalPref(_)));
         attrs.push(PathAttribute::LocalPref(200));
     });
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),

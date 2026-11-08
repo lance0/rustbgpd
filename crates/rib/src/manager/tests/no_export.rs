@@ -182,10 +182,14 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
     let source = peer_v4(Ipv4Addr::new(198, 51, 100, 10));
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 10));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![plain.clone()]).await;
     let _ = query_best_routes(&tx).await;
     for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
-        let update = out_rx.try_recv().expect("plain route announced");
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .expect("plain route announced");
         assert_eq!(update.announce.len(), 1);
     }
 
@@ -203,8 +207,9 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
 
         // Honor-mode eBGP: withdrawn, explained by the no_export rung,
         // pre-policy (no modifications recorded).
-        let update = honor_rx
-            .try_recv()
+        let update = tokio::time::timeout(Duration::from_secs(5), honor_rx.recv())
+            .await
+            .expect("outbound update timed out")
             .expect("tagged replacement must withdraw from the honor peer");
         assert!(update.announce.is_empty());
         assert_eq!(
@@ -230,8 +235,9 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
             (transparent, &mut transparent_rx),
             (internal, &mut internal_rx),
         ] {
-            let update = out_rx
-                .try_recv()
+            let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+                .await
+                .expect("outbound update timed out")
                 .expect("tagged replacement re-announced to non-suppressed peers");
             assert_eq!(update.announce.len(), 1, "{peer}");
             assert!(update.unicast_withdrawals().next().is_none(), "{peer}");
@@ -243,7 +249,10 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
         announce_unicast(&tx, source, vec![plain.clone()]).await;
         let _ = query_best_routes(&tx).await;
         for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
-            let update = out_rx.try_recv().expect("plain route restored");
+            let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+                .await
+                .expect("outbound update timed out")
+                .expect("plain route restored");
             assert_eq!(update.announce.len(), 1);
         }
     }
@@ -275,10 +284,12 @@ async fn policy_added_no_export_is_delivered_and_policy_removed_does_not_bypass(
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 11));
 
     // Policy-added NO_EXPORT: the modified route goes out carrying it.
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![plain.clone()]).await;
     let _ = query_best_routes(&tx).await;
-    let update = adder_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), adder_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("policy-added NO_EXPORT must still be delivered");
     assert_eq!(update.announce.len(), 1);
     let advertised = &update.announce[0];
@@ -297,8 +308,9 @@ async fn policy_added_no_export_is_delivered_and_policy_removed_does_not_bypass(
 
     // Policy-removed NO_EXPORT: the SOURCE route carries it, so the
     // suppression fires before the chain can strip it.
-    let update = remover_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), remover_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("plain route reaches the remover peer");
     assert_eq!(update.announce.len(), 1);
     announce_unicast(
@@ -311,8 +323,9 @@ async fn policy_added_no_export_is_delivered_and_policy_removed_does_not_bypass(
     )
     .await;
     let _ = query_best_routes(&tx).await;
-    let update = remover_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), remover_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("source NO_EXPORT withdraws despite the removal policy");
     assert!(update.announce.is_empty());
     assert_eq!(
@@ -376,6 +389,7 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
     }
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let plain = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = plain.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -388,7 +402,10 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
     .unwrap();
     let _ = query_best_routes(&tx).await;
     for (peer, out_rx) in &mut receivers {
-        let update = out_rx.try_recv().expect("plain VPN route announced");
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .expect("plain VPN route announced");
         assert_eq!(update.vpn_announce.len(), 1, "{peer}");
     }
 
@@ -409,15 +426,17 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
     let _ = query_best_routes(&tx).await;
 
     let (_, honor_rx) = &mut receivers[0];
-    let update = honor_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), honor_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("tagged VPN route withdrawn from the honor peer");
     assert!(update.vpn_announce.is_empty());
     assert_eq!(update.vpn_withdraw, vec![key]);
 
     let (_, transparent_rx) = &mut receivers[1];
-    let update = transparent_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), transparent_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("tagged VPN route re-announced to the transparent peer");
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_withdraw.len(), 0);
@@ -462,6 +481,7 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
     }
 
     let source = peer_v4(Ipv4Addr::new(192, 0, 2, 11));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let plain = make_labeled_rib_route(Ipv4Addr::new(192, 0, 2, 11), 44, 100, 100);
     let key = plain.key();
     tx.send(RibUpdate::LabeledRoutesReceived {
@@ -474,7 +494,10 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
     .unwrap();
     let _ = query_best_routes(&tx).await;
     for (peer, out_rx) in &mut receivers {
-        let update = out_rx.try_recv().expect("plain labeled route announced");
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .expect("plain labeled route announced");
         assert_eq!(update.labeled_announce.len(), 1, "{peer}");
     }
 
@@ -495,15 +518,17 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
     let _ = query_best_routes(&tx).await;
 
     let (_, honor_rx) = &mut receivers[0];
-    let update = honor_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), honor_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("tagged labeled route withdrawn from the honor peer");
     assert!(update.labeled_announce.is_empty());
     assert_eq!(update.labeled_withdraw, vec![key]);
 
     let (_, transparent_rx) = &mut receivers[1];
-    let update = transparent_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), transparent_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("tagged labeled route re-announced to the transparent peer");
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_withdraw.len(), 0);
@@ -534,6 +559,12 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
         make_route_with_lp(prefix, source_b, 100),
         vec![rustbgpd_wire::COMMUNITY_NO_EXPORT],
     );
+    tx.send(registering_peer_up(peer_v4(source_a), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(source_b), 0))
+        .await
+        .unwrap();
     announce_unicast(&tx, peer_v4(source_a), vec![best]).await;
     announce_unicast(&tx, peer_v4(source_b), vec![sibling]).await;
     let _ = query_best_routes(&tx).await;
@@ -630,6 +661,7 @@ fn explain_best_path_add_path_ranks_match_live_llgr_stale_staging() {
         vec![rustbgpd_wire::COMMUNITY_LLGR_STALE],
     );
     for route in [best, sibling] {
+        register_test_peer(&mut manager, route.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -694,6 +726,7 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 30));
 
     // Carried LLGR_STALE alone: eligible (peer advertised LLGR).
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(
         &tx,
         source,
@@ -704,8 +737,9 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
     )
     .await;
     let _ = query_best_routes(&tx).await;
-    let update = out_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("LLGR-stale route deliverable to an LLGR-capable eBGP peer");
     assert_eq!(update.announce.len(), 1);
 
@@ -723,8 +757,9 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
     )
     .await;
     let _ = query_best_routes(&tx).await;
-    let update = out_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("§4.6-form route withdrawn despite LLGR eligibility");
     assert!(update.announce.is_empty());
     assert_eq!(

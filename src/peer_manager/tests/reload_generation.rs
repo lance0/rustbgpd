@@ -2750,7 +2750,11 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
     let (bridge_tx, bridge_rx) = mpsc::channel(16);
     let (mutation_tx, mutation_rx) = mpsc::channel(16);
     let persister = tokio::spawn(
-        ConfigPersister::new_accepted(mutation_rx, fixture.config_path.clone(), prior, None).run(),
+        ConfigPersister::new_accepted(mutation_rx, fixture.config_path.clone(), prior, None).run(
+            crate::RuntimeConfigCoordinator::new()
+                .try_acquire()
+                .unwrap(),
+        ),
     );
     let bridge = tokio::spawn(run_config_bridge_accepted(
         events_rx,
@@ -4961,6 +4965,29 @@ fn relay_conditional_sets_to_real_rib(
     let real =
         rustbgpd_rib::RibManager::new(real_rx, query_rx, None, None, harness.mgr.metrics.clone())
             .with_conditional_advertisements(harness.mgr.conditional_advertisements.clone());
+    // Register this fixture's ingress once, before the relay can forward routes.
+    let source = Ipv4Addr::new(10, 0, 0, 50);
+    let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+    real_tx
+        .try_send(RibUpdate::PeerUp {
+            peer: PeerId::from_addr(IpAddr::V4(source)),
+            session_id: 0,
+            peer_asn: 65050,
+            peer_router_id: source,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: Vec::new(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .unwrap();
     let real = tokio::spawn(real.run());
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&recorded);

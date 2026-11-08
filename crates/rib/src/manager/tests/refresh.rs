@@ -125,6 +125,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 34, 100);
     let key = route.key();
 
@@ -160,8 +161,8 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     .await
     .unwrap();
 
-    let _initial = out_rx.recv().await.map(delivered).unwrap();
-    let _eor = out_rx.recv().await.map(delivered).unwrap();
+    let _initial = fixture_update(out_rx.recv()).await;
+    let _eor = fixture_update(out_rx.recv()).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),
@@ -173,7 +174,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(update.announce.is_empty());
     assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.bgpls_announce.len(), 1);
@@ -962,6 +963,8 @@ async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let retained_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
+
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1108,6 +1111,8 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let retained_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1590,6 +1595,7 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
             BgpMetrics::new(),
         );
         manager.test_force_ungrouped = !grouped;
+        register_test_peer(&mut manager, peer_v4(source), 0);
         let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 71));
         // `grouped` adds a sibling with the same configuration, so the
         // receiver shares an update group where its families allow one.

@@ -4309,6 +4309,7 @@ fn grouped_vpn_non_full_encoder_refusal_keeps_the_owed_withdrawal() {
     assert_eq!(manager.peer_sendable_families[&MEMBER], families);
     let group = &manager.group_ribs[&manager.vpn_grouped_member_of(MEMBER).unwrap()];
     assert!(group.stages_vpn() && group.is_rr_client);
+    crate::manager::tests::register_test_peer(&mut manager, OTHER1, 0);
     let route = vpn_route(1, OTHER1);
     let key = route.key();
     assert_eq!(route.origin_type, crate::route::RouteOrigin::Ibgp);
@@ -4385,6 +4386,7 @@ fn receive_vpn(
     announced: Vec<VpnRibRoute>,
     withdrawn: Vec<VpnRibRouteKey>,
 ) {
+    crate::manager::tests::register_test_peer(manager, peer, 0);
     manager.handle_update(crate::update::RibUpdate::VpnRoutesReceived {
         peer,
         session_id: 0,
@@ -5444,6 +5446,7 @@ fn register_ungrouped_pcb_peer(
 
 /// Feed inbound routes through the REAL chunked distribution pass.
 fn receive_routes(m: &mut RibManager, source: PeerId, announced: Vec<Route>) {
+    crate::manager::tests::register_test_peer(m, source, 0);
     m.handle_update(crate::update::RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,

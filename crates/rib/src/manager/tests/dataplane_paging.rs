@@ -71,6 +71,8 @@ fn route(prefix: Prefix, peer: Ipv4Addr, next_hop: IpAddr, as_path: &[u32]) -> R
 }
 
 fn apply_routes(manager: &mut RibManager, peer: Ipv4Addr, announced: Vec<Route>) {
+    register_test_peer(manager, peer_v4(peer), 0);
+
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer),

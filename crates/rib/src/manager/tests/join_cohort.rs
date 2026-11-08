@@ -105,7 +105,7 @@ fn peer_up(
 
 fn announce(peer: Ipv4Addr, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
-        // The table source is an unregistered legacy producer.
+        // The table source uses a receive-only session fixture.
         session_id: if peer == SOURCE { 0 } else { SESSION },
         peer: peer_v4(peer),
         announced,
@@ -208,6 +208,7 @@ async fn run(
         route(3, SOURCE, vec![]),
     ];
     table.extend_from_slice(extra);
+    register_test_peer(&mut manager, peer_v4(SOURCE), 0);
     manager.handle_update(announce(SOURCE, table));
     drain_route_chunks(&mut manager);
 

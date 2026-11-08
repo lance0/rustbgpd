@@ -14,6 +14,8 @@ fn prefix(octet: u8) -> Ipv4Prefix {
 
 fn source_update(manager: &mut RibManager, announce: &[u8]) {
     let source = Ipv4Addr::new(192, 0, 2, 1);
+
+    register_test_peer(manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,

@@ -104,6 +104,41 @@ fn parse(toml_str: &str) -> Result<Config, ConfigError> {
 }
 
 #[test]
+fn mrt_file_prefix_must_be_one_filename_component() {
+    for prefix in [
+        "", ".", "..", "/rib", "../rib", "dir/rib", "dir\\rib", "rib\0",
+    ] {
+        let source = format!(
+            "{}\n[mrt]\noutput_dir = '/tmp/mrt'\nfile_prefix = {}\n",
+            valid_toml(),
+            toml::Value::String(prefix.to_string())
+        );
+        assert!(
+            matches!(parse(&source), Err(ConfigError::InvalidMrtConfig { .. })),
+            "accepted {prefix:?}"
+        );
+    }
+    for prefix in ["rib", "rib.v1", "route-dump_1"] {
+        let source = format!(
+            "{}\n[mrt]\noutput_dir = '/tmp/mrt'\nfile_prefix = '{prefix}'\n",
+            valid_toml()
+        );
+        parse(&source).unwrap();
+    }
+}
+
+#[test]
+fn mrt_zero_dump_interval_is_rejected_before_manager_start() {
+    let source = format!(
+        "{}\n[mrt]\noutput_dir = '/tmp/mrt'\ndump_interval = 0\n",
+        valid_toml()
+    );
+    assert!(
+        matches!(parse(&source), Err(ConfigError::InvalidMrtConfig { reason }) if reason == "dump_interval must be > 0")
+    );
+}
+
+#[test]
 fn valid_config_parses() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(config.global.asn, 65001);

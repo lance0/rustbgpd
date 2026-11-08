@@ -130,6 +130,15 @@ async fn announce_from(tx: &mpsc::Sender<RibUpdate>, source: Ipv4Addr, routes: V
     .unwrap();
 }
 
+async fn next_outbound(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> OutboundRouteUpdate {
+    delivered(
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected an outbound update within 2s")
+            .expect("outbound channel open"),
+    )
+}
+
 /// Round-trip a query so all prior sends are fully processed.
 async fn sync(tx: &mpsc::Sender<RibUpdate>) {
     let _ = query_best_routes(tx).await;
@@ -168,6 +177,12 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
@@ -185,7 +200,7 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     // Per-client-best client: same chain, receives the runner-up.
     let mitigated = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut mitigated_rx = client_peer_up(&tx, mitigated, Some(deny_tagged_chain()), true).await;
-    let dump = mitigated_rx.recv().await.map(delivered).unwrap();
+    let dump = next_outbound(&mut mitigated_rx).await;
     assert_eq!(dump.announce.len(), 1, "exactly the filtered best");
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(dump.announce[0].path_id, 0, "single-best shape");
@@ -216,6 +231,12 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     let initial_best = ebgp_route(prefix(), SOURCE_A, vec![65001], vec![]);
     announce_from(&tx, SOURCE_A, vec![initial_best]).await;
@@ -230,7 +251,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
         true,
     )
     .await;
-    let initial = out_rx.recv().await.map(delivered).unwrap();
+    let initial = next_outbound(&mut out_rx).await;
     assert_eq!(initial.announce.len(), 1);
     assert_eq!(initial.announce[0].peer, peer_v4(SOURCE_A));
     assert_eq!(initial.announce[0].path_id, 0);
@@ -321,6 +342,9 @@ async fn source_member_of_best_gets_runner_up() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     // A is an outbound per-client-best client AND the source of the best.
     let a = peer_v4(SOURCE_A);
@@ -337,7 +361,7 @@ async fn source_member_of_best_gets_runner_up() {
 
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
     sync(&tx).await;
-    let update = a_rx.recv().await.map(delivered).unwrap();
+    let update = next_outbound(&mut a_rx).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(update.announce[0].path_id, 0);
@@ -357,6 +381,9 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     // Two shareable-chain unicast-only per-client-best members: since
     // the classifier flip they share one mitigated group.
@@ -392,7 +419,7 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
     .await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
     sync(&tx).await;
-    let update = a_rx.recv().await.map(delivered).unwrap();
+    let update = next_outbound(&mut a_rx).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
 
@@ -413,7 +440,7 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
     );
 
     // The non-source member's explain names the winner, also in sync.
-    let e_update = e_rx.recv().await.map(delivered).unwrap();
+    let e_update = next_outbound(&mut e_rx).await;
     assert_eq!(e_update.announce[0].peer, peer_v4(SOURCE_A));
     let explain = query_explain_advertised_route(&tx, e, Prefix::V4(prefix())).await;
     assert_eq!(explain.route_peer, Some(peer_v4(SOURCE_A)));
@@ -438,13 +465,22 @@ async fn candidate_churn_produces_minimal_deltas() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_E), 0))
+        .await
+        .unwrap();
 
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(deny_tagged_chain()), true).await;
-    let dump = client_rx.recv().await.map(delivered).unwrap();
+    let dump = next_outbound(&mut client_rx).await;
     assert_eq!(dump.announce.len(), 1);
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     drain_eor(&mut client_rx).await;
@@ -485,7 +521,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     .await
     .unwrap();
     sync(&tx).await;
-    let update = client_rx.recv().await.map(delivered).unwrap();
+    let update = next_outbound(&mut client_rx).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
@@ -525,7 +561,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     .await
     .unwrap();
     reply_rx.await.unwrap().unwrap();
-    let update = client_rx.recv().await.map(delivered).unwrap();
+    let update = next_outbound(&mut client_rx).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
@@ -542,13 +578,19 @@ async fn route_refresh_replays_filtered_best() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(deny_tagged_chain()), true).await;
-    let dump = client_rx.recv().await.map(delivered).unwrap();
+    let dump = next_outbound(&mut client_rx).await;
     assert_eq!(dump.announce.len(), 1);
     drain_eor(&mut client_rx).await;
 
@@ -561,7 +603,7 @@ async fn route_refresh_replays_filtered_best() {
     })
     .await
     .unwrap();
-    let replay = client_rx.recv().await.map(delivered).unwrap();
+    let replay = next_outbound(&mut client_rx).await;
     assert_eq!(
         replay.announce.len(),
         1,
@@ -607,6 +649,12 @@ async fn explain_names_runner_up_selection_with_term_labels() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
@@ -614,7 +662,7 @@ async fn explain_names_runner_up_selection_with_term_labels() {
     let mitigated = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut mitigated_rx =
         client_peer_up(&tx, mitigated, Some(rpol_deny_tagged_chain()), true).await;
-    let dump = mitigated_rx.recv().await.map(delivered).unwrap();
+    let dump = next_outbound(&mut mitigated_rx).await;
     assert_eq!(dump.announce.len(), 1, "live sends the runner-up");
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
 
@@ -708,6 +756,12 @@ policy deny-all {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
@@ -752,18 +806,24 @@ async fn agrees_with_single_best_when_policy_permits_the_best() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
+    tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+        .await
+        .unwrap();
 
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
     let plain = peer_v4(Ipv4Addr::new(10, 0, 0, 6));
     let mut plain_rx = client_peer_up(&tx, plain, None, false).await;
-    let plain_dump = plain_rx.recv().await.map(delivered).unwrap();
+    let plain_dump = next_outbound(&mut plain_rx).await;
     drain_eor(&mut plain_rx).await;
 
     let pcb = peer_v4(Ipv4Addr::new(10, 0, 0, 7));
     let mut pcb_rx = client_peer_up(&tx, pcb, None, true).await;
-    let pcb_dump = pcb_rx.recv().await.map(delivered).unwrap();
+    let pcb_dump = next_outbound(&mut pcb_rx).await;
     drain_eor(&mut pcb_rx).await;
 
     assert_eq!(plain_dump.announce.len(), 1);

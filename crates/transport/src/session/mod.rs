@@ -570,9 +570,9 @@ pub(crate) struct PeerSession {
     known_evpn: HashSet<EvpnRouteKey>,
     /// One warning per unsupported wire route type per TCP connection.
     evpn_discard_warned: [bool; 256],
-    /// Malformed UPDATEs on this TCP connection, attribute-discard then
-    /// stronger; each class's WARNs fire only at its powers of two.
-    malformed_attribute_updates: [u64; 2],
+    /// Peer-repeatable inbound warnings on this TCP connection; each class
+    /// logs independently at its powers of two.
+    inbound_warning_updates: [u64; inbound::InboundWarningClass::COUNT],
     /// Accepted BGP-LS routes from this peer (RFC 9552 opaque keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_bgpls: HashSet<BgpLsRouteKey>,
@@ -2510,7 +2510,7 @@ impl PeerSession {
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             evpn_discard_warned: [false; 256],
-            malformed_attribute_updates: [0; 2],
+            inbound_warning_updates: [0; inbound::InboundWarningClass::COUNT],
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),

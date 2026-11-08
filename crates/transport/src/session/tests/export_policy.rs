@@ -71,6 +71,7 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let source = Ipv4Addr::new(10, 0, 0, 9);
+    register_test_source(&session.rib_tx, PeerId::from_ipv4(source), 0).await;
     session
         .rib_tx
         .send(RibUpdate::RoutesReceived {

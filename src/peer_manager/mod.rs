@@ -3676,7 +3676,7 @@ impl PeerManager {
                                     staged.global.ebgp_requires_policy =
                                         candidate.global.ebgp_requires_policy;
                                     staged
-                                        .validate()
+                                        .validate_structure()
                                         .map_err(|error| error.to_string())
                                         .map(|()| staged)
                                 }

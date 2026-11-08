@@ -1195,7 +1195,7 @@ impl BgpMetrics {
         let inbound_connections_dropped = IntCounterVec::new(
             Opts::new(
                 "bgp_inbound_connections_dropped_total",
-                "Inbound connections dropped by the accept-path admission checks, by bounded reason: unconfigured source, per-source rate limit, dynamic-neighbor slot saturation (ADR-0120), or a configured neighbor held by its NOTIFICATION reconnect backoff.",
+                "Inbound connections dropped by the accept-path admission checks, by bounded reason: unconfigured, rate_limited, dynamic_limit, notification_backoff, rib_cleanup_pending, or bfd_unavailable.",
             ),
             &["reason"],
         )
@@ -1807,13 +1807,11 @@ impl BgpMetrics {
                  End-of-RIB; route-refresh begin/end/request; ORF updates; \
                  policy context / PeerSlowState slow-peer updates; or a family \
                  made sendable mid-session) discarded \
-                 because their session id did not match the registered \
-                 session for the peer — a message from a superseded session \
-                 (collision loser) queued behind the replacement's PeerUp — \
-                 and End-of-RIB or route-refresh begin/end/timeout markers \
-                 from a peer with no registered session, such as one whose \
-                 routes are retained under Graceful Restart. The registered \
-                 session's state is untouched. `kind` is one of: {}.",
+                 because their session is superseded or the peer has no \
+                 registered session. Unregistered messages cannot change \
+                 routes retained under Graceful Restart. A deferred PeerUp \
+                 already owns ingress. The registered session's state is \
+                 untouched. `kind` is one of: {}.",
                     StaleSessionMessageKind::ALL
                         .iter()
                         .map(|kind| kind.as_str())
@@ -6007,8 +6005,8 @@ impl BgpMetrics {
     /// EVPN routes envelope; separate BGP-LS, VPN, labeled-unicast, and
     /// RT-Constrain route variants; End-of-RIB; route-refresh
     /// begin/end/request; ORF update; policy context update; or slow-peer state)
-    /// discarded because its session id did not match the registered session
-    /// for the peer (a message from a superseded session).
+    /// discarded because its session is superseded or the peer has no
+    /// registered session. A deferred live session already owns ingress.
     ///
     pub fn record_rib_stale_session_message_ignored(
         &self,
@@ -9297,6 +9295,23 @@ mod tests {
                 "bgp_rib_policy_transition_total{{outcome=\"{}\"}} 1",
                 outcome.as_str()
             )));
+        }
+    }
+
+    #[test]
+    fn inbound_connection_drop_help_lists_every_reason() {
+        use crate::reason_labels::InboundConnectionDropReason;
+        let metrics = BgpMetrics::new();
+        let text = gather_text(&metrics);
+        let help = text
+            .lines()
+            .find(|line| line.starts_with("# HELP bgp_inbound_connections_dropped_total "))
+            .unwrap();
+        for reason in InboundConnectionDropReason::ALL {
+            assert!(
+                help.contains(reason.as_str()),
+                "HELP omits {reason}: {help}"
+            );
         }
     }
 

@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.15.0 - Unreleased
 
+- Unexpected BGP messages in OpenSent, OpenConfirm and Established now
+  produce FSM Error subcodes 1, 2 and 3 with the unexpected message type
+  in the one-octet data field (RFC 6608 §4). UPDATE decode or validation
+  errors before Established also produce the matching FSM Error, rather
+  than an UPDATE Message Error. Header and OPEN decode errors retain their
+  existing codes. Internal events without a BGP message keep subcode 0.
 - Move to wire `0.28.0` for IPv4/IPv6 VPN FlowSpec (`Safi::FlowSpecVpn`). A
   configured `(Afi::Ipv4, Safi::FlowSpecVpn)` or
   `(Afi::Ipv6, Safi::FlowSpecVpn)` family is advertised and

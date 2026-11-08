@@ -787,7 +787,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     }
     let installer = "      - uses: ./.github/actions/install-protobuf";
     assert_eq!(workflow.matches(installer).count(), 1);
-    let checkout = workflow.find("actions/checkout@v7").unwrap();
+    let checkout = workflow.find("uses: actions/checkout@").unwrap();
     let installer = workflow.find(installer).unwrap();
     let oracle = workflow
         .find("tests/compat/ixp-manager-birdseye/run.sh")
@@ -836,7 +836,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
             "adapter route inventory must not bypass direct GET registration: {alternate}"
         );
     }
-    let routed_paths: Vec<_> = route_calls
+    let mut routed_paths: Vec<_> = route_calls
         .iter()
         .map(|call| {
             let literal = call
@@ -885,7 +885,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
             path
         })
         .collect();
-    let expected_paths: Vec<_> = concat!(
+    let mut expected_paths: Vec<_> = concat!(
         "/status /protocols/bgp /protocol/{id} /symbols ",
         "/routes/protocol/{id} /routes/export/{id} /routes/table/{table} ",
         "/routes/table/{table}/filtered ",
@@ -895,6 +895,9 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     )
     .split_ascii_whitespace()
     .collect();
+    // Middleware placement changes registration order, not the GET inventory.
+    routed_paths.sort_unstable();
+    expected_paths.sort_unstable();
     assert_eq!(
         routed_paths, expected_paths,
         "adapter route inventory drifted"
@@ -909,12 +912,13 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         .split_once("\n## ")
         .expect("looking-glass disclosure must have a following section")
         .0;
-    let documented_paths: Vec<_> = disclosure
+    let mut documented_paths: Vec<_> = disclosure
         .split('`')
         .skip(1)
         .step_by(2)
         .filter_map(|code| code.strip_prefix("GET "))
         .collect();
+    documented_paths.sort_unstable();
     assert_eq!(
         documented_paths, routed_paths,
         "security disclosure must exactly track every routed GET path"
@@ -1933,46 +1937,109 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "alias reload must retain one PID"
     );
 
+    // Pin outbound convergence before checking the new reader limits below.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while get_json(adapter_port, "/protocols/bgp", "adapter")["protocols"]["pb_0002_as65030"]["routes"]
+        ["exported"]
+        != 4
+    {
+        assert!(
+            Instant::now() < deadline,
+            "four-path export did not converge"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
     // Direct aliases remain a separate startup-only compatibility path.
     // Exercise the real branch so file mode cannot accidentally replace it.
-    let direct_stderr = temp.path().join("direct-adapter.stderr.log");
-    let mut direct_adapter = Proc {
-        child: cargo::command()
-            .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
-            .arg("--grpc-addr")
-            .arg(format!("unix://{}", grpc_socket.display()))
-            .arg("--grpc-token-file")
-            .arg(&token_path)
-            .args([
-                "--listen",
-                "127.0.0.1:0",
-                "--protocol-alias",
-                "pb_direct_as65020=127.0.0.1@master4",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(std::fs::File::create(&direct_stderr).unwrap()))
-            .spawn()
-            .expect("spawn direct-alias adapter"),
-        name: "direct-alias adapter",
-        stderr_path: direct_stderr.clone(),
-    };
-    let direct_port = wait_for_logged(
-        &mut direct_adapter,
-        &direct_stderr,
-        "direct listener",
-        |logs| {
-            logs.split("127.0.0.1:")
-                .nth(1)?
-                .split(|c: char| !c.is_ascii_digit())
-                .next()?
-                .parse()
-                .ok()
-        },
-    );
-    assert_eq!(
-        get_json(direct_port, "/protocol/pb_direct_as65020", "direct adapter")["protocol"]["protocol"],
-        "pb_direct_as65020"
-    );
+    for maximum in [1000, 3] {
+        let direct_stderr = temp
+            .path()
+            .join(format!("direct-adapter-{maximum}.stderr.log"));
+        let mut direct_adapter = Proc {
+            child: cargo::command()
+                .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
+                .arg("--grpc-addr")
+                .arg(format!("unix://{}", grpc_socket.display()))
+                .arg("--grpc-token-file")
+                .arg(&token_path)
+                .args([
+                    "--listen",
+                    "127.0.0.1:0",
+                    "--protocol-alias",
+                    "pb_direct_as65020=127.0.0.1@master4",
+                    "--max-scan-routes",
+                    "1",
+                ])
+                .arg("--max-routes")
+                .arg(maximum.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(std::fs::File::create(&direct_stderr).unwrap()))
+                .spawn()
+                .expect("spawn direct-alias adapter"),
+            name: "direct-alias adapter",
+            stderr_path: direct_stderr.clone(),
+        };
+        let direct_port = wait_for_logged(
+            &mut direct_adapter,
+            &direct_stderr,
+            "direct listener",
+            |logs| {
+                logs.split("127.0.0.1:")
+                    .nth(1)?
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()?
+                    .parse()
+                    .ok()
+            },
+        );
+        assert_eq!(
+            get_json(direct_port, "/protocol/pb_direct_as65020", "direct adapter")["protocol"]["protocol"],
+            "pb_direct_as65020"
+        );
+        // A large unrelated Loc-RIB must not turn an empty peer into a scan-limit
+        // error. Oversized rendered views are refused before the primary-key join.
+        for path in ["/routes/peer/192.0.2.10", "/routes/export/bgp_192.0.2.10"] {
+            assert_eq!(
+                get_json(direct_port, path, "bounded adapter")["routes"],
+                serde_json::json!([])
+            );
+        }
+        if maximum == 3 {
+            for path in [
+                "/routes/protocol/pb_direct_as65020",
+                "/routes/export/bgp_127.0.0.2",
+            ] {
+                wait_for_exact_json_error(
+                    direct_port,
+                    path,
+                    403,
+                    "Number of routes exceeds maximum allowed (4/3)",
+                );
+            }
+        } else {
+            for path in [
+                "/routes/protocol/pb_direct_as65020",
+                "/routes/export/bgp_127.0.0.2",
+                "/routes/table/master4",
+                "/route/10.99.0.0%2F24/protocol/pb_direct_as65020",
+                "/route/10.99.0.0%2F24/export/bgp_127.0.0.2",
+                "/route/10.99.0.0%2F24/table/master4",
+                "/routes/lc-zwild/protocol/pb_direct_as65020/65020/100",
+                "/routes/noexport/pb_direct_as65020",
+                "/routes/filtered/pb_direct_as65020",
+                "/routes/table/master4/filtered",
+                "/routes/lc-zwild/protocol/pb_direct_as65020/65001/1101",
+            ] {
+                wait_for_exact_json_error(
+                    direct_port,
+                    path,
+                    403,
+                    "Route scan exceeds maximum allowed (1 routes)",
+                );
+            }
+        }
+    }
     let invalid_direct = cargo::command()
         .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
         .env("NO_COLOR", "1")

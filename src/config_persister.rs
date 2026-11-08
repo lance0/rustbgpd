@@ -5,9 +5,10 @@
 //! and atomically written (temp file + rename) to the config path.
 //! The filesystem work for each mutation, and the discard of a stage still
 //! outstanding when the channel closes, runs on the blocking pool, off the
-//! runtime workers. Two paths stay on the calling thread: the boot history
-//! record in [`ConfigPersister::new_accepted`], and the best-effort temp-file
-//! removal in `StagedWrite`'s drop if this task is aborted mid-stage.
+//! runtime workers. Boot prepares directory ownership synchronously, then
+//! records history on the blocking pool before releasing mutation admission.
+//! Best-effort temp-file removal in `StagedWrite`'s drop stays on the calling
+//! thread if this task is aborted mid-stage.
 
 #![deny(unsafe_code)]
 
@@ -21,6 +22,7 @@ use crate::config::AcceptedConfigSnapshot;
 #[cfg(test)]
 use crate::config::{Config, Neighbor};
 use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
+use rustbgpd_api::server::RuntimeConfigCoordinatorPermit;
 
 /// File under `runtime_state_dir` recording the config file's mtime as of the
 /// daemon's last read or write of it.
@@ -81,7 +83,7 @@ pub struct ConfigPersister {
     /// `runtime_state_dir`, the home of the applied-config history
     /// (`config_history`) and the last-persist marker. `None` disables both
     /// (unit tests, embedders without a state dir).
-    state_dir: Option<PathBuf>,
+    state_dir: Option<Arc<crate::PinnedRuntimeStateDirectory>>,
     /// SHA-256 of the config file bytes the daemon last read (boot, SIGHUP)
     /// or wrote. Every publish first checks that the file still holds them,
     /// so an edit the daemon has not adopted is never overwritten. Bytes,
@@ -102,11 +104,27 @@ fn sha256_of(bytes: impl AsRef<[u8]>) -> [u8; 32] {
 }
 
 impl ConfigPersister {
+    #[cfg(test)]
     pub fn new_accepted(
         rx: mpsc::Receiver<ConfigMutation>,
         config_path: PathBuf,
         current: Arc<AcceptedConfigSnapshot>,
         state_dir: Option<PathBuf>,
+    ) -> Self {
+        Self::new_pinned(
+            rx,
+            config_path,
+            current,
+            state_dir
+                .map(|path| Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&path).unwrap())),
+        )
+    }
+
+    pub(crate) fn new_pinned(
+        rx: mpsc::Receiver<ConfigMutation>,
+        config_path: PathBuf,
+        current: Arc<AcceptedConfigSnapshot>,
+        state_dir: Option<Arc<crate::PinnedRuntimeStateDirectory>>,
     ) -> Self {
         let persister = Self {
             rx,
@@ -116,10 +134,20 @@ impl ConfigPersister {
             state_dir,
             staged: None,
         };
-        // The v2 writer owns the one-time legacy-directory permission
-        // tightening. Do it synchronously so read-only services can never
-        // observe the directory before that ownership boundary is established.
-        persister.record_current_history(persister.current.read_mtime());
+        persister.record_last_persist(persister.current.read_mtime());
+        // Readers may start before boot recording, but never before the
+        // writer has established the directory's ownership and permissions.
+        if let Some(dir) = persister.history_dir()
+            && let Err(error) = crate::config_history::v2::open_or_create_writer_directory(
+                &dir,
+                persister
+                    .state_dir
+                    .as_ref()
+                    .map(|directory| &directory.file),
+            )
+        {
+            warn!(%error, "failed to prepare the config history directory");
+        }
         persister
     }
 
@@ -138,11 +166,15 @@ impl ConfigPersister {
         )
     }
 
-    pub async fn run(self) {
-        // Boot recording already happened synchronously in `new_accepted` so
-        // readers cannot race directory migration. This task handles later
-        // accepted mutations without rereading external sources.
-        let mut persister = self;
+    pub async fn run(self, boot_permit: RuntimeConfigCoordinatorPermit) {
+        // The blocking job owns admission even if its async waiter is dropped.
+        // History remains best-effort; the accepted config file is authority.
+        let (mut persister, ()) = self
+            .off_runtime(move |p| {
+                p.record_current_history(p.current.read_mtime());
+                drop(boot_permit);
+            })
+            .await;
         while let Some(mutation) = persister.rx.recv().await {
             match mutation {
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
@@ -241,8 +273,8 @@ impl ConfigPersister {
         result
     }
 
-    /// Run one mutation's filesystem work (write, fsync, rename, history) on
-    /// the blocking pool, so a slow or hung config filesystem stalls this
+    /// Run boot recording or mutation filesystem work on the blocking pool,
+    /// so a slow or hung config filesystem stalls this
     /// actor rather than a runtime worker thread.
     ///
     /// The persister moves into the closure and back, so mutations stay
@@ -292,7 +324,7 @@ impl ConfigPersister {
         self.discard_staged();
         // Refuse while the caller can still back out with no effect; the
         // commit checks again for an edit made during its runtime apply.
-        self.verify_on_disk(&self.config_path)?;
+        self.verify_on_disk(&self.config_path, None)?;
         let staged = crate::confirm_journal::stage_atomic(
             &self.config_path,
             new_config.normalized_toml().as_bytes(),
@@ -313,7 +345,7 @@ impl ConfigPersister {
             );
         };
         let written = sha256_of(config.normalized_toml());
-        match staged.commit_if(|target| self.verify_on_disk(target)) {
+        match staged.commit_if(|directory, target| self.verify_on_disk(target, Some(directory))) {
             Ok(()) => {
                 self.current = config;
                 self.on_disk = Some(written);
@@ -366,7 +398,7 @@ impl ConfigPersister {
             Err(error) => return ConfigPersistCommitOutcome::NotPublished(error.to_string()),
         };
         let written = sha256_of(self.current.normalized_toml());
-        match staged.commit_if(|target| self.verify_on_disk(target)) {
+        match staged.commit_if(|directory, target| self.verify_on_disk(target, Some(directory))) {
             Ok(()) => {
                 self.on_disk = Some(written);
                 self.record_current_history(None);
@@ -388,11 +420,51 @@ impl ConfigPersister {
     /// write before anything is published, and the edit stays on disk. A
     /// save in the moment between the commit's check and its rename is not
     /// caught; see [`crate::confirm_journal::StagedWrite::commit_if`].
-    fn verify_on_disk(&self, path: &std::path::Path) -> std::io::Result<()> {
+    fn verify_on_disk(
+        &self,
+        path: &std::path::Path,
+        directory: Option<&std::fs::File>,
+    ) -> std::io::Result<()> {
         let Some(expected) = self.on_disk else {
             return Ok(());
         };
-        let current = match std::fs::read(path) {
+        if directory.is_some() {
+            match std::fs::canonicalize(&self.config_path) {
+                Ok(resolved) if resolved == path => {}
+                Ok(_) => return Err(self.config_changed_on_disk()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(self.config_changed_on_disk());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let bytes = if let Some(directory) = directory {
+            use std::io::Read as _;
+            (|| {
+                let mut file = std::fs::File::from(
+                    nix::fcntl::openat(
+                        directory,
+                        path.file_name()
+                            .ok_or_else(|| std::io::Error::other("config target has no name"))?,
+                        nix::fcntl::OFlag::O_RDONLY
+                            | nix::fcntl::OFlag::O_CLOEXEC
+                            | nix::fcntl::OFlag::O_NOFOLLOW
+                            | nix::fcntl::OFlag::O_NONBLOCK,
+                        nix::sys::stat::Mode::empty(),
+                    )
+                    .map_err(std::io::Error::from)?,
+                );
+                if !file.metadata()?.is_file() {
+                    return Err(std::io::Error::other("config target is not a regular file"));
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                Ok(bytes)
+            })()
+        } else {
+            std::fs::read(path)
+        };
+        let current = match bytes {
             Ok(bytes) => Some(sha256_of(&bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
@@ -400,14 +472,14 @@ impl ConfigPersister {
         if current == Some(expected) {
             return Ok(());
         }
-        warn!(
-            path = %self.config_path.display(),
-            "refusing to overwrite a config file edit the daemon has not adopted"
-        );
-        Err(std::io::Error::other(format!(
-            "{CONFIG_CHANGED_ON_DISK}; the edit was left in place — adopt it with SIGHUP \
-             (or undo it), then retry"
-        )))
+        Err(self.config_changed_on_disk())
+    }
+
+    fn config_changed_on_disk(&self) -> std::io::Error {
+        warn!(path = %self.config_path.display(), "refusing to overwrite a config file edit the daemon has not adopted");
+        std::io::Error::other(format!(
+            "{CONFIG_CHANGED_ON_DISK}; the edit was left in place — adopt it with SIGHUP (or undo it), then retry"
+        ))
     }
 
     /// Best-effort recording of an applied config: the rollback history entry
@@ -425,7 +497,11 @@ impl ConfigPersister {
     fn record_history(&self, read_mtime: Option<std::time::Duration>) {
         self.record_last_persist(read_mtime);
         if let Some(dir) = self.history_dir() {
-            match crate::config_history::record_accepted(&dir, &self.current) {
+            match crate::config_history::record_accepted_at(
+                &dir,
+                self.state_dir.as_ref().map(|directory| &directory.file),
+                &self.current,
+            ) {
                 Ok(
                     crate::config_history::RecordOutcome::Recorded { evicted }
                     | crate::config_history::RecordOutcome::Deduplicated { evicted },
@@ -445,7 +521,7 @@ impl ConfigPersister {
     fn history_dir(&self) -> Option<PathBuf> {
         self.state_dir
             .as_deref()
-            .map(crate::config_history::history_dir)
+            .map(|directory| crate::config_history::history_dir(&directory.display_path))
     }
 
     /// Record the config file's mtime as the daemon's own last-persist stamp.
@@ -474,21 +550,18 @@ impl ConfigPersister {
         }) else {
             return;
         };
-        let path = dir.join(LAST_PERSIST_FILE);
+        let path = dir.display_path.join(LAST_PERSIST_FILE);
         // A torn or missing marker only degrades the freshness check to
         // comparing against process start, so the write is not durable: it
         // runs on the boot path, where an fsync on a slow disk holds up the
         // gRPC bind. The state writer still matters: it replaces a planted
         // symlink rather than writing through it.
-        if let Err(error) = std::fs::create_dir_all(dir)
-            .map_err(crate::confirm_journal::AtomicPublishError::NotPublished)
-            .and_then(|()| {
-                crate::confirm_journal::write_state_hint(
-                    &path,
-                    format!("{}.{:09}\n", mtime.as_secs(), mtime.subsec_nanos()).as_bytes(),
-                )
-            })
-        {
+        if let Err(error) = crate::confirm_journal::write_state_at(
+            &dir.file,
+            &path,
+            format!("{}.{:09}\n", mtime.as_secs(), mtime.subsec_nanos()).as_bytes(),
+            false,
+        ) {
             warn!(
                 path = %path.display(),
                 error = %error,
@@ -506,6 +579,107 @@ impl ConfigPersister {
 mod tests {
     use super::*;
     use crate::config::persisted_config_document;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn boot_permit() -> RuntimeConfigCoordinatorPermit {
+        rustbgpd_api::server::RuntimeConfigCoordinator::new()
+            .try_acquire()
+            .unwrap()
+    }
+
+    #[test]
+    fn boot_history_precedes_mutations_without_blocking_readers() {
+        boot_history_admission(false);
+    }
+
+    #[test]
+    fn cancelled_boot_waiter_retains_admission_until_history_finishes() {
+        boot_history_admission(true);
+    }
+
+    fn boot_history_admission(cancel_waiter: bool) {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = dir.path().join("config.toml");
+            let config = minimal_config();
+            std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let history = crate::config_history::history_dir(dir.path());
+            let (tx, rx) = mpsc::channel(1);
+            let persister = ConfigPersister::new(
+                rx,
+                path.clone(),
+                config.clone(),
+                Some(dir.path().to_path_buf()),
+            );
+            assert!(
+                crate::config_history::list_mixed(&history)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            // Occupy the only blocking worker, so the real boot writer queues.
+            let (started, start) = oneshot::channel();
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = held.recv();
+            });
+            start.await.unwrap();
+            let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+            let mut run = Box::pin(persister.run(coordinator.try_acquire().unwrap()));
+            let poll = std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(poll.is_pending());
+            assert!(coordinator.try_acquire().is_none());
+            assert!(
+                crate::config_history::list_mixed(&history)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+
+            if cancel_waiter {
+                drop(run);
+                assert!(coordinator.try_acquire().is_none());
+                release.send(()).unwrap();
+                let _permit = coordinator.acquire().await.unwrap();
+                assert_eq!(
+                    crate::config_history::list_mixed(&history).unwrap().len(),
+                    1
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            } else {
+                let mut replacement = config;
+                replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+                let (ack, mut acked) = oneshot::channel();
+                tx.try_send(ConfigMutation::ReplaceConfigAck(
+                    AcceptedConfigSnapshot::from_config_for_test(replacement),
+                    ack,
+                ))
+                .unwrap();
+                assert_eq!(acked.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+                drop(tx);
+                release.send(()).unwrap();
+                run.await;
+                assert!(matches!(
+                    acked.await.unwrap(),
+                    ConfigPersistCommitOutcome::PublishedDurable
+                ));
+                assert!(coordinator.try_acquire().is_some());
+                let rows = crate::config_history::list_mixed(&history).unwrap();
+                assert_eq!(rows.len(), 2);
+            }
+            blocker.await.unwrap();
+        });
+    }
 
     fn minimal_config() -> Config {
         let toml_str = r#"
@@ -629,7 +803,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -652,7 +826,76 @@ log_format = "json"
         assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
     }
 
-    /// Red proof: removing constructor recording, routing persistence back to
+    #[tokio::test]
+    async fn runtime_state_records_stay_in_the_pinned_directory_after_a_chained_symlink_swap() {
+        let state = crate::test_support::RuntimeStateRedirect::new();
+        let pinned = Arc::new(crate::PinnedRuntimeStateDirectory::prepare(&state.path).unwrap());
+        let path = state.original.parent().unwrap().join("config.toml");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        let (tx, rx) = mpsc::channel(4);
+        let persister = ConfigPersister::new_pinned(
+            rx,
+            path.clone(),
+            AcceptedConfigSnapshot::from_config_for_test(config.clone()),
+            Some(Arc::clone(&pinned)),
+        );
+        state.redirect();
+
+        let running = tokio::spawn(persister.run(boot_permit()));
+        let mut replacement = config;
+        replacement
+            .neighbors
+            .push(test_neighbor("192.0.2.2", 65002));
+        persist_replacement(
+            &tx,
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+        )
+        .await;
+        drop(tx);
+        running.await.unwrap();
+
+        assert_eq!(
+            std::fs::read_dir(&state.replacement).unwrap().count(),
+            0,
+            "a redirected pathname must receive neither the marker nor config history"
+        );
+        let mtime = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(read_marker(&state.original), mtime);
+        let rows = crate::config_history::list_mixed_at(
+            &crate::config_history::history_dir(&state.path),
+            Some(&pinned.file),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let crate::config_history::RollbackPayload::V2 {
+            normalized_toml, ..
+        } = crate::config_history::read_mixed_rollback_at(
+            &crate::config_history::history_dir(&state.path),
+            Some(&pinned.file),
+            &rows[0],
+        )
+        .unwrap();
+        assert!(normalized_toml.contains("192.0.2.2"));
+        assert_eq!(
+            crate::config_history::list_mixed(&crate::config_history::history_dir(&state.original))
+                .unwrap()
+                .len(),
+            2,
+            "both accepted snapshots belong to the pinned directory"
+        );
+    }
+
+    /// Red proof: removing boot recording, routing persistence back to
     /// the legacy writer, or removing exact v2 dedupe changes the asserted
     /// two-row roster or its byte-identical payloads after restart.
     #[tokio::test]
@@ -660,6 +903,7 @@ log_format = "json"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let state_dir = dir.path().to_path_buf();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let history = crate::config_history::history_dir(&state_dir);
         let config = minimal_config();
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
@@ -667,7 +911,7 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister =
             ConfigPersister::new(rx, path.clone(), config.clone(), Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = config.clone();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -704,7 +948,7 @@ log_format = "json"
         let restarted: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), restarted, Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         drop(tx);
         handle.await.unwrap();
         assert_eq!(
@@ -728,7 +972,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
 
         let (adopted, adopted_rx) = oneshot::channel();
         tx.send(ConfigMutation::AdoptReloadSnapshot {
@@ -776,7 +1020,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         // Two durable writes, so a second header would have somewhere to land.
         let mut first = minimal_config();
         first.neighbors.push(test_neighbor("10.0.0.2", 65002));
@@ -835,7 +1079,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config.clone(), None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = config;
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -855,7 +1099,7 @@ log_format = "json"
         // Restart over the persisted file and persist it again unchanged.
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), reloaded.clone(), None);
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         persist_replacement(&tx, AcceptedConfigSnapshot::from_config_for_test(reloaded)).await;
         drop(tx);
         handle.await.unwrap();
@@ -882,7 +1126,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -917,6 +1161,7 @@ log_format = "json"
         let state_dir = dir.path().join("state");
         let victim = outside.path().join("victim");
         std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(&victim, b"untouched\n").unwrap();
         std::os::unix::fs::symlink(&victim, state_dir.join(LAST_PERSIST_FILE)).unwrap();
         let config = minimal_config();
@@ -924,7 +1169,7 @@ log_format = "json"
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         persist_replacement(
@@ -993,7 +1238,7 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister =
             ConfigPersister::new(rx, path.clone(), minimal_config(), Some(state_dir.clone()));
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
 
         // The operator saves again while the reload is still applying.
         let saved_again = read_at + 60;
@@ -1074,17 +1319,17 @@ log_format = "json"
     }
 
     #[cfg(unix)]
-    /// Red proof: moving boot recording from `new_accepted` into `run`, removing
-    /// the writer's 0700 tightening, or making the reader chmod turns one of
-    /// the pre-run mode/row assertions red.
-    #[test]
-    fn constructor_tightens_history_directory_and_retains_ignored_toml() {
+    /// Directory permissions precede readers; recording precedes mutation
+    /// admission. The reader must never tighten permissions itself.
+    #[tokio::test]
+    async fn constructor_tightens_history_directory_and_retains_ignored_toml() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
         let history = crate::config_history::history_dir(&state_dir);
         std::fs::create_dir_all(&history).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o755)).unwrap();
         let retired = history.join(format!("0000000001-1-{}.toml", "0".repeat(64)));
         let retired_bytes = b"retired history bytes";
@@ -1097,8 +1342,8 @@ log_format = "json"
 
         let snapshot = AcceptedConfigSnapshot::from_config_for_test(minimal_config());
         let exact = snapshot.normalized_toml().as_bytes().to_vec();
-        let (_tx, rx) = mpsc::channel(1);
-        let _persister = ConfigPersister::new_accepted(
+        let (tx, rx) = mpsc::channel(1);
+        let persister = ConfigPersister::new_accepted(
             rx,
             dir.path().join("config.toml"),
             Arc::clone(&snapshot),
@@ -1106,6 +1351,13 @@ log_format = "json"
         );
 
         assert_eq!(std::fs::metadata(&history).unwrap().mode() & 0o777, 0o700);
+        assert!(
+            crate::config_history::list_mixed(&history)
+                .unwrap()
+                .is_empty()
+        );
+        drop(tx);
+        persister.run(boot_permit()).await;
         let rows = crate::config_history::v2::scan_mixed(&history).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(std::fs::read(retired).unwrap(), retired_bytes);
@@ -1145,6 +1397,7 @@ log_format = "json"
         let state_dir = dir.path().join("state");
         let history = crate::config_history::history_dir(&state_dir);
         std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let boot = AcceptedConfigSnapshot::from_config_for_test(minimal_config());
         crate::config_history::record_accepted(&history, &boot).unwrap();
         let newer = history.join(format!("v4-{:020}-5-{}.json", 9, "4".repeat(64)));
@@ -1173,12 +1426,13 @@ log_format = "json"
         tracing::subscriber::with_default(subscriber, || {
             let construct = || {
                 let (_tx, rx) = mpsc::channel(1);
-                drop(ConfigPersister::new_accepted(
+                let persister = ConfigPersister::new_accepted(
                     rx,
                     dir.path().join("config.toml"),
                     Arc::clone(&changed),
                     Some(state_dir.clone()),
-                ));
+                );
+                persister.record_current_history(persister.current.read_mtime());
             };
             // A sibling test can cache this callsite's interest as never;
             // warm it, rebuild the cache, then observe a clean run.
@@ -1198,7 +1452,7 @@ log_format = "json"
         assert_eq!(contents(), before, "history must be untouched");
     }
 
-    /// Red proof: propagating either the constructor-time or post-persist
+    /// Red proof: propagating either the boot-time or post-persist
     /// best-effort history failure rejects the acknowledgement; adopting any
     /// snapshot other than the exact accepted Arc breaks pointer or disk-byte
     /// identity.
@@ -1207,6 +1461,7 @@ log_format = "json"
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
         std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(
             crate::config_history::history_dir(&state_dir),
             "not a directory",
@@ -1229,7 +1484,7 @@ log_format = "json"
         changed.neighbors.push(test_neighbor("10.0.0.2", 65002));
         let changed = snapshot.derive_config(changed).unwrap();
         let (ack_tx, ack_rx) = oneshot::channel();
-        let handle = tokio::spawn(persister.run());
+        let handle = tokio::spawn(persister.run(boot_permit()));
         tx.send(ConfigMutation::ReplaceConfigAck(
             Arc::clone(&changed),
             ack_tx,
@@ -1283,7 +1538,8 @@ log_format = "json"
         let original = std::fs::read(&path).unwrap();
 
         let (tx, rx) = mpsc::channel(1);
-        let handle = tokio::spawn(ConfigPersister::new(rx, path.clone(), config, None).run());
+        let handle =
+            tokio::spawn(ConfigPersister::new(rx, path.clone(), config, None).run(boot_permit()));
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         let (ack, staged) = oneshot::channel();
@@ -1316,6 +1572,48 @@ log_format = "json"
         assert_eq!(std::fs::read(&path).unwrap(), original, "nothing published");
     }
 
+    #[test]
+    fn staged_commit_fences_the_retained_parent_after_a_path_replacement() {
+        for edit_retained in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let parent = root.path().join("config");
+            let retained = root.path().join("retained");
+            std::fs::create_dir(&parent).unwrap();
+            let path = parent.join("config.toml");
+            let original = toml::to_string_pretty(&minimal_config()).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            let accepted = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
+            let mut candidate = accepted.config();
+            candidate.neighbors.push(test_neighbor("192.0.2.2", 65002));
+            let (_tx, rx) = mpsc::channel(1);
+            let mut persister =
+                ConfigPersister::new_pinned(rx, path.clone(), Arc::clone(&accepted), None);
+            persister
+                .stage(accepted.derive_config(candidate).unwrap())
+                .unwrap();
+            std::fs::rename(&parent, &retained).unwrap();
+            std::fs::create_dir(&parent).unwrap();
+            let edited = format!("{original}\n# unadopted operator edit\n");
+            let (retained_bytes, replacement_bytes) = if edit_retained {
+                (&edited, &original)
+            } else {
+                (&original, &edited)
+            };
+            std::fs::write(&path, replacement_bytes).unwrap();
+            std::fs::write(retained.join("config.toml"), retained_bytes).unwrap();
+            assert!(matches!(
+                persister.commit_staged(),
+                ConfigPersistCommitOutcome::NotPublished(_)
+            ));
+            assert_eq!(
+                std::fs::read_to_string(retained.join("config.toml")).unwrap(),
+                *retained_bytes
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), *replacement_bytes);
+            assert!(!retained.join("config.toml.tmp").exists());
+        }
+    }
+
     /// An operator edit that lands between stage and commit, the window a
     /// runtime mutation spends applying, is not overwritten: the commit is
     /// refused before publication and the edit stays on disk. Ordering comes
@@ -1341,7 +1639,8 @@ log_format = "json"
         };
         let (tx, rx) = mpsc::channel(4);
         let handle = tokio::spawn(
-            ConfigPersister::new_accepted(rx, path.clone(), Arc::clone(&booted), None).run(),
+            ConfigPersister::new_accepted(rx, path.clone(), Arc::clone(&booted), None)
+                .run(boot_permit()),
         );
         let stage = |snapshot| {
             let tx = tx.clone();
@@ -1436,7 +1735,8 @@ log_format = "json"
         let candidate = booted.derive_config(config).unwrap();
         let (tx, rx) = mpsc::channel(4);
         let handle = tokio::spawn(
-            ConfigPersister::new_accepted(rx, link.clone(), Arc::clone(&booted), None).run(),
+            ConfigPersister::new_accepted(rx, link.clone(), Arc::clone(&booted), None)
+                .run(boot_permit()),
         );
         let (ack, staged) = oneshot::channel();
         tx.send(ConfigMutation::StageConfigAck(candidate, ack))
@@ -1495,11 +1795,22 @@ log_format = "json"
             .worker_threads(1)
             .build()
             .unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let mut run =
+            Box::pin(ConfigPersister::new(rx, path.clone(), config, None).run(boot_permit()));
+        let (inspected, inspection) = oneshot::channel();
+        tx.try_send(ConfigMutation::InspectCurrent(inspected))
+            .unwrap();
+        runtime.block_on(async {
+            tokio::select! {
+                () = &mut run => panic!("persister exited before boot finished"),
+                result = inspection => { result.unwrap(); }
+            }
+        });
         let handle = runtime.handle().clone();
         runtime.shutdown_background();
         let _entered = handle.enter();
 
-        let (tx, rx) = mpsc::channel(1);
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
         let (ack, mut acked) = oneshot::channel();
@@ -1508,8 +1819,6 @@ log_format = "json"
             ack,
         ))
         .unwrap();
-        let mut run = Box::pin(ConfigPersister::new(rx, path.clone(), config, None).run());
-
         let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run.as_mut().poll(&mut Context::from_waker(Waker::noop()))
         }));

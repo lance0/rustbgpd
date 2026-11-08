@@ -127,6 +127,7 @@ async fn setup_then(
         .unwrap();
     assert_ne!(next_export(&mut outbound).await.end_of_rib.len(), 0);
 
+    register_test_source(&session.rib_tx, PeerId::from_ipv4(SOURCE), 0).await;
     let mut wire = BTreeMap::new();
     for batch in setup {
         received(&session, SOURCE, batch, vec![]).await;

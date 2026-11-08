@@ -313,6 +313,17 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         metrics.clone(),
     );
     let manager_task = tokio::spawn(manager.run());
+    for source_index in 0..SOURCES {
+        send_before(
+            &rib_tx,
+            super::source_peer_up(source(source_index)),
+            run_deadline,
+        )
+        .await?;
+    }
+    let (reply, registered) = oneshot::channel();
+    send_before(&rib_tx, RibUpdate::QueryLocRibCount { reply }, run_deadline).await?;
+    ensure!(tokio::time::timeout_at(run_deadline, registered).await?? == 0);
     let mut listeners = Vec::with_capacity(shape.peers);
     for index in 0..shape.peers {
         listeners.push(
@@ -642,12 +653,13 @@ mod tests {
             assert!(receiver.try_recv().is_err());
         }
         assert_exact_communities(shared_announce.as_deref().unwrap(), (65_000 << 16) | 200);
+        manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(source(0))]);
         let transition_receipt = manager.bench_adj_rib_out_fanout_receipt();
         let policy_receipt = manager.bench_policy_transition_receipt();
         assert_eq!(seed_receipt.routes_received_dispatches, 1);
         assert_eq!(seed_receipt.routes_received_withdrawals, 0);
-        assert_eq!(transition_receipt.update_groups, 1);
-        assert_eq!(transition_receipt.grouped_peers, peers);
+        assert_eq!(transition_receipt.update_groups, 2);
+        assert_eq!(transition_receipt.grouped_peers, peers + 1);
         assert_eq!(transition_receipt.ungrouped_peers, 0);
         assert_eq!(transition_receipt.dirty_peers, 0);
         assert_eq!(transition_receipt.grouped_unicast_routes, prefixes);

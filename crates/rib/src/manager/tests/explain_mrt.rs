@@ -241,6 +241,7 @@ async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -353,6 +354,10 @@ async fn explain_best_path_returns_candidates_without_winner() {
     let route_a = make_route_with_lp(prefix, peer_a, 200);
     let route_b = make_route_with_lp(prefix, peer_b, 100);
 
+    tx.send(registering_peer_up(peer_v4(peer_a), 0))
+        .await
+        .unwrap();
+
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer_a),
@@ -366,6 +371,10 @@ async fn explain_best_path_returns_candidates_without_winner() {
     })
     .await
     .unwrap();
+
+    tx.send(registering_peer_up(peer_v4(peer_b), 0))
+        .await
+        .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -440,17 +449,13 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
         ),
         (closer_peer, make_route_with_lp(closer, closer_peer, 150)),
     ] {
-        tx.send(RibUpdate::RoutesReceived {
-            session_id: 0,
-            peer: peer_v4(peer),
-            announced: vec![route],
-            withdrawn: vec![],
-            flowspec_announced: vec![],
-            flowspec_withdrawn: vec![],
-            evpn_announced: vec![],
-            evpn_withdrawn: vec![],
-            validated_with: None,
-        })
+        tx.send(registering_peer_up(peer_v4(peer), 0))
+            .await
+            .unwrap();
+        tx.send(super::lifecycle::test_routes_received(
+            peer_v4(peer),
+            vec![route],
+        ))
         .await
         .unwrap();
     }
@@ -558,6 +563,10 @@ async fn explain_best_path_single_path_has_no_best_reason() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let peer = Ipv4Addr::new(1, 0, 0, 1);
+
+    tx.send(registering_peer_up(peer_v4(peer), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer),
@@ -624,6 +633,7 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
         })
         .collect();
     for route in &all {
+        tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -709,6 +719,7 @@ async fn explain_best_path_lower_bgp_identifier_beats_peer_address() {
     let mut low_addr = make_multipath_route(prefix, low_addr_peer, vec![65001], 200);
     low_addr.peer_router_id = Ipv4Addr::new(2, 2, 2, 2);
     for route in [&low_id, &low_addr] {
+        tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -769,6 +780,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
         (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 150),
         (peer3, Ipv4Addr::new(10, 0, 0, 3), 65003, 100),
     ] {
+        tx.send(registering_peer_up(peer, 0)).await.unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer,
@@ -860,28 +872,6 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
     let peer_runner_up = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
-    // peer_winner has the higher LP and *is* the target peer.
-    // Under split-horizon, peer_winner cannot receive its own route
-    // back — so single-best advertises nothing.
-    for (peer, addr, asn, lp) in [
-        (peer_winner, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
-        (peer_runner_up, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
-    ] {
-        tx.send(RibUpdate::RoutesReceived {
-            session_id: 0,
-            peer,
-            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
-            withdrawn: vec![],
-            flowspec_announced: vec![],
-            flowspec_withdrawn: vec![],
-            evpn_announced: vec![],
-            evpn_withdrawn: vec![],
-            validated_with: None,
-        })
-        .await
-        .unwrap();
-    }
-
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -903,6 +893,31 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
     })
     .await
     .unwrap();
+    tx.send(registering_peer_up(peer_runner_up, 0))
+        .await
+        .unwrap();
+
+    // peer_winner has the higher LP and *is* the target peer.
+    // Under split-horizon, peer_winner cannot receive its own route
+    // back — so single-best advertises nothing.
+    for (peer, addr, asn, lp) in [
+        (peer_winner, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer_runner_up, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    }
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -941,6 +956,9 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
         (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
         (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
     ] {
+        tx.send(registering_peer_up(PeerId::from_addr(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: PeerId::from_addr(peer),
@@ -1016,6 +1034,9 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
         (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
         (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
     ] {
+        tx.send(registering_peer_up(PeerId::from_addr(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: PeerId::from_addr(peer),
@@ -1104,6 +1125,10 @@ async fn explain_best_path_global_view_unchanged() {
     let peer_a = Ipv4Addr::new(1, 0, 0, 1);
     let peer_b = Ipv4Addr::new(1, 0, 0, 2);
 
+    tx.send(registering_peer_up(peer_v4(peer_a), 0))
+        .await
+        .unwrap();
+
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer_a),
@@ -1117,6 +1142,10 @@ async fn explain_best_path_global_view_unchanged() {
     })
     .await
     .unwrap();
+
+    tx.send(registering_peer_up(peer_v4(peer_b), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer_b),
@@ -1143,4 +1172,39 @@ async fn explain_best_path_global_view_unchanged() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+#[test]
+fn mrt_snapshot_captures_unregistered_route_sources_before_rebind() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let old: IpAddr = "fe80::a".parse().unwrap();
+    let peer = PeerId::allocate(crate::PeerEndpoint::new(old, Some("swp1")));
+    let mut route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 1),
+    );
+    route.peer = peer;
+    // Seed the snapshot's fallback case directly; session ingress requires PeerUp.
+    let mut rib = AdjRibIn::new(peer);
+    rib.insert(route);
+    manager.ribs.insert(peer, rib);
+    assert!(!manager.peer_asn.contains_key(&peer));
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryMrtSnapshot { reply });
+    let snapshot = response.try_recv().unwrap();
+    assert_eq!(snapshot.routes.len(), 1);
+    assert_eq!(snapshot.peers.len(), 1);
+    assert_eq!(snapshot.peers[0].peer_asn, 0);
+    assert_eq!(snapshot.peers[0].peer_addr, old);
+    assert_eq!(snapshot.peers[0].interface.as_deref(), Some("swp1"));
+
+    manager.handle_update(RibUpdate::RebindPeer {
+        peer,
+        endpoint: crate::PeerEndpoint::new("fe80::b".parse().unwrap(), Some("swp1")),
+    });
+    assert_eq!(peer.addr(), "fe80::b".parse::<IpAddr>().unwrap());
+    assert_eq!(snapshot.peers[0].peer_addr, old);
+    assert!(peer.release());
 }

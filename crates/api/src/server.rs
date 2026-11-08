@@ -1195,7 +1195,7 @@ pub struct ServeConfig {
     /// Live snapshot reader for ADR-0061 general unicast FIB route
     /// install state. Returns an empty list when no `[[fib_tables]]`
     /// are configured or before the actor's first reconcile pass.
-    pub fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    pub fib_route_snapshot: crate::rib_service::FibRouteSnapshotReader,
     /// Daemon hook for runtime `[[fib_tables]]` CRUD (gRPC `SetFibTable` /
     /// `DeleteFibTable` / `ListFibTables`). `None` disables the mutating RPCs
     /// (they return `FAILED_PRECONDITION`). Wired in `main.rs` where the
@@ -1969,7 +1969,7 @@ async fn run_tcp_listener(
     evpn_duplicate_mac_quarantine_snapshot: crate::evpn_service::DuplicateMacQuarantineSnapshotFn,
     evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
-    fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    fib_route_snapshot: crate::rib_service::FibRouteSnapshotReader,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     gnmi_set: Option<GnmiSetFn>,
     config_transaction_apply: Option<ConfigTransactionApplyFn>,
@@ -2302,7 +2302,7 @@ async fn run_uds_listener(
     evpn_duplicate_mac_quarantine_snapshot: crate::evpn_service::DuplicateMacQuarantineSnapshotFn,
     evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
-    fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    fib_route_snapshot: crate::rib_service::FibRouteSnapshotReader,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     gnmi_set: Option<GnmiSetFn>,
     config_transaction_apply: Option<ConfigTransactionApplyFn>,

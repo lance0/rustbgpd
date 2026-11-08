@@ -47,7 +47,7 @@ runs:
     - name: Restore linux-modules-extra .deb cache
       id: cache
       if: steps.probe.outputs.loaded != 'true'
-      uses: actions/cache/restore@v6
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       env:
         SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
       with:
@@ -162,7 +162,7 @@ runs:
     # Save only bytes that matched the apt index hash and loaded vrf.
     - name: Save linux-modules-extra .deb cache
       if: steps.load.outputs.downloaded == 'true' && steps.load.outputs.vrf-available == 'true'
-      uses: actions/cache/save@v6
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/vrf-module-cache
         key: linux-modules-extra-${{ steps.probe.outputs.kernel }}

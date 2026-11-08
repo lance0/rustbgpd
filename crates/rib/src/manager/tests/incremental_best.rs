@@ -46,6 +46,8 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
     let (_tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let topology_peer = Ipv4Addr::new(10, 9, 9, 9);
+
+    register_test_peer(&mut manager, peer_v4(topology_peer), 0);
     manager.handle_update(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: peer_v4(topology_peer),

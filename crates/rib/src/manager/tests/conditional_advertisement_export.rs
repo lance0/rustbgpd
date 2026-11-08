@@ -170,6 +170,8 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr, local_pref: u32, tagged: bool) ->
 }
 
 fn announce(manager: &mut RibManager, source: Ipv4Addr, routes: Vec<Route>) {
+    register_test_peer(manager, ip(source), 0);
+
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: ip(source),
         session_id: 0,
@@ -1236,6 +1238,7 @@ async fn run_loop_withdraws_after_the_settle_window() {
         let tx = tx.clone();
         async move { tx.send(update).await.unwrap() }
     };
+    send(registering_peer_up(ip(SOURCE), 0)).await;
     send(RibUpdate::RoutesReceived {
         peer: ip(SOURCE),
         session_id: 0,

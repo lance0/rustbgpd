@@ -249,7 +249,13 @@ the configured path and its resolved form, must be owned by root or the daemon
 user and not writable by other users: world-writable, or group-writable by a
 group other than the daemon's, is refused unless the directory is sticky, as
 `/tmp` is. The default `/var/lib/rustbgpd`, a systemd `StateDirectory=`, and
-the container images satisfy this.
+the container images satisfy this. After startup, FIB receipts, config history,
+commit-confirm pending files, and crash reports use the retained directory
+handle. Replacing an ancestor symlink cannot redirect those reads or writes.
+The commit-confirm locator records the resolved pending-directory path for
+recovery after restart. Confirmed apply refuses if that path no longer names
+the retained directory, resolves through a new symlink, or the directory's
+ownership or mode is unsafe.
 
 The **directory holding the config file** must also be writable by the
 rustbgpd process if you use runtime mutation. Every accepted `rbgp neighbor
@@ -2760,6 +2766,14 @@ unicast, rejected IDs also count when `max_prefixes_received_ipv4_unicast` or
 that family. A replacement of an existing ID needs no new slot, and a
 withdrawal releases one.
 
+These receive counters belong to the current session. With LLGR enabled,
+stale IDs from earlier sessions can remain alongside newly received IDs,
+so the retained RIB can exceed this per-session cap. Repeated reconnects do
+not restart the original LLGR stale deadline; End-of-RIB or that deadline
+removes unrefreshed stale paths. The RIB uses logarithmic per-key indexes
+for these accumulated IDs, but does not impose an additional retained-path
+memory cap. Account for this retention when enabling LLGR on Add-Path peers.
+
 Past the cap, `max_prefix_action = "block"` withholds a net-new ID and
 counts it as `"block"`. `"shutdown"` sends Cease/1, latches the peer and
 counts the attempt as `"shutdown"`, at any `receive_max`. `"warning"` admits
@@ -2896,10 +2910,14 @@ unauthorized next hop — and it is fail-closed:
 Rejected announcements are dropped treat-as-withdraw style: a rejection that
 replaces a previously accepted route withdraws exactly that prior
 `(prefix, path_id)` identity; a first-seen rejection emits no withdrawal.
-Withdrawals in the same UPDATE are always processed. Each rejection logs at
-`warn` with the peer, the rejected prefixes, the offending next-hop tuple,
-and a stable `reason` token (`foreign_next_hop`,
-`unverified_link_local_companion`, or `unscoped_link_local`).
+Withdrawals in the same UPDATE are always processed. A rejecting UPDATE
+logs at `warn` with the peer, the rejected prefixes, the offending next-hop
+tuple, and a stable `reason` token (`foreign_next_hop`,
+`unverified_link_local_companion`, or `unscoped_link_local`). Each reason
+logs only its 1st, 2nd, 4th, 8th, ... rejecting UPDATE per connection, and
+the line's `warning_updates` field gives that count; a reconnect starts the
+schedule again. `rbgp rib received <peer> --rejected` lists the retained
+rejected prefixes, including those from unlogged UPDATEs.
 
 `next_hop_ownership` requires `route_server_client = true` and inherits from
 the peer-group. Unset means no ownership enforcement (RFC 7947 transparency
@@ -4889,7 +4907,7 @@ file_prefix = "rib"         # filename prefix (default "rib")
 | `output_dir`    | string  | yes      | --       | Directory for MRT dump files (created lazily; must be writable) |
 | `dump_interval` | u64     | no       | 7200     | Seconds between periodic dumps (must be > 0) |
 | `compress`      | bool    | no       | false    | Compress output files with gzip           |
-| `file_prefix`   | string  | no       | `"rib"`  | Filename prefix for dump files            |
+| `file_prefix`   | string  | no       | `"rib"`  | Nonempty filename component; no `/`, `\`, NUL, `.` or `..` |
 
 ### Output files
 

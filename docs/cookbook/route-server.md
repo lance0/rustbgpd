@@ -498,9 +498,13 @@ outbound filter — roles are defense in depth, not a substitute for it.
 
 **A member's routes vanish after enabling `next_hop_ownership`.** The
 strict-peer gate (ADR-0107) rejected them pre-policy: the announced
-NEXT_HOP is not that member's session address. Each rejection logs at
+NEXT_HOP is not that member's session address. A rejecting UPDATE logs at
 `warn` with the peer, prefixes, offending next-hop tuple, and a `reason`
 token (`foreign_next_hop`, `unverified_link_local_companion`,
-`unscoped_link_local`). If the member legitimately points at another of
-its own connections (same AS, different port), unset the knob for that
-member — the strict pilot only authorizes the session's own address.
+`unscoped_link_local`). Each reason logs only its 1st, 2nd, 4th, 8th, ...
+rejecting UPDATE per connection, with that count in `warning_updates`, so
+expect a handful of lines rather than one per UPDATE. The retained
+rejected prefixes are listed by `rbgp rib received <peer> --rejected`. If
+the member legitimately points at another of its own connections (same AS,
+different port), unset the knob for that member — the strict pilot only
+authorizes the session's own address.

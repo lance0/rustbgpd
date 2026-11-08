@@ -393,6 +393,20 @@ struct ReplacementFanoutState {
     expected_inventory: HashSet<Prefix>,
 }
 
+fn register_fanout_source(manager: &mut RibManager) {
+    let before = manager
+        .bench_adj_rib_out_fanout_receipt()
+        .pristine_otc_reconcile_candidates;
+    manager.bench_register_restarted_source(PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1)));
+    assert_eq!(
+        manager
+            .bench_adj_rib_out_fanout_receipt()
+            .pristine_otc_reconcile_candidates,
+        before + 1,
+        "the empty ingress PeerUp must contribute exactly one setup reconciliation"
+    );
+}
+
 /// Build a manager with `n_peers` registered and `CHANGED` best paths seeded.
 /// The receivers are returned so the caller keeps the bounded channels open
 /// across the measured `distribute_changes`.
@@ -417,7 +431,9 @@ fn build(n_peers: usize, export_policy: Option<PolicyChain>) -> FanoutState {
         CHANNEL_CAP,
         fanout_bench_export_encoder,
     );
+    register_fanout_source(&mut mgr);
     mgr.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
+    mgr.bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     let changed: HashSet<Prefix> = prefixes.into_iter().collect();
     (mgr, receivers, changed)
 }
@@ -450,7 +466,9 @@ fn build_ixp_with_policy(
         CHANNEL_CAP,
         fanout_bench_route_server_export_encoder,
     );
+    register_fanout_source(&mut manager);
     manager.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
+    manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     let changed = prefixes.into_iter().collect();
     (manager, receivers, changed)
 }
@@ -463,9 +481,13 @@ fn expected_fanout_receipt(
     peers: usize,
     routes_received_dispatches: usize,
 ) -> AdjRibOutFanoutBenchReceipt {
+    assert!(
+        routes_received_dispatches <= 1,
+        "receipt is either the initial seed or one prepared replacement"
+    );
     AdjRibOutFanoutBenchReceipt {
-        update_groups: 1,
-        grouped_peers: peers,
+        update_groups: 2, // one exporter group plus the proven empty ingress group
+        grouped_peers: peers + 1,
         ungrouped_peers: 0,
         dirty_peers: 0,
         grouped_unicast_routes: CHANGED,
@@ -480,12 +502,15 @@ fn expected_fanout_receipt(
         successful_enqueues: peers,
         family_gauge_writes: peers,
         last_family_gauge_write_mask: 0x01,
+        // Initial PeerUp also reconciles the proven empty ingress source once.
+        // Receipt resets exclude that setup work from timed replacements.
         pristine_otc_reconcile_candidates: peers
             * if routes_received_dispatches == 0 {
                 1
             } else {
                 2
-            },
+            }
+            + usize::from(routes_received_dispatches != 0),
         private_extra_prefix_scans: 0,
         first_peer_family_values: [
             i64::try_from(CHANGED).expect("fixture size fits i64"),
@@ -503,9 +528,13 @@ fn expected_private_single_best_receipt(
     peers: usize,
     routes_received_dispatches: usize,
 ) -> AdjRibOutFanoutBenchReceipt {
+    assert!(
+        routes_received_dispatches <= 1,
+        "receipt is either the initial seed or one prepared replacement"
+    );
     AdjRibOutFanoutBenchReceipt {
-        update_groups: 0,
-        grouped_peers: 0,
+        update_groups: 1, // only the proven empty ingress group
+        grouped_peers: 1,
         ungrouped_peers: peers,
         dirty_peers: 0,
         grouped_unicast_routes: 0,
@@ -520,7 +549,8 @@ fn expected_private_single_best_receipt(
         successful_enqueues: peers,
         family_gauge_writes: peers,
         last_family_gauge_write_mask: 0x01,
-        pristine_otc_reconcile_candidates: peers,
+        // Include the source's initial reconciliation only in the setup receipt.
+        pristine_otc_reconcile_candidates: peers + usize::from(routes_received_dispatches != 0),
         private_extra_prefix_scans: 0,
         first_peer_family_values: [CHANGED as i64, 0, 0, 0, 0, 0, 0],
     }
@@ -1097,10 +1127,10 @@ fn assert_grouped_withdrawal_setup_receipt(receipt: AdjRibOutFanoutBenchReceipt,
         "setup must be a pure pre-advertisement"
     );
     assert_eq!(
-        receipt.update_groups, 1,
-        "setup must populate one production update group"
+        receipt.update_groups, 2,
+        "setup must populate one exporter group beside the empty ingress group"
     );
-    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(receipt.grouped_peers, peers + 1);
     assert_eq!(
         receipt.ungrouped_peers, 0,
         "private fallback invalidates the grouped-withdrawal setup"
@@ -1182,10 +1212,10 @@ fn assert_grouped_withdrawal_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers
         "the production dispatch must carry the complete withdrawal inventory"
     );
     assert_eq!(
-        receipt.update_groups, 1,
-        "the fleet must remain one production update group"
+        receipt.update_groups, 2,
+        "the fleet must remain one exporter group beside the empty ingress group"
     );
-    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(receipt.grouped_peers, peers + 1);
     assert_eq!(
         receipt.ungrouped_peers, 0,
         "private fallback invalidates the grouped-withdrawal shape"
@@ -1347,8 +1377,8 @@ fn build_grouped_policy_denial_fanout(peers: usize) -> GroupedPolicyDenialState 
 }
 
 fn assert_grouped_policy_denial_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
-    assert_eq!(receipt.update_groups, 1);
-    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(receipt.update_groups, 2);
+    assert_eq!(receipt.grouped_peers, peers + 1);
     assert_eq!(
         receipt.ungrouped_peers, 0,
         "private fallback invalidates grouped policy-denial staging"
@@ -1473,10 +1503,10 @@ fn build_adj_rib_out_gauge_fanout(peers: usize) -> AdjRibOutGaugeFanoutState {
 
 fn assert_adj_rib_out_gauge_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
     assert_eq!(
-        receipt.update_groups, 1,
-        "fixture must use one update group"
+        receipt.update_groups, 2,
+        "fixture must use one exporter group beside the empty ingress group"
     );
-    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(receipt.grouped_peers, peers + 1);
     assert_eq!(
         receipt.ungrouped_peers, 0,
         "fallback peers invalidate the A/B"
@@ -1601,6 +1631,7 @@ fn build_initial_table_join(routes: usize) -> InitialTableJoinState {
         "the deterministic seed must contain one unique route identity per row"
     );
     manager.bench_seed_loc_rib(seeded);
+    manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     manager.bench_reset_adj_rib_out_fanout_receipt();
 
     // Two synchronous envelopes are expected: one route-bearing dump and one
@@ -1633,12 +1664,15 @@ fn build_initial_table_join(routes: usize) -> InitialTableJoinState {
 }
 
 fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: usize) {
+    state
+        .manager
+        .bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     let receipt = state.manager.bench_adj_rib_out_fanout_receipt();
     assert_eq!(
-        receipt.update_groups, 1,
-        "the joining RR client must build and replay one production update group"
+        receipt.update_groups, 2,
+        "the joining RR client must build and replay one exporter group beside the empty ingress group"
     );
-    assert_eq!(receipt.grouped_peers, 1);
+    assert_eq!(receipt.grouped_peers, 2);
     assert_eq!(
         receipt.ungrouped_peers, 0,
         "a private fallback would measure the wrong initial-table join shape"
@@ -1816,6 +1850,11 @@ fn build_group_join(sources: u8, routes: usize) -> RibManager {
             })
             .collect(),
     );
+    manager.bench_assert_empty_source_group(
+        &(1..=sources)
+            .map(|source| PeerId::from_ipv4(Ipv4Addr::new(192, 0, 2, source)))
+            .collect::<Vec<_>>(),
+    );
     let (sender, mut receiver) = mpsc::channel(2);
     manager.bench_join_route_reflector_peer(0, sender, fanout_bench_export_encoder());
     assert_eq!(
@@ -1864,12 +1903,20 @@ fn bench_initial_table_group_join(c: &mut Criterion) {
                             let eor = receiver.try_recv().expect("joiner EoR");
                             assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
                         }
+                        manager.bench_assert_empty_source_group(
+                            &(1..=sources)
+                                .map(|source| PeerId::from_ipv4(Ipv4Addr::new(192, 0, 2, source)))
+                                .collect::<Vec<_>>(),
+                        );
                         let receipt = manager.bench_adj_rib_out_fanout_receipt();
                         assert_eq!(
-                            receipt.update_groups, 1,
+                            receipt.update_groups, 2,
                             "joiners share the founder's group"
                         );
-                        assert_eq!(receipt.grouped_peers, 1 + GROUP_JOINERS);
+                        assert_eq!(
+                            receipt.grouped_peers,
+                            usize::from(sources) + 1 + GROUP_JOINERS
+                        );
                         assert_eq!(receipt.ungrouped_peers, 0);
                     }
                     accumulated
@@ -1917,12 +1964,15 @@ fn bench_initial_table_deferred_group_join(c: &mut Criterion) {
                             let eor = receiver.try_recv().expect("joiner EoR");
                             assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
                         }
+                        manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(
+                            Ipv4Addr::new(192, 0, 2, 1),
+                        )]);
                         let receipt = manager.bench_adj_rib_out_fanout_receipt();
                         assert_eq!(
-                            receipt.update_groups, 1,
+                            receipt.update_groups, 2,
                             "joiners share the founder's group"
                         );
-                        assert_eq!(receipt.grouped_peers, 1 + joiners);
+                        assert_eq!(receipt.grouped_peers, 1 + 1 + joiners);
                     }
                     accumulated
                 });
@@ -2006,7 +2056,16 @@ fn build_add_path_staging(
         matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
         "Add-Path setup must leave a live channel with no residue"
     );
-    assert_add_path_receipt(manager.bench_adj_rib_out_fanout_receipt(), send_max);
+    manager.bench_assert_empty_source_group(
+        &(0..candidates)
+            .map(|index| PeerId::from_ipv4(add_path_source(index)))
+            .collect::<Vec<_>>(),
+    );
+    assert_add_path_receipt(
+        manager.bench_adj_rib_out_fanout_receipt(),
+        candidates,
+        send_max,
+    );
     assert_eq!(
         manager.bench_unicast_candidate_count(add_path_prefix()),
         candidates,
@@ -2127,10 +2186,10 @@ fn assert_add_path_envelope(
     );
 }
 
-fn assert_add_path_receipt(receipt: AdjRibOutFanoutBenchReceipt, send_max: u32) {
+fn assert_add_path_receipt(receipt: AdjRibOutFanoutBenchReceipt, candidates: usize, send_max: u32) {
     let send_max = usize::try_from(send_max).expect("send_max fits usize");
-    assert_eq!(receipt.update_groups, 0);
-    assert_eq!(receipt.grouped_peers, 0);
+    assert_eq!(receipt.update_groups, 1);
+    assert_eq!(receipt.grouped_peers, candidates);
     assert_eq!(receipt.ungrouped_peers, 1);
     assert_eq!(receipt.dirty_peers, 0);
     assert_eq!(receipt.grouped_unicast_routes, 0);
@@ -2182,6 +2241,7 @@ fn measure_add_path_staging(
         accumulated += started.elapsed();
         assert_add_path_receipt(
             state.manager.bench_adj_rib_out_fanout_receipt(),
+            state.candidates,
             state.send_max,
         );
         let update = state
@@ -2671,6 +2731,10 @@ fn build_queued_announce(peers: usize, fleet: QueuedAnnounceFleet) -> QueuedAnno
         CHANNEL_CAP,
         fanout_bench_route_server_export_encoder,
     );
+    manager.bench_register_restarted_source(PeerId::from_ipv4(QUEUED_SOURCE_A));
+    if matches!(fleet, QueuedAnnounceFleet::MultiSource) {
+        manager.bench_register_restarted_source(PeerId::from_ipv4(QUEUED_SOURCE_B));
+    }
     let mut state = QueuedAnnounceState {
         manager,
         tx,
@@ -2679,9 +2743,21 @@ fn build_queued_announce(peers: usize, fleet: QueuedAnnounceFleet) -> QueuedAnno
         prefixes: changed_prefixes(),
     };
     queued_announce_restore(&mut state);
+    let sources = if matches!(fleet, QueuedAnnounceFleet::MultiSource) {
+        vec![
+            PeerId::from_ipv4(QUEUED_SOURCE_A),
+            PeerId::from_ipv4(QUEUED_SOURCE_B),
+        ]
+    } else {
+        vec![PeerId::from_ipv4(QUEUED_SOURCE_A)]
+    };
+    state.manager.bench_assert_empty_source_group(&sources);
     let receipt = state.manager.bench_adj_rib_out_fanout_receipt();
-    assert_eq!(receipt.update_groups, 1, "fleet must form one update group");
-    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(
+        receipt.update_groups, 2,
+        "one exporter group beside the empty ingress group"
+    );
+    assert_eq!(receipt.grouped_peers, peers + sources.len());
     assert_eq!(receipt.ungrouped_peers, 0);
     state
 }
@@ -2799,7 +2875,9 @@ fn bench_queued_announce_fanout(c: &mut Criterion) {
                                 receipt.dirty_peers, 0,
                                 "dirty resync invalidates the shape"
                             );
-                            assert_eq!(receipt.grouped_peers, peers);
+                            let sources =
+                                1 + usize::from(matches!(fleet, QueuedAnnounceFleet::MultiSource));
+                            assert_eq!(receipt.grouped_peers, peers + sources);
                             let envelopes = fold_queued_envelopes(&mut state.receivers, &expected);
                             if !reported {
                                 eprintln!(
@@ -2855,9 +2933,20 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
                             .collect();
                         // Every refreshed member must take the grouped refresh
                         // arm; an ungrouped member would time the full walk.
+                        manager.bench_assert_empty_source_group(
+                            &(1..=sources)
+                                .map(|source| PeerId::from_ipv4(Ipv4Addr::new(192, 0, 2, source)))
+                                .collect::<Vec<_>>(),
+                        );
                         let receipt = manager.bench_adj_rib_out_fanout_receipt();
-                        assert_eq!(receipt.update_groups, 1, "one converged group");
-                        assert_eq!(receipt.grouped_peers, 1 + GROUP_JOINERS);
+                        assert_eq!(
+                            receipt.update_groups, 2,
+                            "one exporter group beside the empty ingress group"
+                        );
+                        assert_eq!(
+                            receipt.grouped_peers,
+                            usize::from(sources) + 1 + GROUP_JOINERS
+                        );
                         assert_eq!(
                             receipt.ungrouped_peers, 0,
                             "no refreshed member is ungrouped"
@@ -2875,7 +2964,7 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
                         }
                         assert_eq!(
                             manager.bench_adj_rib_out_fanout_receipt().update_groups,
-                            1,
+                            2,
                             "refreshing members stay in the founder's group"
                         );
                     }
@@ -2887,7 +2976,7 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
     group.finish();
 }
 
-/// `GROUP_JOINERS` RR clients of one converged group go dirty together and
+/// `GROUP_JOINERS` RR clients of one exporter group beside the empty ingress group go dirty together and
 /// hold admitted-key proofs; timed is their full dirty resync through the
 /// production resync timer, one member per slice. Fixture construction, the
 /// dirty marks (proof capture) and receipt checks stay outside.

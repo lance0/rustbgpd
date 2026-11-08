@@ -112,6 +112,15 @@ impl<V> FamilyPrefixMap<V> {
     /// Collect a small stack batch first to amortize iterator startup, without
     /// leaving a whole table's structural cleanup to its final destructor.
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
+        self.retire_values_with(checkpoint, |value, _| drop(value));
+    }
+
+    /// [`Self::retire_with`], handing each removed value to `retire`.
+    fn retire_values_with<C: RetirementCheckpoint>(
+        &mut self,
+        checkpoint: &mut C,
+        mut retire: impl FnMut(V, &mut C),
+    ) {
         loop {
             let mut prefixes = [None; 32];
             for (slot, (prefix, _)) in prefixes.iter_mut().zip(self.iter_from(None)) {
@@ -125,7 +134,9 @@ impl<V> FamilyPrefixMap<V> {
                 checkpoint.checkpoint(RetirementProgress::Progress);
                 let retired = self.remove(&prefix);
                 debug_assert!(retired.is_some(), "iterated prefix must still be present");
-                drop(retired);
+                if let Some(value) = retired {
+                    retire(value, checkpoint);
+                }
                 checkpoint.checkpoint(RetirementProgress::Progress);
             }
         }
@@ -133,7 +144,16 @@ impl<V> FamilyPrefixMap<V> {
 
     /// Retire every prefix, then release the empty trie roots.
     pub(crate) fn release_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
-        self.retire_with(checkpoint);
+        self.release_values_with(checkpoint, |value, _| drop(value));
+    }
+
+    /// [`Self::release_with`], handing each removed value to `retire`.
+    pub(crate) fn release_values_with<C: RetirementCheckpoint>(
+        &mut self,
+        checkpoint: &mut C,
+        retire: impl FnMut(V, &mut C),
+    ) {
+        self.retire_values_with(checkpoint, retire);
 
         let v4 = std::mem::replace(&mut self.v4, PrefixMap::new());
         checkpoint.checkpoint(RetirementProgress::Boundary);

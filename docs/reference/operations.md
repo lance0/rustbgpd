@@ -501,6 +501,21 @@ rbgp config rollback "$HISTORY_INDEX" --confirm-id undo-1 --confirm-timeout 120
 rbgp config confirm undo-1
 ```
 
+At boot, history directory ownership and private permissions are checked before
+gRPC starts serving. Recording then runs on the blocking pool, so a slow history
+`fsync` does not delay the gRPC bind. Persisted config mutations and SIGHUP wait
+for that recording attempt to finish under the shared config coordinator.
+The blocking job retains admission ownership even if its async waiter is
+canceled. History failures still warn and release admission; history is
+best-effort, and the config file remains authoritative.
+
+During this interval, history readers can see the previous retained rows, an
+empty history, or a complete newly renamed row whose final directory sync has
+not finished. Staging files are never history rows. A crash may lose the new
+row; startup still loads the config file and any pending commit-confirm
+authority, then attempts to record that accepted snapshot again. History index
+0 is not a promise that boot recording is durable or that mutations are ready.
+
 `config diff --history N` previews a retained rollback without changing runtime,
 persisted config, history, or confirmed-commit state. Choose either a candidate
 file or `--history`, with an index of 1 or higher. The preview uses the rollback
@@ -1983,6 +1998,7 @@ and `bfd_unavailable` (a `[[dynamic_neighbors]]` range runs BFD but the new
 session's BFD session could not be registered without waiting on the BFD
 actor, because a BFD membership change was in progress or the range's socket
 family is not open; the peer retries).
+The metric HELP text lists the same six canonical `reason` values.
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
 The Grafana overview graphs every reason in "Inbound connection drops by
@@ -2043,7 +2059,7 @@ name it.
 | `bgp_rib_outbound_registration_pending_oldest_seconds` | Age in whole seconds of the oldest wait counted above, 0 when none. A wait starts at the session's `PeerUp`, or at a collision failback onto a survivor whose earlier registration had completed, and ends when the registration completes or the session goes down. It keeps rising while the actor is otherwise idle. An investigation signal, not a readiness condition: legitimate import deferral has no fixed bound |
 | `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); the replacement resets the prior session's RIB state and keeps the superseded session live for failover; its `PeerDown` is matched by session identity |
 | `bgp_rib_stale_peer_down_ignored_total{peer}` | `PeerDown`/`PeerGracefulRestart` events discarded because their session id didn't match the registered session — a stale teardown from a superseded collision-loser session; the surviving session's state is untouched |
-| `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp` — and End-of-RIB or route-refresh begin/end/timeout markers (`eor`, `refresh`) from a peer with no registered session, such as one whose routes are retained under Graceful Restart, which must not complete their sweep. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`, `family_sendable`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, slow-peer state, and a family made sendable mid-session (IPv6 unicast unlocked by a reloaded `local_ipv6_nexthop`) respectively. The registered session's state is untouched |
+| `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded because they belong to a superseded session or a peer with no registered session. This includes route data and End-of-RIB or route-refresh begin/end/timeout markers from an unregistered peer whose routes are retained under Graceful Restart. A deferred `PeerUp` already owns ingress and remains accepted. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`, `family_sendable`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, slow-peer state, and a family made sendable mid-session (IPv6 unicast unlocked by a reloaded `local_ipv6_nexthop`) respectively. The registered session's state is untouched |
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer outcomes: `still_dirty` when a tick leaves a dirty peer or another retry pending and the timer re-arms; `owing` when a tick leaves only owed private-family routes; runnable debt uses the 10 ms backlog cadence to detect returned credit or channel capacity, while a whole-family drain behind a live operation wakes when that operation completes; `cleared` when a tick drains the work, or when the RIB loop notices at the end of an iteration that a message handler such as session teardown drained it. A drain on a loop path that continues before that check is not counted, so a missing `cleared` does not prove that resync is stalled. Every series is exported at 0 from startup |
 | `bgp_rib_outbound_owing_fallback_total` | Peers that owed private-family routes and fell back to a whole-peer resync instead: the owed routes could not be sent for a reason other than a full channel or spent credit (a missing export encoder, EVPN recovery admission), or a gated update was refused for credit. Expected to stay at 0 |
@@ -2236,6 +2252,17 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
 | `bgp_max_prefix_blocked_total{peer,family,stage}` | Blocking episodes opened for a bound under `max_prefix_action = "block"`, counted once when the first net-new prefix is withheld by a full bound — not once per withheld prefix. Each increment marks a `bgp_max_prefix_blocking{peer,family,stage}` transition to 1; the bound must recover to 0 before another withheld prefix increments the counter again. Read it as how often a peer has driven a bound to full, never as how much it sent: a `rate()` over it measures episode frequency, the gauge answers whether prefixes are being withheld right now, and the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain |
 | `bgp_max_prefix_warning_total{peer,family,stage}` | `max_prefix_warning_percent` (or the bound itself under `max_prefix_action = "warning"`) crossings, one per crossing per bound; each is paired with one warn log line and one `max_prefix_warning` session event |
+
+Other repeatable inbound WARNs use independent per-connection counts for
+non-negotiated `MP_REACH_NLRI` families, IPv4 body NLRI from scoped link-local
+peers, strict-peer next-hop rejection (one count per `reason`), and policy OTC
+rejection. Each class logs at counts 1, 2, 4, 8, ... and includes its count as
+`warning_updates`. Reconnect re-arms every class. Suppressing a warning does
+not change route handling. `bgp_messages_received_total{type="update"}` and
+`bgp_otc_routes_blocked_total` still count every event. Strict-peer next-hop
+rejection, non-negotiated `MP_REACH_NLRI` and scoped-peer body NLRI have no
+counter: `warning_updates` shows them only to power-of-two resolution, and
+`rbgp rib received <peer> --rejected` lists retained next-hop rejections.
 
 Malformed UPDATE cause reasons are bounded to `attribute_list`,
 `unrecognized_well_known`, `missing_well_known`, `attribute_flags`,

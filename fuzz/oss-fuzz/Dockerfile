@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM gcr.io/oss-fuzz-base/base-builder-rust:ubuntu-24-04
+FROM gcr.io/oss-fuzz-base/base-builder-rust:ubuntu-24-04@sha256:bceca1feaa6ee67cd11a4ac6104b754afb6da7f0a81d191212aff1d678c71f21
 RUN git clone --depth 1 https://github.com/lance0/rustbgpd rustbgpd
 WORKDIR rustbgpd
 RUN toolchain="$(cat fuzz/rust-nightly.txt)" \

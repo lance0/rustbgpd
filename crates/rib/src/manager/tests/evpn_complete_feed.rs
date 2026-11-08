@@ -1629,6 +1629,8 @@ fn review_announce_unicast(manager: &mut RibManager, octet: u8) -> Route {
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
         source,
     );
+
+    register_test_peer(manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -2232,6 +2234,7 @@ fn assert_review2_direct_family_refusal(family: u8) {
     let route = received(100);
     admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
     let source = Ipv4Addr::new(192, 0, 2, 10);
+    register_test_peer(&mut manager, peer_v4(source), 0);
     let extra = if family == 0 {
         (Afi::Ipv4, Safi::FlowSpec)
     } else {

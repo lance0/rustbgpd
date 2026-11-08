@@ -807,6 +807,7 @@ async fn one_to_two_label_replacement_withdraws_the_advertised_copy() {
             .sum::<f64>()
     };
 
+    register_test_source(&session.rib_tx, source, 0).await;
     let mut labeled_seen = (Vec::new(), Vec::new());
     let mut vpn_seen = (Vec::new(), Vec::new());
     for (round, labels) in [one_label, two_label_stack()].into_iter().enumerate() {

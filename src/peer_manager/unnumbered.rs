@@ -948,7 +948,6 @@ impl PeerManager {
             &mut next,
             &rustbgpd_api::peer_types::ConfigEvent::PresenceAwareNeighborAdded { spec, ack: None },
         )
-        .and_then(|()| next.validate())
         .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
         let neighbor = next
             .neighbors

@@ -2055,6 +2055,10 @@ async fn run(
         OBSERVERS.iter().all(|i| ctx.obs[*i].converged()),
         format!("v4={V4_ROUTES} v6={V6_ROUTES} elapsed={converged:?}"),
     );
+    // Listener and wire readiness can precede boot-history publication.
+    wait_for(|| history_files(lab).is_ok_and(|files| !files.is_empty()))
+        .await
+        .ok_or("boot config history was never published")?;
     let boot_history = history_entries(&lab.rbgp.run(&["-j", "config", "history"]).await?);
     checks.assert(
         "baseline.boot_config_recorded_in_history",

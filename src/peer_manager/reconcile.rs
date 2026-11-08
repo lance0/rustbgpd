@@ -572,7 +572,9 @@ impl PeerManager {
             tables.iter().map(fib_table_snapshot_to_config).collect();
         let mut probe = self.current_config.clone();
         probe.fib_tables.clone_from(&staged);
-        probe.validate().map_err(|error| error.to_string())?;
+        probe
+            .validate_structure()
+            .map_err(|error| error.to_string())?;
         self.current_config.fib_tables = staged;
         Ok(())
     }

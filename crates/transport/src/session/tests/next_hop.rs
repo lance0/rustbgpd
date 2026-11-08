@@ -3311,6 +3311,7 @@ async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
         .unwrap();
 
     let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+    register_test_source(&session.rib_tx, source, 0).await;
     let v6_next_hop: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
     let labeled_v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24));
     let labeled_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
@@ -3646,10 +3647,12 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
             })
             .await
             .unwrap();
+        let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+        register_test_source(&session.rib_tx, source, 0).await;
         session
             .rib_tx
             .send(RibUpdate::LabeledRoutesReceived {
-                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))),
+                peer: source,
                 session_id: 0,
                 announced: vec![
                     labeled_route_with(received_prefix, received_v6),
@@ -3823,6 +3826,7 @@ async fn check_mpls_set_next_hop_keeps_link_local(safi: Safi, add_path: bool) {
             .await
             .unwrap();
         let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+        register_test_source(&session.rib_tx, source, 0).await;
         let prefix = "2001:db8:100::".parse().unwrap();
         let received = if safi == Safi::LabeledUnicast {
             let mut route = labeled_route_with(Prefix::V6(Ipv6Prefix::new(prefix, 48)), primary);
@@ -4273,6 +4277,7 @@ async fn action_only_replacement_frames(
     }
     let mut route = make_route(100);
     route.peer = PeerId::from_addr("192.0.2.9".parse().unwrap());
+    register_test_source(&session.rib_tx, route.peer, 0).await;
     route.next_hop = route.peer.addr();
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),

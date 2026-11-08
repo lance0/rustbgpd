@@ -1808,6 +1808,7 @@ fn restart_unicast_manager(armed: bool) -> RibManager {
         );
     }
     let source = Ipv4Addr::new(198, 51, 100, 250);
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::BgpLsRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1941,6 +1942,7 @@ fn deferred_unicast_lease(
 
 fn deferred_unicast_received(manager: &mut RibManager, prefixes: &[Prefix]) -> PeerId {
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 9));
+    manager.handle_update(registering_peer_up(source, 0));
     let announced = prefixes
         .iter()
         .map(|prefix| {
@@ -1966,6 +1968,8 @@ fn deferred_unicast_received(manager: &mut RibManager, prefixes: &[Prefix]) -> P
             route
         })
         .collect();
+
+    register_test_peer(manager, source, 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -2527,6 +2531,8 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
             }],
         });
         let topology_source = Ipv4Addr::new(198, 51, 100, 250);
+
+        register_test_peer(&mut manager, peer_v4(topology_source), 0);
         manager.handle_update(RibUpdate::BgpLsRoutesReceived {
             peer: peer_v4(topology_source),
             session_id: 0,

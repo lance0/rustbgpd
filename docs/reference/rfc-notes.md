@@ -412,6 +412,12 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 
 - All six states implemented: Idle, Connect, Active, OpenSent,
   OpenConfirm, Established.
+- Unexpected messages in OpenSent, OpenConfirm and Established produce
+  FSM Error subcodes 1, 2 and 3, respectively, with the unexpected BGP
+  message type in the one-octet data field ([RFC 6608 §4](https://www.rfc-editor.org/rfc/rfc6608.html#section-4)).
+  An UPDATE decode or validation error before Established also produces
+  the matching FSM Error. Header and OPEN decode errors keep their own
+  error codes; internal events without a BGP message use subcode 0.
 - All timers modeled as inputs (not spawned internally): ConnectRetry,
   Hold, Keepalive.
 - DelayOpen timer: not implemented in v1 (RFC 4271 §8 optional).

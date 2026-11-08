@@ -932,7 +932,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             tables: snapshots, ..
         } => {
             // The full accepted set the FIB reconciler acknowledged. The
-            // trailing `config.validate()` re-checks it (`validate_fib_tables`)
+            // trailing structural validation re-checks it (`validate_fib_tables`)
             // before the caller commits the snapshot, so a malformed event
             // cannot poison the persisted config.
             config.fib_tables = snapshots.iter().map(fib_table_snapshot_to_config).collect();
@@ -943,7 +943,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     .map_err(|reason| ConfigError::InvalidGrpcConfig { reason })?;
         }
     }
-    config.validate()
+    // These events preserve listener credentials; full transaction documents
+    // above still pass through the production loader before reaching this check.
+    config.validate_structure()
 }
 
 /// Convert all named policy definitions from config schema to API payloads.

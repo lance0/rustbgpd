@@ -531,10 +531,25 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(entrypoint.read_text(encoding="utf-8"), self.ADDRESS_MAIN)
         self.assertEqual(harness.read_text(encoding="utf-8"), original)
 
+    def test_current_memory_harness_maps_to_a_historical_control(self) -> None:
+        tree, harness = self.control_api_tree(swaps=False, hook=False, peer_id=False)
+        source = Path(__file__).resolve().parent / "rrharness/src"
+        for name in ("main.rs", "recovery_memory.rs"):
+            (harness.parent / name).write_bytes((source / name).read_bytes())
+        entrypoint = harness.parent / "main.rs"
+        receipt.normalize_memory_entrypoint(entrypoint)
+        receipt.derive_control_api(tree)
+        derived = entrypoint.read_text(encoding="utf-8")
+        self.assertIn("peer: IpAddr::V4(source_addr(index)),", derived)
+        self.assertIn("RibUpdate::QueryLocRibCount { reply }", derived)
+        for path in (entrypoint, harness):
+            self.assertNotIn("PeerId", path.read_text(encoding="utf-8"))
+
     def test_control_api_refuses_peer_id_uses_without_a_one_to_one_mapping(self) -> None:
         for main in (
             self.PEER_ID_MAIN.replace("peer.addr()", "source.addr()", 1),
             self.PEER_ID_MAIN + "const LOCAL: PeerId = PeerId::LOCAL;\n",
+            self.PEER_ID_MAIN + "fn f() { PeerId::from_ipv4(source_addr(0)); }\n",
             "use rustbgpd_rib::{PeerId, Route};\n" + self.PEER_ID_MAIN,
             self.PEER_ID_MAIN + "fn f() { PeerId::from_addr(peer; }\n",
         ):

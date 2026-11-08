@@ -1081,6 +1081,10 @@ async fn confirmed_ipv6_unlock_probes_restored_table_once() {
     let v6 = Ipv6Prefix::new("2001:db8:81::".parse().unwrap(), 48);
     let mut route = make_route(v4, source);
     route.prefix = Prefix::V6(v6);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1114,7 +1118,7 @@ async fn confirmed_ipv6_unlock_probes_restored_table_once() {
     .await
     .unwrap();
     response.await.unwrap().unwrap();
-    let update = outbound.recv().await.map(delivered).unwrap();
+    let update = fixture_update(outbound.recv()).await;
     assert_eq!(update.announce.len(), 1, "restored route exported");
     assert_eq!(update.announce[0].prefix, Prefix::V6(v6));
     assert_eq!(encoder.probe_count(), 1, "one route, one encode probe");
@@ -1835,6 +1839,10 @@ async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
 
     let source = Ipv4Addr::new(198, 51, 100, 1);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -1850,10 +1858,7 @@ async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
     .unwrap();
 
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
     assert_eq!(
         encoders
@@ -1885,6 +1890,10 @@ async fn grouped_shared_unicast_does_not_reuse_when_snapshot_refuses() {
 
     let source = Ipv4Addr::new(198, 51, 100, 2);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -1946,6 +1955,10 @@ async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
 
     let source = Ipv4Addr::new(198, 51, 100, 3);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -2006,6 +2019,9 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
     let mut out_rx = peer_up_with_encoder(&tx, target, encoder.clone()).await;
     let mut route = make_route(prefix, source);
     route.next_hop = "fe80::1".parse().unwrap();
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     // Only the source scope changes: no profile replacement or route refresh
     // may be needed to withdraw and restore the same peer/key/next-hop.
     for (step, ifindex) in [7, 8, 7, 7].into_iter().enumerate() {
@@ -2013,6 +2029,7 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
             interface: Arc::from("eth1"),
             ifindex,
         }));
+
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(source),
@@ -2082,6 +2099,10 @@ async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private(
         if !force_ungrouped {
             assert_eq!(update_group(&tx, peer).await, "group:0");
         }
+
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(source),
@@ -2095,7 +2116,7 @@ async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private(
         })
         .await
         .unwrap();
-        let initial = output.recv().await.unwrap();
+        let initial = fixture_delivery(output.recv()).await.unwrap();
         assert_eq!(initial.announce.len(), 1);
         assert_eq!(advertised_count(&tx, peer).await, 1);
         encoder.set_profile(52, [delivered_key, rejected_key]);
@@ -2114,7 +2135,7 @@ async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private(
             })
             .await
             .unwrap();
-            let refresh = output.recv().await.unwrap();
+            let refresh = fixture_delivery(output.recv()).await.unwrap();
             assert!(!queued.load(Ordering::Acquire));
             assert_eq!(refresh.end_of_rib, ipv4_sendable());
             assert_eq!(
@@ -2181,6 +2202,10 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     assert_eq!(update_group(&tx, classic).await, "group:0");
     assert_eq!(update_group(&tx, extended).await, "group:0");
 
+    tx.send(registering_peer_up(peer_v4(source_a), 0))
+        .await
+        .unwrap();
+
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source_a),
@@ -2194,8 +2219,8 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     })
     .await
     .unwrap();
-    let classic_first = classic_rx.recv().await.map(delivered).unwrap();
-    let extended_first = extended_rx.recv().await.map(delivered).unwrap();
+    let classic_first = fixture_update(classic_rx.recv()).await;
+    let extended_first = fixture_update(extended_rx.recv()).await;
     assert!(classic_first.announce.is_empty());
     assert_eq!(extended_first.announce.len(), 1);
     assert_eq!(advertised_count(&tx, classic).await, 0);
@@ -2219,6 +2244,10 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
 
     // Replacing the group-table winner must not erase the classic member's
     // rejection overlay just because the source peer changed.
+
+    tx.send(registering_peer_up(peer_v4(source_b), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source_b),
@@ -2232,8 +2261,8 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     })
     .await
     .unwrap();
-    let classic_flip = classic_rx.recv().await.map(delivered).unwrap();
-    let extended_flip = extended_rx.recv().await.map(delivered).unwrap();
+    let classic_flip = fixture_update(classic_rx.recv()).await;
+    let extended_flip = fixture_update(extended_rx.recv()).await;
     assert!(classic_flip.announce.is_empty());
     assert_eq!(classic_flip.unicast_withdrawals().count(), 0);
     assert_eq!(extended_flip.announce.len(), 1);
@@ -2293,7 +2322,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
         .unwrap();
         let _ = advertised_count(&tx, classic).await;
     }
-    let extended_withdraw = extended_rx.recv().await.map(delivered).unwrap();
+    let extended_withdraw = fixture_update(extended_rx.recv()).await;
     assert_eq!(
         extended_withdraw
             .unicast_withdrawals()
@@ -2325,6 +2354,7 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
     let sibling = peer_v4(Ipv4Addr::new(192, 0, 2, 31));
     let source = peer_v4(Ipv4Addr::new(198, 51, 100, 30));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_vpn_rib_route(Ipv4Addr::new(198, 51, 100, 30), 30, 1030, 100);
     let key = route.key();
     let exact_key = ExactExportKey::Vpn(key.clone());
@@ -2332,8 +2362,9 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     let sibling_encoder = MockExactExportEncoder::accepting(52);
     let mut target_rx = vpn_peer_up_with_encoder(&tx, target, target_encoder.clone()).await;
     let mut sibling_rx = vpn_peer_up_with_encoder(&tx, sibling, sibling_encoder).await;
-    assert_eq!(update_group(&tx, target).await, "group:0");
-    assert_eq!(update_group(&tx, sibling).await, "group:0");
+    let group = update_group(&tx, target).await;
+    assert!(group.starts_with("group:"));
+    assert_eq!(update_group(&tx, sibling).await, group);
 
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
@@ -2377,7 +2408,7 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     .await
     .unwrap();
     assert_eq!(result.await.unwrap(), Ok(()));
-    let rejected_refresh = target_rx.recv().await.map(delivered).unwrap();
+    let rejected_refresh = fixture_update(target_rx.recv()).await;
     assert!(rejected_refresh.vpn_announce.is_empty());
     assert_eq!(rejected_refresh.vpn_withdraw, vec![key.clone()]);
 
@@ -2393,7 +2424,7 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     .await
     .unwrap();
     assert_eq!(
-        sibling_rx.recv().await.map(delivered).unwrap().vpn_withdraw,
+        fixture_update(sibling_rx.recv()).await.vpn_withdraw,
         vec![key]
     );
     let (reply, result) = oneshot::channel();
@@ -2438,6 +2469,10 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
         update_group(&tx, target).await,
         update_group(&tx, sibling).await
     );
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -2446,24 +2481,9 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     })
     .await
     .unwrap();
+    assert_eq!(fixture_update(target_rx.recv()).await.vpn_announce.len(), 1);
     assert_eq!(
-        target_rx
-            .recv()
-            .await
-            .map(delivered)
-            .unwrap()
-            .vpn_announce
-            .len(),
-        1
-    );
-    assert_eq!(
-        sibling_rx
-            .recv()
-            .await
-            .map(delivered)
-            .unwrap()
-            .vpn_announce
-            .len(),
+        fixture_update(sibling_rx.recv()).await.vpn_announce.len(),
         1
     );
 
@@ -2480,10 +2500,10 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     })
     .await
     .unwrap();
-    let rejected = target_rx.recv().await.map(delivered).unwrap();
+    let rejected = fixture_update(target_rx.recv()).await;
     assert!(rejected.vpn_announce.is_empty());
     assert_eq!(rejected.vpn_withdraw, vec![key.clone()]);
-    let accepted = sibling_rx.recv().await.map(delivered).unwrap();
+    let accepted = fixture_update(sibling_rx.recv()).await;
     assert_eq!(accepted.vpn_announce.len(), 1);
     assert!(accepted.vpn_announce[0].next_hop.is_ipv6());
     assert_eq!(accepted.vpn_withdraw.len(), 0);
@@ -2513,7 +2533,7 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     .await
     .unwrap();
     assert_eq!(
-        sibling_rx.recv().await.map(delivered).unwrap().vpn_withdraw,
+        fixture_update(sibling_rx.recv()).await.vpn_withdraw,
         vec![key]
     );
     if let Ok(Some(update)) =
@@ -2544,6 +2564,9 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
         (Ipv4Addr::new(198, 51, 100, 21), 200),
         (Ipv4Addr::new(198, 51, 100, 22), 100),
     ] {
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(source),
@@ -2949,6 +2972,8 @@ fn grouped_operator_replay_withdraws_a_newly_rejected_route() {
     );
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24);
     let source = Ipv4Addr::new(198, 51, 100, 45);
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -3106,6 +3131,7 @@ fn assert_deferred_frozen_rejection_stays_exact(
     let classic = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
     let extended = peer_v4(Ipv4Addr::new(192, 0, 2, 11));
     let source = Ipv4Addr::new(198, 51, 100, 10);
+    register_test_peer(&mut manager, peer_v4(source), 0);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route_with_lp(prefix, source, 100);
     let vpn_route = make_vpn_rib_route(source, 30, 1030, 100);
@@ -3343,6 +3369,7 @@ fn deferred_frozen_labeled_rejection_keeps_the_explain_exact() {
         rejecting.set_profile(31, [key.clone()]);
         let mut classic_rx = sync_peer_up(&mut manager, classic, family, Some(rejecting), false);
         let send = |manager: &mut RibManager, announce: bool| {
+            register_test_peer(manager, peer_v4(source), 0);
             manager.handle_update(RibUpdate::LabeledRoutesReceived {
                 peer: peer_v4(source),
                 session_id: 0,

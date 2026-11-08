@@ -1022,3 +1022,41 @@ fn config_loader_has_no_test_only_legacy_bypass() {
         "the production loader must keep the exact semantic migration detector"
     );
 }
+
+#[test]
+fn runtime_structure_validation_keeps_checks_without_reopening_credentials() {
+    let token = NamedTempFile::new().unwrap();
+    std::fs::write(token.path(), "operator-token\n").unwrap();
+    let mut config = parse(valid_toml()).unwrap();
+    config
+        .global
+        .telemetry
+        .grpc_uds
+        .as_mut()
+        .unwrap()
+        .token_file = Some(token.path().display().to_string());
+    config.validate().unwrap();
+    std::fs::remove_file(token.path()).unwrap();
+    config.validate_structure().unwrap();
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::InvalidGrpcConfig { .. })
+    ));
+    config.global.asn = 0;
+    assert!(matches!(
+        config.validate_structure(),
+        Err(ConfigError::InvalidLocalAsn { .. })
+    ));
+    config.global.asn = 65001;
+    config
+        .global
+        .telemetry
+        .grpc_uds
+        .as_mut()
+        .unwrap()
+        .token_file = Some("  ".to_string());
+    assert!(matches!(
+        config.validate_structure(),
+        Err(ConfigError::InvalidGrpcConfig { .. })
+    ));
+}

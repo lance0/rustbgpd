@@ -1,6 +1,35 @@
 use super::*;
 use rustbgpd_rib::PeerId;
 
+pub(super) async fn register_peer(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    session_id: u64,
+) -> mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    outbound_rx
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -340,6 +369,7 @@ async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib
         rustbgpd_telemetry::BgpMetrics::new(),
     );
     let actor = tokio::spawn(manager.run());
+    let _outbound = register_peer(&tx, source, 0).await;
     tx.send(RibUpdate::VpnRoutesReceived {
         peer: source,
         session_id: 0,
@@ -756,6 +786,7 @@ async fn vpn_pages_preserve_raw_rd_identity_across_continuation_and_filtering() 
         rustbgpd_telemetry::BgpMetrics::new(),
     );
     let actor = tokio::spawn(manager.run());
+    let _outbound = register_peer(&tx, peer, 1).await;
     tx.send(RibUpdate::VpnRoutesReceived {
         peer,
         session_id: 1,
@@ -1505,7 +1536,9 @@ async fn bgpls_pages_walk_every_route_once_through_the_real_rib() {
         rustbgpd_telemetry::BgpMetrics::new(),
     );
     let actor = tokio::spawn(manager.run());
+    let mut outbound = Vec::new();
     for (peer, announced) in [(first, routes), (second, vec![foreign])] {
+        outbound.push(register_peer(&tx, PeerId::from_addr(peer), 0).await);
         tx.send(RibUpdate::BgpLsRoutesReceived {
             peer: PeerId::from_addr(peer),
             session_id: 0,
@@ -1767,6 +1800,7 @@ async fn orr_topology_pages_walk_every_element_once_through_the_real_rib() {
         rustbgpd_telemetry::BgpMetrics::new(),
     );
     let actor = tokio::spawn(manager.run());
+    let _outbound = register_peer(&tx, peer, 0).await;
     tx.send(RibUpdate::BgpLsRoutesReceived {
         peer,
         session_id: 0,

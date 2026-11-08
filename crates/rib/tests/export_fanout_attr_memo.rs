@@ -237,6 +237,27 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
         // (the profile harness shape: attrs maximally Arc-shared at
         // ingest; per-peer structural fanout is what is measured).
         let src = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(172, 20, 0, 10)));
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            peer: src,
+            session_id: 0,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(172, 20, 0, 10),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: Vec::new(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
         let shared: Arc<AttrSet> = AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {

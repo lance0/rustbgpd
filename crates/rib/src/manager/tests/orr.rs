@@ -33,13 +33,6 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     super::arm_selection_waiter(&mut manager, feed_peer, &[family]);
     let handle = tokio::spawn(manager.run());
 
-    feed_square_topology(&tx, feed).await;
-    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
-    let _client_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
-    let gated = query_orr_status(&tx).await;
-    assert_eq!(gated.topology_nodes, 0);
-    assert!(!gated.vantages[0].resolved);
-
     tx.send(RibUpdate::SetPeerGracefulRestartContext {
         peer: feed_peer,
         session_id: 1,
@@ -73,6 +66,20 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     })
     .await
     .unwrap();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 1,
+        peer: feed_peer,
+        announced: crate::orr::fixtures::square_topology(feed),
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let _client_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+    let gated = query_orr_status(&tx).await;
+    assert_eq!(gated.topology_nodes, 0);
+    assert!(!gated.vantages[0].resolved);
+
     tx.send(RibUpdate::EndOfRib {
         peer: feed_peer,
         session_id: 1,
@@ -101,6 +108,9 @@ async fn peer_up_registers_orr_vantage_and_teardown_clears() {
     let handle = tokio::spawn(manager.run());
 
     let feed = Ipv4Addr::new(10, 9, 9, 9);
+    tx.send(registering_peer_up(peer_v4(feed), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, feed).await;
 
     // Before any vantage: the cache is intentionally empty.
@@ -208,6 +218,9 @@ async fn orr_status_reports_resolved_and_unresolved_vantages() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 9, 9, 9)), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, Ipv4Addr::new(10, 9, 9, 9)).await;
 
     let client1 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
@@ -268,6 +281,9 @@ async fn bgpls_gr_stale_topology_keeps_orr_vantages_resolved() {
     assert!(!status.vantages[0].resolved, "no topology yet");
 
     let feed = Ipv4Addr::new(10, 9, 9, 9);
+    tx.send(registering_peer_up(peer_v4(feed), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, feed).await;
 
     let status = query_orr_status(&tx).await;
@@ -332,6 +348,9 @@ async fn no_vantage_configured_skips_topology_rebuild() {
 
     // BGP-LS churn: announce, re-announce, withdraw.
     let feed = Ipv4Addr::new(10, 9, 9, 9);
+    tx.send(registering_peer_up(peer_v4(feed), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, feed).await;
     feed_square_topology(&tx, feed).await;
     let keys: Vec<_> = crate::orr::fixtures::square_topology(feed)
@@ -373,7 +392,13 @@ async fn empty_bgpls_batch_skips_orr_recompute() {
 
     // Resolve a vantage against the square topology (initial SPF run).
     let feed = Ipv4Addr::new(10, 9, 9, 9);
+    tx.send(registering_peer_up(peer_v4(feed), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, feed).await;
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 8, 8, 8)), 0))
+        .await
+        .unwrap();
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
     let status = query_orr_status(&tx).await;
@@ -417,12 +442,16 @@ async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String
 
     // The BGP-LS topology is present in BOTH runs; the vantage config is
     // the only variable.
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 9, 9, 9)), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, Ipv4Addr::new(10, 9, 9, 9)).await;
 
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = orr_client_peer_up(&tx, client, vantage).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
@@ -572,6 +601,18 @@ fn ibgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, next_hop: IpAddr) -> Route {
     }
 }
 
+async fn register_orr_source(tx: &mpsc::Sender<RibUpdate>, source: Ipv4Addr) {
+    let mut registration = registering_peer_up(peer_v4(source), 0);
+    if let RibUpdate::PeerUp {
+        is_ebgp, peer_asn, ..
+    } = &mut registration
+    {
+        *is_ebgp = false;
+        *peer_asn = 65000;
+    }
+    tx.send(registration).await.unwrap();
+}
+
 /// An RR-mode manager (cluster id set, so iBGP-learned routes reflect
 /// to clients) with the square topology already fed from `ORR_FEED`.
 async fn orr_rr_manager() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
@@ -584,12 +625,17 @@ async fn orr_rr_manager() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<(
         BgpMetrics::new(),
     );
     let handle = tokio::spawn(manager.run());
+    for source in [ORR_SRC_X, ORR_SRC_Y] {
+        register_orr_source(&tx, source).await;
+    }
+    tx.send(registering_peer_up(peer_v4(ORR_FEED), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, ORR_FEED).await;
     (tx, handle)
 }
 
-/// Announce unicast routes from `peer` (unregistered sources pass the
-/// stale-session gate with session id 0).
+/// Announce unicast routes from a source registered with session id 0.
 async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, announced: Vec<Route>) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -684,6 +730,7 @@ async fn explain_best_path_for_orr_peer_uses_that_peers_vantage() {
 
     announce_divergent_bests(&tx).await;
     let unknown_peer = Ipv4Addr::new(192, 0, 2, 3);
+    register_orr_source(&tx, unknown_peer).await;
     let unknown_next_hop = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
     announce_unicast(
         &tx,
@@ -1285,6 +1332,7 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
     // A third source whose next-hop resolves nowhere in the topology —
     // unknown cost, must rank least preferred.
     let src_unknown = Ipv4Addr::new(192, 0, 2, 3);
+    register_orr_source(&tx, src_unknown).await;
     let nh_unknown = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
     announce_unicast(
         &tx,
@@ -2512,6 +2560,12 @@ async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
     )
     .with_conditional_advertisements(set);
     let handle = tokio::spawn(manager.run());
+    for source in [ORR_SRC_X, ORR_SRC_Y] {
+        register_orr_source(&tx, source).await;
+    }
+    tx.send(registering_peer_up(peer_v4(ORR_FEED), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, ORR_FEED).await;
     let mut out = orr_client_peer_up(&tx, client, Some(vantage_at_node_b())).await;
     announce_divergent_bests(&tx).await;

@@ -28,6 +28,7 @@ fn sibling(family: (Afi, Safi)) -> Option<(Afi, Safi)> {
 fn announce_case(manager: &mut RibManager, family: (Afi, Safi), index: u8, other_family: bool) {
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
+    register_test_peer(manager, peer, 0);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24);
     let v6 = Ipv6Prefix::new(
         Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, u16::from(index), 0),
@@ -547,6 +548,7 @@ fn run_orr_llgr_case(
         .insert(peer_v4(Ipv4Addr::new(10, 0, 0, 2)), orr_vantage());
     for feed in [restarting, steady] {
         let peer = peer_v4(feed);
+        register_test_peer(&mut manager, peer, 0);
         manager.ribs.insert(peer, AdjRibIn::new(peer));
         manager.handle_update(RibUpdate::BgpLsRoutesReceived {
             session_id: 0,
@@ -787,6 +789,8 @@ fn llgr_timer_retires_cached_orr_page_topology_under_readiness() {
     let feed = Ipv4Addr::new(10, 9, 9, 1);
     let peer = peer_v4(feed);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    register_test_peer(&mut manager, peer, 0);
     manager.handle_update(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -951,6 +955,7 @@ fn run_llgr_expiry_case(
 fn announce_fresh(manager: &mut RibManager, family: (Afi, Safi), index: u8) {
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
+    register_test_peer(manager, peer, 0);
     let update = match family.1 {
         Safi::FlowSpec => {
             let mut route = make_flowspec_route(addr);
@@ -1191,6 +1196,8 @@ fn llgr_expiry_rebuilds_orr_and_retires_page_cache_under_readiness() {
         for feed in [restarting, steady] {
             let peer = peer_v4(feed);
             manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+            register_test_peer(&mut manager, peer, 0);
             manager.handle_update(RibUpdate::BgpLsRoutesReceived {
                 session_id: 0,
                 peer,
@@ -1418,6 +1425,11 @@ fn run_gr_walk_case(
             Box::new(move |manager| manager.sweep_gr_stale(peer))
         }
     };
+    if walk == GrWalk::Entry {
+        // Measure retained-route walks, not the zero-work teardown of an empty exporter.
+        assert!(manager.adj_ribs_out[&peer].is_empty_all_families());
+        manager.adj_ribs_out.remove(&peer);
+    }
     let initial = manager.loc_rib.len();
     crate::orr::rebuild_growth::take();
     let (answered, observations) =
@@ -1586,6 +1598,7 @@ fn run_add_path_expiry_case(family: (Afi, Safi), paths: u8, one_nlri: bool) -> u
     let (mut manager, readiness_tx) = readiness_manager();
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
+    register_test_peer(&mut manager, peer, 0);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
     let nlri = |path: u8| if one_nlri { 1 } else { path + 1 };
     let path_id = |path: u8| if one_nlri { u32::from(path) + 1 } else { 0 };
@@ -1655,12 +1668,11 @@ fn run_add_path_expiry_case(family: (Afi, Safi), paths: u8, one_nlri: bool) -> u
     answered.get("llgr_expiry_purge").copied().unwrap_or(0)
 }
 
-/// Many Add-Path paths on one NLRI: each removal scans the NLRI's path
-/// list, so the purge must answer readiness inside those scans. One NLRI
-/// with 64 paths answers at least `64 * 63 / 8` more queries than 64 NLRIs
-/// with one path each, for unicast, VPN and labeled.
+/// Indexed removals answer readiness at the route scan, before/after the
+/// outer removal and before/after the index operation: at least five answers
+/// per route. Crowding paths on one NLRI adds no linear path-list scan.
 #[test]
-fn llgr_expiry_add_path_removal_scans_answer_readiness() {
+fn llgr_expiry_add_path_removals_answer_readiness_without_path_scans() {
     let failures: Vec<_> = [
         (Afi::Ipv4, Safi::Unicast),
         (Afi::Ipv4, Safi::MplsVpn),
@@ -1674,12 +1686,12 @@ fn llgr_expiry_add_path_removal_scans_answer_readiness() {
             run_add_path_expiry_case(family, 64, true),
         )
     })
-    .filter(|&(_, spread, one)| one < spread + 64 * 63 / 8)
+    .filter(|&(_, spread, one)| one != spread || one < 5 * 64)
     .collect();
     assert!(
         failures.is_empty(),
-        "(family, 64 NLRIs, one NLRI with 64 paths) purge answers must cover the \
-         path-list scans: {failures:?}"
+        "(family, 64 NLRIs, one NLRI with 64 paths) purge answers must cover each \
+         indexed removal without path-list scans: {failures:?}"
     );
 }
 
@@ -1736,6 +1748,7 @@ fn run_rtc_restage_expiry_case(fresh: u16, vpn: u8) -> BTreeMap<&'static str, us
             .ribs
             .insert(peer_v4(addr), AdjRibIn::new(peer_v4(addr)));
     }
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -1830,18 +1843,19 @@ fn llgr_expiry_rtc_restage_matching_answers_readiness() {
     );
 }
 
-/// GR-phase End-of-RIB removes every unrefreshed Add-Path path of an NLRI;
-/// each removal scans that NLRI's path list, so the sweep must answer
-/// readiness inside the scans: one prefix with 64 paths answers at least
-/// `64 * 63 / 8` more queries than 64 single-path prefixes.
+/// GR-phase End-of-RIB answers readiness at the route scan, before/after
+/// the outer removal and before/after the index operation. Crowded and
+/// single-path prefixes use the same checkpoints, at least five per route.
 #[test]
-fn eor_add_path_removal_scans_answer_readiness() {
+fn eor_add_path_removals_answer_readiness_without_path_scans() {
     let run = |one_prefix: bool| {
         let unicast = (Afi::Ipv4, Safi::Unicast);
         let (mut manager, readiness_tx) = readiness_manager();
         let addr = Ipv4Addr::new(10, 0, 0, 1);
         let peer = peer_v4(addr);
         manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+        register_test_peer(&mut manager, peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer,
@@ -1881,7 +1895,7 @@ fn eor_add_path_removal_scans_answer_readiness() {
     };
     let (spread, one) = (run(false), run(true));
     assert!(
-        one >= spread + 64 * 63 / 8,
+        one == spread && one >= 5 * 64,
         "eor_sweep answered {spread} for 64 prefixes and {one} for one prefix with 64 paths"
     );
 }

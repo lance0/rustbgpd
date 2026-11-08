@@ -31,7 +31,7 @@ jobs:
     # for this release — nothing may be built or published from it.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Assert tag matches workspace version
         run: |
           set -euo pipefail
@@ -54,14 +54,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --locked --workspace
 
   release-build-features:
@@ -73,8 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@v1 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (stable)
         with:
           toolchain: stable
       - run: python3 scripts/check_release_build_features.py
@@ -97,7 +97,7 @@ jobs:
     # Building directly on the ubuntu-latest runner links against its
     # newer glibc and the artifacts fail to start on all of the above.
     # The image also pins the release toolchain (rustc 1.95).
-    container: rust:1.95-bullseye
+    container: rust:1.95-bullseye@sha256:28afaeb8445f2a2e7d878bd34ed39ba02bb517efb29986188cbd59b7cf4f2fdf
 
     # Container jobs default `run` steps to sh (dash on Debian), which
     # rejects `set -o pipefail`; the runner-hosted jobs default to bash
@@ -107,7 +107,7 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install cross-compilation target and tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -278,7 +278,7 @@ jobs:
           cat checksums-${{ matrix.suffix }}.txt
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: binaries-${{ matrix.suffix }}
           path: dist/
@@ -291,10 +291,10 @@ jobs:
     permissions:
       contents: write  # create the GitHub release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           merge-multiple: true
@@ -364,7 +364,7 @@ jobs:
         # run can never publish: without a tag ref, action-gh-release
         # would otherwise act on the branch ref.
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           body_path: release-notes.md
           files: artifacts/*

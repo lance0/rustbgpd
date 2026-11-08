@@ -36,9 +36,203 @@ use rustbgpd_wire::{
 pub type BlackholeDiscardSnapshotFn =
     std::sync::Arc<dyn Fn() -> Vec<proto::BlackholeDiscard> + Send + Sync + 'static>;
 
-/// Live snapshot provider for daemon-owned general FIB route status.
-pub type FibRouteSnapshotFn =
-    std::sync::Arc<dyn Fn() -> Vec<proto::FibRouteStatus> + Send + Sync + 'static>;
+/// Borrow a prepared publication without transferring its destruction to a reader.
+#[derive(Debug, Clone)]
+pub struct FibRouteSnapshotReader(tokio::sync::watch::Receiver<FibRouteSnapshot>);
+
+impl FibRouteSnapshotReader {
+    /// Connect to the daemon's off-actor status publisher.
+    #[must_use]
+    pub fn new(receiver: tokio::sync::watch::Receiver<FibRouteSnapshot>) -> Self {
+        Self(receiver)
+    }
+
+    /// Read while the publication is pinned; the publisher owns retired rows.
+    ///
+    /// The callback cannot keep the publication alive after the read:
+    ///
+    /// ```compile_fail
+    /// use rustbgpd_api::rib_service::FibRouteSnapshotReader;
+    /// let reader = FibRouteSnapshotReader::default();
+    /// let retained = reader.with_snapshot(|snapshot| snapshot);
+    /// ```
+    pub fn with_snapshot<T>(&self, read: impl FnOnce(&FibRouteSnapshot) -> T) -> T {
+        read(&self.0.borrow())
+    }
+}
+
+impl Default for FibRouteSnapshotReader {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(FibRouteSnapshot::default()).1)
+    }
+}
+
+/// Immutable FIB rows and equality indexes prepared before publication.
+///
+/// Each varying filter combination has a row-index permutation. Matching
+/// rows form one contiguous range in canonical page order, so even the first
+/// page of a new filter needs only two binary searches and its returned rows.
+#[derive(Debug)]
+pub struct FibRouteSnapshot {
+    rows: Vec<proto::FibRouteStatus>,
+    indexes: [Vec<usize>; 32],
+    varying: usize,
+    summary: crate::event_service::dataplane::DataplaneSummary,
+}
+
+impl Default for FibRouteSnapshot {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            indexes: Default::default(),
+            varying: 0,
+            summary: crate::event_service::dataplane::count_fib_statuses(&[]),
+        }
+    }
+}
+
+impl FibRouteSnapshot {
+    /// Prepare a publication without doing any work on a reader's request.
+    #[must_use]
+    pub fn new(rows: Vec<proto::FibRouteStatus>) -> Self {
+        let mut snapshot = Self {
+            summary: crate::event_service::dataplane::count_fib_statuses(&rows),
+            rows,
+            ..Self::default()
+        };
+        let Some(first) = snapshot.rows.first() else {
+            return snapshot;
+        };
+        for column in 0..5 {
+            let mask = 1 << column;
+            if snapshot
+                .rows
+                .iter()
+                .any(|row| compare_fib_filters(row, first, mask).is_ne())
+            {
+                snapshot.varying |= mask;
+            }
+        }
+        let mut canonical: Vec<_> = (0..snapshot.rows.len()).collect();
+        canonical.sort_by(|&a, &b| compare_fib_routes(&snapshot.rows[a], &snapshot.rows[b]));
+        for mask in 1..32 {
+            if mask & !snapshot.varying != 0 {
+                continue;
+            }
+            let mut index = canonical.clone();
+            // Stable sorting keeps the existing page order within each match.
+            index.sort_by(|&a, &b| compare_fib_filters(&snapshot.rows[a], &snapshot.rows[b], mask));
+            snapshot.indexes[mask] = index;
+        }
+        snapshot.indexes[0] = canonical;
+        snapshot
+    }
+
+    pub(crate) fn summary(&self) -> crate::event_service::dataplane::DataplaneSummary {
+        self.summary
+    }
+
+    fn matching(&self, filters: &FibRouteFilters) -> &[usize] {
+        let Some(first) = self.rows.first() else {
+            return &[];
+        };
+        let mask = filters.mask();
+        if filters.compare(first, mask & !self.varying).is_ne() {
+            return &[];
+        }
+        let mask = mask & self.varying;
+        let index = &self.indexes[mask];
+        if mask == 0 {
+            return index;
+        }
+        let start = index.partition_point(|&i| filters.compare(&self.rows[i], mask).is_lt());
+        let end = index[start..]
+            .partition_point(|&i| !filters.compare(&self.rows[i], mask).is_gt())
+            + start;
+        &index[start..end]
+    }
+
+    fn list(
+        &self,
+        filters: &FibRouteFilters,
+        page: Option<FibRoutePageParams>,
+    ) -> Result<proto::ListFibRoutesResponse, Status> {
+        let matching = self.matching(filters);
+        let total_count = u64::try_from(matching.len()).unwrap_or(u64::MAX);
+        let Some(page) = page else {
+            let routes = if matching.len() == self.rows.len() {
+                self.rows.clone()
+            } else {
+                let mut original_order = matching.to_vec();
+                #[cfg(test)]
+                FIB_UNPAGED_REORDER_ROWS.with(|rows| rows.set(rows.get() + original_order.len()));
+                original_order.sort_unstable();
+                original_order
+                    .into_iter()
+                    .map(|i| self.rows[i].clone())
+                    .collect()
+            };
+            return Ok(proto::ListFibRoutesResponse {
+                routes,
+                next_page_token: String::new(),
+                total_count,
+            });
+        };
+        if page.offset > matching.len() {
+            return Err(Status::invalid_argument("page_token is out of range"));
+        }
+        let end = page
+            .offset
+            .saturating_add(page.page_size)
+            .min(matching.len());
+        let next_page_token = match (end < matching.len(), filters.peer_scope.as_deref()) {
+            (false, _) => String::new(),
+            (true, None) => end.to_string(),
+            (true, Some(scope)) => format!("{end}:{scope}"),
+        };
+        Ok(proto::ListFibRoutesResponse {
+            routes: matching[page.offset..end]
+                .iter()
+                .map(|&i| self.rows[i].clone())
+                .collect(),
+            next_page_token,
+            total_count,
+        })
+    }
+}
+
+impl std::ops::Deref for FibRouteSnapshot {
+    type Target = [proto::FibRouteStatus];
+
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+
+fn compare_fib_filters(
+    a: &proto::FibRouteStatus,
+    b: &proto::FibRouteStatus,
+    mask: usize,
+) -> std::cmp::Ordering {
+    let mut result = std::cmp::Ordering::Equal;
+    if mask & 1 != 0 {
+        result = result.then_with(|| a.table_name.cmp(&b.table_name));
+    }
+    if mask & 2 != 0 {
+        result = result.then_with(|| a.state.cmp(&b.state));
+    }
+    if mask & 4 != 0 {
+        result = result.then_with(|| a.reason.cmp(&b.reason));
+    }
+    if mask & 8 != 0 {
+        result =
+            result.then_with(|| (&a.prefix, a.prefix_length).cmp(&(&b.prefix, b.prefix_length)));
+    }
+    if mask & 16 != 0 {
+        result = result.then_with(|| a.peer_address.cmp(&b.peer_address));
+    }
+    result
+}
 
 fn explain_advertised_error_status(error: ExplainAdvertisedRouteError) -> Status {
     match error {
@@ -143,7 +337,7 @@ pub struct VpnQueryServiceReceipt {
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-    fib_route_snapshot: FibRouteSnapshotFn,
+    fib_route_snapshot: FibRouteSnapshotReader,
     /// Per-listener access mode; gates the mutating FIB-table RPCs as
     /// defense-in-depth behind the authz interceptor's `Mutating` tier.
     access_mode: crate::server::AccessMode,
@@ -178,7 +372,7 @@ impl RibService {
         Self {
             rib_tx,
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
-            fib_route_snapshot: std::sync::Arc::new(Vec::new),
+            fib_route_snapshot: FibRouteSnapshotReader::default(),
             // Fail closed: callers opt into mutations via `with_fib_table_control`.
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
@@ -193,7 +387,7 @@ impl RibService {
     pub fn with_status_snapshots(
         rib_tx: mpsc::Sender<RibUpdate>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-        fib_route_snapshot: FibRouteSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotReader,
     ) -> Self {
         Self {
             rib_tx,
@@ -841,6 +1035,12 @@ struct FibRouteFilters {
     peer_scope: Option<String>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIB_FILTER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FIB_UNPAGED_REORDER_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl FibRouteFilters {
     fn from_request(
         req: &proto::ListFibRoutesRequest,
@@ -880,33 +1080,44 @@ impl FibRouteFilters {
         })
     }
 
-    fn matches(&self, row: &proto::FibRouteStatus) -> bool {
-        if let Some(table_name) = &self.table_name
-            && &row.table_name != table_name
+    fn mask(&self) -> usize {
+        usize::from(self.table_name.is_some())
+            | (usize::from(self.state.is_some()) << 1)
+            | (usize::from(self.reason.is_some()) << 2)
+            | (usize::from(self.prefix.is_some()) << 3)
+            | (usize::from(self.peer_address.is_some()) << 4)
+    }
+
+    fn compare(&self, row: &proto::FibRouteStatus, mask: usize) -> std::cmp::Ordering {
+        #[cfg(test)]
+        FIB_FILTER_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let mut result = std::cmp::Ordering::Equal;
+        if mask & 1 != 0
+            && let Some(value) = &self.table_name
         {
-            return false;
+            result = result.then_with(|| row.table_name.cmp(value));
         }
-        if let Some(state) = self.state
-            && proto::FibRouteState::try_from(row.state).ok() != Some(state)
+        if mask & 2 != 0
+            && let Some(value) = self.state
         {
-            return false;
+            result = result.then_with(|| row.state.cmp(&(value as i32)));
         }
-        if let Some(reason) = &self.reason
-            && &row.reason != reason
+        if mask & 4 != 0
+            && let Some(value) = &self.reason
         {
-            return false;
+            result = result.then_with(|| row.reason.cmp(value));
         }
-        if let Some((prefix, prefix_length)) = &self.prefix
-            && (&row.prefix != prefix || row.prefix_length != *prefix_length)
+        if mask & 8 != 0
+            && let Some((prefix, length)) = &self.prefix
         {
-            return false;
+            result = result.then_with(|| (&row.prefix, row.prefix_length).cmp(&(prefix, *length)));
         }
-        if let Some(peer_address) = &self.peer_address
-            && &row.peer_address != peer_address
+        if mask & 16 != 0
+            && let Some(value) = &self.peer_address
         {
-            return false;
+            result = result.then_with(|| row.peer_address.cmp(value));
         }
-        true
+        result
     }
 }
 
@@ -948,56 +1159,17 @@ fn parse_fib_page_params(
     }))
 }
 
-fn sort_fib_routes(routes: &mut [proto::FibRouteStatus]) {
-    routes.sort_by(|a, b| {
-        a.table_name
-            .cmp(&b.table_name)
-            .then_with(|| a.table_id.cmp(&b.table_id))
-            .then_with(|| a.metric.cmp(&b.metric))
-            .then_with(|| a.prefix.cmp(&b.prefix))
-            .then_with(|| a.prefix_length.cmp(&b.prefix_length))
-            .then_with(|| a.next_hop.cmp(&b.next_hop))
-            .then_with(|| a.peer_address.cmp(&b.peer_address))
-            .then_with(|| a.state.cmp(&b.state))
-            .then_with(|| a.reason.cmp(&b.reason))
-    });
-}
-
-fn build_fib_response(
-    routes: Vec<proto::FibRouteStatus>,
-    page: Option<FibRoutePageParams>,
-    peer_scope: Option<&str>,
-) -> proto::ListFibRoutesResponse {
-    let total_count = u64::try_from(routes.len()).unwrap_or(u64::MAX);
-    let Some(page) = page else {
-        return proto::ListFibRoutesResponse {
-            routes,
-            next_page_token: String::new(),
-            total_count,
-        };
-    };
-
-    let routes_len = routes.len();
-    let page_routes: Vec<proto::FibRouteStatus> = routes
-        .into_iter()
-        .skip(page.offset)
-        .take(page.page_size)
-        .collect();
-    let next_offset = page
-        .offset
-        .checked_add(page_routes.len())
-        .unwrap_or(routes_len);
-    let next_page_token = match (next_offset < routes_len, peer_scope) {
-        (false, _) => String::new(),
-        (true, None) => next_offset.to_string(),
-        (true, Some(scope)) => format!("{next_offset}:{scope}"),
-    };
-
-    proto::ListFibRoutesResponse {
-        routes: page_routes,
-        next_page_token,
-        total_count,
-    }
+fn compare_fib_routes(a: &proto::FibRouteStatus, b: &proto::FibRouteStatus) -> std::cmp::Ordering {
+    a.table_name
+        .cmp(&b.table_name)
+        .then_with(|| a.table_id.cmp(&b.table_id))
+        .then_with(|| a.metric.cmp(&b.metric))
+        .then_with(|| a.prefix.cmp(&b.prefix))
+        .then_with(|| a.prefix_length.cmp(&b.prefix_length))
+        .then_with(|| a.next_hop.cmp(&b.next_hop))
+        .then_with(|| a.peer_address.cmp(&b.peer_address))
+        .then_with(|| a.state.cmp(&b.state))
+        .then_with(|| a.reason.cmp(&b.reason))
 }
 
 fn prefix_parts(prefix: Prefix) -> (String, u32) {
@@ -2956,23 +3128,10 @@ impl proto::rib_service_server::RibService for RibService {
         let filters = FibRouteFilters::from_request(&req, self.roster())?;
         let page = parse_fib_page_params(&req, filters.peer_scope.as_deref())
             .map_err(Status::invalid_argument)?;
-        let mut routes: Vec<proto::FibRouteStatus> = (self.fib_route_snapshot)()
-            .into_iter()
-            .filter(|route| filters.matches(route))
-            .collect();
-        if page.is_some() {
-            sort_fib_routes(&mut routes);
-        }
-        if let Some(page) = page.as_ref()
-            && page.offset > routes.len()
-        {
-            return Err(Status::invalid_argument("page_token is out of range"));
-        }
-        Ok(Response::new(build_fib_response(
-            routes,
-            page,
-            filters.peer_scope.as_deref(),
-        )))
+        Ok(Response::new(
+            self.fib_route_snapshot
+                .with_snapshot(|snapshot| snapshot.list(&filters, page))?,
+        ))
     }
 
     async fn list_route_events(
@@ -8428,6 +8587,284 @@ mod tests {
         route_page_query_identity(req.afi_safi, &filters)
     }
 
+    fn fib_snapshot_provider(rows: Vec<proto::FibRouteStatus>) -> FibRouteSnapshotReader {
+        FibRouteSnapshotReader::new(tokio::sync::watch::channel(FibRouteSnapshot::new(rows)).1)
+    }
+
+    #[test]
+    fn fib_prepared_summary_keeps_the_legacy_three_state_counts() {
+        let rows = [
+            proto::FibRouteState::Installed as i32,
+            proto::FibRouteState::Installed as i32,
+            proto::FibRouteState::Rejected as i32,
+            proto::FibRouteState::Failed as i32,
+            proto::FibRouteState::Unresolved as i32,
+            proto::FibRouteState::Unspecified as i32,
+            -1,
+        ]
+        .into_iter()
+        .map(|state| proto::FibRouteStatus {
+            state,
+            ..Default::default()
+        })
+        .collect();
+        let snapshot = FibRouteSnapshot::new(rows);
+        assert_eq!(
+            snapshot.summary(),
+            crate::event_service::dataplane::DataplaneSummary {
+                source: "fib",
+                installed: 2,
+                rejected: 1,
+                failed: 1,
+            }
+        );
+        assert_eq!(FibRouteSnapshot::default().summary().source, "fib");
+    }
+
+    #[test]
+    fn fib_unpaged_reorders_only_partial_matches() {
+        let rows: Vec<_> = [3, 1, 4, 2]
+            .into_iter()
+            .map(|peer| {
+                fib_status(
+                    "edge",
+                    "203.0.113.0",
+                    24,
+                    &format!("198.51.100.{peer}"),
+                    if peer % 2 == 0 {
+                        proto::FibRouteState::Installed
+                    } else {
+                        proto::FibRouteState::Failed
+                    },
+                    "owned",
+                )
+            })
+            .collect();
+        let snapshot = FibRouteSnapshot::new(rows.clone());
+        for (request, expected, reordered) in [
+            (proto::ListFibRoutesRequest::default(), rows.clone(), 0),
+            (
+                proto::ListFibRoutesRequest {
+                    table_name: "edge".into(),
+                    reason: "owned".into(),
+                    ..Default::default()
+                },
+                rows.clone(),
+                0,
+            ),
+            (
+                proto::ListFibRoutesRequest {
+                    state: proto::FibRouteState::Installed as i32,
+                    ..Default::default()
+                },
+                vec![rows[2].clone(), rows[3].clone()],
+                2,
+            ),
+            (
+                proto::ListFibRoutesRequest {
+                    table_name: "missing".into(),
+                    ..Default::default()
+                },
+                Vec::new(),
+                0,
+            ),
+        ] {
+            let filters = FibRouteFilters::from_request(&request, None).unwrap();
+            FIB_UNPAGED_REORDER_ROWS.with(|rows| rows.set(0));
+            let response = snapshot.list(&filters, None).unwrap();
+            assert_eq!(response.routes, expected);
+            assert_eq!(response.total_count, expected.len() as u64);
+            assert_eq!(response.next_page_token, "");
+            assert_eq!(
+                FIB_UNPAGED_REORDER_ROWS.with(std::cell::Cell::get),
+                reordered
+            );
+        }
+        let snapshot = FibRouteSnapshot::default();
+        for table_name in ["", "edge"] {
+            let filters = FibRouteFilters::from_request(
+                &proto::ListFibRoutesRequest {
+                    table_name: table_name.into(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            FIB_UNPAGED_REORDER_ROWS.with(|rows| rows.set(0));
+            let response = snapshot.list(&filters, None).unwrap();
+            assert_eq!(response.routes, []);
+            assert_eq!(response.total_count, 0);
+            assert_eq!(response.next_page_token, "");
+            assert_eq!(FIB_UNPAGED_REORDER_ROWS.with(std::cell::Cell::get), 0);
+        }
+    }
+
+    #[test]
+    fn fib_indexes_preserve_all_filter_combinations_and_original_order() {
+        let rows: Vec<_> = (0..96)
+            .rev()
+            .map(|i| proto::FibRouteStatus {
+                table_name: format!("table{}", i % 3),
+                table_id: i % 3,
+                metric: i % 2,
+                prefix: format!("192.0.2.{}", i % 8),
+                prefix_length: 32,
+                next_hop: format!("198.51.100.{}", i % 2 + 1),
+                peer_address: format!("203.0.113.{}", i % 4 + 1),
+                state: i32::try_from(i % 4 + 1).unwrap(),
+                reason: format!("reason{}", i % 2),
+                peer_interface: format!("interface{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let snapshot = FibRouteSnapshot::new(rows.clone());
+        assert_eq!(snapshot.varying, 31);
+        for mask in 0..32 {
+            for selected in [&rows[0], &rows[37]] {
+                let req = proto::ListFibRoutesRequest {
+                    table_name: if mask & 1 != 0 {
+                        selected.table_name.clone()
+                    } else {
+                        String::new()
+                    },
+                    state: if mask & 2 != 0 { selected.state } else { 0 },
+                    reason: if mask & 4 != 0 {
+                        selected.reason.clone()
+                    } else {
+                        String::new()
+                    },
+                    prefix: if mask & 8 != 0 {
+                        selected.prefix.clone()
+                    } else {
+                        String::new()
+                    },
+                    prefix_length: if mask & 8 != 0 {
+                        selected.prefix_length
+                    } else {
+                        0
+                    },
+                    peer_address: if mask & 16 != 0 {
+                        selected.peer_address.clone()
+                    } else {
+                        String::new()
+                    },
+                    ..Default::default()
+                };
+                let filters = FibRouteFilters::from_request(&req, None).unwrap();
+                let mut expected: Vec<_> = rows
+                    .iter()
+                    .filter(|row| {
+                        (req.table_name.is_empty() || req.table_name == row.table_name)
+                            && (req.state == 0 || req.state == row.state)
+                            && (req.reason.is_empty() || req.reason == row.reason)
+                            && (req.prefix.is_empty()
+                                || (req.prefix == row.prefix
+                                    && req.prefix_length == row.prefix_length))
+                            && (req.peer_address.is_empty() || req.peer_address == row.peer_address)
+                    })
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    snapshot.list(&filters, None).unwrap().routes,
+                    expected,
+                    "unpaged mask={mask}"
+                );
+                expected.sort_by(compare_fib_routes);
+                for offset in [0, 1, expected.len(), expected.len() + 1] {
+                    FIB_FILTER_VISITS.with(|visits| visits.set(0));
+                    let result = snapshot.list(
+                        &filters,
+                        Some(FibRoutePageParams {
+                            offset,
+                            page_size: 2,
+                        }),
+                    );
+                    assert!(FIB_FILTER_VISITS.with(std::cell::Cell::get) <= 32);
+                    if offset > expected.len() {
+                        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+                    } else {
+                        let result = result.unwrap();
+                        let end = (offset + 2).min(expected.len());
+                        assert_eq!(
+                            result.routes,
+                            expected[offset..end],
+                            "paged mask={mask} offset={offset}"
+                        );
+                        assert_eq!(result.total_count, expected.len() as u64);
+                        let token = if end < expected.len() {
+                            end.to_string()
+                        } else {
+                            String::new()
+                        };
+                        assert_eq!(result.next_page_token, token);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fib_indexes_handle_empty_and_constant_columns_without_missing_indexes() {
+        for rows in [
+            Vec::new(),
+            vec![fib_status(
+                "edge",
+                "192.0.2.0",
+                24,
+                "198.51.100.1",
+                proto::FibRouteState::Installed,
+                "owned",
+            )],
+        ] {
+            let snapshot = FibRouteSnapshot::new(rows);
+            assert_eq!(snapshot.varying, 0);
+            for req in [
+                proto::ListFibRoutesRequest::default(),
+                proto::ListFibRoutesRequest {
+                    table_name: "missing".into(),
+                    ..Default::default()
+                },
+                proto::ListFibRoutesRequest {
+                    state: proto::FibRouteState::Failed as i32,
+                    ..Default::default()
+                },
+                proto::ListFibRoutesRequest {
+                    reason: "missing".into(),
+                    ..Default::default()
+                },
+                proto::ListFibRoutesRequest {
+                    prefix: "203.0.113.0".into(),
+                    prefix_length: 24,
+                    ..Default::default()
+                },
+                proto::ListFibRoutesRequest {
+                    peer_address: "198.51.100.2".into(),
+                    ..Default::default()
+                },
+            ] {
+                let filters = FibRouteFilters::from_request(&req, None).unwrap();
+                let response = snapshot
+                    .list(
+                        &filters,
+                        Some(FibRoutePageParams {
+                            offset: 0,
+                            page_size: 1,
+                        }),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    response.routes.len(),
+                    if filters.mask() == 0 {
+                        snapshot.len()
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(response.next_page_token, "");
+            }
+        }
+    }
+
     fn fib_status(
         table_name: &str,
         prefix: &str,
@@ -9179,7 +9616,7 @@ mod tests {
                     reason: "owned".to_string(),
                 }]
             }),
-            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
         );
 
         let resp = svc
@@ -9203,7 +9640,7 @@ mod tests {
         let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(Vec::new),
-            Arc::new(|| {
+            fib_snapshot_provider({
                 vec![proto::FibRouteStatus {
                     table_name: "edge".to_string(),
                     table_id: 1000,
@@ -9238,6 +9675,123 @@ mod tests {
         assert_eq!(row.reason, "owned");
     }
 
+    #[tokio::test]
+    async fn list_fib_routes_paged_work_does_not_scan_snapshot() {
+        let (tx, _rx) = mpsc::channel(16);
+        let rows: Vec<_> = (0..10_000)
+            .map(|i| {
+                fib_status(
+                    "edge",
+                    &Ipv4Addr::from(0x0a00_0000 + i).to_string(),
+                    32,
+                    "198.51.100.1",
+                    proto::FibRouteState::Installed,
+                    "owned",
+                )
+            })
+            .collect();
+        let svc =
+            RibService::with_status_snapshots(tx, Arc::new(Vec::new), fib_snapshot_provider(rows));
+        FIB_FILTER_VISITS.with(|visits| visits.set(0));
+        let response = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                prefix: "10.0.0.7".to_string(),
+                prefix_length: 32,
+                page_size: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.total_count, 1);
+        assert_eq!(response.routes[0].prefix, "10.0.0.7");
+        let visits = FIB_FILTER_VISITS.with(std::cell::Cell::get);
+        assert!(visits <= 128, "one-row page examined {visits} rows");
+    }
+
+    #[tokio::test]
+    #[ignore = "large FIB page-walk measurement"]
+    async fn fib_full_page_walk_receipt() {
+        let count: u32 = std::env::var("FIB_READ_RECEIPT_ROUTES")
+            .map_or(100_000, |value| value.parse().unwrap());
+        let shape =
+            std::env::var("FIB_READ_RECEIPT_SHAPE").unwrap_or_else(|_| "single".to_string());
+        assert!(["single", "common", "all"].contains(&shape.as_str()));
+        let rows: Vec<_> = (0..count)
+            .map(|i| {
+                let mut row = fib_status(
+                    "edge",
+                    &Ipv4Addr::from(0x0a00_0000 + i).to_string(),
+                    32,
+                    "198.51.100.1",
+                    proto::FibRouteState::Installed,
+                    "owned",
+                );
+                if shape != "single" {
+                    row.peer_address = format!("198.51.100.{}", i % 8 + 1);
+                }
+                if shape == "all" {
+                    row.table_name = format!("table{}", i % 4);
+                    row.state = [
+                        proto::FibRouteState::Installed,
+                        proto::FibRouteState::Rejected,
+                        proto::FibRouteState::Failed,
+                    ][i as usize % 3] as i32;
+                    row.reason = format!("reason{}", i % 2);
+                }
+                row
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let snapshot = FibRouteSnapshot::new(rows);
+        let indexes = snapshot
+            .indexes
+            .iter()
+            .filter(|index| !index.is_empty())
+            .count();
+        let index_bytes: usize = snapshot
+            .indexes
+            .iter()
+            .map(|index| index.capacity() * std::mem::size_of::<usize>())
+            .sum();
+        eprintln!(
+            "fib_prepare shape={shape} routes={count} indexes={indexes} index_bytes={index_bytes} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            FibRouteSnapshotReader::new(tokio::sync::watch::channel(snapshot).1),
+        );
+        let started = std::time::Instant::now();
+        let mut token = String::new();
+        let mut returned = 0;
+        let mut pages = 0;
+        loop {
+            let response = svc
+                .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                    page_size: 1000,
+                    page_token: token,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            returned += response.routes.len();
+            pages += 1;
+            token = response.next_page_token;
+            if token.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(returned, count as usize);
+        eprintln!(
+            "fib_page_walk routes={count} pages={pages} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+
     /// A FIB page token for a scoped peer binds the scope: it continues the
     /// same scoped query and is refused for another interface or a numbered
     /// query, while a numbered query keeps the plain decimal offset.
@@ -9248,7 +9802,7 @@ mod tests {
         let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(Vec::new),
-            Arc::new(|| {
+            fib_snapshot_provider({
                 ["203.0.113.0", "203.0.113.64", "198.51.100.0"]
                     .into_iter()
                     .zip(["fe80::1", "fe80::1", "192.0.2.1"])
@@ -9306,7 +9860,7 @@ mod tests {
         let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(Vec::new),
-            Arc::new(|| {
+            fib_snapshot_provider({
                 vec![
                     fib_status(
                         "edge",
@@ -9361,7 +9915,7 @@ mod tests {
         let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(Vec::new),
-            Arc::new(|| {
+            fib_snapshot_provider({
                 vec![fib_status(
                     "edge",
                     "203.0.113.0",
@@ -9397,7 +9951,7 @@ mod tests {
         let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(Vec::new),
-            Arc::new(|| {
+            fib_snapshot_provider({
                 vec![
                     fib_status(
                         "edge",
@@ -9465,7 +10019,7 @@ mod tests {
         let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(Vec::new),
-            Arc::new(|| {
+            fib_snapshot_provider({
                 vec![
                     fib_status(
                         "edge",
@@ -9502,7 +10056,11 @@ mod tests {
     #[tokio::test]
     async fn list_fib_routes_rejects_bad_filters() {
         let (tx, _rx) = mpsc::channel(16);
-        let svc = RibService::with_status_snapshots(tx, Arc::new(Vec::new), Arc::new(Vec::new));
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            FibRouteSnapshotReader::default(),
+        );
 
         let err = svc
             .list_fib_routes(Request::new(proto::ListFibRoutesRequest {

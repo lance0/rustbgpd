@@ -12,7 +12,8 @@ goes red when the rule is removed or weakened.
    archive is absent and verifies before it extracts, and a lab job stages the
    same archive version before building that Dockerfile. Lab workflows never
    take bytes from the artifact service.
-2. Action refs. Every external `uses:` is a reviewed version tag.
+2. Build inputs. Every external `uses:` is a full commit SHA with a version
+   comment, and external Dockerfile bases and workflow containers use digests.
 3. Permissions. Token scopes stay read-only apart from reviewed grants, and no
    workflow runs on pull_request_target.
 4. Lab wiring. Every lab job needs prime_dev_image, and each run-interop-test
@@ -33,6 +34,7 @@ pattern needs no edit here.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -46,23 +48,23 @@ LAB_WORKFLOWS = ("interop.yml", "kernel-dataplane.yml")
 BUNDLE_SETUP_STEP = {"interop.yml": "dev_image", "kernel-dataplane.yml": "dataplane"}
 BUNDLE_GUARD = "${{{{ !cancelled() && steps.{}.outcome == 'success' }}}}"
 MANIFEST = ".github/pinned-archives.sha256"
-# External actions are pinned by reviewed version tag: no branch refs and no
-# bare commit SHAs. Adding an action or moving to a new major edits this set.
-PINS = frozenset(
+# Keep the reviewed action names separate from their pins so Dependabot can
+# update a commit and its version comment together.
+ACTIONS = frozenset(
     {
-        "actions/cache/restore@v6",
-        "actions/cache/save@v6",
-        "actions/checkout@v7",
-        "actions/upload-artifact@v7",
-        "docker/build-push-action@v7",
-        "docker/setup-buildx-action@v4",
-        "dtolnay/rust-toolchain@v1",
-        "EmbarkStudios/cargo-deny-action@v2",
-        "rustsec/audit-check@v2.0.0",
-        "Swatinem/rust-cache@v2",
+        "actions/cache", "actions/cache/restore", "actions/cache/save",
+        "actions/checkout", "actions/download-artifact", "actions/upload-artifact",
+        "docker/build-push-action", "docker/login-action", "docker/metadata-action",
+        "docker/setup-buildx-action", "dtolnay/rust-toolchain",
+        "EmbarkStudios/cargo-deny-action", "rustsec/audit-check", "Swatinem/rust-cache",
+        "google/clusterfuzzlite/actions/build_fuzzers",
+        "google/clusterfuzzlite/actions/run_fuzzers", "lycheeverse/lychee-action",
+        "obi1kenobi/cargo-semver-checks-action", "softprops/action-gh-release",
     }
 )
-VERSION_TAG = re.compile(r"@v\d+(?:\.\d+){0,2}$")
+COMMIT_REF = re.compile(r"[^@\s]+@[0-9a-f]{40}$")
+VERSION_TAG = re.compile(r"v\d+(?:\.\d+){0,2}$")
+IMAGE_DIGEST = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}$")
 # rustsec/audit-check posts its findings as a check-run.
 WRITE_GRANTS = {"audit.yml": {"checks"}}
 
@@ -92,6 +94,117 @@ def _jobs(text: str) -> dict[str, str]:
         ]
         for i, m in enumerate(matches)
     }
+
+
+def _yaml_code_and_comment(line: str) -> tuple[str, str]:
+    """Split comments outside quoted scalars, including escaped quote characters."""
+    single_quoted = double_quoted = escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+        elif character == "\\" and double_quoted:
+            escaped = True
+        elif character == '"' and not single_quoted:
+            if double_quoted or not line[:index].strip() or line[:index].rstrip().endswith((":", "{", "[", ",", "-")):
+                double_quoted = not double_quoted
+        elif character == "'" and not double_quoted:
+            if single_quoted and line[index + 1:index + 2] == "'":
+                escaped = True
+            elif single_quoted or not line[:index].strip() or line[:index].rstrip().endswith((":", "{", "[", ",", "-")):
+                single_quoted = not single_quoted
+        elif character == "#" and not single_quoted and not double_quoted:
+            if index == 0 or line[index - 1].isspace():
+                return line[:index], line[index + 1:]
+    return line, ""
+
+
+def _check_action_refs(relative: str, text: str, errors: list[str]) -> None:
+    for line in text.splitlines():
+        code, comment = _yaml_code_and_comment(line)
+        # Match block and flow mapping keys, including quoted keys and values.
+        for match in re.finditer(
+            r'''(?:^|[,{])[ \t]*(?:-[ \t]+)?(?:uses|"uses"|'uses')[ \t]*:[ \t]*("[^"]*"|'[^']*'|[^\s,}#]*)''',
+            code,
+        ):
+            ref = match[1].strip("\"'")
+            if ref.startswith("./"):
+                continue
+            if not COMMIT_REF.fullmatch(ref):
+                errors.append(f"{relative}: action ref is not pinned to a full commit SHA: {ref}")
+            elif ref.split("@", 1)[0] not in ACTIONS:
+                errors.append(f"{relative}: action is not in the reviewed set: {ref}")
+            if not comment.split() or not VERSION_TAG.fullmatch(comment.split()[0]):
+                errors.append(f"{relative}: action ref needs a trailing version tag comment: {ref}")
+
+
+def _check_image_ref(relative: str, ref: str, errors: list[str]) -> None:
+    if not IMAGE_DIGEST.fullmatch(ref):
+        errors.append(f"{relative}: external image is not pinned to a SHA-256 digest: {ref}")
+
+
+def _check_base_images(relative: str, text: str, errors: list[str]) -> None:
+    stages: set[str] = set()
+    arguments: dict[str, str] = {}
+    before_from = True
+    for line in text.replace("\\\n", " ").splitlines():
+        line = line.strip()
+        frontend = re.fullmatch(r"#\s*syntax\s*=\s*(\S+)", line)
+        if frontend:
+            _check_image_ref(relative, frontend[1], errors)
+        argument = re.fullmatch(r"ARG\s+(\w+)=(\S+)", line, re.I)
+        if argument and before_from:
+            arguments[argument[1]] = argument[2]
+        source = re.fullmatch(r"FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", line, re.I)
+        if not source:
+            if re.match(r"FROM\b", line, re.I):
+                errors.append(f"{relative}: cannot parse Dockerfile base: {line}")
+            continue
+        before_from = False
+        ref = re.sub(r"\$\{(\w+)\}|\$(\w+)", lambda m: arguments.get(m[1] or m[2], m[0]), source[1])
+        local_build = (
+            relative == "tests/interop/m126-fastnetmon-rtbh/Dockerfile"
+            and ref == "rustbgpd:dev"
+        )
+        # This lab extends the image built from the checked-out source.
+        if ref.lower() not in stages | {"scratch"} and not local_build:
+            _check_image_ref(relative, ref, errors)
+        if source[2]:
+            stages.add(source[2].lower())
+
+
+def _check_build_inputs(root: Path, errors: list[str]) -> None:
+    for path in sorted((root / ".github").rglob("*.y*ml")):
+        relative = path.relative_to(root).as_posix()
+        text = path.read_text()
+        _check_action_refs(relative, text, errors)
+        # Scalar job containers and object-form container/service images.
+        lines = [_yaml_code_and_comment(line)[0] for line in text.splitlines()]
+        for number, code in enumerate(lines):
+            for match in re.finditer(
+                r'''(?:^|[,{])[ \t]*(container|image|"container"|"image"|'container'|'image')[ \t]*:[ \t]*("[^"]*"|'[^']*'|[^{}\s,#]*)''',
+                code,
+            ):
+                ref = match[2].strip("\"'")
+                if ref:
+                    _check_image_ref(relative, ref, errors)
+                    continue
+                if match[1].strip("\"'") == "container":
+                    if code[match.end():].lstrip().startswith("{"):
+                        continue
+                    following = next((line for line in lines[number + 1:] if line.strip()), "")
+                    indent = len(code) - len(code.lstrip())
+                    if len(following) - len(following.lstrip()) > indent and re.match(
+                        r'''(?:[\w-]+|"[^"]+"|'[^']+')[ \t]*:(?:[ \t]|$)|\{''',
+                        following.lstrip(),
+                    ):
+                        continue
+                errors.append(f"{relative}: external image must use a same-line digest reference")
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in {".git", ".claude", "target", "node_modules", ".venv"}]
+        for name in files:
+            if name == "Dockerfile" or name.startswith("Dockerfile.") and not name.endswith(".dockerignore"):
+                path = Path(directory) / name
+                _check_base_images(path.relative_to(root).as_posix(), path.read_text(), errors)
 
 
 def _list_needs(block: str) -> list[str]:
@@ -334,6 +447,7 @@ def _check_permissions(name: str, text: str, errors: list[str]) -> None:
 
 def check(root: Path) -> list[str]:
     errors: list[str] = []
+    _check_build_inputs(root, errors)
     texts = {
         f".github/workflows/{name}": (root / ".github/workflows" / name).read_text()
         for name in WORKFLOWS
@@ -433,15 +547,6 @@ def check(root: Path) -> list[str]:
         _check_dockerfile(relative, text, errors)
 
     for relative, text in texts.items():
-        # 2. Action refs.
-        for value in re.findall(r"(?m)^\s*(?:- )?uses:\s*(.+)$", text):
-            ref = value.split("#", 1)[0].strip()
-            if ref.startswith("./"):
-                continue
-            if not VERSION_TAG.search(ref):
-                errors.append(f"{relative}: action ref is not a reviewed version tag: {ref}")
-            elif ref not in PINS:
-                errors.append(f"{relative}: action ref is not in the reviewed pin set: {ref}")
         # 3. Permissions.
         if relative.startswith(".github/workflows/"):
             _check_permissions(Path(relative).name, text, errors)

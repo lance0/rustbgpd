@@ -249,6 +249,11 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         })
         .await
         .unwrap();
+    let (source_tx, _source_rx) = mpsc::channel(32);
+    rib_tx
+        .send(export_peer_up("192.0.2.9".parse().unwrap(), 0, source_tx))
+        .await
+        .unwrap();
     rib_tx
         .send(RibUpdate::RoutesReceived {
             peer: PeerId::from_addr("192.0.2.9".parse().unwrap()),
@@ -461,11 +466,15 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
             })
             .await
             .unwrap();
-        rib_tx
-            .send(export_peer_up(source.addr(), 1, source_tx))
-            .await
-            .unwrap();
     }
+    rib_tx
+        .send(export_peer_up(
+            source.addr(),
+            u64::from(selection_release),
+            source_tx,
+        ))
+        .await
+        .unwrap();
     // Selection remains deferred until the source EoR; without deferral these
     // routes seed the table before the destination's initial registration.
     rib_tx
