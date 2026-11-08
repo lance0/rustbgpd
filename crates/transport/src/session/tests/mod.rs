@@ -1141,6 +1141,32 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
     announced
 }
 
+/// Register one synthetic ingress owner before feeding a real RIB actor.
+async fn register_test_source(rib_tx: &mpsc::Sender<RibUpdate>, peer: PeerId, session_id: u64) {
+    let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+    rib_tx
+        .send(RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+}
+
 /// A real `RibManager` holding one route from an unrelated peer, so an
 /// initial dump has something to carry.
 async fn spawn_rib_with_one_route() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
@@ -1150,6 +1176,7 @@ async fn spawn_rib_with_one_route() -> (mpsc::Sender<RibUpdate>, tokio::task::Jo
         rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
     );
     let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+    register_test_source(&rib_tx, source, 0).await;
     let mut route = make_route(100);
     route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     route.peer = source;

@@ -237,6 +237,8 @@ fn receive_direct(
     announced: Vec<Route>,
     withdrawn: Vec<(Prefix, u32)>,
 ) {
+    register_test_peer(manager, peer, 0);
+
     let session_id = manager
         .outbound_session_ids
         .get(&peer)
@@ -302,6 +304,9 @@ async fn seeded_manager() -> (
                 )
             })
             .collect();
+        tx.send(registering_peer_up(peer_v4(peer_addr), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(peer_addr),
@@ -915,6 +920,13 @@ async fn canceled_paged_query_skips_the_scan() {
 async fn custom_predicate_continuation_preserves_filter_semantics() {
     let (tx, _target, _out_rx, handle) = seeded_manager().await;
     let scope = RouteQueryScope::Received { peer: None };
+
+    tx.send(registering_peer_up(
+        PeerId::from_addr("2001:db8::1".parse().unwrap()),
+        0,
+    ))
+    .await
+    .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         peer: PeerId::from_addr("2001:db8::1".parse().unwrap()),
         session_id: 0,

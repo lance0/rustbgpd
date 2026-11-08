@@ -48,6 +48,7 @@ fn each_message_turn_is_observed_under_its_kind() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     manager.handle_update(routes_received(peer));
@@ -66,6 +67,7 @@ fn each_message_turn_is_observed_under_its_kind() {
         observed,
         BTreeMap::from([
             ("peer_down".to_owned(), 1),
+            ("peer_up".to_owned(), 1),
             ("query".to_owned(), 1),
             ("routes".to_owned(), 1),
         ]),

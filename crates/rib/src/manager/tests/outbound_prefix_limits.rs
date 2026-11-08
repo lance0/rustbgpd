@@ -226,6 +226,8 @@ fn set_ipv4_limit(manager: &mut RibManager, peer: PeerId, cap: u32) {
 }
 
 pub(super) fn announce(manager: &mut RibManager, source: PeerId, announced: Vec<Route>) {
+    register_test_peer(manager, source, 0);
+
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -2416,6 +2418,10 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     }
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,

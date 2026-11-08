@@ -1807,13 +1807,11 @@ impl BgpMetrics {
                  End-of-RIB; route-refresh begin/end/request; ORF updates; \
                  policy context / PeerSlowState slow-peer updates; or a family \
                  made sendable mid-session) discarded \
-                 because their session id did not match the registered \
-                 session for the peer — a message from a superseded session \
-                 (collision loser) queued behind the replacement's PeerUp — \
-                 and End-of-RIB or route-refresh begin/end/timeout markers \
-                 from a peer with no registered session, such as one whose \
-                 routes are retained under Graceful Restart. The registered \
-                 session's state is untouched. `kind` is one of: {}.",
+                 because their session is superseded or the peer has no \
+                 registered session. Unregistered messages cannot change \
+                 routes retained under Graceful Restart. A deferred PeerUp \
+                 already owns ingress. The registered session's state is \
+                 untouched. `kind` is one of: {}.",
                     StaleSessionMessageKind::ALL
                         .iter()
                         .map(|kind| kind.as_str())
@@ -6007,8 +6005,8 @@ impl BgpMetrics {
     /// EVPN routes envelope; separate BGP-LS, VPN, labeled-unicast, and
     /// RT-Constrain route variants; End-of-RIB; route-refresh
     /// begin/end/request; ORF update; policy context update; or slow-peer state)
-    /// discarded because its session id did not match the registered session
-    /// for the peer (a message from a superseded session).
+    /// discarded because its session is superseded or the peer has no
+    /// registered session. A deferred live session already owns ingress.
     ///
     pub fn record_rib_stale_session_message_ignored(
         &self,

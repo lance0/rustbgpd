@@ -377,6 +377,7 @@ async fn run(
         PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(0x0002_fde8_0000_0064)]),
     ]);
     let setup_deadline = tokio::time::Instant::now() + timeout;
+    let mut outbound = Vec::new();
     for peer_index in 0..PEERS {
         let peer = IpAddr::V4(Ipv4Addr::new(
             10,
@@ -384,6 +385,32 @@ async fn run(
             0,
             u8::try_from(peer_index + 1).unwrap(),
         ));
+        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        outbound.push(outbound_rx);
+        tokio::time::timeout_at(
+            setup_deadline,
+            primary_tx.send(RibUpdate::PeerUp {
+                peer: PeerId::from_addr(peer),
+                session_id: 0,
+                peer_asn: 65001,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            }),
+        )
+        .await
+        .map_err(|_| CapacityCensored("seed_peer_up"))?
+        .expect("VPN RIB primary channel closed during registration");
         let mut indices = (peer_index..routes).step_by(PEERS);
         loop {
             let announced: Vec<_> = indices

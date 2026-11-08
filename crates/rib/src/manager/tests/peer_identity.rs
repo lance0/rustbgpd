@@ -46,6 +46,7 @@ fn spawn_manager() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
 async fn a_stale_handle_message_after_delete_and_re_add_is_dropped() {
     let (tx, actor) = spawn_manager();
     let old = scoped("fe80::1", "eth0");
+    tx.send(registering_peer_up(old, 1)).await.unwrap();
     announce(&tx, old, 1).await;
     assert_eq!(query_received_routes(&tx, old).await.len(), 1);
 
@@ -63,12 +64,17 @@ async fn a_stale_handle_message_after_delete_and_re_add_is_dropped() {
     // Re-added at the same endpoint: a new handle.
     let new = scoped("fe80::1", "eth0");
     assert_ne!(new, old);
+    // The late session re-registers before announcing, so only the
+    // deleted-handle drop can keep the announcement out; the unregistered
+    // session gate never sees it.
+    tx.send(registering_peer_up(old, 1)).await.unwrap();
     announce(&tx, old, 1).await;
     assert!(
         query_received_routes(&tx, old).await.is_empty(),
         "the stale handle's announcement was installed"
     );
     assert!(query_best_routes(&tx).await.is_empty());
+    tx.send(registering_peer_up(new, 2)).await.unwrap();
     announce(&tx, new, 2).await;
     let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
@@ -100,6 +106,7 @@ async fn same_address_neighbors_select_the_same_winner_in_any_order() {
                 [eth1, eth0]
             };
             for peer in order {
+                tx.send(registering_peer_up(peer, 0)).await.unwrap();
                 announce(&tx, peer, 0).await;
             }
             let best = query_best_routes(&tx).await;
@@ -191,6 +198,7 @@ async fn a_rebind_purges_routes_retained_from_the_previous_endpoint() {
     assert!(peer.is_live(), "a rebind keeps the handle");
 
     // The new endpoint's session registers and learns under the same handle.
+    tx.send(registering_peer_up(peer, 2)).await.unwrap();
     announce(&tx, peer, 2).await;
     let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
@@ -214,6 +222,7 @@ async fn route_event_history_keeps_the_endpoint_each_event_recorded() {
     let peer = PeerId::allocate(PeerEndpoint::new(IpAddr::V4(old), None));
     let mut imet = make_evpn_imet(old, 7);
     imet.peer = peer;
+    tx.send(registering_peer_up(peer, 1)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 1,
         peer,
@@ -310,6 +319,7 @@ async fn evpn_event_history_keeps_current_and_previous_scopes_after_release() {
     let eth0 = scoped("fe80::1", "eth0");
     let eth1 = scoped("fe80::1", "eth1");
     for peer in [eth0, eth1] {
+        tx.send(registering_peer_up(peer, 1)).await.unwrap();
         let mut route = make_evpn_imet(Ipv4Addr::new(192, 0, 2, 1), 7);
         route.peer = peer;
         tx.send(RibUpdate::RoutesReceived {
@@ -387,7 +397,9 @@ async fn evpn_event_history_keeps_current_and_previous_scopes_after_release() {
 async fn an_mrt_snapshot_lists_same_address_neighbors_separately() {
     let (tx, actor) = spawn_manager();
     let (eth0, eth1) = (scoped("fe80::1", "eth0"), scoped("fe80::1", "eth1"));
+    tx.send(registering_peer_up(eth0, 1)).await.unwrap();
     announce(&tx, eth0, 1).await;
+    tx.send(registering_peer_up(eth1, 2)).await.unwrap();
     announce(&tx, eth1, 2).await;
     let snapshot = query_mrt_snapshot(&tx).await;
     let mut peers: Vec<_> = snapshot
@@ -415,7 +427,9 @@ async fn an_mrt_snapshot_lists_same_address_neighbors_separately() {
 async fn explain_names_the_scope_when_the_interface_breaks_the_tie() {
     let (tx, actor) = spawn_manager();
     let (eth1, eth0) = (scoped("fe80::1", "eth1"), scoped("fe80::1", "eth0"));
+    tx.send(registering_peer_up(eth1, 1)).await.unwrap();
     announce(&tx, eth1, 1).await;
+    tx.send(registering_peer_up(eth0, 2)).await.unwrap();
     announce(&tx, eth0, 2).await;
     let explain = query_explain_best_path(&tx, tied_route(eth0).prefix).await;
     assert_eq!(explain.best.as_ref().map(|best| best.peer), Some(eth0));
@@ -447,7 +461,9 @@ async fn explain_names_the_scope_when_the_interface_breaks_the_tie() {
 async fn a_page_boundary_between_same_address_neighbors_skips_no_row() {
     let (tx, actor) = spawn_manager();
     let (eth0, eth1) = (scoped("fe80::1", "eth0"), scoped("fe80::1", "eth1"));
+    tx.send(registering_peer_up(eth0, 1)).await.unwrap();
     announce(&tx, eth0, 1).await;
+    tx.send(registering_peer_up(eth1, 2)).await.unwrap();
     announce(&tx, eth1, 2).await;
     let page = |after, expected_version| {
         let tx = tx.clone();

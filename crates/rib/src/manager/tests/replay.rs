@@ -38,6 +38,7 @@ fn register_peer(
 
 fn receive_routes(manager: &mut RibManager, routes: Vec<Route>) {
     let source = routes[0].peer;
+    manager.handle_update(registering_peer_up(source, 0));
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,

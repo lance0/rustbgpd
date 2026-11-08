@@ -2367,10 +2367,9 @@ impl RibManager {
         announced: Vec<Route>,
         withdrawn: Vec<(Prefix, u32)>,
     ) {
-        // An unregistered synthetic source deliberately takes the production
-        // legacy-producer compatibility branch, whose accepted session stamp
-        // is zero. Outbound benchmark peers retain their registered stamps.
-        let session_id = self.outbound_session_ids.get(&peer).copied().unwrap_or(0);
+        let session_id = self
+            .current_session_id(peer)
+            .expect("benchmark source must register before delivering routes");
         self.handle_update(RibUpdate::RoutesReceived {
             peer,
             session_id,
@@ -2547,9 +2546,9 @@ impl RibManager {
         });
     }
 
-    /// Register a restarted source's session 0 through the production
+    /// Register a source's session 0 through the production
     /// `PeerUp` path, sending it no families, as transport does when the
-    /// restarted session reaches Established. The RIB refuses End-of-RIB from
+    /// session reaches Established. The RIB refuses data and End-of-RIB from
     /// a peer with no registered session. Session 0 matches the stamp
     /// `bench_seed_loc_rib` and `bench_end_of_rib` use.
     pub fn bench_register_restarted_source(&mut self, peer: PeerId) {
@@ -2619,15 +2618,18 @@ impl RibManager {
     }
 
     /// Seed the Loc-RIB through the production dispatcher/chunk path, grouped
-    /// into one envelope per synthetic source peer. A source without an
-    /// outbound registration uses the production legacy-unregistered
-    /// `session_id = 0` compatibility branch.
+    /// into one envelope per synthetic source peer. Register a new synthetic
+    /// source first; existing sessions keep their identity and export context.
+    /// Timed ingestion callers register their sources in setup.
     pub fn bench_seed_loc_rib(&mut self, routes: Vec<Route>) {
         let mut by_peer: BTreeMap<PeerId, Vec<Route>> = BTreeMap::new();
         for route in routes {
             by_peer.entry(route.peer).or_default().push(route);
         }
         for (peer, announced) in by_peer {
+            if self.current_session_id(peer).is_none() {
+                self.bench_register_restarted_source(peer);
+            }
             self.bench_apply_routes_received(peer, announced, Vec::new());
         }
     }
@@ -2830,6 +2832,31 @@ impl RibManager {
             exact_export_rejection_peers: self.peer_unexportable.len(),
             outbound_prefix_limit_peers: self.outbound_prefix_limits.len(),
             forced_resync_peers: self.force_outbound_peers.len(),
+        }
+    }
+
+    /// Prove that the named ingress sources form one empty export group.
+    /// Total fanout receipts still include this group and all its members.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sources are missing, duplicated, export-capable, retain
+    /// advertised routes, or share their group with another peer.
+    pub fn bench_assert_empty_source_group(&self, sources: &[PeerId]) {
+        let expected: HashSet<_> = sources.iter().copied().collect();
+        assert!(!expected.is_empty());
+        assert_eq!(expected.len(), sources.len());
+        let group_id = self
+            .grouped_member_of(sources[0])
+            .expect("source is grouped");
+        let group = &self.group_ribs[&group_id];
+        assert_eq!(group.members, expected);
+        assert!(group.table.is_empty_all_families());
+        for &source in sources {
+            assert!(self.current_session_id(source).is_some());
+            assert_eq!(self.grouped_member_of(source), Some(group_id));
+            assert_eq!(self.peer_sendable_families[&source], []);
+            assert!(self.adj_ribs_out[&source].is_empty_all_families());
         }
     }
 

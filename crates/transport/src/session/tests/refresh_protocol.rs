@@ -253,6 +253,7 @@ async fn gr_orf_first_refresh_sends_initial_eor_before_any_borr_on_tcp() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
         65003,
     );
+    register_test_source(&tx, route.peer, 0).await;
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: route.peer,

@@ -49,7 +49,9 @@ async fn a_route_page_held_across_a_rebind_keeps_its_endpoint_and_cursor() {
     let moving = neighbor("fe80::1", "swp1");
     let staying = neighbor("fe80::5", "swp2");
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+    let mut outbound = Vec::new();
     for (session_id, peer) in [(1, moving), (2, staying)] {
+        outbound.push(super::family_pages::register_peer(&tx, peer, session_id).await);
         tx.send(RibUpdate::RoutesReceived {
             session_id,
             peer,

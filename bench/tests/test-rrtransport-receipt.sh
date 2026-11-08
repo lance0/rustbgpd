@@ -85,7 +85,7 @@ checkpoints={"established":point(100,105,1000,1100,1200,1300),
   "snapshot_owner_nonzero":True,"snapshot_generation":0,"snapshot_max_message_len":4096,
   "snapshot_add_path":False,"shared_group_encode_classification":"one_arc_all_members",
   "shared_announce_classification":"one_arc_all_members","shared_route_count":100000,
-  "community":"65000:200","update_groups":1,"grouped_peers":1000,"ungrouped_peers":0,"dirty_peers":0,"grouped_unicast_routes":100000,"private_unicast_routes":0}})+"\n")
+  "community":"65000:200","update_groups":2,"grouped_peers":1001,"ungrouped_peers":0,"dirty_peers":0,"grouped_unicast_routes":100000,"private_unicast_routes":0}})+"\n")
 header="peer\tstaged\tnlri\tmessages\twithdrawals\tduplicates\toutside\tdecode_failures\tcoverage\tbitmap_digest\tinitial_eor\twire_ms\n"
 rows=[f"127.{2+i//254}.{1+i%254}.1\t100000\t100000\t391\t0\t0\t0\t0\t100000\t7c50a897bc4a4e51\ttrue\t3\n" for i in range(1000)]
 (d/"per-peer.tsv").write_text(header+"".join(rows))
@@ -120,6 +120,7 @@ grep -Fxq "FAIL: staged convergence ceiling exceeded: 355 ms > 354 ms" \
 expect_red wire-time-ceiling mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);phase=p/"phase.json";d=json.loads(phase.read_text());d["wire_ms"]=386;phase.write_text(json.dumps(d));peers=p/"per-peer.tsv";rows=peers.read_text().splitlines();fields=rows[1].split("\t");fields[-1]="386";rows[1]="\t".join(fields);peers.write_text("\n".join(rows)+"\n")'
 grep -Fxq "FAIL: wire convergence ceiling exceeded: 386 ms > 385 ms" \
   "$tmp/wire-time-ceiling.result"
+expect_red unregistered-source-totals mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"grouped-commit.json";d=json.loads(p.read_text());d["transition"].update(update_groups=1,grouped_peers=1000);p.write_text(json.dumps(d))'
 expect_red missing-internal-receipt mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])/"grouped-commit.json").unlink()'
 for field in routes_received_dispatches routes_received_withdrawals envelopes \
   routes_per_envelope; do

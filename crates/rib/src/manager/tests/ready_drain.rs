@@ -16,6 +16,7 @@ fn timer_manager(rx: mpsc::Receiver<RibUpdate>, query_rx: mpsc::Receiver<RibUpda
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
+    register_test_peer(&mut manager, source, 0);
     arm_selection_waiter(&mut manager, source, &[(Afi::Ipv6, Safi::Unicast)]);
     manager.ribs.insert(source, AdjRibIn::new(source));
     manager

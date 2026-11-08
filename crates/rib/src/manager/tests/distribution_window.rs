@@ -330,7 +330,7 @@ fn source() -> Ipv4Addr {
     Ipv4Addr::new(198, 51, 100, 7)
 }
 
-fn unregistered_routes(announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> RibUpdate {
+fn source_routes(announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> RibUpdate {
     let RibUpdate::RoutesReceived {
         peer,
         announced,
@@ -405,6 +405,7 @@ struct RejectionFixture {
 fn rejection_fixture() -> RejectionFixture {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source()), 0);
     untimed_window(&mut manager);
     let target = peer_v4(Ipv4Addr::new(10, 0, 7, 1));
     let other = peer_v4(Ipv4Addr::new(10, 0, 7, 2));
@@ -454,8 +455,7 @@ async fn exact_export_rejection_retires_after_window_distribution() {
     } = rejection_fixture();
     let route = |prefix| make_route(prefix, source());
 
-    tx.try_send(unregistered_routes(vec![route(p)], vec![]))
-        .unwrap();
+    tx.try_send(source_routes(vec![route(p)], vec![])).unwrap();
     drain_primary(&mut manager);
     assert!(route_envelopes(&mut receivers[0]).is_empty());
     assert_eq!(route_envelopes(&mut receivers[1]).len(), 1);
@@ -465,9 +465,8 @@ async fn exact_export_rejection_retires_after_window_distribution() {
     );
 
     // Withdraw the rejected route and announce another in one window.
-    tx.try_send(unregistered_routes(vec![], vec![p])).unwrap();
-    tx.try_send(unregistered_routes(vec![route(q)], vec![]))
-        .unwrap();
+    tx.try_send(source_routes(vec![], vec![p])).unwrap();
+    tx.try_send(source_routes(vec![route(q)], vec![])).unwrap();
     drain_primary(&mut manager);
     let to_target = route_envelopes(&mut receivers[0]);
     assert_eq!(to_target.len(), 1, "one window, one envelope");
@@ -489,11 +488,9 @@ async fn exact_export_rejection_retires_after_window_distribution() {
 
     // Announce, withdraw and re-announce the rejected route in one window:
     // it is live when the window settles, so the rejection survives.
-    tx.try_send(unregistered_routes(vec![route(p)], vec![]))
-        .unwrap();
-    tx.try_send(unregistered_routes(vec![], vec![p])).unwrap();
-    tx.try_send(unregistered_routes(vec![route(p)], vec![]))
-        .unwrap();
+    tx.try_send(source_routes(vec![route(p)], vec![])).unwrap();
+    tx.try_send(source_routes(vec![], vec![p])).unwrap();
+    tx.try_send(source_routes(vec![route(p)], vec![])).unwrap();
     drain_primary(&mut manager);
     assert!(route_envelopes(&mut receivers[0]).is_empty());
     assert_eq!(route_envelopes(&mut receivers[1]).len(), 1);
@@ -508,6 +505,7 @@ fn windows_for(
 ) -> Vec<OutboundRouteUpdate> {
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source()), 0);
     manager.distribution_window_limits = limits;
     let (up, mut out) = member_up(peer_v4(Ipv4Addr::new(10, 0, 8, 1)), 1);
     manager.handle_update(up);
@@ -549,7 +547,7 @@ fn churn_window_ends(limits: DistributionWindowLimits, count: u32) -> Vec<u32> {
 fn distinct_messages(count: u8, prefixes_each: u8) -> Vec<RibUpdate> {
     (0..count)
         .map(|message| {
-            unregistered_routes(
+            source_routes(
                 (0..prefixes_each)
                     .map(|index| make_route(window_pfx(message, index), source()))
                     .collect(),
@@ -566,7 +564,7 @@ fn churn_messages(count: u32) -> Vec<RibUpdate> {
             AttrSet::edit(&mut route.attributes, |attrs| {
                 attrs.push(PathAttribute::Med(med));
             });
-            unregistered_routes(vec![route], vec![])
+            source_routes(vec![route], vec![])
         })
         .collect()
 }
@@ -697,12 +695,13 @@ async fn same_prefix_churn_is_capped_by_the_input_bounds() {
 async fn window_never_waits_and_admits_one_message_per_turn() {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source()), 0);
     untimed_window(&mut manager);
     let (up, mut out) = member_up(peer_v4(Ipv4Addr::new(10, 0, 9, 1)), 1);
     manager.handle_update(up);
     let _ = route_envelopes(&mut out);
 
-    manager.handle_update(unregistered_routes(
+    manager.handle_update(source_routes(
         vec![make_route(pfx(40, 0), source())],
         vec![],
     ));
@@ -746,17 +745,15 @@ async fn dirty_resync_settles_an_open_window_first() {
         key_p,
     } = rejection_fixture();
     let route = |prefix| make_route(prefix, source());
-    tx.try_send(unregistered_routes(vec![route(p)], vec![]))
-        .unwrap();
+    tx.try_send(source_routes(vec![route(p)], vec![])).unwrap();
     drain_primary(&mut manager);
     let _ = route_envelopes(&mut receivers[1]);
     assert_eq!(manager.peer_unexportable[&target], HashSet::from([key_p]));
 
     // Window: withdraw p, then q already queued. One turn ingests the
     // withdrawal and admits q; the window is open.
-    tx.try_send(unregistered_routes(vec![], vec![p])).unwrap();
-    tx.try_send(unregistered_routes(vec![route(q)], vec![]))
-        .unwrap();
+    tx.try_send(source_routes(vec![], vec![p])).unwrap();
+    tx.try_send(source_routes(vec![route(q)], vec![])).unwrap();
     let first = manager.try_recv_primary().unwrap();
     manager.handle_update(first);
     assert!(manager.process_next_route_chunk());
@@ -800,6 +797,7 @@ async fn dirty_resync_settles_an_open_window_first() {
 async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source()), 0);
     untimed_window(&mut manager);
     let member = peer_v4(Ipv4Addr::new(10, 0, 9, 1));
     let (up, mut out) = member_up(member, 1);
@@ -844,10 +842,10 @@ async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
         },
         stale(window_pfx(50, 3)),
         stale(window_pfx(50, 4)),
-        unregistered_routes(vec![make_route(window_pfx(50, 5), source())], vec![]),
+        source_routes(vec![make_route(window_pfx(50, 5), source())], vec![]),
     ];
     let total = queued.len();
-    manager.handle_update(unregistered_routes(
+    manager.handle_update(source_routes(
         vec![make_route(window_pfx(50, 0), source())],
         vec![],
     ));

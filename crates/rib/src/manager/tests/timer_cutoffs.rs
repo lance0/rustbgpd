@@ -144,6 +144,7 @@ fn spawn(metrics: &BgpMetrics) -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHan
 async fn gr_stale_timer_fires_under_sustained_ingress() {
     let metrics = BgpMetrics::new();
     let (tx, handle) = spawn(&metrics);
+    tx.send(registering_peer_up(source(), 0)).await.unwrap();
     tx.send(one_route()).await.unwrap();
     tx.send(graceful_restart(0)).await.unwrap();
     barrier(&tx).await;
@@ -167,6 +168,7 @@ async fn gr_stale_timer_fires_under_sustained_ingress() {
 async fn llgr_stale_timer_fires_under_sustained_ingress() {
     let metrics = BgpMetrics::new();
     let (tx, handle) = spawn(&metrics);
+    tx.send(registering_peer_up(source(), 0)).await.unwrap();
     tx.send(one_route()).await.unwrap();
     tx.send(graceful_restart(10)).await.unwrap();
     barrier(&tx).await;
@@ -193,8 +195,8 @@ async fn llgr_stale_timer_fires_under_sustained_ingress() {
 async fn refresh_window_timer_fires_under_sustained_ingress() {
     let metrics = BgpMetrics::new();
     let (tx, handle) = spawn(&metrics);
-    tx.send(one_route()).await.unwrap();
     tx.send(registering_peer_up(source(), 0)).await.unwrap();
+    tx.send(one_route()).await.unwrap();
     tx.send(RibUpdate::BeginRouteRefresh {
         session_id: 0,
         peer: source(),
@@ -276,8 +278,8 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
         &[(Afi::Ipv6, Safi::Unicast)],
     );
     let handle = tokio::spawn(manager.run());
-    tx.send(one_route()).await.unwrap();
     tx.send(registering_peer_up(source(), 0)).await.unwrap();
+    tx.send(one_route()).await.unwrap();
     tx.send(RibUpdate::BeginRouteRefresh {
         session_id: 0,
         peer: source(),
@@ -288,6 +290,10 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
     .unwrap();
     barrier(&tx).await;
     let other = Ipv4Addr::new(10, 0, 0, 2);
+
+    tx.send(registering_peer_up(peer_v4(other), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(other),
@@ -376,6 +382,7 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
         peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
         &[(Afi::Ipv6, Safi::Unicast)],
     );
+    register_test_peer(&mut manager, source(), 0);
     manager.handle_update(one_route());
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -1191,6 +1198,7 @@ async fn staggered_gr_sweeps(first_look_at_earliest: bool) -> Vec<usize> {
     let peers: Vec<Ipv4Addr> = (0..K).map(|k| Ipv4Addr::new(10, 9, 0, k + 1)).collect();
     for (k, &address) in (0u8..).zip(&peers) {
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, k * 4), 30);
+        register_test_peer(&mut manager, peer_v4(address), 0);
         manager.handle_update(received(address, 0, vec![make_route(prefix, address)]));
         while manager.process_next_route_chunk() {}
         manager.handle_update(restart(address, 0, 2, 360));

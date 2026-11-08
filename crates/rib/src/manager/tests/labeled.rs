@@ -114,6 +114,9 @@ async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn
     );
     let handle = tokio::spawn(manager.run());
     let feed = Ipv4Addr::new(10, 9, 9, 9);
+    tx.send(registering_peer_up(peer_v4(feed), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, feed).await;
 
     let next_hop_x = IpAddr::V4(Ipv4Addr::new(10, 0, X, A));
@@ -121,6 +124,11 @@ async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn
     let vantage_b = IpAddr::V4(Ipv4Addr::new(10, 0, B, X));
     let source_x = Ipv4Addr::new(192, 0, 2, 1);
     let source_y = Ipv4Addr::new(192, 0, 2, 2);
+    for source in [source_x, source_y] {
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
+    }
     let families = vec![
         (Afi::Ipv4, Safi::LabeledUnicast),
         (Afi::Ipv6, Safi::LabeledUnicast),
@@ -346,6 +354,7 @@ async fn labeled_add_path_no_advertise_compacts_and_withdraws_ranks() {
     let second = make_labeled_rib_route(Ipv4Addr::new(192, 0, 2, 12), 43, 200, 100);
     let prefix = best.nlri.key();
     for route in [&best, &second] {
+        tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
         tx.send(RibUpdate::LabeledRoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -480,6 +489,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
 
@@ -492,7 +502,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(update.announce.is_empty());
     assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
@@ -513,7 +523,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.map(delivered).unwrap();
+    let withdraw = fixture_update(out_rx.recv()).await;
     assert!(withdraw.labeled_announce.is_empty());
     assert_eq!(withdraw.labeled_withdraw, vec![key]);
 
@@ -532,6 +542,7 @@ async fn labeled_rr_reflects_non_client_route_to_clients_only() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let non_client = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 
@@ -576,7 +587,7 @@ async fn labeled_rr_reflects_non_client_route_to_clients_only() {
     .await
     .unwrap();
 
-    let reflected = client_rx.recv().await.map(delivered).unwrap();
+    let reflected = fixture_update(client_rx.recv()).await;
     assert_eq!(reflected.labeled_announce.len(), 1);
     assert_eq!(reflected.labeled_announce[0].key(), key);
 
@@ -630,6 +641,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 33, 100, 100);
     let relabeled = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 33, 200, 100);
     assert_eq!(
@@ -646,7 +658,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.map(delivered).unwrap();
+    let first = fixture_update(out_rx.recv()).await;
     assert_eq!(first.labeled_announce.len(), 1);
     assert_eq!(first.labeled_announce[0].nlri.labels[0].label, 100);
 
@@ -658,7 +670,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     })
     .await
     .unwrap();
-    let second = out_rx.recv().await.map(delivered).unwrap();
+    let second = fixture_update(out_rx.recv()).await;
     assert_eq!(
         second.labeled_announce.len(),
         1,
@@ -704,6 +716,7 @@ async fn labeled_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 34, 100, 100);
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
@@ -713,7 +726,7 @@ async fn labeled_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.map(delivered).unwrap();
+    let first = fixture_update(out_rx.recv()).await;
     assert_eq!(first.labeled_announce.len(), 1);
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -748,6 +761,7 @@ async fn labeled_addpath_ingest_distinct_path_ids_stored_and_withdrawn_independe
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let mut path_1 = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 200);
     path_1.path_id = 1;
     let mut path_2 = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
@@ -874,6 +888,7 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     let third = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 13), 31, 300, 100);
     let prefix = best.nlri.key();
     for route in [&best, &second, &third] {
+        tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
         tx.send(RibUpdate::LabeledRoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -961,6 +976,7 @@ async fn send_initial_table_includes_labeled_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 35, 100, 100);
     let key = route.key();
 
@@ -996,13 +1012,13 @@ async fn send_initial_table_includes_labeled_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(update.announce.is_empty());
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(update.labeled_withdraw.len(), 0);
 
-    let eor = out_rx.recv().await.map(delivered).unwrap();
+    let eor = fixture_update(out_rx.recv()).await;
     assert_eq!(eor.end_of_rib, labeled_sendable());
 
     drop(tx);
@@ -1018,6 +1034,7 @@ async fn route_refresh_labeled_re_advertises_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 36, 100, 100);
     let key = route.key();
 
@@ -1053,8 +1070,8 @@ async fn route_refresh_labeled_re_advertises_routes() {
     .await
     .unwrap();
 
-    let _initial = out_rx.recv().await.map(delivered).unwrap();
-    let _eor = out_rx.recv().await.map(delivered).unwrap();
+    let _initial = fixture_update(out_rx.recv()).await;
+    let _eor = fixture_update(out_rx.recv()).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),
@@ -1066,7 +1083,7 @@ async fn route_refresh_labeled_re_advertises_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(update.announce.is_empty());
     assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
@@ -1155,7 +1172,11 @@ async fn labeled_gr_marks_stale_and_demotes_routes() {
     let best_advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let alternate_advertiser = Ipv4Addr::new(10, 0, 0, 3);
     let best_peer = peer_v4(best_advertiser);
+    tx.send(registering_peer_up(best_peer, 0)).await.unwrap();
     let alternate_peer = peer_v4(alternate_advertiser);
+    tx.send(registering_peer_up(alternate_peer, 0))
+        .await
+        .unwrap();
 
     // Same prefix (octet) from both peers ⇒ same RIB key.
     let route_a = make_labeled_rib_route(best_advertiser, 31, 100, 200);
@@ -1266,6 +1287,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
     tx.send(RibUpdate::LabeledRoutesReceived {
@@ -1276,7 +1298,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.map(delivered).unwrap();
+    let announced = fixture_update(out_rx.recv()).await;
     assert_eq!(announced.labeled_announce.len(), 1);
 
     // GR capability carries only unicast: labeled is withdrawn, not retained.
@@ -1293,7 +1315,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.map(delivered).unwrap();
+    let withdraw = fixture_update(out_rx.recv()).await;
     assert_eq!(
         withdraw.labeled_withdraw,
         vec![key],
@@ -1346,6 +1368,8 @@ async fn labeled_gr_eor_clears_stale() {
     let dropped = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 61, 100, 100);
     let kept_key = kept.key();
     let dropped_key = dropped.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1354,7 +1378,7 @@ async fn labeled_gr_eor_clears_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.map(delivered).unwrap();
+    let announced = fixture_update(out_rx.recv()).await;
     assert_eq!(announced.labeled_announce.len(), 2);
 
     tx.send(RibUpdate::PeerGracefulRestart {
@@ -1403,7 +1427,7 @@ async fn labeled_gr_eor_clears_stale() {
 
     // The removal must be withdrawn downstream.
     loop {
-        let update = out_rx.recv().await.map(delivered).unwrap();
+        let update = fixture_update(out_rx.recv()).await;
         if update.labeled_withdraw.is_empty() {
             continue;
         }
@@ -1425,6 +1449,7 @@ async fn labeled_gr_timer_sweeps_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1476,6 +1501,7 @@ async fn labeled_gr_consecutive_restart_deletes_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1530,7 +1556,9 @@ async fn labeled_llgr_gr_timer_promotes_to_llgr_stale() {
     let handle = tokio::spawn(manager.run());
 
     let peer_a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer_a, 0)).await.unwrap();
     let peer_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    tx.send(registering_peer_up(peer_b, 0)).await.unwrap();
     // Same key from both peers; A wins the LOCAL_PREF tiebreak.
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
@@ -1618,6 +1646,7 @@ async fn labeled_llgr_timer_sweeps_llgr_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1671,6 +1700,8 @@ async fn labeled_llgr_eor_clears_llgr_stale() {
     let kept = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 60, 100, 100);
     let dropped = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 61, 100, 100);
     let kept_key = kept.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1743,6 +1774,7 @@ async fn labeled_llgr_no_llgr_community_drops_route_on_promotion() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let mut route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1791,6 +1823,7 @@ async fn labeled_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
     tx.send(RibUpdate::LabeledRoutesReceived {
@@ -1801,7 +1834,7 @@ async fn labeled_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.map(delivered).unwrap();
+    let first = fixture_update(out_rx.recv()).await;
     assert_eq!(first.labeled_announce.len(), 1);
 
     let family = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
@@ -1858,6 +1891,7 @@ async fn labeled_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
     tx.send(RibUpdate::LabeledRoutesReceived {
@@ -1939,6 +1973,9 @@ async fn labeled_addpath_llgr_stale_candidates_gated_individually() {
     let route_b = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 3), 31, 100, 100);
     let prefix = route_a.nlri.key();
     for (peer, route) in [(source_a, route_a), (source_b.addr(), route_b)] {
+        tx.send(registering_peer_up(PeerId::from_addr(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::LabeledRoutesReceived {
             session_id: 0,
             peer: PeerId::from_addr(peer),

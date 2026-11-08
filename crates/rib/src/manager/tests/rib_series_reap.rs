@@ -90,6 +90,7 @@ fn receive_from_target(
     session_id: u64,
     octets: impl IntoIterator<Item = u8>,
 ) {
+    register_test_peer(manager, peer_v4(TARGET), session_id);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(TARGET),
         session_id,
@@ -393,6 +394,8 @@ fn session_with_routes(
             route
         })
         .collect();
+
+    register_test_peer(manager, peer, session_id);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer,
         session_id,

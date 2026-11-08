@@ -4782,8 +4782,13 @@ impl RibManager {
                 reply,
             } => {
                 if self.stale_session_message(peer, session_id, "PeerOrfUpdate", Orf) {
+                    let origin = if self.current_session_id(peer).is_some() {
+                        "superseded"
+                    } else {
+                        "unregistered"
+                    };
                     let _ = reply.send(Err(format!(
-                        "stale ORF update from superseded session {session_id} discarded"
+                        "stale ORF update from {origin} session {session_id} discarded"
                     )));
                 } else {
                     self.advance_advertised_pages();
@@ -5416,7 +5421,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_marker(peer, session_id, "EndOfRib", Eor) {
+                if !self.stale_session_message(peer, session_id, "EndOfRib", Eor) {
                     self.advance_all_route_pages();
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
@@ -5468,7 +5473,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_marker(peer, session_id, "BeginRouteRefresh", Refresh) {
+                if !self.stale_session_message(peer, session_id, "BeginRouteRefresh", Refresh) {
                     self.advance_all_route_pages();
                     self.handle_begin_route_refresh(peer, afi, safi);
                     if let Some(transition) =
@@ -5487,7 +5492,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_marker(peer, session_id, "EndRouteRefresh", Refresh) {
+                if !self.stale_session_message(peer, session_id, "EndRouteRefresh", Refresh) {
                     // A collision-failback survivor already sent its EoR;
                     // its refreshed membership ends with the EoRR that
                     // closes an active RTC refresh window. A stray or
@@ -5519,7 +5524,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_marker(peer, session_id, "RouteRefreshTimeout", Refresh) {
+                if !self.stale_session_message(peer, session_id, "RouteRefreshTimeout", Refresh) {
                     self.finish_route_refresh(peer, afi, safi, true);
                 }
             }

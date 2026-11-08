@@ -795,6 +795,7 @@ fn bench_contested_prefix_selection(c: &mut Criterion) {
             let (_query_tx, query_rx) = mpsc::channel(8);
             let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
             manager.bench_seed_loc_rib(routes(holder));
+            manager.bench_register_restarted_source(challenger);
             group.bench_function(BenchmarkId::new("numbered_v6", count), |b| {
                 b.iter_custom(|iterations| {
                     let mut elapsed = Duration::ZERO;
@@ -835,7 +836,8 @@ fn bench_full_table_load(c: &mut Criterion) {
                 || {
                     let (tx, rx) = mpsc::channel(8);
                     let (query_tx, query_rx) = mpsc::channel(8);
-                    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                    manager.bench_register_restarted_source(routes[0].peer);
                     (manager, routes.clone(), tx, query_tx)
                 },
                 |(mut manager, routes, tx, query_tx)| {
@@ -1283,6 +1285,7 @@ fn bench_announce_validation(c: &mut Criterion) {
                         let (_query_tx, query_rx) = mpsc::channel(1);
                         let mut manager =
                             RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                        manager.bench_register_restarted_source(peer);
                         if arm != "table_off" {
                             tx.try_send(RibUpdate::RpkiCacheUpdate {
                                 table: Arc::clone(&vrps),

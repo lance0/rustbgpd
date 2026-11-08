@@ -492,6 +492,7 @@ fn srv6_argument_exact_pair_tracks_replacement_withdrawal_and_reannouncement() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (imet, ead) = argument_routes(0xaaaa);
     let receive = |manager: &mut RibManager, announced, withdrawn| {
+        register_test_peer(manager, imet.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: imet.peer,
@@ -616,6 +617,7 @@ fn srv6_p2mp_imet_replacement_withdrawal_and_recovery_reach_export_and_inspectio
     let mut imet = p2mp_imet();
     let (_, ead) = argument_routes(0xaaaa);
     let receive = |manager: &mut RibManager, route: &EvpnRibRoute, withdraw| {
+        register_test_peer(manager, route.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,

@@ -56,7 +56,9 @@ async fn vpn_llgr_gr_timer_promotes_to_llgr_stale() {
     let handle = tokio::spawn(manager.run());
 
     let peer_a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer_a, 0)).await.unwrap();
     let peer_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    tx.send(registering_peer_up(peer_b, 0)).await.unwrap();
     // Same key from both peers; A wins the LOCAL_PREF tiebreak.
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
@@ -134,7 +136,9 @@ async fn bgpls_llgr_gr_timer_promotes_to_llgr_stale() {
     let handle = tokio::spawn(manager.run());
 
     let peer_a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer_a, 0)).await.unwrap();
     let peer_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    tx.send(registering_peer_up(peer_b, 0)).await.unwrap();
     // Same key from both peers; A wins the LOCAL_PREF tiebreak.
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
@@ -207,7 +211,9 @@ async fn rtc_llgr_gr_timer_promotes_to_llgr_stale() {
     let handle = tokio::spawn(manager.run());
 
     let peer_a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer_a, 0)).await.unwrap();
     let peer_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    tx.send(registering_peer_up(peer_b, 0)).await.unwrap();
     // Same NLRI from both peers; A wins the LOCAL_PREF tiebreak.
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
@@ -280,6 +286,7 @@ async fn vpn_llgr_timer_sweeps_llgr_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -321,6 +328,7 @@ async fn bgpls_llgr_timer_sweeps_llgr_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: source,
@@ -362,6 +370,7 @@ async fn rtc_llgr_timer_sweeps_llgr_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: source,
@@ -424,6 +433,8 @@ async fn vpn_llgr_eor_clears_llgr_stale() {
     let kept_key = kept.key();
     let kept_tagged_key = kept_tagged.key();
     let dropped_key = dropped.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -432,7 +443,7 @@ async fn vpn_llgr_eor_clears_llgr_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(announced.vpn_announce.len(), 3);
 
     let family = vec![(Afi::Ipv4, Safi::MplsVpn)];
@@ -497,7 +508,7 @@ async fn vpn_llgr_eor_clears_llgr_stale() {
 
     // The EoR removal must be withdrawn downstream.
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = fixture_delivery(out_rx.recv()).await.unwrap();
         if update.vpn_withdraw.is_empty() {
             continue;
         }
@@ -534,6 +545,8 @@ async fn bgpls_llgr_eor_clears_llgr_stale() {
     let kept_key = kept.key();
     let kept_tagged_key = kept_tagged.key();
     let dropped_key = dropped.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: source,
@@ -542,7 +555,7 @@ async fn bgpls_llgr_eor_clears_llgr_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(announced.bgpls_announce.len(), 3);
 
     let family = vec![(Afi::BgpLs, Safi::BgpLs)];
@@ -604,7 +617,7 @@ async fn bgpls_llgr_eor_clears_llgr_stale() {
     );
 
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = fixture_delivery(out_rx.recv()).await.unwrap();
         if update.bgpls_withdraw.is_empty() {
             continue;
         }
@@ -644,6 +657,8 @@ async fn rtc_llgr_eor_clears_llgr_stale() {
     let kept_key = kept.key();
     let kept_tagged_key = kept_tagged.key();
     let dropped_key = dropped.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: source,
@@ -652,7 +667,7 @@ async fn rtc_llgr_eor_clears_llgr_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(announced.rtc_announce.len(), 3);
 
     let family = vec![(Afi::Ipv4, Safi::RtConstrain)];
@@ -718,7 +733,7 @@ async fn rtc_llgr_eor_clears_llgr_stale() {
     );
 
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = fixture_delivery(out_rx.recv()).await.unwrap();
         if update.rtc_withdraw.is_empty() {
             continue;
         }
@@ -741,6 +756,7 @@ async fn vpn_llgr_no_llgr_community_drops_route_on_promotion() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let mut route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::Communities(vec![
@@ -784,6 +800,7 @@ async fn bgpls_llgr_no_llgr_community_drops_route_on_promotion() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let mut route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 0x01, 100);
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::Communities(vec![
@@ -827,6 +844,7 @@ async fn rtc_llgr_no_llgr_community_drops_route_on_promotion() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let mut route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::Communities(vec![
@@ -878,6 +896,7 @@ async fn vpn_llgr_stale_reexport_carries_community() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -888,7 +907,7 @@ async fn vpn_llgr_stale_reexport_carries_community() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
     assert!(
         !first.vpn_announce[0]
@@ -942,6 +961,7 @@ async fn bgpls_llgr_stale_reexport_carries_community() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 0x01, 100);
     let key = route.key();
     tx.send(RibUpdate::BgpLsRoutesReceived {
@@ -952,7 +972,7 @@ async fn bgpls_llgr_stale_reexport_carries_community() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(first.bgpls_announce.len(), 1);
     assert!(
         !first.bgpls_announce[0]
@@ -1004,6 +1024,7 @@ async fn rtc_llgr_stale_reexport_carries_community() {
     drain_rtc_initial_dump(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -1014,7 +1035,7 @@ async fn rtc_llgr_stale_reexport_carries_community() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(first.rtc_announce.len(), 1);
     assert!(
         !first.rtc_announce[0]
@@ -1074,6 +1095,7 @@ async fn llgr_families_split_promote_vs_purge_for_typed_families() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1136,6 +1158,7 @@ async fn rtc_llgr_sweep_drops_preserved_vpn_membership() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1153,7 +1176,7 @@ async fn rtc_llgr_sweep_drops_preserved_vpn_membership() {
     let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     send_rtc_interest(&tx, target, &[100]).await;
-    let announced = out_rx.recv().await.unwrap();
+    let announced = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(announced.vpn_announce.len(), 1);
 
     // GR entry preserving RTC through both retention phases.
@@ -1215,6 +1238,9 @@ async fn bgpls_llgr_stale_topology_keeps_orr_vantages_resolved_until_llgr_sweep(
     let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
 
     let feed = Ipv4Addr::new(10, 9, 9, 9);
+    tx.send(registering_peer_up(peer_v4(feed), 0))
+        .await
+        .unwrap();
     feed_square_topology(&tx, feed).await;
     let status = query_orr_status(&tx).await;
     assert!(status.vantages[0].resolved);
@@ -1263,6 +1289,7 @@ async fn unicast_announce_and_promote_to_llgr(
     source: PeerId,
     prefix: Ipv4Prefix,
 ) {
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1463,6 +1490,7 @@ async fn fresh_routes_unaffected_by_peer_llgr_capability() {
     drain_eor(&mut capable_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1479,7 +1507,7 @@ async fn fresh_routes_unaffected_by_peer_llgr_capability() {
     .unwrap();
 
     for out_rx in [&mut plain_rx, &mut capable_rx] {
-        let update = out_rx.recv().await.unwrap();
+        let update = fixture_delivery(out_rx.recv()).await.unwrap();
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
         assert!(!update.announce[0].is_llgr_stale);
@@ -1510,6 +1538,7 @@ async fn vpn_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1520,7 +1549,7 @@ async fn vpn_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
 
     let family = vec![(Afi::Ipv4, Safi::MplsVpn)];
@@ -1576,6 +1605,7 @@ async fn vpn_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1586,7 +1616,14 @@ async fn vpn_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     })
     .await
     .unwrap();
-    assert_eq!(out_rx.recv().await.unwrap().vpn_announce.len(), 1);
+    assert_eq!(
+        fixture_delivery(out_rx.recv())
+            .await
+            .unwrap()
+            .vpn_announce
+            .len(),
+        1
+    );
 
     let family = vec![(Afi::Ipv4, Safi::MplsVpn)];
     tx.send(gr_with_llgr(source, 2, family.clone(), family, 3600))
@@ -1648,6 +1685,9 @@ async fn vpn_addpath_llgr_stale_candidates_gated_individually() {
     let route_b = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 3), 31, 100, 100);
     let nlri_key = route_a.nlri.key();
     for (peer, route) in [(source_a, route_a), (source_b.addr(), route_b)] {
+        tx.send(registering_peer_up(PeerId::from_addr(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::VpnRoutesReceived {
             session_id: 0,
             peer: PeerId::from_addr(peer),
@@ -1718,6 +1758,7 @@ async fn evpn_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
@@ -1733,7 +1774,7 @@ async fn evpn_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(first.evpn_announce.len(), 1);
 
     let family = vec![(Afi::L2Vpn, Safi::Evpn)];
@@ -1819,6 +1860,7 @@ async fn unicast_llgr_no_llgr_community_drops_route_on_promotion() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let dropped = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let kept = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
     let mut no_llgr = make_route(dropped, Ipv4Addr::new(10, 0, 0, 1));
