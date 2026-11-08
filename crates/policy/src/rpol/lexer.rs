@@ -373,15 +373,15 @@ pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
                 last_span.end = span.end;
                 continue;
             }
-            if diagnostics.len() == MAX_DIAGNOSTICS {
-                break;
-            }
             diagnostics.push(Diagnostic::coded(
                 DiagnosticCode::Lex,
                 span,
                 format!("unrecognized token `{}`", &source[span.range()]),
                 "not a valid `.rpol` token",
             ));
+            if diagnostics.len() == MAX_DIAGNOSTICS {
+                break;
+            }
             continue;
         };
         tokens.push(Token { kind, span });
@@ -397,6 +397,20 @@ mod tests {
         let (tokens, diags) = lex(src, 0);
         assert!(diags.is_empty(), "unexpected lex errors: {diags:?}");
         tokens.into_iter().map(|t| t.kind).collect()
+    }
+
+    /// Lexing stops at the diagnostic that reaches the cap, so a valid
+    /// suffix after it is never tokenized (or parsed).
+    #[test]
+    fn lexing_stops_at_the_capped_diagnostic() {
+        let source = format!(
+            "{}{}",
+            "@\n".repeat(MAX_DIAGNOSTICS),
+            "import \"x.rpol\"\n".repeat(10_000)
+        );
+        let (tokens, diags) = lex(&source, 0);
+        assert_eq!(diags.len(), MAX_DIAGNOSTICS);
+        assert!(tokens.is_empty(), "{} tokens after the cap", tokens.len());
     }
 
     #[test]
