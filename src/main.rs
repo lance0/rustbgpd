@@ -2795,7 +2795,7 @@ fn blackhole_status_to_proto(
     }
 }
 
-/// Publish complete read indexes independently of FIB reconciliation.
+/// Publish the base read order independently of FIB reconciliation.
 async fn fib_route_snapshots(
     mut source: tokio::sync::watch::Receiver<Arc<Vec<fib_runtime::FibRuntimeStatus>>>,
 ) -> Result<
@@ -8389,7 +8389,12 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "large FIB publication overlap measurement"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one receipt retains the publication overlap schedule before separate cold and warm read measurements"
+    )]
     async fn fib_publication_overlap_receipt() {
+        use rustbgpd_api::proto::rib_service_server::RibService as _;
         let count: u32 = std::env::var("FIB_READ_RECEIPT_ROUTES")
             .map_or(100_000, |value| value.parse().unwrap());
         let shape =
@@ -8469,6 +8474,73 @@ mod tests {
             latest_start.elapsed().as_millis()
         );
         report_fib_measurement_memory("latest");
+
+        // Report-only: first-use preparation is separate from publication cost.
+        let selected = count.saturating_sub(1).min(7);
+        let mut request = rustbgpd_api::proto::ListFibRoutesRequest {
+            peer_address: format!("198.51.100.{}", selected % 8 + 1),
+            page_size: 1000,
+            ..Default::default()
+        };
+        if shape == "all" {
+            request.table_name = format!("table{}", selected % 4);
+            request.state = [
+                rustbgpd_api::proto::FibRouteState::Installed,
+                rustbgpd_api::proto::FibRouteState::Rejected,
+                rustbgpd_api::proto::FibRouteState::Failed,
+            ][selected as usize % 3] as i32;
+            request.reason = format!("reason{}", selected % 2);
+            request.prefix = std::net::Ipv4Addr::from(0x0a00_0000 + selected).to_string();
+            request.prefix_length = 32;
+        }
+        let expected_total = if shape == "all" {
+            1
+        } else {
+            u64::from((count - selected % 8).div_ceil(8))
+        };
+        let (rib_tx, _rib_rx) = tokio::sync::mpsc::channel(1);
+        let service = rustbgpd_api::rib_service::RibService::with_status_snapshots(
+            rib_tx,
+            Arc::new(Vec::new),
+            rustbgpd_api::rib_service::FibRouteSnapshotReader::new(published_rx.clone()),
+        );
+        for pass in ["cold", "warm"] {
+            let started = std::time::Instant::now();
+            let response = service
+                .list_fib_routes(tonic::Request::new(request.clone()))
+                .await
+                .unwrap()
+                .into_inner();
+            eprintln!(
+                "fib_filter_read shape={shape} pass={pass} returned={} total={} elapsed_us={}",
+                response.routes.len(),
+                response.total_count,
+                started.elapsed().as_micros()
+            );
+            assert_eq!(response.total_count, expected_total);
+            assert_eq!(
+                response.routes.len(),
+                usize::try_from(expected_total.min(1000)).unwrap()
+            );
+            for row in response.routes {
+                assert_eq!(row.peer_address, request.peer_address);
+                assert_eq!(row.prefix_length, 32);
+                let address: std::net::Ipv4Addr = row.prefix.parse().unwrap();
+                let index = u32::from(address) - 0x0a00_0000;
+                assert!(index < count);
+                assert_eq!(index % 8, selected % 8);
+                if shape == "all" {
+                    assert_eq!(row.prefix, request.prefix);
+                    assert_eq!(row.table_name, request.table_name);
+                    assert_eq!(row.state, request.state);
+                    assert_eq!(row.reason, request.reason);
+                }
+            }
+        }
+        report_fib_measurement_memory("filtered");
+        tokio::task::spawn_blocking(move || drop(service))
+            .await
+            .unwrap();
         drop(source_tx);
         worker.await.unwrap();
         tokio::task::spawn_blocking(move || drop(published_rx))

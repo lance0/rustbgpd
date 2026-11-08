@@ -3,7 +3,7 @@
 use rustbgpd_rib::{PageSource, PeerId, PeerScope};
 use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
@@ -36,18 +36,25 @@ use rustbgpd_wire::{
 pub type BlackholeDiscardSnapshotFn =
     std::sync::Arc<dyn Fn() -> Vec<proto::BlackholeDiscard> + Send + Sync + 'static>;
 
-/// Borrow a prepared publication without transferring its destruction to a reader.
+/// Borrow a publication; only admitted blocking work can retain retired data.
 #[derive(Debug, Clone)]
-pub struct FibRouteSnapshotReader(tokio::sync::watch::Receiver<FibRouteSnapshot>);
+pub struct FibRouteSnapshotReader {
+    receiver: tokio::sync::watch::Receiver<FibRouteSnapshot>,
+    build_slot: Arc<tokio::sync::Semaphore>,
+}
 
 impl FibRouteSnapshotReader {
     /// Connect to the daemon's off-actor status publisher.
     #[must_use]
     pub fn new(receiver: tokio::sync::watch::Receiver<FibRouteSnapshot>) -> Self {
-        Self(receiver)
+        Self {
+            receiver,
+            build_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
     }
 
-    /// Read while the publication is pinned; the publisher owns retired rows.
+    /// Read while the publication is pinned. The publisher or an admitted
+    /// blocking worker owns retired rows.
     ///
     /// The callback cannot keep the publication alive after the read:
     ///
@@ -57,53 +64,93 @@ impl FibRouteSnapshotReader {
     /// let retained = reader.with_snapshot(|snapshot| snapshot);
     /// ```
     pub fn with_snapshot<T>(&self, read: impl FnOnce(&FibRouteSnapshot) -> T) -> T {
-        read(&self.0.borrow())
+        read(&self.receiver.borrow())
+    }
+
+    async fn list(
+        &self,
+        filters: FibRouteFilters,
+        page: Option<FibRoutePageParams>,
+    ) -> Result<proto::ListFibRoutesResponse, Status> {
+        if let Some(response) = self.with_snapshot(|snapshot| {
+            snapshot
+                .is_prepared(&filters)
+                .then(|| snapshot.list(&filters, page))
+        }) {
+            return response;
+        }
+        let permit = self
+            .build_slot
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Status::unavailable("FIB index preparation unavailable"))?;
+        // Only admitted blocking work may retain a retired publication.
+        let snapshot = self.with_snapshot(FibRouteSnapshot::for_worker);
+        tokio::task::spawn_blocking(move || {
+            // Drop retained data before releasing the slot, including on unwind.
+            let (_permit, owned_snapshot) = (permit, snapshot);
+            owned_snapshot.list(&filters, page)
+        })
+        .await
+        .map_err(|error| Status::internal(format!("FIB index preparation failed: {error}")))?
     }
 }
 
 impl Default for FibRouteSnapshotReader {
     fn default() -> Self {
-        Self(tokio::sync::watch::channel(FibRouteSnapshot::default()).1)
+        Self::new(tokio::sync::watch::channel(FibRouteSnapshot::default()).1)
     }
 }
 
-/// Immutable FIB rows and equality indexes prepared before publication.
+/// Immutable FIB rows with an eager base order and lazy equality indexes.
 ///
-/// Each varying filter combination has a row-index permutation. Matching
-/// rows form one contiguous range in canonical page order, so even the first
-/// page of a new filter needs only two binary searches and its returned rows.
+/// Each requested varying filter combination gets a row-index permutation.
+/// Once prepared, matching rows form one contiguous range in canonical page
+/// order, so pages need only two binary searches and their returned rows.
 #[derive(Debug)]
 pub struct FibRouteSnapshot {
-    rows: Vec<proto::FibRouteStatus>,
-    indexes: [Vec<usize>; 32],
+    rows: Arc<Vec<proto::FibRouteStatus>>,
+    indexes: Arc<[OnceLock<Vec<usize>>; 64]>,
     varying: usize,
     summary: crate::event_service::dataplane::DataplaneSummary,
+    #[cfg(test)]
+    build_gate: Option<Arc<FibIndexBuildGate>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct FibIndexBuildGate {
+    entered: tokio::sync::Notify,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Default for FibRouteSnapshot {
     fn default() -> Self {
         Self {
-            rows: Vec::new(),
-            indexes: Default::default(),
+            rows: Arc::new(Vec::new()),
+            indexes: Arc::new(std::array::from_fn(|_| OnceLock::new())),
             varying: 0,
             summary: crate::event_service::dataplane::count_fib_statuses(&[]),
+            #[cfg(test)]
+            build_gate: None,
         }
     }
 }
 
 impl FibRouteSnapshot {
-    /// Prepare a publication without doing any work on a reader's request.
+    /// Prepare only the unfiltered order before publication.
     #[must_use]
     pub fn new(rows: Vec<proto::FibRouteStatus>) -> Self {
         let mut snapshot = Self {
             summary: crate::event_service::dataplane::count_fib_statuses(&rows),
-            rows,
+            rows: Arc::new(rows),
             ..Self::default()
         };
         let Some(first) = snapshot.rows.first() else {
             return snapshot;
         };
-        for column in 0..5 {
+        for column in 0..6 {
             let mask = 1 << column;
             if snapshot
                 .rows
@@ -115,16 +162,7 @@ impl FibRouteSnapshot {
         }
         let mut canonical: Vec<_> = (0..snapshot.rows.len()).collect();
         canonical.sort_by(|&a, &b| compare_fib_routes(&snapshot.rows[a], &snapshot.rows[b]));
-        for mask in 1..32 {
-            if mask & !snapshot.varying != 0 {
-                continue;
-            }
-            let mut index = canonical.clone();
-            // Stable sorting keeps the existing page order within each match.
-            index.sort_by(|&a, &b| compare_fib_filters(&snapshot.rows[a], &snapshot.rows[b], mask));
-            snapshot.indexes[mask] = index;
-        }
-        snapshot.indexes[0] = canonical;
+        snapshot.indexes[0].get_or_init(|| canonical);
         snapshot
     }
 
@@ -132,16 +170,46 @@ impl FibRouteSnapshot {
         self.summary
     }
 
-    fn matching(&self, filters: &FibRouteFilters) -> &[usize] {
-        let Some(first) = self.rows.first() else {
-            return &[];
-        };
+    fn for_worker(&self) -> Self {
+        Self {
+            rows: self.rows.clone(),
+            indexes: self.indexes.clone(),
+            varying: self.varying,
+            summary: self.summary,
+            #[cfg(test)]
+            build_gate: self.build_gate.clone(),
+        }
+    }
+
+    fn matching_mask(&self, filters: &FibRouteFilters) -> Option<usize> {
+        let first = self.rows.first()?;
         let mask = filters.mask();
         if filters.compare(first, mask & !self.varying).is_ne() {
-            return &[];
+            return None;
         }
-        let mask = mask & self.varying;
-        let index = &self.indexes[mask];
+        Some(mask & self.varying)
+    }
+
+    fn is_prepared(&self, filters: &FibRouteFilters) -> bool {
+        self.matching_mask(filters)
+            .is_none_or(|mask| self.indexes[mask].get().is_some())
+    }
+
+    fn matching(&self, filters: &FibRouteFilters) -> &[usize] {
+        let Some(mask) = self.matching_mask(filters) else {
+            return &[];
+        };
+        let index = self.indexes[mask].get_or_init(|| {
+            #[cfg(test)]
+            if let Some(gate) = &self.build_gate {
+                gate.entered.notify_one();
+                gate.release.lock().unwrap().recv().unwrap();
+            }
+            let mut index = self.indexes[0].get().expect("nonempty base order").clone();
+            // Stable sorting preserves canonical order inside every match.
+            index.sort_by(|&a, &b| compare_fib_filters(&self.rows[a], &self.rows[b], mask));
+            index
+        });
         if mask == 0 {
             return index;
         }
@@ -161,7 +229,7 @@ impl FibRouteSnapshot {
         let total_count = u64::try_from(matching.len()).unwrap_or(u64::MAX);
         let Some(page) = page else {
             let routes = if matching.len() == self.rows.len() {
-                self.rows.clone()
+                self.rows.as_ref().clone()
             } else {
                 let mut original_order = matching.to_vec();
                 #[cfg(test)]
@@ -230,6 +298,9 @@ fn compare_fib_filters(
     }
     if mask & 16 != 0 {
         result = result.then_with(|| a.peer_address.cmp(&b.peer_address));
+    }
+    if mask & 32 != 0 {
+        result = result.then_with(|| a.peer_interface.cmp(&b.peer_interface));
     }
     result
 }
@@ -1030,6 +1101,7 @@ struct FibRouteFilters {
     reason: Option<String>,
     prefix: Option<(String, u32)>,
     peer_address: Option<String>,
+    peer_interface: Option<String>,
     /// Page-token binding of a scoped peer selector; `None` keeps the plain
     /// decimal offset token.
     peer_scope: Option<String>,
@@ -1055,6 +1127,7 @@ impl FibRouteFilters {
             });
         let key = parse_optional_peer_filter("peer_address", &req.peer_address, roster)?;
         let peer_address = key.as_ref().map(|key| key.address.to_string());
+        let peer_interface = key.as_ref().and_then(|key| key.interface.clone());
         let peer_scope = key
             .as_ref()
             .filter(|key| key.interface.is_some())
@@ -1076,6 +1149,7 @@ impl FibRouteFilters {
             reason,
             prefix,
             peer_address,
+            peer_interface,
             peer_scope,
         })
     }
@@ -1086,6 +1160,7 @@ impl FibRouteFilters {
             | (usize::from(self.reason.is_some()) << 2)
             | (usize::from(self.prefix.is_some()) << 3)
             | (usize::from(self.peer_address.is_some()) << 4)
+            | (usize::from(self.peer_interface.is_some()) << 5)
     }
 
     fn compare(&self, row: &proto::FibRouteStatus, mask: usize) -> std::cmp::Ordering {
@@ -1117,10 +1192,16 @@ impl FibRouteFilters {
         {
             result = result.then_with(|| row.peer_address.cmp(value));
         }
+        if mask & 32 != 0
+            && let Some(value) = &self.peer_interface
+        {
+            result = result.then_with(|| row.peer_interface.cmp(value));
+        }
         result
     }
 }
 
+#[derive(Clone, Copy)]
 struct FibRoutePageParams {
     offset: usize,
     page_size: usize,
@@ -3129,8 +3210,7 @@ impl proto::rib_service_server::RibService for RibService {
         let page = parse_fib_page_params(&req, filters.peer_scope.as_deref())
             .map_err(Status::invalid_argument)?;
         Ok(Response::new(
-            self.fib_route_snapshot
-                .with_snapshot(|snapshot| snapshot.list(&filters, page))?,
+            self.fib_route_snapshot.list(filters, page).await?,
         ))
     }
 
@@ -8621,6 +8701,268 @@ mod tests {
         assert_eq!(FibRouteSnapshot::default().summary().source, "fib");
     }
 
+    #[tokio::test]
+    async fn fib_publication_prepares_only_requested_filter_indexes() {
+        let rows = (0..16)
+            .map(|i| proto::FibRouteStatus {
+                table_name: format!("table{}", i % 2),
+                peer_address: format!("198.51.100.{}", i % 4 + 1),
+                prefix: format!("203.0.113.{i}"),
+                prefix_length: 32,
+                state: i % 3 + 1,
+                reason: format!("reason{}", i % 2),
+                ..Default::default()
+            })
+            .collect();
+        let reader = fib_snapshot_provider(rows);
+        let prepared = || {
+            reader.with_snapshot(|snapshot| {
+                snapshot
+                    .indexes
+                    .iter()
+                    .filter(|index| index.get().is_some())
+                    .count()
+            })
+        };
+        assert_eq!(
+            prepared(),
+            1,
+            "unread publications build only the base order"
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let service = RibService::with_status_snapshots(tx, Arc::new(Vec::new), reader.clone());
+        for (request, expected_indexes) in [
+            (
+                proto::ListFibRoutesRequest {
+                    page_size: 1,
+                    ..Default::default()
+                },
+                1,
+            ),
+            (proto::ListFibRoutesRequest::default(), 1),
+            (
+                proto::ListFibRoutesRequest {
+                    table_name: "table0".to_string(),
+                    page_size: 1,
+                    ..Default::default()
+                },
+                2,
+            ),
+            (
+                proto::ListFibRoutesRequest {
+                    table_name: "table1".to_string(),
+                    page_size: 1,
+                    ..Default::default()
+                },
+                2,
+            ),
+            (
+                proto::ListFibRoutesRequest {
+                    peer_address: "198.51.100.1".to_string(),
+                    page_size: 1,
+                    ..Default::default()
+                },
+                3,
+            ),
+        ] {
+            service
+                .list_fib_routes(Request::new(request))
+                .await
+                .unwrap();
+            assert_eq!(prepared(), expected_indexes);
+        }
+    }
+
+    #[tokio::test]
+    async fn fib_cold_index_cancellation_keeps_slot_without_pinning_publication() {
+        let (release, released) = std::sync::mpsc::channel();
+        let gate = Arc::new(FibIndexBuildGate {
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Mutex::new(released),
+        });
+        let mut snapshot = FibRouteSnapshot::new(
+            ["198.51.100.1", "198.51.100.2"]
+                .into_iter()
+                .map(|peer| {
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        peer,
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    )
+                })
+                .collect(),
+        );
+        snapshot.build_gate = Some(gate.clone());
+        let retired_rows = Arc::downgrade(&snapshot.rows);
+        let (publisher, receiver) = tokio::sync::watch::channel(snapshot);
+        let reader = FibRouteSnapshotReader::new(receiver);
+        let (tx, _rx) = mpsc::channel(1);
+        let service = RibService::with_status_snapshots(tx, Arc::new(Vec::new), reader.clone());
+        let request = tokio::spawn(async move {
+            service
+                .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                    peer_address: "198.51.100.1".to_string(),
+                    page_size: 1,
+                    ..Default::default()
+                }))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            reader.build_slot.available_permits(),
+            0,
+            "canceled request still owns its running build"
+        );
+        let next = fib_status(
+            "edge",
+            "192.0.2.0",
+            24,
+            "198.51.100.3",
+            proto::FibRouteState::Installed,
+            "owned",
+        );
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        let publisher = tokio::task::spawn_blocking(move || {
+            publisher.send_replace(FibRouteSnapshot::new(vec![next]));
+            completed.send(()).unwrap();
+            publisher
+        });
+        let publication_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completion).await;
+        if publication_result.is_err() {
+            release.send(()).unwrap();
+            panic!("cold index preparation held the publication lock");
+        }
+        publication_result.unwrap().unwrap();
+        let publisher = publisher.await.unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reader.list(
+                FibRouteFilters::from_request(&proto::ListFibRoutesRequest::default(), None)
+                    .unwrap(),
+                Some(FibRoutePageParams {
+                    offset: 0,
+                    page_size: 1,
+                }),
+            ),
+        )
+        .await
+        .expect("warm read waited for cold index preparation")
+        .unwrap();
+        assert_eq!(response.routes[0].prefix, "192.0.2.0");
+        assert!(
+            retired_rows.upgrade().is_some(),
+            "blocking worker retains only its own generation"
+        );
+        release.send(()).unwrap();
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reader.build_slot.clone().acquire_owned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            retired_rows.upgrade().is_none(),
+            "retired rows are dropped before the build slot is released"
+        );
+        drop(settled);
+        drop(publisher);
+    }
+
+    #[test]
+    fn fib_scoped_indexes_preserve_filter_combinations_and_page_order() {
+        let rows: Vec<_> = (0..96)
+            .rev()
+            .map(|i| proto::FibRouteStatus {
+                table_name: format!("table{}", i % 3),
+                table_id: i % 3,
+                metric: i % 2,
+                prefix: format!("192.0.2.{}", i % 8),
+                prefix_length: 32,
+                next_hop: format!("198.51.100.{}", i % 2 + 1),
+                peer_address: format!("fe80::{:x}", i % 4 + 1),
+                peer_interface: format!("eth{}", i % 3),
+                state: i32::try_from(i % 4 + 1).unwrap(),
+                reason: format!("reason{}", i % 2),
+                ..Default::default()
+            })
+            .collect();
+        let snapshot = FibRouteSnapshot::new(rows.clone());
+        for mask in 0..16 {
+            for selected in [&rows[0], &rows[37]] {
+                let request = proto::ListFibRoutesRequest {
+                    table_name: if mask & 1 != 0 {
+                        selected.table_name.clone()
+                    } else {
+                        String::new()
+                    },
+                    state: if mask & 2 != 0 { selected.state } else { 0 },
+                    reason: if mask & 4 != 0 {
+                        selected.reason.clone()
+                    } else {
+                        String::new()
+                    },
+                    prefix: if mask & 8 != 0 {
+                        selected.prefix.clone()
+                    } else {
+                        String::new()
+                    },
+                    prefix_length: if mask & 8 != 0 {
+                        selected.prefix_length
+                    } else {
+                        0
+                    },
+                    peer_address: format!("{}%{}", selected.peer_address, selected.peer_interface),
+                    ..Default::default()
+                };
+                let filters = FibRouteFilters::from_request(&request, None).unwrap();
+                let mut expected: Vec<_> = rows
+                    .iter()
+                    .filter(|row| {
+                        row.peer_address == selected.peer_address
+                            && row.peer_interface == selected.peer_interface
+                            && (request.table_name.is_empty()
+                                || row.table_name == request.table_name)
+                            && (request.state == 0 || row.state == request.state)
+                            && (request.reason.is_empty() || row.reason == request.reason)
+                            && (request.prefix.is_empty()
+                                || (row.prefix == request.prefix
+                                    && row.prefix_length == request.prefix_length))
+                    })
+                    .cloned()
+                    .collect();
+                assert_eq!(snapshot.list(&filters, None).unwrap().routes, expected);
+                expected.sort_by(compare_fib_routes);
+                for offset in 0..=expected.len() {
+                    FIB_FILTER_VISITS.with(|visits| visits.set(0));
+                    let page = snapshot
+                        .list(
+                            &filters,
+                            Some(FibRoutePageParams {
+                                offset,
+                                page_size: 2,
+                            }),
+                        )
+                        .unwrap();
+                    assert_eq!(page.total_count, expected.len() as u64);
+                    assert_eq!(
+                        page.routes,
+                        expected[offset..(offset + 2).min(expected.len())]
+                    );
+                    assert!(FIB_FILTER_VISITS.with(std::cell::Cell::get) <= 32);
+                }
+            }
+        }
+    }
+
     #[test]
     fn fib_unpaged_reorders_only_partial_matches() {
         let rows: Vec<_> = [3, 1, 4, 2]
@@ -8718,7 +9060,7 @@ mod tests {
             })
             .collect();
         let snapshot = FibRouteSnapshot::new(rows.clone());
-        assert_eq!(snapshot.varying, 31);
+        assert_eq!(snapshot.varying, 63);
         for mask in 0..32 {
             for selected in [&rows[0], &rows[37]] {
                 let req = proto::ListFibRoutesRequest {
@@ -9676,7 +10018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_fib_routes_paged_work_does_not_scan_snapshot() {
+    async fn list_fib_routes_warm_page_work_does_not_scan_snapshot() {
         let (tx, _rx) = mpsc::channel(16);
         let rows: Vec<_> = (0..10_000)
             .map(|i| {
@@ -9692,6 +10034,14 @@ mod tests {
             .collect();
         let svc =
             RibService::with_status_snapshots(tx, Arc::new(Vec::new), fib_snapshot_provider(rows));
+        svc.list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+            prefix: "10.0.0.7".to_string(),
+            prefix_length: 32,
+            page_size: 1,
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
         FIB_FILTER_VISITS.with(|visits| visits.set(0));
         let response = svc
             .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
@@ -9706,7 +10056,10 @@ mod tests {
         assert_eq!(response.total_count, 1);
         assert_eq!(response.routes[0].prefix, "10.0.0.7");
         let visits = FIB_FILTER_VISITS.with(std::cell::Cell::get);
-        assert!(visits <= 128, "one-row page examined {visits} rows");
+        assert!(
+            (3..=128).contains(&visits),
+            "warm one-row page examined {visits} rows"
+        );
     }
 
     #[tokio::test]
@@ -9747,11 +10100,12 @@ mod tests {
         let indexes = snapshot
             .indexes
             .iter()
-            .filter(|index| !index.is_empty())
+            .filter(|index| index.get().is_some_and(|index| !index.is_empty()))
             .count();
         let index_bytes: usize = snapshot
             .indexes
             .iter()
+            .filter_map(OnceLock::get)
             .map(|index| index.capacity() * std::mem::size_of::<usize>())
             .sum();
         eprintln!(
@@ -9811,6 +10165,11 @@ mod tests {
                         prefix: prefix.to_string(),
                         prefix_length: 26,
                         peer_address: peer.to_string(),
+                        peer_interface: if peer == "fe80::1" {
+                            "eth0".to_string()
+                        } else {
+                            String::new()
+                        },
                         ..Default::default()
                     })
                     .collect()
@@ -9852,6 +10211,118 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scoped reader regression covers retained identity, cursor binding and legacy responses"
+    )]
+    async fn fib_scoped_peer_filter_matches_retained_interface() {
+        let (_publication, publication) = tokio::sync::watch::channel(None);
+        let roster = crate::import_roster::test_support::publisher(
+            ["eth0", "eth1"]
+                .into_iter()
+                .map(|interface| crate::import_roster::ImportRosterPeer {
+                    key: PeerKey::new("fe80::1".parse().unwrap(), Some(interface.to_string())),
+                    session_id: 1,
+                    publication: publication.clone(),
+                    rib_peer: rustbgpd_transport::RibPeerSlot::default(),
+                })
+                .collect(),
+            Vec::new(),
+        );
+        let rows: Vec<_> = [
+            ("203.0.113.3", "fe80::1", "eth1"),
+            ("203.0.113.1", "fe80::1", "eth0"),
+            ("203.0.113.4", "fe80::1", ""),
+            ("203.0.113.2", "fe80::1", "eth1"),
+            ("203.0.113.0", "fe80::1", "eth0"),
+            ("198.51.100.0", "192.0.2.1", ""),
+        ]
+        .into_iter()
+        .map(|(prefix, peer, interface)| proto::FibRouteStatus {
+            peer_interface: interface.to_string(),
+            ..fib_status(
+                "edge",
+                prefix,
+                32,
+                peer,
+                proto::FibRouteState::Installed,
+                "owned",
+            )
+        })
+        .collect();
+        let (tx, _rx) = mpsc::channel(1);
+        let (peer_manager, _) = mpsc::channel(1);
+        let service = RibService::with_status_snapshots(
+            tx.clone(),
+            Arc::new(Vec::new),
+            fib_snapshot_provider(rows.clone()),
+        )
+        .with_known_peer_queries(KnownPeerQueries {
+            peer_manager,
+            operator_lane: None,
+            rib: tx,
+            daemon_gate: crate::health_probe::DaemonGate::new(),
+            roster: Some(roster.reader()),
+        });
+        for interface in ["eth0", "eth1"] {
+            for page_size in [0, 1] {
+                let mut token = String::new();
+                let mut actual = Vec::new();
+                loop {
+                    let response = service
+                        .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                            peer_address: format!("fe80::1%{interface}"),
+                            page_size,
+                            page_token: token,
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    assert_eq!(response.total_count, 2, "{interface} page_size={page_size}");
+                    actual.extend(response.routes);
+                    token = response.next_page_token;
+                    if token.is_empty() {
+                        break;
+                    }
+                    let other = if interface == "eth0" { "eth1" } else { "eth0" };
+                    let error = service
+                        .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                            peer_address: format!("fe80::1%{other}"),
+                            page_size,
+                            page_token: token.clone(),
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap_err();
+                    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+                }
+                let mut expected: Vec<_> = rows
+                    .iter()
+                    .filter(|row| row.peer_interface == interface)
+                    .cloned()
+                    .collect();
+                if page_size != 0 {
+                    expected.sort_by(compare_fib_routes);
+                }
+                assert_eq!(actual, expected);
+            }
+        }
+        for (peer_address, expected) in [("", rows.clone()), ("192.0.2.1", vec![rows[5].clone()])] {
+            let response = service
+                .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                    peer_address: peer_address.to_string(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.total_count, expected.len() as u64);
+            assert_eq!(response.routes, expected);
+        }
     }
 
     #[tokio::test]
