@@ -283,6 +283,9 @@ fn main() -> io::Result<()> {
     };
     let routes = make_routes(args.prefixes, args.announcers);
     let churn_rows = make_routes(args.prefixes.min(1_000), 1);
+    for announcer in 0..args.announcers {
+        manager.bench_register_restarted_source(PeerId::from_addr(IpAddr::V4(peer(announcer))));
+    }
 
     let ingest_started = Instant::now();
     manager.bench_seed_loc_rib(routes);

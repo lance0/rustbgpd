@@ -11,6 +11,7 @@
 //! and memory gates.
 
 use rustbgpd_rib::PeerId;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr};
@@ -268,6 +269,13 @@ fn seeded_manager(
         .take(CHURN_ROUTE_COUNT.min(routes.len()))
         .cloned()
         .collect::<Vec<_>>();
+    for source in routes
+        .iter()
+        .map(|route| route.peer)
+        .collect::<BTreeSet<_>>()
+    {
+        manager.bench_register_restarted_source(source);
+    }
     let ingest_started = Instant::now();
     manager.bench_seed_loc_rib(routes);
     let ingest = ingest_started.elapsed();

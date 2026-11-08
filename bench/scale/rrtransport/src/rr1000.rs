@@ -313,6 +313,17 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         metrics.clone(),
     );
     let manager_task = tokio::spawn(manager.run());
+    for source_index in 0..SOURCES {
+        send_before(
+            &rib_tx,
+            super::source_peer_up(source(source_index)),
+            run_deadline,
+        )
+        .await?;
+    }
+    let (reply, registered) = oneshot::channel();
+    send_before(&rib_tx, RibUpdate::QueryLocRibCount { reply }, run_deadline).await?;
+    ensure!(tokio::time::timeout_at(run_deadline, registered).await?? == 0);
     let mut listeners = Vec::with_capacity(shape.peers);
     for index in 0..shape.peers {
         listeners.push(
