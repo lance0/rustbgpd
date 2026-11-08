@@ -1968,6 +1968,70 @@ fn unregistered_session_route_messages_are_discarded_and_counted() {
     );
 }
 
+/// The session-control envelopes are gated like the route envelopes: an
+/// unregistered session's ORF push, slow-peer signal and ROUTE-REFRESH are
+/// discarded and counted, and the ORF push is refused, not installed.
+#[test]
+fn unregistered_session_control_messages_are_discarded_and_counted() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let discarded = |manager: &RibManager, kind: &str| {
+        counter_metric_value(
+            &manager.metrics,
+            "bgp_rib_stale_session_message_ignored_total",
+            &[("peer", &peer.label()), ("kind", kind)],
+        )
+    };
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 77,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        entries: vec![AddressPrefixOrf {
+            action: OrfAction::Add,
+            match_: OrfMatch::Permit,
+            sequence: 1,
+            min_len: 24,
+            max_len: 32,
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 0, 0), 24))),
+        }],
+        reply,
+    });
+    let refusal = response
+        .try_recv()
+        .expect("synchronous ORF reply")
+        .expect_err("an unregistered ORF push must be refused");
+    assert!(refusal.contains("unregistered"), "{refusal}");
+    assert!(!manager.peer_orf_filters.contains_key(&peer));
+    assert!((discarded(&manager, "orf") - 1.0).abs() < f64::EPSILON);
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 77,
+        slow: true,
+    });
+    assert!(!manager.slow_isolated_peers.contains(&peer));
+    assert!((discarded(&manager, "slow_peer") - 1.0).abs() < f64::EPSILON);
+
+    let queued = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::clone(&queued),
+        peer,
+        session_id: 77,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert!(
+        !queued.load(std::sync::atomic::Ordering::Acquire),
+        "the coalescing flag is released even when the request is discarded"
+    );
+    assert!((discarded(&manager, "refresh") - 1.0).abs() < f64::EPSILON);
+}
+
 #[tokio::test(start_paused = true)]
 async fn unregistered_session_routes_cannot_replace_or_withdraw_gr_retained_routes() {
     let (_tx, rx) = mpsc::channel(64);

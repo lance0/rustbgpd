@@ -4782,8 +4782,13 @@ impl RibManager {
                 reply,
             } => {
                 if self.stale_session_message(peer, session_id, "PeerOrfUpdate", Orf) {
+                    let origin = if self.current_session_id(peer).is_some() {
+                        "superseded"
+                    } else {
+                        "unregistered"
+                    };
                     let _ = reply.send(Err(format!(
-                        "stale ORF update from superseded session {session_id} discarded"
+                        "stale ORF update from {origin} session {session_id} discarded"
                     )));
                 } else {
                     self.advance_advertised_pages();
