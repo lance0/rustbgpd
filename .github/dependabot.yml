@@ -112,3 +112,8 @@ updates:
     ignore:
       # This image is built locally from the current checkout.
       - dependency-name: "rustbgpd"
+      # Base-image versions change deliberately: the rust tag tracks the
+      # workspace MSRV and compat images match their pinned oracles.
+      # Dependabot here is for digest and patch refreshes only.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
