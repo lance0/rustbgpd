@@ -44,6 +44,13 @@ impl LocalExportSource {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calls to [`AdjRibOut::family_counts`], so tests can pin that a query
+    /// path reads maintained counters instead of walking every family table.
+    pub(crate) static FAMILY_COUNT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
 /// Routes are keyed by `(Prefix, path_id)` for Add-Path (RFC 7911).
@@ -1260,6 +1267,8 @@ impl AdjRibOut {
     /// paid once per peer per BMP stats tick (60s).
     #[must_use]
     pub fn family_counts(&self) -> Vec<((Afi, Safi), u64)> {
+        #[cfg(test)]
+        FAMILY_COUNT_WALKS.with(|walks| walks.set(walks.get() + 1));
         let mut counts: Vec<((Afi, Safi), u64)> = Vec::new();
         let mut bump = |family: (Afi, Safi)| {
             if let Some((_, count)) = counts.iter_mut().find(|(f, _)| *f == family) {

@@ -1193,23 +1193,21 @@ impl RibManager {
             RouteQueryScope::Received { peer: Some(peer) } => self
                 .ribs
                 .get(&peer)
-                .map_or(0, |rib| rib.unicast_family_len(family)),
+                .map_or(0, |rib| rib.unicast_lens()[slot] as u64),
             RouteQueryScope::Received { peer: None } => self
                 .ribs
                 .values()
-                .map(|rib| rib.unicast_family_len(family))
+                .map(|rib| rib.unicast_lens()[slot] as u64)
                 .sum(),
             RouteQueryScope::Best => self.loc_rib.family_lens().unicast[slot] as u64,
             RouteQueryScope::Advertised { peer } => {
+                // shortcut: a grouped member's total still walks that member's
+                // rejections; ungrouped totals read the maintained per-family counter.
                 self.grouped_advertised_unicast_lens(peer).map_or_else(
-                    // shortcut: ungrouped advertised family counts still scan; a complete actor-turn bound needs cooperative count work.
                     || {
-                        self.adj_ribs_out.get(&peer).map_or(0, |rib| {
-                            rib.family_counts()
-                                .into_iter()
-                                .find(|(key, _)| *key == (family, Safi::Unicast))
-                                .map_or(0, |(_, count)| count)
-                        })
+                        self.adj_ribs_out
+                            .get(&peer)
+                            .map_or(0, |rib| rib.family_lens().unicast[slot] as u64)
                     },
                     |lens| lens[slot] as u64,
                 )

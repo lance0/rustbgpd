@@ -2600,3 +2600,45 @@ fn typed_route_pages_stop_at_an_absent_family() {
         }
     }
 }
+
+#[test]
+fn ungrouped_advertised_family_total_reads_counters_not_other_family_tables() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let mut outbound = AdjRibOut::new(target);
+    for octet in 0..64 {
+        outbound.insert_vpn(make_vpn_rib_route(source, octet, 100, 100));
+    }
+    manager.adj_ribs_out.insert(target, outbound);
+    let scope = RouteQueryScope::Advertised { peer: target };
+    assert!(manager.grouped_member_of(target).is_none());
+
+    let assert_totals = |manager: &mut RibManager, expected: [u64; 2]| {
+        for (family, expected) in [Afi::Ipv4, Afi::Ipv6].into_iter().zip(expected) {
+            crate::adj_rib_out::FAMILY_COUNT_WALKS.with(|walks| walks.set(0));
+            let filter = ordered_route_query_filter(Some(family), None);
+            let (page, _) = differential_page(manager, scope, &filter, None, None);
+            assert_eq!(page.unwrap().total, expected, "{family:?} total");
+            assert_eq!(
+                crate::adj_rib_out::FAMILY_COUNT_WALKS.with(std::cell::Cell::get),
+                0,
+                "{family:?} first page walked every advertised family table"
+            );
+        }
+    };
+    assert_totals(&mut manager, [0, 0]);
+
+    // Add-Path rows count once per path identity, in their own AFI slot.
+    let outbound = manager.adj_ribs_out.get_mut(&target).unwrap();
+    for path_id in [0, 7] {
+        let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 1), 32), source);
+        route.path_id = path_id;
+        outbound.insert(route);
+    }
+    let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0), source);
+    route.prefix = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
+    outbound.insert(route);
+    assert_totals(&mut manager, [2, 1]);
+}

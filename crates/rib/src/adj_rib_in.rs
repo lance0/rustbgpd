@@ -1134,16 +1134,6 @@ impl AdjRibIn {
         counts
     }
 
-    /// Exact unicast path count, including Add-Path identities, from maintained counters.
-    pub(crate) fn unicast_family_len(&self, family: Afi) -> u64 {
-        let counts = match family {
-            Afi::Ipv4 => self.rpki_counts_v4,
-            Afi::Ipv6 => self.rpki_counts_v6,
-            _ => return 0,
-        };
-        counts.invalid + counts.valid + counts.not_found
-    }
-
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
