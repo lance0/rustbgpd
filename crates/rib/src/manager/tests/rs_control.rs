@@ -1774,11 +1774,15 @@ async fn filtered_page(
     tx: &mpsc::Sender<RibUpdate>,
     peer: PeerId,
     filter: fn(&Route) -> bool,
+    prefix: Option<Prefix>,
 ) -> (Vec<(String, String)>, u64) {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
         scope: RouteQueryScope::Advertised { peer },
-        filter: Some(Box::new(filter)),
+        filter: Some(match prefix {
+            Some(prefix) => crate::update::prefix_route_query_filter(prefix, filter),
+            None => Box::new(filter),
+        }),
         after: None,
         expected_version: None,
         page_size: 64,
@@ -1841,17 +1845,27 @@ async fn grouped_filtered_listing_filters_the_rewritten_row() {
         )
         .await;
         let _ = query_best_routes(&tx).await;
-        let with_communities =
-            filtered_page(&tx, client_b, |route| !route.communities().is_empty()).await;
-        let long_path = filtered_page(&tx, client_b, |route| {
-            route.as_path().is_some_and(|path| path.len() >= 3)
-        })
-        .await;
-        assert_eq!(with_communities.1, 0, "force_ungrouped={force_ungrouped}");
-        assert_eq!(long_path.1, 1, "force_ungrouped={force_ungrouped}");
-        reports.push((with_communities, long_path));
+        for exact_prefix in [None, Some(Prefix::V4(prefix))] {
+            let with_communities = filtered_page(
+                &tx,
+                client_b,
+                |route| !route.communities().is_empty(),
+                exact_prefix,
+            )
+            .await;
+            let long_path = filtered_page(
+                &tx,
+                client_b,
+                |route| route.as_path().is_some_and(|path| path.len() >= 3),
+                exact_prefix,
+            )
+            .await;
+            assert_eq!(with_communities.1, 0, "force_ungrouped={force_ungrouped}");
+            assert_eq!(long_path.1, 1, "force_ungrouped={force_ungrouped}");
+            reports.push((with_communities, long_path));
+        }
         drop(tx);
         handle.await.unwrap();
     }
-    assert_eq!(reports[0], reports[1]);
+    assert!(reports.iter().all(|report| report == &reports[0]));
 }

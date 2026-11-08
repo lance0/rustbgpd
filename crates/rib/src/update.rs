@@ -2011,16 +2011,22 @@ pub type RouteQueryFilter = Box<dyn Fn(&Route) -> bool + Send + Sync>;
 
 type OrderedRouteQuery = (Option<Afi>, Option<u64>);
 
-static ORDERED_ROUTE_QUERIES: OnceLock<Mutex<HashMap<usize, OrderedRouteQuery>>> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteQueryPlan {
+    Ordered(OrderedRouteQuery),
+    Prefix(Prefix),
+}
 
-struct OrderedRouteQueryRegistration {
+static ROUTE_QUERY_PLANS: OnceLock<Mutex<HashMap<usize, RouteQueryPlan>>> = OnceLock::new();
+
+struct RouteQueryRegistration {
     filter_identity: AtomicUsize,
 }
 
-impl Drop for OrderedRouteQueryRegistration {
+impl Drop for RouteQueryRegistration {
     fn drop(&mut self) {
         let identity = self.filter_identity.load(Ordering::Relaxed);
-        if let Some(registry) = ORDERED_ROUTE_QUERIES.get() {
+        if let Some(registry) = ROUTE_QUERY_PLANS.get() {
             registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2041,27 +2047,52 @@ pub fn ordered_route_query_filter(
     family: Option<Afi>,
     known_total: Option<u64>,
 ) -> RouteQueryFilter {
-    let registration = Arc::new(OrderedRouteQueryRegistration {
+    registered_route_query_filter(
+        move |route| {
+            family.is_none_or(|family| match family {
+                Afi::Ipv4 => matches!(route.prefix, Prefix::V4(_)),
+                Afi::Ipv6 => matches!(route.prefix, Prefix::V6(_)),
+                _ => false,
+            })
+        },
+        RouteQueryPlan::Ordered((family, known_total)),
+    )
+}
+
+/// Restrict a paged query to an exact prefix before evaluating its row filter.
+#[doc(hidden)]
+#[must_use = "the filter must be passed to a paged route query"]
+pub fn prefix_route_query_filter(
+    prefix: Prefix,
+    filter: impl Fn(&Route) -> bool + Send + Sync + 'static,
+) -> RouteQueryFilter {
+    registered_route_query_filter(
+        move |route| route.prefix == prefix && filter(route),
+        RouteQueryPlan::Prefix(prefix),
+    )
+}
+
+fn registered_route_query_filter(
+    matches: impl Fn(&Route) -> bool + Send + Sync + 'static,
+    plan: RouteQueryPlan,
+) -> RouteQueryFilter {
+    let registration = Arc::new(RouteQueryRegistration {
         filter_identity: AtomicUsize::new(0),
     });
     let keep_registered = Arc::clone(&registration);
     let filter: RouteQueryFilter = Box::new(move |route| {
         let _ = &keep_registered;
-        family.is_none_or(|family| match family {
-            Afi::Ipv4 => matches!(route.prefix, Prefix::V4(_)),
-            Afi::Ipv6 => matches!(route.prefix, Prefix::V6(_)),
-            _ => false,
-        })
+        matches(route)
     });
     let identity = route_query_filter_identity(&filter);
     registration
         .filter_identity
         .store(identity, Ordering::Relaxed);
-    let replaced = ORDERED_ROUTE_QUERIES
+    let replaced = ROUTE_QUERY_PLANS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(identity, (family, known_total));
+        .insert(identity, plan);
     debug_assert!(
         replaced.is_none(),
         "live route-query filter identity reused"
@@ -2069,13 +2100,41 @@ pub fn ordered_route_query_filter(
     filter
 }
 
-pub(crate) fn ordered_route_query(filter: &RouteQueryFilter) -> Option<OrderedRouteQuery> {
-    ORDERED_ROUTE_QUERIES
+fn route_query_plan(filter: &RouteQueryFilter) -> Option<RouteQueryPlan> {
+    ROUTE_QUERY_PLANS
         .get()?
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&route_query_filter_identity(filter))
         .copied()
+}
+
+pub(crate) fn ordered_route_query(filter: &RouteQueryFilter) -> Option<OrderedRouteQuery> {
+    match route_query_plan(filter)? {
+        RouteQueryPlan::Ordered(query) => Some(query),
+        RouteQueryPlan::Prefix(_) => None,
+    }
+}
+
+pub(crate) fn prefix_route_query(filter: &RouteQueryFilter) -> Option<Prefix> {
+    match route_query_plan(filter)? {
+        RouteQueryPlan::Prefix(prefix) => Some(prefix),
+        RouteQueryPlan::Ordered(_) => None,
+    }
+}
+
+/// Seek to the requested family without turning its first prefix into an exclusive cursor.
+pub(crate) fn route_query_start_prefix(
+    after: Option<RouteQueryKey>,
+    family: Option<Afi>,
+) -> Option<Prefix> {
+    let start = (family == Some(Afi::Ipv6)).then(|| {
+        Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            std::net::Ipv6Addr::UNSPECIFIED,
+            0,
+        ))
+    });
+    after.map(|cursor| cursor.0).max(start)
 }
 
 #[cfg(test)]
@@ -2094,21 +2153,27 @@ mod ordered_route_query_filter_tests {
         drop(filter);
         assert_eq!(ordered_route_query(&all_routes), Some((None, Some(11))));
 
+        let prefix = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+        let exact = prefix_route_query_filter(prefix, |_| true);
+        assert_eq!(prefix_route_query(&exact), Some(prefix));
+        assert_eq!(ordered_route_query(&exact), None);
+        assert_eq!(prefix_route_query(&all_routes), None);
         let ordinary: RouteQueryFilter = Box::new(|_: &Route| true);
         assert_eq!(ordered_route_query(&ordinary), None);
+        assert_eq!(prefix_route_query(&ordinary), None);
     }
 
     #[test]
     fn registration_drop_removes_its_registry_entry() {
         let identity = usize::MAX;
-        let registry = ORDERED_ROUTE_QUERIES.get_or_init(|| Mutex::new(HashMap::new()));
+        let registry = ROUTE_QUERY_PLANS.get_or_init(|| Mutex::new(HashMap::new()));
         let replaced = registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(identity, (None, Some(1)));
+            .insert(identity, RouteQueryPlan::Ordered((None, Some(1))));
         assert_eq!(replaced, None);
 
-        drop(OrderedRouteQueryRegistration {
+        drop(RouteQueryRegistration {
             filter_identity: AtomicUsize::new(identity),
         });
         assert!(

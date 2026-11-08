@@ -28,8 +28,13 @@ use crate::update::{
     RouteExportPageError, RouteExportVersion, RoutePage, RoutePageError, RoutePageVersion,
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
     VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
-    route_query_key,
+    prefix_route_query, route_query_key,
 };
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static ROUTE_PAGE_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Full-snapshot queries check cancellation at bounded work intervals instead
 /// of adding a branch and clock read to every route on the normal path.
@@ -312,6 +317,8 @@ pub(super) fn page_routes<'a, F: Fn(&crate::route::Route) -> bool + ?Sized>(
     // remain beyond this page.
     let mut remaining: u64 = 0;
     for route in routes {
+        #[cfg(test)]
+        ROUTE_PAGE_ROWS.with(|rows| rows.set(rows.get() + 1));
         if let Some(filter) = filter
             && !filter(route)
         {
@@ -461,7 +468,11 @@ fn ordered_family_routes<'a>(
     family: Option<Afi>,
 ) -> impl Iterator<Item = &'a crate::route::Route> {
     routes
-        .skip_while(move |route| !matches_ordered_family(route, family))
+        .inspect(|_| {
+            #[cfg(test)]
+            ROUTE_PAGE_ROWS.with(|rows| rows.set(rows.get() + 1));
+        })
+        .skip_while(move |route| family == Some(Afi::Ipv6) && matches!(route.prefix, Prefix::V4(_)))
         .take_while(move |route| matches_ordered_family(route, family))
 }
 
@@ -1173,6 +1184,37 @@ impl RibManager {
         let _ = reply.send(result);
     }
 
+    fn route_query_family_total(&self, scope: RouteQueryScope, family: Afi) -> u64 {
+        if !matches!(family, Afi::Ipv4 | Afi::Ipv6) {
+            return 0;
+        }
+        let slot = usize::from(family == Afi::Ipv6);
+        match scope {
+            RouteQueryScope::Received { peer: Some(peer) } => self
+                .ribs
+                .get(&peer)
+                .map_or(0, |rib| rib.unicast_lens()[slot] as u64),
+            RouteQueryScope::Received { peer: None } => self
+                .ribs
+                .values()
+                .map(|rib| rib.unicast_lens()[slot] as u64)
+                .sum(),
+            RouteQueryScope::Best => self.loc_rib.family_lens().unicast[slot] as u64,
+            RouteQueryScope::Advertised { peer } => {
+                // shortcut: a grouped member's total still walks that member's
+                // rejections; ungrouped totals read the maintained per-family counter.
+                self.grouped_advertised_unicast_lens(peer).map_or_else(
+                    || {
+                        self.adj_ribs_out
+                            .get(&peer)
+                            .map_or(0, |rib| rib.family_lens().unicast[slot] as u64)
+                    },
+                    |lens| lens[slot] as u64,
+                )
+            }
+        }
+    }
+
     /// One bounded page of a resumable route listing. The reply channel
     /// doubles as the cancellation token: an abandoned caller (dropped
     /// receiver — e.g. a canceled gRPC request whose page query was
@@ -1225,31 +1267,50 @@ impl RibManager {
                 return;
             }
         }
-        // Arbitrary API route predicates still need the full scope to preserve
-        // the cursor-independent filtered total. Unfiltered listings resume
+        // Exact prefixes narrow the input before residual predicates run.
+        // Other predicates still scan to preserve the cursor-independent total.
+        // Unfiltered and family-only listings resume
         // through persistent ordered indices and clone only one page plus a
         // lookahead row. A grouped advertised view may inspect extra index rows
         // while applying member-local split horizon and exact-rejection filters.
+        let prefix = filter.and_then(prefix_route_query);
         let ordered_family = filter
             .and_then(ordered_route_query)
-            .and_then(|(family, total)| total.map(|total| (family, total)));
+            .and_then(|(family, total)| {
+                total
+                    .or_else(|| family.map(|family| self.route_query_family_total(scope, family)))
+                    .map(|total| (family, total))
+            });
         let page = if filter.is_some() && ordered_family.is_none() {
             match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_routes(
-                    self.ribs.get(&peer).into_iter().flat_map(AdjRibIn::iter),
+                    self.ribs
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(|rib| rib.iter_query_prefix(prefix)),
                     filter,
                     after,
                     page_size,
                 ),
                 RouteQueryScope::Received { peer: None } => page_routes(
-                    self.ribs.values().flat_map(AdjRibIn::iter),
+                    self.ribs
+                        .values()
+                        .flat_map(|rib| rib.iter_query_prefix(prefix)),
                     filter,
                     after,
                     page_size,
                 ),
-                RouteQueryScope::Best => page_routes(self.loc_rib.iter(), filter, after, page_size),
+                RouteQueryScope::Best => page_routes(
+                    self.loc_rib
+                        .iter()
+                        .take(if prefix.is_none() { usize::MAX } else { 0 })
+                        .chain(prefix.and_then(|prefix| self.loc_rib.get(&prefix))),
+                    filter,
+                    after,
+                    page_size,
+                ),
                 RouteQueryScope::Advertised { peer } => {
-                    match self.grouped_advertised_routes_iter(peer) {
+                    match self.grouped_advertised_routes_for_prefix(peer, prefix) {
                         // RFC 7947: an rs-control member's filter sees its
                         // wire form (prepend, control-community scrub), as
                         // an ungrouped client's Adj-RIB-Out holds it. Other
@@ -1274,7 +1335,7 @@ impl RibManager {
                             self.adj_ribs_out
                                 .get(&peer)
                                 .into_iter()
-                                .flat_map(AdjRibOut::iter),
+                                .flat_map(|rib| rib.iter_query_prefix(prefix)),
                             filter,
                             after,
                             page_size,
@@ -1294,7 +1355,7 @@ impl RibManager {
                 RouteQueryScope::Received { peer: Some(peer) } => {
                     self.ribs.get(&peer).map_or_else(RoutePage::default, |rib| {
                         page_ordered_family(
-                            rib.iter_ordered_from(after),
+                            rib.iter_ordered_family_from(after, family),
                             family,
                             total(rib.len()),
                             page_size,
@@ -1306,14 +1367,22 @@ impl RibManager {
                     let iterators = self
                         .ribs
                         .values()
-                        .map(|rib| ordered_family_routes(rib.iter_ordered_from(after), family))
+                        .map(|rib| {
+                            ordered_family_routes(
+                                rib.iter_ordered_family_from(after, family),
+                                family,
+                            )
+                        })
                         .collect();
                     page_merged_ordered_routes(iterators, route_total, page_size)
                 }
                 RouteQueryScope::Best => {
                     let route_total = total(self.loc_rib.len());
                     page_ordered_routes(
-                        ordered_family_routes(self.loc_rib.iter_ordered_from(after), family),
+                        ordered_family_routes(
+                            self.loc_rib.iter_ordered_family_from(after, family),
+                            family,
+                        ),
                         route_total,
                         page_size,
                     )
@@ -1323,7 +1392,7 @@ impl RibManager {
                     // its view is group table − own-sourced − exact-export
                     // rejections. Both branches resume through their table's
                     // compact prefix index without materializing the scope.
-                    match self.grouped_advertised_routes_ordered_iter(peer, after) {
+                    match self.grouped_advertised_routes_ordered_family_iter(peer, after, family) {
                         Some(routes) => {
                             let route_total = ordered_family.map_or_else(
                                 || {
@@ -1345,7 +1414,7 @@ impl RibManager {
                                 .get(&peer)
                                 .map_or_else(RoutePage::default, |rib| {
                                     page_ordered_family(
-                                        rib.iter_ordered_from(after),
+                                        rib.iter_ordered_family_from(after, family),
                                         family,
                                         total(rib.len()),
                                         page_size,

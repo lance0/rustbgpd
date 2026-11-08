@@ -2319,3 +2319,326 @@ fn accepting_a_shared_policy_transition_invalidates_advertised_continuations() {
         "cohort export-policy replacement must fence advertised continuations at acceptance"
     );
 }
+
+#[derive(Clone, Copy, Debug)]
+enum TypedPageFilter {
+    Prefix(Prefix),
+    Family(Afi),
+}
+
+impl TypedPageFilter {
+    fn filter(self, typed: bool) -> RouteQueryFilter {
+        let matches = move |route: &Route| match self {
+            Self::Prefix(prefix) => route.prefix == prefix,
+            Self::Family(family) => {
+                crate::manager::helpers::prefix_family(&route.prefix).0 == family
+            }
+        };
+        if typed {
+            match self {
+                Self::Prefix(prefix) => crate::update::prefix_route_query_filter(prefix, matches),
+                Self::Family(family) => ordered_route_query_filter(Some(family), None),
+            }
+        } else {
+            Box::new(matches)
+        }
+    }
+}
+
+fn differential_page(
+    manager: &mut RibManager,
+    scope: RouteQueryScope,
+    filter: &RouteQueryFilter,
+    after: Option<RouteQueryKey>,
+    version: Option<RoutePageVersion>,
+) -> (Result<RoutePage, RoutePageError>, usize) {
+    super::super::queries::ROUTE_PAGE_ROWS.with(|rows| rows.set(0));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_routes_page_versioned(scope, Some(filter), after, version, 1, reply);
+    (
+        response.try_recv().unwrap(),
+        super::super::queries::ROUTE_PAGE_ROWS.with(std::cell::Cell::get),
+    )
+}
+
+fn assert_typed_pages_match_scan(
+    manager: &mut RibManager,
+    scope: RouteQueryScope,
+    selection: TypedPageFilter,
+) {
+    let typed = selection.filter(true);
+    let scanned = selection.filter(false);
+    let mut after = None;
+    let mut version = None;
+    loop {
+        let (actual, examined) = differential_page(manager, scope, &typed, after, version);
+        let (expected, scanned_rows) = differential_page(manager, scope, &scanned, after, version);
+        let (actual, expected) = (actual.unwrap(), expected.unwrap());
+        assert_eq!(
+            keys(&actual.routes),
+            keys(&expected.routes),
+            "{scope:?} {selection:?}"
+        );
+        assert_eq!(
+            format!("{:?}", actual.routes),
+            format!("{:?}", expected.routes)
+        );
+        assert_eq!(
+            (actual.total, actual.has_more, actual.version),
+            (expected.total, expected.has_more, expected.version)
+        );
+        // Counts actual paging inputs, so removing typed dispatch keeps results
+        // identical but fails this assertion on the same populated table.
+        assert!(
+            examined <= 6,
+            "{scope:?} {selection:?}: examined {examined} rows, scan {scanned_rows}"
+        );
+        assert!(
+            scanned_rows > 6,
+            "the reference must scan a populated scope"
+        );
+        assert_eq!(
+            actual.routes.last().map(route_query_key),
+            expected.routes.last().map(route_query_key)
+        );
+        if !actual.has_more {
+            break;
+        }
+        after = actual.routes.last().map(route_query_key);
+        version = Some(actual.version);
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one mixed-family scoped Add-Path fixture exercises every query scope and invalidation"
+)]
+fn typed_route_pages_match_full_scan_with_scoped_add_path_and_family_boundaries() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peers = ["typed-page-a", "typed-page-b"].map(|interface| {
+        PeerId::allocate(crate::PeerEndpoint::new(
+            "fe80::1".parse().unwrap(),
+            Some(interface),
+        ))
+    });
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 99));
+    let mut outbound = AdjRibOut::new(target);
+    let defaults = [
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+        Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0)),
+    ];
+    for (source, peer) in peers.into_iter().enumerate() {
+        let mut inbound = AdjRibIn::new(peer);
+        for prefix in defaults.into_iter().chain((1..=32).flat_map(|offset| {
+            [
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, offset), 32)),
+                Prefix::V6(Ipv6Prefix::new(
+                    Ipv6Addr::from(0x2001_0db8_0000_0000_0000_0000_0000_0000 + u128::from(offset)),
+                    128,
+                )),
+            ]
+        })) {
+            for path_id in [0, 7] {
+                let mut route = make_route(
+                    Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+                    Ipv4Addr::new(192, 0, 2, 1),
+                );
+                route.prefix = prefix;
+                set_peer(&mut route, peer);
+                route.aspa_context = crate::route::AspaContextId::intern_scoped(
+                    rustbgpd_wire::AspaValidationContext::default(),
+                    peer.interface().as_deref(),
+                );
+                route.path_id = path_id;
+                inbound.insert(route.clone());
+                manager.loc_rib.recompute(prefix, std::iter::once(&route));
+                route.path_id += u32::try_from(source * 100).unwrap();
+                outbound.insert(route);
+            }
+        }
+        manager.ribs.insert(peer, inbound);
+    }
+    manager.adj_ribs_out.insert(target, outbound);
+    let scopes = [
+        RouteQueryScope::Received {
+            peer: Some(peers[0]),
+        },
+        RouteQueryScope::Received { peer: None },
+        RouteQueryScope::Best,
+        RouteQueryScope::Advertised { peer: target },
+    ];
+    for scope in scopes {
+        for selection in defaults.into_iter().map(TypedPageFilter::Prefix).chain([
+            TypedPageFilter::Prefix(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::BROADCAST, 32))),
+            TypedPageFilter::Family(Afi::Ipv4),
+            TypedPageFilter::Family(Afi::Ipv6),
+        ]) {
+            assert_typed_pages_match_scan(&mut manager, scope, selection);
+        }
+        let unsupported = ordered_route_query_filter(Some(Afi::L2Vpn), None);
+        let (page, _) = differential_page(&mut manager, scope, &unsupported, None, None);
+        let page = page.unwrap();
+        assert_eq!((page.total, page.routes.len()), (0, 0));
+    }
+    // A production mutation fences both typed and opaque continuations alike.
+    let snapshots: Vec<_> = scopes
+        .into_iter()
+        .map(|scope| {
+            let (page, _) = differential_page(
+                &mut manager,
+                scope,
+                &TypedPageFilter::Family(Afi::Ipv6).filter(true),
+                None,
+                None,
+            );
+            let page = page.unwrap();
+            (
+                scope,
+                page.routes.last().map(route_query_key),
+                Some(page.version),
+            )
+        })
+        .collect();
+    let mut changed = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
+        Ipv4Addr::new(192, 0, 2, 1),
+    );
+    set_peer(&mut changed, peers[0]);
+    receive_direct(&mut manager, peers[0], vec![changed], vec![]);
+    for (scope, after, version) in snapshots {
+        for typed in [false, true] {
+            let (page, examined) = differential_page(
+                &mut manager,
+                scope,
+                &TypedPageFilter::Family(Afi::Ipv6).filter(typed),
+                after,
+                version,
+            );
+            assert!(matches!(page, Err(RoutePageError::Invalidated)));
+            assert_eq!(examined, 0);
+        }
+    }
+    for peer in peers {
+        assert!(peer.release());
+    }
+}
+
+#[test]
+fn typed_grouped_route_pages_match_full_scan_with_member_overlays() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let sibling = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let _target_rx = peer_up_direct(&mut manager, target);
+    let _sibling_rx = peer_up_direct(&mut manager, sibling);
+    let routes: Vec<_> = (1..=32)
+        .map(|octet| {
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
+                source,
+            )
+        })
+        .collect();
+    receive_direct(&mut manager, peer_v4(source), routes.clone(), vec![]);
+    manager
+        .peer_unexportable
+        .entry(target)
+        .or_default()
+        .insert(ExactExportKey::Unicast(routes[3].prefix, 0));
+    assert!(manager.grouped_member_of(target).is_some());
+    let scope = RouteQueryScope::Advertised { peer: target };
+    for selection in [
+        TypedPageFilter::Prefix(routes[0].prefix),
+        TypedPageFilter::Prefix(routes[3].prefix),
+        TypedPageFilter::Prefix(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::BROADCAST, 32))),
+        TypedPageFilter::Family(Afi::Ipv4),
+        TypedPageFilter::Family(Afi::Ipv6),
+    ] {
+        assert_typed_pages_match_scan(&mut manager, scope, selection);
+    }
+}
+
+#[test]
+fn typed_route_pages_stop_at_an_absent_family() {
+    for present in [Afi::Ipv4, Afi::Ipv6] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let source = Ipv4Addr::new(192, 0, 2, 1);
+        let peer = peer_v4(source);
+        let target = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+        let mut inbound = AdjRibIn::new(peer);
+        let mut outbound = AdjRibOut::new(target);
+        for offset in 0..32 {
+            let mut route =
+                make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, offset), 32), source);
+            if present == Afi::Ipv6 {
+                route.prefix = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(u128::from(offset)), 128));
+            }
+            inbound.insert(route.clone());
+            manager
+                .loc_rib
+                .recompute(route.prefix, std::iter::once(&route));
+            outbound.insert(route);
+        }
+        manager.ribs.insert(peer, inbound);
+        manager.adj_ribs_out.insert(target, outbound);
+        let absent = if present == Afi::Ipv4 {
+            Afi::Ipv6
+        } else {
+            Afi::Ipv4
+        };
+        for scope in [
+            RouteQueryScope::Received { peer: Some(peer) },
+            RouteQueryScope::Received { peer: None },
+            RouteQueryScope::Best,
+            RouteQueryScope::Advertised { peer: target },
+        ] {
+            assert_typed_pages_match_scan(&mut manager, scope, TypedPageFilter::Family(absent));
+        }
+    }
+}
+
+#[test]
+fn ungrouped_advertised_family_total_reads_counters_not_other_family_tables() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let mut outbound = AdjRibOut::new(target);
+    for octet in 0..64 {
+        outbound.insert_vpn(make_vpn_rib_route(source, octet, 100, 100));
+    }
+    manager.adj_ribs_out.insert(target, outbound);
+    let scope = RouteQueryScope::Advertised { peer: target };
+    assert!(manager.grouped_member_of(target).is_none());
+
+    let assert_totals = |manager: &mut RibManager, expected: [u64; 2]| {
+        for (family, expected) in [Afi::Ipv4, Afi::Ipv6].into_iter().zip(expected) {
+            crate::adj_rib_out::FAMILY_COUNT_WALKS.with(|walks| walks.set(0));
+            let filter = ordered_route_query_filter(Some(family), None);
+            let (page, _) = differential_page(manager, scope, &filter, None, None);
+            assert_eq!(page.unwrap().total, expected, "{family:?} total");
+            assert_eq!(
+                crate::adj_rib_out::FAMILY_COUNT_WALKS.with(std::cell::Cell::get),
+                0,
+                "{family:?} first page walked every advertised family table"
+            );
+        }
+    };
+    assert_totals(&mut manager, [0, 0]);
+
+    // Add-Path rows count once per path identity, in their own AFI slot.
+    let outbound = manager.adj_ribs_out.get_mut(&target).unwrap();
+    for path_id in [0, 7] {
+        let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 1), 32), source);
+        route.path_id = path_id;
+        outbound.insert(route);
+    }
+    let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0), source);
+    route.prefix = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
+    outbound.insert(route);
+    assert_totals(&mut manager, [2, 1]);
+}

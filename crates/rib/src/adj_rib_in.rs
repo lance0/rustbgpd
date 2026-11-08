@@ -943,9 +943,17 @@ impl AdjRibIn {
     /// preserves full query identity order even for caller-supplied routes with
     /// a source peer different from this table's owner.
     pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
+        self.iter_ordered_family_from(after, None)
+    }
+
+    pub(crate) fn iter_ordered_family_from(
+        &self,
+        after: Option<RouteQueryKey>,
+        family: Option<Afi>,
+    ) -> impl Iterator<Item = &Route> {
         let routes = &self.routes;
         self.prefix_index
-            .iter_from(after.map(|cursor| cursor.0))
+            .iter_from(crate::update::route_query_start_prefix(after, family))
             .flat_map(move |(_, ids)| {
                 let mut ordered: SmallVec<[(u32, u32); 1]> = ids.iter().collect();
                 ordered
@@ -1171,11 +1179,19 @@ impl AdjRibIn {
             .map(|(prefix, _)| prefix)
     }
 
-    /// Iterate over all routes for a given prefix (all path IDs).
-    ///
-    /// Uses the prefix index for O(candidates) lookup instead of an O(N)
-    /// full scan.
-    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> {
+    /// Restrict a query's input before evaluating its residual row predicate.
+    pub(crate) fn iter_query_prefix(&self, prefix: Option<Prefix>) -> impl Iterator<Item = &Route> {
+        self.iter()
+            .take(if prefix.is_none() { usize::MAX } else { 0 })
+            .chain(
+                prefix
+                    .into_iter()
+                    .flat_map(|prefix| self.iter_prefix(&prefix)),
+            )
+    }
+
+    /// Iterate all paths of one exact prefix through its existing index.
+    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> + use<'_> {
         let routes = &self.routes;
         self.prefix_index
             .get(prefix)

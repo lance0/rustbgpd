@@ -17,7 +17,7 @@ use crate::peer_types::PeerKey;
 use crate::proto;
 use crate::route_distinguisher::{format_rd, parse_family_rd, parse_rd};
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
-use rustbgpd_rib::update::ordered_route_query_filter;
+use rustbgpd_rib::update::{ordered_route_query_filter, prefix_route_query_filter};
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, EvpnRouteQueryKey, ExplainAdvertisedRoute,
     ExplainAdvertisedRouteError, ExplainBestPath, ExplainDecision, ExportGateVerdict,
@@ -2248,9 +2248,13 @@ fn build_route_query_filter(
         };
         return Some(ordered_route_query_filter(Some(family), known_total));
     }
-    Some(Box::new(move |route: &Route| {
-        route_matches_family(route, afi_safi) && filters.matches(route)
-    }))
+    let prefix = filters.prefix.filter(|_| !filters.longer);
+    let matches =
+        move |route: &Route| route_matches_family(route, afi_safi) && filters.matches(route);
+    Some(match prefix {
+        Some(prefix) => prefix_route_query_filter(prefix, matches),
+        None => Box::new(matches),
+    })
 }
 
 fn set_row_lease(
@@ -11449,6 +11453,239 @@ mod tests {
         };
         let filters = RouteFilters::from_request(&invalid).unwrap();
         assert!(!filters.matches(&route));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one shared actor fixture compares complete API pages and mutation invalidation"
+    )]
+    async fn typed_route_api_pages_equal_full_scan_rows_totals_tokens_and_invalidation() {
+        let (tx, rx) = mpsc::channel(32);
+        let (query_tx, query_rx) = mpsc::channel(1);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let actor = tokio::spawn(manager.run());
+        let (scan_tx, mut scan_rx) = mpsc::channel(4);
+        let forward = tx.clone();
+        // The same production handler and table, with trusted metadata removed.
+        let proxy = tokio::spawn(async move {
+            while let Some(mut update) = scan_rx.recv().await {
+                if let RibUpdate::QueryRoutesPage {
+                    filter: Some(filter),
+                    ..
+                } = &mut update
+                {
+                    let typed = std::mem::replace(filter, Box::new(|_| false));
+                    *filter = Box::new(move |route| typed(route));
+                }
+                forward.send(update).await.unwrap();
+            }
+        });
+        let peers = ["typed-api-a", "typed-api-b"].map(|interface| {
+            PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(
+                "fe80::1".parse().unwrap(),
+                Some(interface),
+            ))
+        });
+        let roster = crate::import_roster::test_support::publisher(
+            peers
+                .into_iter()
+                .zip(["typed-api-a", "typed-api-b"])
+                .map(|(peer, interface)| crate::import_roster::ImportRosterPeer {
+                    key: PeerKey::new(peer.addr(), Some(interface.to_string())),
+                    session_id: 0,
+                    publication: tokio::sync::watch::channel(None).1,
+                    rib_peer: rustbgpd_transport::RibPeerSlot::assigned(peer),
+                })
+                .collect(),
+            Vec::new(),
+        );
+        let (peer_manager, _) = mpsc::channel(1);
+        let known = KnownPeerQueries {
+            peer_manager,
+            operator_lane: None,
+            rib: tx.clone(),
+            daemon_gate: crate::health_probe::DaemonGate::new(),
+            roster: Some(roster.reader()),
+        };
+        let typed = RibService::new(tx.clone()).with_known_peer_queries(known.clone());
+        let scanned = RibService::new(scan_tx).with_known_peer_queries(known);
+        let mut receivers = Vec::new();
+        for peer in peers {
+            let (outbound_tx, receiver) = mpsc::channel(1);
+            receivers.push(receiver);
+            tx.send(RibUpdate::PeerUp {
+                peer,
+                session_id: 0,
+                peer_asn: 65001,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            })
+            .await
+            .unwrap();
+            let mut announced = Vec::new();
+            for prefix in [
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 1), 32)),
+                Prefix::V6(Ipv6Prefix::new(std::net::Ipv6Addr::UNSPECIFIED, 0)),
+                Prefix::V6(Ipv6Prefix::new("2001:db8::1".parse().unwrap(), 128)),
+            ] {
+                for path_id in [0, 7] {
+                    let mut route = test_route(prefix, vec![PathAttribute::Communities(vec![42])]);
+                    route.peer = peer;
+                    route.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
+                        rustbgpd_wire::AspaValidationContext::default(),
+                        peer.interface().as_deref(),
+                    );
+                    route.path_id = path_id;
+                    announced.push(route);
+                }
+            }
+            tx.send(RibUpdate::RoutesReceived {
+                peer,
+                session_id: 0,
+                announced,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+        }
+        let (reply, ready) = tokio::sync::oneshot::channel();
+        tx.send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        assert_eq!(ready.await.unwrap(), 4);
+        for best in [false, true] {
+            for (prefix, length, afi_safi, longer) in [
+                ("0.0.0.0", 0, 0, false),
+                ("::", 0, 0, false),
+                ("192.0.2.255", 32, 0, false),
+                (
+                    "0.0.0.0",
+                    0,
+                    proto::AddressFamily::Ipv6Unicast as i32,
+                    false,
+                ),
+                ("", 0, proto::AddressFamily::Ipv4Unicast as i32, false),
+                ("", 0, proto::AddressFamily::Ipv6Unicast as i32, false),
+                ("0.0.0.0", 0, 0, true),
+            ] {
+                let mut request = proto::ListRoutesRequest {
+                    prefix_filter: prefix.to_string(),
+                    prefix_filter_length: length,
+                    afi_safi,
+                    longer_prefixes: longer,
+                    page_size: 1,
+                    ..list_routes_request()
+                };
+                loop {
+                    let actual = if best {
+                        typed.list_best_routes(Request::new(request.clone())).await
+                    } else {
+                        typed
+                            .list_received_routes(Request::new(request.clone()))
+                            .await
+                    }
+                    .unwrap()
+                    .into_inner();
+                    let expected = if best {
+                        scanned
+                            .list_best_routes(Request::new(request.clone()))
+                            .await
+                    } else {
+                        scanned
+                            .list_received_routes(Request::new(request.clone()))
+                            .await
+                    }
+                    .unwrap()
+                    .into_inner();
+                    assert_eq!(
+                        actual, expected,
+                        "prefix {prefix}, family {afi_safi}, best {best}"
+                    );
+                    if actual.next_page_token.is_empty() {
+                        break;
+                    }
+                    request.page_token = actual.next_page_token;
+                }
+            }
+        }
+        // Scope-bound continuations retain Add-Path identities and reject mutation.
+        let mut request = proto::ListRoutesRequest {
+            neighbor_address: "fe80::1%typed-api-a".to_string(),
+            prefix_filter: "0.0.0.0".to_string(),
+            prefix_filter_length: 0,
+            page_size: 1,
+            ..list_routes_request()
+        };
+        let first = typed
+            .list_received_routes(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        let reference = scanned
+            .list_received_routes(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first, reference);
+        assert_eq!(first.total_count, 2);
+        assert_ne!(first.next_page_token, "");
+        request.page_token = first.next_page_token;
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peers[0],
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)), 7)],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        for service in [&typed, &scanned] {
+            assert_eq!(
+                service
+                    .list_received_routes(Request::new(request.clone()))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Aborted
+            );
+        }
+        drop(typed);
+        drop(scanned);
+        proxy.await.unwrap();
+        drop(tx);
+        drop(query_tx);
+        actor.await.unwrap();
+        for peer in peers {
+            assert!(peer.release());
+        }
     }
 
     #[test]
