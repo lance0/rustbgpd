@@ -103,6 +103,13 @@ impl<V> FamilyPrefixMap<V> {
         }
     }
 
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.v4
+            .iter_mut()
+            .map(|(_, value)| value)
+            .chain(self.v6.iter_mut().map(|(_, value)| value))
+    }
+
     pub(crate) fn clear(&mut self) {
         self.v4.clear();
         self.v6.clear();
