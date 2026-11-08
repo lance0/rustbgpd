@@ -2034,7 +2034,6 @@ fn an_empty_pass_behind_a_live_operation_does_not_redirty_the_peer() {
     routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
     send_all(&mut source);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 21, 1));
-    manager.handle_update(registering_peer_up(peer, 0));
     let mut rx = up(&mut manager, peer, ipv4_sendable(), 4096, 0);
     send_all(&mut rx);
     refresh_request(&mut manager, peer, 0, family);
