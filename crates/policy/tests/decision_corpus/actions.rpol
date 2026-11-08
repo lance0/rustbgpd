@@ -107,3 +107,102 @@ test tag-forward-miss {
     route { prefix 192.0.2.0/24; communities [65000:8] }
     expect tag-forward(65000:7, 192.0.2.9, scrub-tags) == reject
 }
+
+# A computed `set` and a literal `set` share their attribute's slot, so the
+# later one wins in either order: in a term, in a loop body, and across an
+# applied policy's inlined terms.
+policy literal-after-computed {
+    term t {
+        set med route.med + 5
+        set med 10
+        set local-pref min(route.local-pref * 2, 400)
+        set local-pref 200
+        accept
+    }
+}
+
+policy computed-after-literal {
+    term t {
+        set med 10
+        set med route.med + 5
+        set local-pref 200
+        set local-pref min(route.local-pref * 2, 400)
+        accept
+    }
+}
+
+policy loop-literal-after-computed {
+    term t {
+        for c in route.communities {
+            set med route.med + 5
+            set med 10
+            set local-pref route.local-pref + 1
+            set local-pref 200
+        }
+        accept
+    }
+}
+
+policy bump-med {
+    term t { set med route.med + 5; set local-pref route.local-pref * 2 }
+}
+
+policy pin-med {
+    term t { set med 10; set local-pref 200 }
+}
+
+policy literal-after-applied-computed {
+    term t {
+        apply bump-med
+        set med 10
+        set local-pref 200
+        accept
+    }
+}
+
+policy applied-literal-after-computed {
+    term t {
+        set med route.med + 5
+        set local-pref route.local-pref * 2
+        apply pin-med
+        accept
+    }
+}
+
+policy child-literal-after-computed {
+    term t {
+        set med route.med + 5
+        set med 10
+        set local-pref route.local-pref * 2
+        set local-pref 200
+    }
+}
+
+policy applies-literal-after-computed {
+    term t { apply child-literal-after-computed; accept }
+}
+
+test literal-set-replaces-computed-set {
+    route { prefix 192.0.2.0/24; med 100; local-pref 150 }
+    expect literal-after-computed == accept with med 10, local-pref 200
+}
+test computed-set-replaces-literal-set {
+    route { prefix 192.0.2.0/24; med 100; local-pref 150 }
+    expect computed-after-literal == accept with med 105, local-pref 300
+}
+test loop-literal-set-replaces-computed-set {
+    route { prefix 192.0.2.0/24; med 100; local-pref 150; communities [65000:1] }
+    expect loop-literal-after-computed == accept with med 10, local-pref 200
+}
+test literal-set-replaces-applied-computed-set {
+    route { prefix 192.0.2.0/24; med 100; local-pref 150 }
+    expect literal-after-applied-computed == accept with med 10, local-pref 200
+}
+test applied-literal-set-replaces-computed-set {
+    route { prefix 192.0.2.0/24; med 100; local-pref 150 }
+    expect applied-literal-after-computed == accept with med 10, local-pref 200
+}
+test applied-policy-literal-set-replaces-computed-set {
+    route { prefix 192.0.2.0/24; med 100; local-pref 150 }
+    expect applies-literal-after-computed == accept with med 10, local-pref 200
+}

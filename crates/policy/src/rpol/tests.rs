@@ -4214,6 +4214,46 @@ fn eval_error_explain_renders_and_agrees() {
     );
 }
 
+/// A literal `set` after a computed one replaces it in the compiled
+/// chain, so runtime evaluation (which `TestPolicy` also runs) and explain
+/// report the literal.
+#[test]
+fn literal_set_after_computed_set_wins_in_evaluate_and_explain() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+    let compiled = compile_ok(
+        "policy p { term t { set med route.med + 5; set med 10; \
+         set local-pref route.local-pref * 2; set local-pref 200; accept } }",
+    );
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(100);
+    ctx.local_pref = Some(150);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(10));
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    let mods = &trace.steps[0].modifications;
+    assert!(
+        mods.iter().any(|line| line.contains("med 100 -> 10")),
+        "{mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|line| line.contains("local_pref 150 -> 200")),
+        "{mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|line| line.contains("route.med + 5")),
+        "{mods:?}"
+    );
+}
+
 /// In-language `test` fixtures exercise the boundary arithmetic and
 /// the deny-on-error contract end to end through `rbgp policy check`.
 #[test]
