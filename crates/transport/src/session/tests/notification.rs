@@ -96,6 +96,8 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
         || validation_warn_metadata(metadata)
         || downstream_malformed_warn_metadata(metadata)
         || (*metadata.level() == tracing::Level::WARN
+            && metadata.target() == "rustbgpd_transport::session::inbound")
+        || (*metadata.level() == tracing::Level::WARN
             && ["peer", "family", "route_type", "discarded"]
                 .into_iter()
                 .all(|field| metadata.fields().field(field).is_some()))
@@ -2275,6 +2277,326 @@ fn session_reset_logs_its_validation_cause_past_the_first_update() {
         "the reset's validation cause must log: {events:?}"
     );
     assert_eq!(update_malformed_count(&session, "session_reset"), 1);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PeerWarningCase {
+    UnnegotiatedMpReach,
+    ScopedIpv4Body,
+    NextHopOwnership,
+    OtcPolicy,
+}
+
+impl PeerWarningCase {
+    const ALL: [Self; 4] = [
+        Self::UnnegotiatedMpReach,
+        Self::ScopedIpv4Body,
+        Self::NextHopOwnership,
+        Self::OtcPolicy,
+    ];
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::UnnegotiatedMpReach => "Ignoring MP_REACH_NLRI for non-negotiated family",
+            Self::ScopedIpv4Body => "Ignoring IPv4 body NLRI from scoped link-local peer",
+            Self::NextHopOwnership => {
+                "strict-peer next-hop ownership rejected unicast announcements"
+            }
+            Self::OtcPolicy => "OTC rule rejected unicast announcements",
+        }
+    }
+}
+
+/// One scoped Established peer can trigger all four classes without changing
+/// configuration between UPDATEs. Frames enter through the real read buffer.
+struct PeerWarningFixture {
+    runtime: tokio::runtime::Runtime,
+    session: PeerSession,
+    peer: Option<TcpStream>,
+    rib_rx: mpsc::Receiver<RibUpdate>,
+}
+
+impl PeerWarningFixture {
+    fn new() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+        configure_scoped_link_local_peer(&mut session);
+        session.config.peer.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session.config.peer.link_local_next_hop = true;
+        session.config.peer.local_role = Some(BgpRole::Provider);
+        session.config.next_hop_ownership_strict_peer = true;
+        session.fsm = Session::new(session.config.peer.clone());
+        let mut fixture = Self {
+            runtime,
+            session,
+            peer: None,
+            rib_rx,
+        };
+        fixture.connect();
+        fixture
+    }
+
+    fn connect(&mut self) {
+        self.peer = Some(self.runtime.block_on(async {
+            let (client, server) = connected_stream_pair().await;
+            self.session.test_install_stream(client);
+            self.session.drive_fsm(Event::ManualStart).await;
+            self.session
+                .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+                    version: 4,
+                    my_as: 65002,
+                    hold_time: 90,
+                    bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+                    capabilities: vec![
+                        Capability::MultiProtocol {
+                            afi: Afi::Ipv4,
+                            safi: Safi::Unicast,
+                        },
+                        Capability::MultiProtocol {
+                            afi: Afi::Ipv6,
+                            safi: Safi::Unicast,
+                        },
+                        Capability::FourOctetAs { asn: 65002 },
+                        Capability::LinkLocalNextHop,
+                        Capability::Role {
+                            role: BgpRole::Customer,
+                        },
+                    ],
+                }))
+                .await;
+            self.session.drive_fsm(Event::KeepaliveReceived).await;
+            server
+        }));
+        assert_eq!(self.session.fsm.state(), SessionState::Established);
+        rfc7606_drain(&mut self.rib_rx);
+    }
+
+    fn receive(&mut self, update: &UpdateMessage) -> Vec<SessionLogFields> {
+        let encoded = rustbgpd_wire::encode_message(&Message::Update(update.clone())).unwrap();
+        self.session.read_buf.buf.extend_from_slice(&encoded);
+        let events = capture_session_logs(|| {
+            self.runtime.block_on(self.session.process_read_buffer());
+        });
+        assert_eq!(self.session.fsm.state(), SessionState::Established);
+        rfc7606_drain(&mut self.rib_rx);
+        events
+    }
+
+    fn reconnect(&mut self, tcp_failure: bool) {
+        self.runtime.block_on(async {
+            if tcp_failure {
+                self.session.handle_tcp_disconnect();
+                self.session.drive_fsm(Event::TcpConnectionFails).await;
+            } else {
+                self.session
+                    .drive_fsm(Event::ManualStop { reason: None })
+                    .await;
+            }
+        });
+        assert_eq!(self.session.fsm.state(), SessionState::Idle);
+        self.peer = None;
+        self.connect();
+    }
+}
+
+fn peer_warning_update(case: Option<PeerWarningCase>) -> UpdateMessage {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ];
+    if matches!(case, Some(PeerWarningCase::ScopedIpv4Body)) {
+        attrs.push(PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)));
+        return UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            }],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
+    }
+    let next_hop = if matches!(case, Some(PeerWarningCase::NextHopOwnership)) {
+        "2001:db8::9".parse().unwrap()
+    } else {
+        "fe80::2".parse().unwrap()
+    };
+    let mut reach = empty_nonunicast_reach(Afi::Ipv6, Safi::Unicast, next_hop);
+    if matches!(case, Some(PeerWarningCase::UnnegotiatedMpReach)) {
+        reach.afi = Afi::Ipv4;
+        reach.safi = Safi::FlowSpec;
+        reach.next_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        reach.flowspec_announced.push(make_flowspec_route().rule);
+    } else {
+        reach.announced.push(NlriEntry {
+            path_id: 0,
+            prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+        });
+    }
+    if matches!(case, Some(PeerWarningCase::OtcPolicy)) {
+        attrs.push(PathAttribute::OnlyToCustomer(65002));
+    }
+    nonunicast_update(attrs, reach, None, false)
+}
+
+fn peer_warning_count(events: &[SessionLogFields], case: PeerWarningCase) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event
+                .get("message")
+                .is_some_and(|text| text.starts_with(case.message()))
+        })
+        .count()
+}
+
+fn assert_peer_warning_stream(case: PeerWarningCase) {
+    let mut fixture = PeerWarningFixture::new();
+    // Valid negotiated MP NLRI with the peer's next hop and no OTC must not
+    // consume any class's warning schedule.
+    for _ in 0..2 {
+        assert_eq!(fixture.receive(&peer_warning_update(None)), Vec::new());
+    }
+    let update = peer_warning_update(Some(case));
+    let warned: Vec<_> = (1..=16)
+        .map(|_| peer_warning_count(&fixture.receive(&update), case))
+        .collect();
+    assert_eq!(
+        warned,
+        [1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
+        "{case:?} must emit five actual WARNs over sixteen UPDATEs"
+    );
+    assert_eq!(
+        fixture.session.config.neighbor_counters.updates_received(),
+        18
+    );
+    if matches!(case, PeerWarningCase::OtcPolicy) {
+        assert_eq!(
+            fixture
+                .session
+                .config
+                .neighbor_counters
+                .otc_routes_blocked(),
+            16
+        );
+        let samples = counter_samples(&fixture.session.metrics, "bgp_otc_routes_blocked_total");
+        assert!(samples.iter().any(|(labels, count)| {
+            labels.get("reason").map(String::as_str) == Some("ingress_from_customer_rsclient")
+                && (*count - 16.0).abs() < f64::EPSILON
+        }));
+    }
+    for tcp_failure in [false, true] {
+        fixture.reconnect(tcp_failure);
+        assert_eq!(peer_warning_count(&fixture.receive(&update), case), 1);
+        assert_eq!(peer_warning_count(&fixture.receive(&update), case), 1);
+        assert_eq!(peer_warning_count(&fixture.receive(&update), case), 0);
+    }
+}
+
+#[test]
+fn unnegotiated_mp_reach_warnings_are_bounded_per_connection() {
+    assert_peer_warning_stream(PeerWarningCase::UnnegotiatedMpReach);
+}
+
+#[test]
+fn scoped_body_nlri_warnings_are_bounded_per_connection() {
+    assert_peer_warning_stream(PeerWarningCase::ScopedIpv4Body);
+}
+
+#[test]
+fn strict_next_hop_warnings_are_bounded_per_connection() {
+    assert_peer_warning_stream(PeerWarningCase::NextHopOwnership);
+}
+
+#[test]
+fn policy_otc_warnings_are_bounded_per_connection() {
+    assert_peer_warning_stream(PeerWarningCase::OtcPolicy);
+}
+
+#[test]
+fn next_hop_ownership_reasons_keep_independent_schedules() {
+    let mut fixture = PeerWarningFixture::new();
+    let foreign = peer_warning_update(Some(PeerWarningCase::NextHopOwnership));
+    let mut reach =
+        empty_nonunicast_reach(Afi::Ipv6, Safi::Unicast, "2001:db8::2".parse().unwrap());
+    reach.link_local_next_hop = Some("fe80::2".parse().unwrap());
+    reach.announced.push(NlriEntry {
+        path_id: 0,
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+    });
+    let companion = nonunicast_update(
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ],
+        reach,
+        None,
+        false,
+    );
+    let ownership_reasons = |events: &[SessionLogFields]| -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter(|event| {
+                event.get("message").is_some_and(|text| {
+                    text.starts_with(PeerWarningCase::NextHopOwnership.message())
+                })
+            })
+            .map(|event| {
+                (
+                    event.get("reason").cloned().unwrap_or_default(),
+                    event.get("warning_updates").cloned().unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    // Four companion rejections put a shared schedule on count 5, which
+    // would not log; the first foreign next hop must log at its own count 1.
+    let flooded: Vec<_> = (0..4)
+        .map(|_| ownership_reasons(&fixture.receive(&companion)).len())
+        .collect();
+    assert_eq!(flooded, [1, 1, 0, 1]);
+    assert_eq!(
+        ownership_reasons(&fixture.receive(&foreign)),
+        [("foreign_next_hop".to_string(), "1".to_string())]
+    );
+    assert_eq!(
+        ownership_reasons(&fixture.receive(&companion)),
+        Vec::<(String, String)>::new()
+    );
+}
+
+#[test]
+fn peer_warning_classes_keep_independent_schedules() {
+    let mut fixture = PeerWarningFixture::new();
+    let malformed = with_attributes(&peer_warning_update(None), |attrs| attrs[3] = 9);
+    for _ in 0..2 {
+        fixture.receive(&malformed);
+    }
+    for count in 1_u64..=16 {
+        for case in PeerWarningCase::ALL {
+            let events = fixture.receive(&peer_warning_update(Some(case)));
+            assert_eq!(
+                peer_warning_count(&events, case),
+                usize::from(count.is_power_of_two())
+            );
+            for event in events {
+                assert_eq!(event.get("warning_updates"), Some(&count.to_string()));
+            }
+        }
+    }
+    assert_eq!(
+        fixture.session.config.neighbor_counters.updates_received(),
+        66
+    );
 }
 
 #[test]
