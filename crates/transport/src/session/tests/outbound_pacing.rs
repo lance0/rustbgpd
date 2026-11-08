@@ -1560,6 +1560,446 @@ async fn cheap_resumes_keep_fresh_slices_halving() {
     assert_eq!(sizes, [SLICE, SLICE / 2, SLICE / 4]);
 }
 
+/// The peer's view of `frames`: one entry per NLRI, refresh marker and
+/// End-of-RIB, in wire order.
+fn wire_items(frames: Vec<Bytes>) -> Vec<String> {
+    let mut items = Vec::new();
+    for mut frame in frames {
+        let update = match rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN)
+            .unwrap()
+        {
+            Message::Update(update) => update,
+            Message::RouteRefresh(marker) => {
+                items.push(format!("{marker:?}"));
+                continue;
+            }
+            other => panic!("unexpected bulk frame {other:?}"),
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let before = items.len();
+        macro_rules! push {
+            ($kind:literal, $($list:expr),+) => {
+                $(items.extend($list.iter().map(|nlri| format!("{} {nlri:?}", $kind)));)+
+            };
+        }
+        push!("withdraw", parsed.withdrawn);
+        push!("announce", parsed.announced);
+        let mut family = None;
+        for attr in parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    family = Some((mp.afi, mp.safi));
+                    push!(
+                        "announce",
+                        mp.announced,
+                        mp.flowspec_announced,
+                        mp.evpn_announced,
+                        mp.bgpls_announced,
+                        mp.vpn_announced,
+                        mp.labeled_announced,
+                        mp.rtc_announced,
+                        mp.vpn_flowspec_announced
+                    );
+                }
+                PathAttribute::MpUnreachNlri(mp) => {
+                    family = Some((mp.afi, mp.safi));
+                    push!(
+                        "withdraw",
+                        mp.withdrawn,
+                        mp.flowspec_withdrawn,
+                        mp.evpn_withdrawn,
+                        mp.bgpls_withdrawn,
+                        mp.vpn_withdrawn,
+                        mp.labeled_withdrawn,
+                        mp.rtc_withdrawn,
+                        mp.vpn_flowspec_withdrawn
+                    );
+                }
+                _ => {}
+            }
+        }
+        if items.len() == before {
+            items.push(format!("EoR {family:?}"));
+        }
+    }
+    items
+}
+
+/// Drain one envelope to completion and return the peer's view. Pressured,
+/// every step starts with little more than one frame of writer headroom, so
+/// slices park partway through a group and resume across many steps.
+async fn drain_envelope(
+    families: &[(Afi, Safi)],
+    mut update: OutboundRouteUpdate,
+    pressured: bool,
+) -> Vec<String> {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    negotiated.peer_enhanced_route_refresh = true;
+    for family in families {
+        if !negotiated.negotiated_families.contains(family) {
+            negotiated.negotiated_families.push(*family);
+        }
+    }
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    // One maximum frame plus two markers' worth: a full frame or two
+    // markers per step.
+    let headroom = u64::from(session.outbound_max_message_len()) + 40;
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    if update.end_of_rib.is_empty() {
+        update.end_of_rib = families.to_vec();
+    }
+    if pressured {
+        session.writer_bulk_admitted = BYTE_BUDGET - headroom;
+    }
+    session.handle_outbound_route_update(update).await;
+    let mut sink = Vec::new();
+    let mut parked = false;
+    for _ in 0..10_000 {
+        parked |= session
+            .pending_outbound
+            .as_ref()
+            .is_some_and(super::outbound::PendingOutbound::slice_parked);
+        assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+        while let Ok(frame) = frames.try_recv() {
+            sink.push(frame);
+        }
+        if session.pending_outbound.is_none() {
+            break;
+        }
+        completed.send_replace(session.writer_bulk_admitted);
+        if pressured {
+            session.writer_bulk_admitted += BYTE_BUDGET - headroom;
+            session.advance_pending_outbound();
+        } else {
+            admit_until_blocked(&mut session);
+        }
+    }
+    assert!(session.pending_outbound.is_none(), "envelope completed");
+    assert!(session.writer_priority_tx.is_some(), "session remains up");
+    assert_eq!(parked, pressured, "only the pressured drain parks a slice");
+    wire_items(sink)
+}
+
+/// A slice parked mid-group and resumed in one-frame steps delivers exactly
+/// what an unpressured drain of the same envelope does: every item once, in
+/// order, with End-of-RIB last.
+async fn assert_resume_matches_unpressured(
+    families: &[(Afi, Safi)],
+    update: impl Fn() -> OutboundRouteUpdate,
+    expected: usize,
+) {
+    let reference = drain_envelope(families, update(), false).await;
+    assert_eq!(
+        reference.len(),
+        expected,
+        "{families:?}: complete reference"
+    );
+    let unique: std::collections::HashSet<_> = reference.iter().collect();
+    assert_eq!(unique.len(), expected, "{families:?}: no duplicates");
+    let eors = reference
+        .iter()
+        .filter(|item| item.starts_with("EoR"))
+        .count();
+    assert!(eors > 0, "{families:?}");
+    assert!(
+        reference[expected - eors..]
+            .iter()
+            .all(|item| item.starts_with("EoR")),
+        "{families:?}: End-of-RIB follows every route"
+    );
+    let resumed = drain_envelope(families, update(), true).await;
+    assert_eq!(resumed, reference, "{families:?}");
+}
+
+/// More rows than one 2,048-row slice, so the second slice resumes from a
+/// nonzero source index.
+const RESUME_ROWS: u32 = 3_000;
+
+fn resume_rows<T: Clone>(template: &T, vary: impl Fn(&mut T, u32)) -> Vec<T> {
+    (0..RESUME_ROWS)
+        .map(|index| {
+            let mut row = template.clone();
+            vary(&mut row, index);
+            row
+        })
+        .collect()
+}
+
+fn resume_vpn_routes() -> Vec<rustbgpd_rib::VpnRibRoute> {
+    resume_rows(&make_vpn_rib_route(100), |route, index| {
+        route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x1400_0000 | index), 32).unwrap();
+    })
+}
+
+fn resume_evpn_routes() -> Vec<rustbgpd_rib::EvpnRibRoute> {
+    resume_rows(&make_smet_route(2), |route, index| {
+        let EvpnRoute::Smet(nlri) = &mut route.route else {
+            panic!("SMET")
+        };
+        nlri.originator_ip = IpAddr::V4(Ipv4Addr::from(0xc633_0000 | index));
+    })
+}
+
+fn resume_bgpls_routes() -> Vec<rustbgpd_rib::BgpLsRibRoute> {
+    resume_rows(&make_bgpls_route(1), |route, index| {
+        route.nlri.payload = Bytes::copy_from_slice(&index.to_be_bytes());
+    })
+}
+
+fn resume_labeled_routes() -> Vec<rustbgpd_rib::LabeledRibRoute> {
+    resume_rows(&make_labeled_rib_route(100), |route, index| {
+        route.nlri.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 | index), 32));
+    })
+}
+
+fn resume_rtc_routes() -> Vec<rustbgpd_rib::RtcRibRoute> {
+    resume_rows(&make_rtc_rib_route(1), |route, index| {
+        route.nlri =
+            rustbgpd_wire::RtcNlri::new(65002, 0x0002_fdea_0000_0000 | u64::from(index), 96)
+                .unwrap();
+    })
+}
+
+fn resume_flowspec_routes(vpn_v6: bool) -> Vec<FlowSpecRoute> {
+    (0..RESUME_ROWS as usize)
+        .map(|index| small_flowspec_route(index, vpn_v6, false))
+        .collect()
+}
+
+const RESUME_ITEMS: usize = RESUME_ROWS as usize + 1;
+
+#[tokio::test(start_paused = true)]
+async fn parked_end_of_rib_markers_resume_across_families() {
+    let families = [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::BgpLs, Safi::BgpLs),
+    ];
+    assert_resume_matches_unpressured(&families, OutboundRouteUpdate::default, families.len())
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_refresh_markers_resume_in_order() {
+    let marked = [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+    ];
+    let families = [marked.as_slice(), &[(Afi::L2Vpn, Safi::Evpn)]].concat();
+    assert_resume_matches_unpressured(
+        &families,
+        || OutboundRouteUpdate {
+            refresh_markers: [RouteRefreshSubtype::BoRR, RouteRefreshSubtype::EoRR]
+                .into_iter()
+                .flat_map(|subtype| marked.map(|(afi, safi)| (afi, safi, subtype)))
+                .collect(),
+            end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
+            ..OutboundRouteUpdate::default()
+        },
+        2 * marked.len() + 1,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_unicast_withdrawals_resume_across_shared_and_own_rows() {
+    for v6 in [false, true] {
+        let rows: Vec<(Prefix, u32)> = (0..RESUME_ROWS)
+            .map(|index| {
+                let prefix = if v6 {
+                    Prefix::V6(Ipv6Prefix::new(
+                        Ipv6Addr::from((0x2001_0db8_u128 << 96) | u128::from(index)),
+                        128,
+                    ))
+                } else {
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32))
+                };
+                (prefix, 0)
+            })
+            .collect();
+        let (shared, own) = rows.split_at(RESUME_ROWS as usize / 2);
+        let shared = Arc::new(shared.to_vec());
+        let family = (if v6 { Afi::Ipv6 } else { Afi::Ipv4 }, Safi::Unicast);
+        assert_resume_matches_unpressured(
+            &[family],
+            || OutboundRouteUpdate {
+                shared_withdraw: SharedWithdrawals::from(Arc::clone(&shared)),
+                withdraw: own.to_vec(),
+                ..OutboundRouteUpdate::default()
+            },
+            RESUME_ITEMS,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_flowspec_announcements_and_withdrawals_resume_in_order() {
+    for vpn_v6 in [false, true] {
+        let family = if vpn_v6 {
+            (Afi::Ipv6, Safi::FlowSpecVpn)
+        } else {
+            (Afi::Ipv4, Safi::FlowSpec)
+        };
+        let routes = resume_flowspec_routes(vpn_v6);
+        assert_resume_matches_unpressured(
+            &[family],
+            || OutboundRouteUpdate {
+                flowspec_announce: routes.clone(),
+                ..OutboundRouteUpdate::default()
+            },
+            RESUME_ITEMS,
+        )
+        .await;
+        assert_resume_matches_unpressured(
+            &[family],
+            || OutboundRouteUpdate {
+                flowspec_withdraw: routes.iter().map(FlowSpecRoute::selection_key).collect(),
+                ..OutboundRouteUpdate::default()
+            },
+            RESUME_ITEMS,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_vpn_withdrawals_resume_in_order() {
+    let keys: Vec<_> = resume_vpn_routes()
+        .iter()
+        .map(rustbgpd_rib::VpnRibRoute::key)
+        .collect();
+    assert_resume_matches_unpressured(
+        &[(Afi::Ipv4, Safi::MplsVpn)],
+        || OutboundRouteUpdate {
+            vpn_withdraw: keys.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+/// An inventory another owner still holds stays in the envelope instead of
+/// moving into the slice; resumption reads it by source index.
+#[tokio::test(start_paused = true)]
+async fn parked_shared_evpn_and_vpn_announcements_resume_in_order() {
+    let evpn = Arc::new(resume_evpn_routes());
+    assert_resume_matches_unpressured(
+        &[(Afi::L2Vpn, Safi::Evpn)],
+        || OutboundRouteUpdate {
+            evpn_announce: Arc::clone(&evpn),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+    let vpn = Arc::new(resume_vpn_routes());
+    assert_resume_matches_unpressured(
+        &[(Afi::Ipv4, Safi::MplsVpn)],
+        || OutboundRouteUpdate {
+            vpn_announce: Arc::clone(&vpn),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_evpn_withdrawals_resume_in_order() {
+    let keys: Vec<_> = resume_evpn_routes()
+        .iter()
+        .map(rustbgpd_rib::EvpnRibRoute::key)
+        .collect();
+    assert_resume_matches_unpressured(
+        &[(Afi::L2Vpn, Safi::Evpn)],
+        || OutboundRouteUpdate {
+            evpn_withdraw: keys.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_bgpls_announcements_and_withdrawals_resume_in_order() {
+    let routes = resume_bgpls_routes();
+    let family = [(Afi::BgpLs, Safi::BgpLs)];
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            bgpls_announce: routes.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            bgpls_withdraw: routes
+                .iter()
+                .map(rustbgpd_rib::BgpLsRibRoute::key)
+                .collect(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_labeled_withdrawals_resume_in_order() {
+    let keys: Vec<_> = resume_labeled_routes()
+        .iter()
+        .map(rustbgpd_rib::LabeledRibRoute::key)
+        .collect();
+    assert_resume_matches_unpressured(
+        &[(Afi::Ipv4, Safi::LabeledUnicast)],
+        || OutboundRouteUpdate {
+            labeled_withdraw: keys.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_rtc_announcements_and_withdrawals_resume_in_order() {
+    let routes = resume_rtc_routes();
+    let family = [(Afi::Ipv4, Safi::RtConstrain)];
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            rtc_announce: routes.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            rtc_withdraw: routes.iter().map(rustbgpd_rib::RtcRibRoute::key).collect(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
 /// Private families move source rows into the active slice. A paused slice
 /// must retain those originals, release them under the same retirement budget,
 /// and keep its credit/latch until both that slice and the remainder are gone.
