@@ -203,7 +203,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mirrored to BMP collectors as Route Monitoring for a peer that never sent
   Peer Up. UPDATE, End-of-RIB and ROUTE-REFRESH received before Established
   now reach neither BMP nor the RIB: the session answers them with
-  NOTIFICATION FSM Error (code 5, subcode 0) and closes.
+  NOTIFICATION FSM Error (code 5) carrying the RFC 6608 subcode for its state
+  (1 in OpenSent, 2 in OpenConfirm) and the message type, and closes.
 - Update the protobuf build tooling's `pulldown-cmark` dependency to 0.13.6
   for RUSTSEC-2026-0433.
 - Name the exact occupied `.unconfirmed-<id>` backup suffix when boot recovery
@@ -535,7 +536,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   true and false values and an operand's evaluation order never changes a
   verdict. Before, `if route.as-path matches "^65000" && route.origin-as + 0
   == 1 { reject }` denied an `AS_SET`-only route with `absent-operand` even
-  though the regex was false, and `route.origin-as == (64500)` denied where
+  though the regex was false (arithmetic on an ASN is now a compile error), and `route.origin-as == (64500)` denied where
   `route.origin-as == 64500` did not match. A `let` that cannot be computed
   now binds that state: conditions on it are false, and only an action that
   needs the value denies the route. Computed `set` values, computed prepend
@@ -1073,11 +1074,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shutdown waits at most 5 s to tell the RIB it has begun.
   Update-group members share one copy of the group's withdrawals.
 - A peer that stops reading no longer lets its session's outbound writer
-  queue gigabytes of encoded UPDATEs. Once a session's writer holds about
-  640 KiB of unwritten bytes, the session stops taking outbound work from the
-  RIB and resumes as the peer reads, so the RIB's outbound row credit bounds
-  what waits behind it. The writer can exceed the budget by one admission
-  step (at most 2,048 UPDATEs). A peer whose writes keep completing is not
+  queue gigabytes of encoded UPDATEs. Each session caps its writer's
+  unwritten bytes at 655,358 B (just under 640 KiB). Before building each
+  frame it requires room for the negotiated maximum message size, or a
+  shared frame's exact size, so admission pauses below the cap and resumes
+  as the peer reads, and the RIB's outbound row credit bounds what waits
+  behind it. A peer whose writes keep completing is not
   torn down; one that stops reading altogether is still closed by the
   RFC 9687 send hold timer or, with `send_hold_time = 0`, by the admission
   deadline (Cease/8). Slow-peer detection also counts the writer's unwritten
@@ -1480,7 +1482,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `overflow`; it is now false, and the route falls through to the next
     term;
   - on an origin-less route, `route.origin-as + 0 == 64500` used to deny
-    with `absent-operand`; it is now false.
+    with `absent-operand`. Arithmetic on an ASN is now a compile error (see
+    the typed-value note above), so a file with that guard fails
+    `rbgp policy check`, `rustbgpd --check` and reload until it is rewritten
+    as `route.origin-as == 64500`, which is false on such a route.
 
   Review guards that compare a computed expression. To keep only the values
   the old guard could match, give the range both bounds:
