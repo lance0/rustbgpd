@@ -218,6 +218,77 @@ fn compile_ok(source: &str) -> crate::ir::CompiledChain {
 }
 
 #[test]
+fn indexed_community_members_preserve_first_conflict() {
+    use crate::ir::CommunityAttribute::{Extended, Large, Standard};
+
+    // Attribute order differs from source order; duplicates and patterns
+    // must retain the same first conflicting span as the original scan.
+    let (file, diagnostics) = super::parser::parse(
+        "community-set mixed { LC:65000:1:2, 65000:1, RT:65000:2, 65000:* }\n\
+         community-set mixed { 65000:99 }\n\
+         community-set standard { 65000:*, 65000:2 }\n\
+         community-set extended { RO:65000:*, RT:65000:3 }\n\
+         community-set empty {}",
+    );
+    assert_eq!(diagnostics, []);
+    for name in ["mixed", "standard", "extended", "empty"] {
+        let def = file.community_set(name).unwrap();
+        for attribute in [Standard, Extended, Large] {
+            let expected = def
+                .entries
+                .iter()
+                .find(|member| member.node.attribute() != attribute)
+                .map(|member| member.span);
+            assert_eq!(
+                file.other_community_member(name, attribute)
+                    .map(|member| member.span),
+                expected,
+                "{name}: {attribute:?}"
+            );
+        }
+    }
+    assert!(file.community_set_has_rt_or_ro("mixed"));
+    assert!(file.community_set_has_rt_or_ro("extended"));
+    assert!(!file.community_set_has_rt_or_ro("standard"));
+    assert!(!file.community_set_has_rt_or_ro("empty"));
+    assert!(file.other_community_member("missing", Standard).is_none());
+    assert!(!file.community_set_has_rt_or_ro("missing"));
+}
+
+#[test]
+fn large_valid_source_reaches_indexed_lowering() {
+    use std::fmt::Write;
+
+    let mut source = String::new();
+    for index in 0..2_000 {
+        writeln!(source, "asn-set s{index} {{ 64512 }}").unwrap();
+        writeln!(
+            source,
+            "policy p{index}(asn: u32) {{ term t {{ if asn in s{index} {{ accept }} }} }}"
+        )
+        .unwrap();
+    }
+    for index in 0..2_000 {
+        writeln!(
+            source,
+            "policy caller{index} {{ term t {{ if apply(p{index}(64512)) {{ accept }} }} }}"
+        )
+        .unwrap();
+    }
+    let chain = compile_ok(&source);
+    assert_eq!(chain.policies.len(), 2_000);
+    assert_eq!(chain.asn_sets.len(), 2_000);
+    for (index, policy) in chain.policies.iter().enumerate() {
+        assert_eq!(
+            policy.name.as_deref(),
+            Some(format!("caller{index}").as_str())
+        );
+        assert_eq!(policy.terms.len(), 1);
+        assert_eq!(policy.terms[0].guard, MatchExpr::True);
+    }
+}
+
+#[test]
 fn one_shot_compiles_share_literal_sets_through_caller_store() {
     let source = |policy: &str| {
         format!(

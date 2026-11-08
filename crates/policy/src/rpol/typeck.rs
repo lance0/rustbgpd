@@ -3108,7 +3108,7 @@ impl<'a> Checker<'a> {
             return;
         }
         if let Some(def) = self.community_set(&set.node) {
-            match removal_set_problem(def, kind, negate) {
+            match removal_set_problem(self.file, def, kind, negate) {
                 None => {}
                 Some(RemovalSetProblem::OtherKind { member, span }) => {
                     self.push_diag(other_kind_removal(set, member, span, kind, form));
@@ -3222,14 +3222,10 @@ impl<'a> Checker<'a> {
         form: &str,
         instead: &str,
     ) -> bool {
-        let Some(def) = self.community_set(&set.node) else {
+        if self.community_set(&set.node).is_none() {
             return false;
-        };
-        let Some(member) = def
-            .entries
-            .iter()
-            .find(|member| member.node.attribute() != attribute)
-        else {
+        }
+        let Some(member) = self.file.other_community_member(&set.node, attribute) else {
             return false;
         };
         let other = attribute_describe(member.node.attribute());
@@ -4155,7 +4151,7 @@ pub(super) fn check_call_arg(
                     };
                     let form = if negate { "not in" } else { "in" };
                     let action = format!("`remove {} {form} {param}`", kind_keyword(kind));
-                    match removal_set_problem(def, kind, negate) {
+                    match removal_set_problem(file, def, kind, negate) {
                         None => {}
                         Some(RemovalSetProblem::OtherKind { member, .. }) => {
                             return Err(other_kind_message(name, member, kind, form));
@@ -5270,6 +5266,7 @@ fn other_kind_message(set: &str, member: CommunityKind, kind: CommunityKind, for
 /// The member check for a removal set, shared by a named set and a set
 /// reached through a parameter, so both are held to the same rules.
 fn removal_set_problem(
+    file: &SourceFile,
     def: &super::ast::CommunitySetDef,
     kind: CommunityKind,
     negate: bool,
@@ -5278,26 +5275,19 @@ fn removal_set_problem(
     if kind == CommunityKind::Any {
         return None;
     }
-    if let Some(other) = def
-        .entries
-        .iter()
-        .find(|entry| member_kind(&entry.node) != kind)
-    {
+    if let Some(other) = file.other_community_member(&def.name.node, community_attribute(kind)) {
         return Some(RemovalSetProblem::OtherKind {
             member: member_kind(&other.node),
             span: other.span,
         });
     }
-    let has_kind = def
-        .entries
-        .iter()
-        .any(|entry| member_kind(&entry.node) == kind);
+    let has_kind = !def.entries.is_empty();
     // `ext-community not in` acts on route targets and route origins only,
     // so its set needs one of those.
     if negate
         && kind == CommunityKind::Ext
         && has_kind
-        && !def.entries.iter().any(|entry| names_rt_or_ro(&entry.node))
+        && !file.community_set_has_rt_or_ro(&def.name.node)
     {
         return Some(RemovalSetProblem::NoRouteTargetOrOrigin);
     }
@@ -5312,22 +5302,6 @@ fn removal_set_problem(
         "never removes anything".to_string()
     };
     Some(RemovalSetProblem::NoMembers { effect })
-}
-
-/// Whether a set member names a route target or route origin.
-fn names_rt_or_ro(member: &crate::sets::CommunityMember) -> bool {
-    use crate::engine::CommunityMatch;
-    use crate::sets::{CommunityMember, CommunityPattern};
-    match member {
-        CommunityMember::Exact(cm) => matches!(
-            cm,
-            CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. }
-        ),
-        CommunityMember::Pattern(pattern) => matches!(
-            **pattern,
-            CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. }
-        ),
-    }
 }
 
 /// The community kind of a set member.
