@@ -2405,8 +2405,10 @@ client busy with its own convergence.
 
 Detection is on by default and purely observational: once a peer's
 outbound backlog stays at or above `slow_peer_threshold_pct` (default
-50%) of the writer buffer for `slow_peer_duration` seconds (default
-30), the daemon
+50%) of the writer's frame queue, or of its byte admission ceiling (the
+byte budget less one maximum-size UPDATE; see the
+[neighbor reference](configuration.md#neighbors)), for `slow_peer_duration`
+seconds (default 30), the daemon
 
 - raises the `slow_peer` flag in `rbgp neighbor <ip>`, `rbgp neighbor
   --json`, and the `GetNeighborState`/`ListNeighbors` gRPC surface; the

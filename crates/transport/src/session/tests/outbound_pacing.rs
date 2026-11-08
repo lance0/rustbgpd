@@ -3196,8 +3196,8 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
 }
 
 /// Each slow-peer threshold is the configured share of its own limit: the
-/// frame queue's capacity and the writer's byte budget. One frame, or one
-/// byte, under the share starts no episode; reaching it does.
+/// frame queue's capacity and the writer's byte admission ceiling. One
+/// frame, or one byte, under the share starts no episode; reaching it does.
 #[tokio::test(start_paused = true)]
 async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
     let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
@@ -3207,7 +3207,8 @@ async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
     let (_frames, _completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
     let pct = usize::from(session.config.slow_peer_threshold_pct);
     let frames = (super::super::OUTBOUND_BUFFER * pct).div_ceil(100);
-    let bytes = (BYTE_BUDGET * pct as u64).div_ceil(100);
+    let ceiling = BYTE_BUDGET + 1 - u64::from(session.outbound_max_message_len());
+    let bytes = (ceiling * pct as u64).div_ceil(100);
     let bulk = session.writer_bulk_tx.clone().unwrap();
     for _ in 1..frames {
         bulk.try_send(Bytes::from_static(b"frame")).unwrap();
@@ -3234,6 +3235,69 @@ async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
         session.slow_peer_backlog_since.is_some(),
         "at the byte share"
     );
+}
+
+/// Bytes stop admission once the next maximum-size frame cannot fit, so a
+/// byte-blocked writer must reach every configured share up to 100% and
+/// start an episode, then signal isolation once flagged.
+async fn byte_blocked_writer_reaches_slow_threshold(extended: bool, pct: u8) {
+    let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    Arc::make_mut(session.negotiated.as_mut().unwrap()).peer_extended_message = extended;
+    session.timers.hold = None;
+    session.config.slow_peer_threshold_pct = pct;
+    session.config.slow_peer_isolation = true;
+    let (_frames, _completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+    // About 5,000-byte UPDATEs with Extended Messages, near-full 4,096-byte
+    // ones without.
+    let communities = if extended { 1_240 } else { 1_000 };
+    let routes = pacing_routes(200, true)
+        .into_iter()
+        .map(|mut route| {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities((0..communities).collect()));
+            });
+            route
+        })
+        .collect();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    admit_until_blocked(&mut session);
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    session.evaluate_slow_peer();
+    assert!(
+        session.slow_peer_backlog_since.is_some(),
+        "extended={extended}, pct={pct}: held {} B starts an episode",
+        session.writer_bytes_held()
+    );
+    session.slow_peer_backlog_since = std::time::Instant::now().checked_sub(Duration::from_secs(
+        u64::from(session.config.slow_peer_duration),
+    ));
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer, "flagged slow");
+    assert!(
+        std::iter::from_fn(|| rib_rx.try_recv().ok())
+            .any(|update| matches!(update, RibUpdate::PeerSlowState { slow: true, .. })),
+        "isolation signalled"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_blocked_extended_writer_reaches_a_95_percent_slow_threshold() {
+    byte_blocked_writer_reaches_slow_threshold(true, 95).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_blocked_extended_writer_reaches_a_100_percent_slow_threshold() {
+    byte_blocked_writer_reaches_slow_threshold(true, 100).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_blocked_standard_writer_reaches_a_100_percent_slow_threshold() {
+    byte_blocked_writer_reaches_slow_threshold(false, 100).await;
 }
 
 /// A write that completes in the same turn as the admission deadline is
