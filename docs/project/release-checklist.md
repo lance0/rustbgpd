@@ -991,7 +991,7 @@ After the tag publishes:
     `examples/route-server/config.toml` and `hygiene.rpol` into `route-server`,
     and the tagged `config.toml` of `examples/route-reflector/`,
     `examples/rr-evpn-fabric/` and `examples/flowspec-controller/` into
-    directories of the same names. Nothing else is needed: the existing
+    directories of the same names. No parse test needs adding: the existing
     fixture parse test walks that root, and `scripts/check-v1-stable-surface.py`
     fails until the copies match the tag byte for byte and every role the tag
     carries is present. The next release's consecutive upgrade exercise consumes the
@@ -1025,6 +1025,27 @@ After the tag publishes:
     and checks that canonical persistence introduces no root key the tag's
     schema rejects. Semantic round-trip tests cover the rendered values; this
     is not full previous-release schema validation or a downgrade guarantee.
+
+    The same commit also re-blesses the `.rpol` decision corpus, which pins
+    every `.rpol` file in the repository, so the new `hygiene.rpol` copy
+    fails `corpus_decisions_are_pinned` until its golden records it. The
+    corpus lists files with `git ls-files`, so stage the frozen fixture
+    directory first:
+
+    ```sh
+    git add "tests/fixtures/v1-stable/${tag}/"
+    RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
+    ```
+
+    A golden that is unchanged after blessing means the fixture was not
+    staged.
+
+    Review `crates/policy/src/rpol/decision_corpus.golden` before committing.
+    The diff must be exactly the header's program count rising by one, with
+    the case count unchanged, and one new alias line,
+    `tests/fixtures/v1-stable/<tag>/route-server/hygiene.rpol = examples/route-server/hygiene.rpol`.
+    Any other line is a real decision change, not a freeze artifact: do not
+    commit it as part of the freeze.
 
 14. **Refresh the copyable install and deploy examples.** In
     `docs/how-to/deployment.md`, move the pinned installer (`--tag vX.Y.Z`),
