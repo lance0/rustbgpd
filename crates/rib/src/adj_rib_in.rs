@@ -73,6 +73,51 @@ enum PathIndex<V> {
     Many(Box<BTreeMap<IndexedPathId, V>>),
 }
 
+// Keep only the active iterator: chained optional ranges inflate every
+// single-path selection iterator and force large copies in best-path selection.
+enum PathIndexIter<'a, V> {
+    One(Option<(u32, V)>),
+    Small(std::slice::Iter<'a, (IndexedPathId, V)>),
+    Many(std::collections::btree_map::Range<'a, IndexedPathId, V>),
+}
+
+impl<V: Copy> Iterator for PathIndexIter<'_, V> {
+    type Item = (u32, V);
+
+    #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::useless_conversion,
+            reason = "Tests substitute a comparison-counting key; production keys remain u32."
+        )
+    )]
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = match self {
+            Self::One(path) => path.take(),
+            Self::Small(paths) => paths.next().map(|&(id, value)| (id.into(), value)),
+            Self::Many(paths) => paths.next().map(|(&id, &value)| (id.into(), value)),
+        };
+        #[cfg(test)]
+        if next.is_some() {
+            tests::record_path_visit();
+        }
+        next
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::One(path) => {
+                let len = usize::from(path.is_some());
+                (len, Some(len))
+            }
+            Self::Small(paths) => paths.size_hint(),
+            Self::Many(paths) => paths.size_hint(),
+        }
+    }
+}
+
 #[cfg_attr(
     not(test),
     expect(
@@ -162,45 +207,32 @@ impl<V: Copy> PathIndex<V> {
         matches!(self, Self::Empty)
     }
 
-    fn iter(&self) -> impl Iterator<Item = (u32, V)> + '_ {
+    fn iter(&self) -> PathIndexIter<'_, V> {
         self.iter_after(None)
     }
 
-    fn iter_after(&self, after: Option<u32>) -> impl Iterator<Item = (u32, V)> + '_ {
+    fn iter_after(&self, after: Option<u32>) -> PathIndexIter<'_, V> {
         use std::ops::Bound::{Excluded, Unbounded};
-        let (one, small, many) = match self {
-            Self::Empty => (None, &[][..], None),
-            Self::One(id, value) => (
+        match self {
+            Self::Empty => PathIndexIter::One(None),
+            Self::One(id, value) => PathIndexIter::One(
                 after
                     .is_none_or(|after| *id > after)
                     .then_some((*id, *value)),
-                &[][..],
-                None,
             ),
             Self::Small(paths) => {
                 let start = after.map_or(0, |after| {
                     let after = IndexedPathId::from(after);
                     paths.partition_point(|(id, _)| *id <= after)
                 });
-                (None, &paths[start..], None)
+                PathIndexIter::Small(paths[start..].iter())
             }
             Self::Many(paths) => {
                 let start: std::ops::Bound<IndexedPathId> =
                     after.map_or(Unbounded, |id| Excluded(id.into()));
-                (None, &[][..], Some(paths.range((start, Unbounded))))
+                PathIndexIter::Many(paths.range((start, Unbounded)))
             }
-        };
-        one.into_iter()
-            .chain(small.iter().map(|&(id, value)| (id.into(), value)))
-            .chain(
-                many.into_iter()
-                    .flatten()
-                    .map(|(&id, &value)| (id.into(), value)),
-            )
-            .inspect(|_| {
-                #[cfg(test)]
-                tests::record_path_visit();
-            })
+        }
     }
 
     /// Release a retired entry. Inline and vector entries free in one step;
@@ -1141,8 +1173,8 @@ impl AdjRibIn {
         let routes = &self.routes;
         self.prefix_index
             .get(prefix)
-            .into_iter()
-            .flat_map(move |ids| ids.iter().filter_map(move |(_, handle)| routes.get(handle)))
+            .map_or(PathIndexIter::One(None), PathIndex::iter)
+            .filter_map(move |(_, handle)| routes.get(handle))
     }
 
     /// Mark all routes matching the given address family as stale
@@ -3812,6 +3844,33 @@ mod tests {
             assert_eq!(std::mem::size_of::<PathIndex<()>>(), 24);
             assert_eq!(std::mem::size_of::<SmallVec<[(u32, u32); 1]>>(), 24);
             assert_eq!(std::mem::size_of::<SmallVec<[u32; 1]>>(), 24);
+        }
+    }
+
+    #[test]
+    fn path_index_iteration_seeks_and_stays_exhausted_in_each_tier() {
+        for count in [0_u32, 1, 2, 16, 17, 4096] {
+            let mut paths = PathIndex::default();
+            for id in (0..count).rev() {
+                paths.insert(id * 2, id);
+            }
+            for after in [None, Some(0), Some(15), Some(32), Some(u32::MAX)] {
+                let expected: Vec<_> = (0..count)
+                    .filter(|id| after.is_none_or(|after| id * 2 > after))
+                    .map(|id| (id * 2, id))
+                    .collect();
+                let mut iter = paths.iter_after(after);
+                if count <= 16 {
+                    // Paging uses this lower bound to reserve once.
+                    assert_eq!(iter.size_hint(), (expected.len(), Some(expected.len())));
+                }
+                for path in expected {
+                    assert_eq!(iter.next(), Some(path));
+                }
+                assert_eq!(iter.next(), None);
+                assert_eq!(iter.next(), None);
+                assert_eq!(iter.size_hint().0, 0);
+            }
         }
     }
 

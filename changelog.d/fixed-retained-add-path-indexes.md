@@ -11,3 +11,4 @@
   changing retention or adding a cap.
 - Keep retirement checkpoints and covered-prefix validation continuation
   bounded when a prefix holds many Add-Path IDs.
+- Avoid excess iterator copying during single-path unicast best-path selection.
