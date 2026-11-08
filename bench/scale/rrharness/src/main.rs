@@ -289,7 +289,7 @@ async fn setup(n_clients: u32, n_sources: u32) -> Harness {
         harness
             .tx
             .send(RibUpdate::PeerUp {
-                peer: PeerId::from_ipv4(source_addr(index)),
+                peer: PeerId::from_addr(IpAddr::V4(source_addr(index))),
                 session_id: 0,
                 peer_asn: 64512,
                 peer_router_id: source_addr(index),
