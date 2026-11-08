@@ -1047,7 +1047,7 @@ pub struct TestOptions<'a> {
 
 // Bound file reads before allocation, then check the exact encoded request size.
 const TEST_POLICY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const TEST_POLICY_MAX_REJECTED_SAMPLES: u32 = 1000;
+const TEST_POLICY_MAX_SAMPLES: u32 = 1000;
 
 fn read_test_policy_file(path: &str, limit: usize) -> Result<String, CliError> {
     let file = std::fs::File::open(path)
@@ -1194,9 +1194,14 @@ pub async fn test(
 ) -> Result<(), CliError> {
     use prost::Message;
 
-    if opts.show_rejected > TEST_POLICY_MAX_REJECTED_SAMPLES {
+    if opts.show_changes > TEST_POLICY_MAX_SAMPLES {
         return Err(CliError::Argument(format!(
-            "--show-rejected exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+            "--show-changes exceeds {TEST_POLICY_MAX_SAMPLES}"
+        )));
+    }
+    if opts.show_rejected > TEST_POLICY_MAX_SAMPLES {
+        return Err(CliError::Argument(format!(
+            "--show-rejected exceeds {TEST_POLICY_MAX_SAMPLES}"
         )));
     }
     let (rpol_source, datasets) = read_candidate_inputs(opts.file, opts.datasets)?;
@@ -1377,9 +1382,9 @@ pub async fn compare(
 ) -> Result<(), CliError> {
     use prost::Message;
 
-    if opts.max_samples > TEST_POLICY_MAX_REJECTED_SAMPLES {
+    if opts.max_samples > TEST_POLICY_MAX_SAMPLES {
         return Err(CliError::Argument(format!(
-            "--max-samples exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+            "--max-samples exceeds {TEST_POLICY_MAX_SAMPLES}"
         )));
     }
     if opts.replace.is_some() && opts.policies.len() != 1 {

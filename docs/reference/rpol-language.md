@@ -2367,7 +2367,13 @@ Changes (up to 2):
   is IPv4/IPv6 unicast routes (other families are not walked).
 - `--limit N` caps how many routes are evaluated (`N` ≥ 1; `--limit 0` is
   a usage error); `--all`, the default, evaluates every route.
-  `--show-changes N` caps the before/after attribute diff samples.
+  `--show-changes N` caps the before/after attribute diff samples
+  (`N` ≤ 1000).
+- The daemon runs at most two `policy test` and `policy compare` requests at
+  once per API listener and refuses more with `RESOURCE_EXHAUSTED`. A walk
+  that runs longer than 60 s stops with `DEADLINE_EXCEEDED` and reports how
+  many routes it evaluated; narrow it with `--limit`, `--neighbor` or
+  `--family`.
 - `--dataset NAME=PATH` supplies the contents of a candidate `.list` file
   for a dataset declared in the submitted source. Repeat it for each dataset
   the selected policy probes; a missing, duplicate, undeclared, or malformed
@@ -2432,7 +2438,8 @@ Attributes changed (showing 1 of 1):
   chains reach it through different terms.
 - Counts are exact over the walk; `--max-samples N` (up to 1000, default
   10) caps the routes listed per class, in canonical order. `--limit`,
-  `--all`, `--family` and `--dataset` work as for `policy test`.
+  `--all`, `--family` and `--dataset` work as for `policy test`, and the
+  two commands share its concurrency limit and 60 s walk deadline.
 - Only policy chains are compared. Native egress steps (split horizon, iBGP
   and route-reflector rules, RS control communities, OTC, NO_EXPORT, ORF,
   family negotiation) apply to neither side, so a count can include routes

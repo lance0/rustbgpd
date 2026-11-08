@@ -992,7 +992,9 @@ enum PolicyAction {
     /// The file compiles server-side and evaluates read-only over a
     /// route snapshot — counts, per-term hit counters, and
     /// before/after attribute diffs. No route state or session is
-    /// touched. Exit codes: 0 ran, 1 compile diagnostics.
+    /// touched. The daemon stops a walk after 60 s; narrow a large one with
+    /// --limit, --neighbor or --family. Exit codes: 0 ran, 1 compile
+    /// diagnostics.
     Test {
         /// Path to the `.rpol` file
         #[arg(value_hint = clap::ValueHint::FilePath)]
@@ -1021,13 +1023,14 @@ enum PolicyAction {
         /// Evaluate every route in the snapshot (the default)
         #[arg(long, conflicts_with = "limit")]
         all: bool,
-        /// Maximum before/after attribute diffs to show
+        /// Maximum before/after attribute diffs to show (up to 1000)
         #[arg(long, default_value_t = 10)]
         show_changes: u32,
         /// Candidate dataset binding NAME=PATH (repeat for each declared dataset)
         #[arg(long = "dataset")]
         datasets: Vec<String>,
         /// Maximum currently carried routes rejected by the candidate to show
+        /// (up to 1000)
         #[arg(long, default_value_t = 0)]
         show_rejected: u32,
     },
@@ -1038,8 +1041,8 @@ enum PolicyAction {
     /// change: newly rejected, newly accepted, and accepted with different
     /// attributes. Policy chains only: native egress steps (split
     /// horizon, iBGP/RR rules, RS control communities, OTC, NO_EXPORT)
-    /// apply to neither side. Read-only. Exit codes: 0 ran, 1 compile
-    /// diagnostics.
+    /// apply to neither side. Read-only. The daemon stops a walk after
+    /// 60 s, as for `policy test`. Exit codes: 0 ran, 1 compile diagnostics.
     Compare {
         /// Path to the candidate `.rpol` file
         #[arg(value_hint = clap::ValueHint::FilePath)]

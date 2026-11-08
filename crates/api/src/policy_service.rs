@@ -55,7 +55,7 @@ const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONDITIONAL_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 // Match tonic's default decoded-message limit without narrowing valid requests.
 const TEST_POLICY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const TEST_POLICY_MAX_REJECTED_SAMPLES: u32 = 1000;
+const TEST_POLICY_MAX_SAMPLES: u32 = 1000;
 /// Whole-chain `ComparePolicy` candidates name at most this many members.
 const COMPARE_POLICY_MAX_MEMBERS: usize = 64;
 
@@ -390,30 +390,51 @@ pub struct PolicyService {
     /// The daemon's `[global] asn` (restart-only), which config resolution
     /// stamps into `.rpol` chain members for `prepend as self`.
     local_asn: Option<u32>,
-    /// `TestPolicy` / `ComparePolicy` candidate compiles in flight on the
-    /// blocking pool ([`POLICY_COMPILE_SLOTS`]).
-    compile_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Test-only hold on the blocking compile, to order observations
-    /// against it.
+    /// `TestPolicy` / `ComparePolicy` dry runs in flight, from compile
+    /// through the last evaluated page ([`POLICY_DRY_RUN_SLOTS`]).
+    dry_run_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Wall-clock bound on one dry run's route walk
+    /// ([`POLICY_DRY_RUN_DEADLINE`]; tests shorten it).
+    dry_run_deadline: Duration,
+    /// Test-only holds on the blocking compile and on each blocking page
+    /// evaluation, to order observations against them.
     #[cfg(test)]
-    compile_gate: Option<std::sync::Arc<CompileGate>>,
+    compile_gate: Option<std::sync::Arc<BlockingGate>>,
+    #[cfg(test)]
+    page_gate: Option<std::sync::Arc<BlockingGate>>,
 }
 
-/// Holds a candidate compile on its blocking thread until released, after
-/// announcing that it started. The hold ends after 10 s whatever happens,
-/// so a compile that runs on an async worker cannot hang a failing test.
+/// Holds blocking work on its thread until released, after announcing that
+/// it started. The hold ends after 10 s whatever happens, so work that runs
+/// on an async worker cannot hang a failing test.
 #[cfg(test)]
-struct CompileGate {
-    started: tokio::sync::Notify,
+struct BlockingGate {
+    /// One permit per hold that has started.
+    started: tokio::sync::Semaphore,
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    /// Whether the hold ran out instead of being released.
+    /// Whether a hold ran out instead of being released.
     timed_out: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
-impl CompileGate {
+impl BlockingGate {
+    fn new() -> (std::sync::Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (release, held) = std::sync::mpsc::channel();
+        let gate = Self {
+            started: tokio::sync::Semaphore::new(0),
+            release: std::sync::Mutex::new(held),
+            timed_out: std::sync::atomic::AtomicBool::new(false),
+        };
+        (std::sync::Arc::new(gate), release)
+    }
+
+    /// Wait until `holds` more holds have started.
+    async fn started(&self, holds: u32) {
+        self.started.acquire_many(holds).await.unwrap().forget();
+    }
+
     fn hold(&self) {
-        self.started.notify_one();
+        self.started.add_permits(1);
         let released = self
             .release
             .lock()
@@ -426,13 +447,27 @@ impl CompileGate {
     }
 }
 
-/// Candidate compiles one service runs at once. A request past this is
-/// refused, not queued, so a burst cannot exhaust the blocking pool.
-const POLICY_COMPILE_SLOTS: usize = 2;
+/// Dry runs (`TestPolicy` / `ComparePolicy`) one service runs at once. A
+/// request holds its slot from compile through evaluation; a request past
+/// this is refused, not queued, so a burst cannot exhaust the blocking pool.
+const POLICY_DRY_RUN_SLOTS: usize = 2;
 
 /// Wall-clock bound on one candidate compile and diagnostic render. A
 /// compile that misses it keeps its slot until it finishes.
 const POLICY_COMPILE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Wall-clock bound on one dry run's route walk, after the compile. A
+/// route-server import policy evaluates a 1M-route table in well under a
+/// second of evaluation time in a release build, so this leaves room for
+/// heavier legitimate policies and the RIB page reads while bounding a
+/// near-budget candidate (about 1.5 ms per route) to a few tens of
+/// thousands of routes.
+const POLICY_DRY_RUN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// One dry run's admission slot. The request holds one reference and each
+/// blocking compile or page it starts holds another, so the slot frees only
+/// once the RPC has ended and its last blocking task has returned.
+type DryRunSlot = std::sync::Arc<tokio::sync::OwnedSemaphorePermit>;
 
 impl PolicyService {
     /// Create a new policy service with the given channels and a private
@@ -478,10 +513,25 @@ impl PolicyService {
             settlement: None,
             owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
             local_asn: None,
-            compile_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(POLICY_COMPILE_SLOTS)),
+            dry_run_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(POLICY_DRY_RUN_SLOTS)),
+            dry_run_deadline: POLICY_DRY_RUN_DEADLINE,
             #[cfg(test)]
             compile_gate: None,
+            #[cfg(test)]
+            page_gate: None,
         }
+    }
+
+    /// Admit one dry run, or refuse it when every slot is taken.
+    fn admit_dry_run(&self) -> Result<DryRunSlot, Status> {
+        std::sync::Arc::clone(&self.dry_run_slots)
+            .try_acquire_owned()
+            .map(std::sync::Arc::new)
+            .map_err(|_| {
+                Status::resource_exhausted(format!(
+                    "{POLICY_DRY_RUN_SLOTS} policy dry runs are already running; retry"
+                ))
+            })
     }
 
     /// Run a candidate compile, and the render of its diagnostics, on the
@@ -489,19 +539,14 @@ impl PolicyService {
     /// error-dense source never holds an async worker.
     async fn compile_off_worker<T: Send + 'static>(
         &self,
+        slot: &DryRunSlot,
         compile: impl FnOnce() -> Result<T, Status> + Send + 'static,
     ) -> Result<T, Status> {
-        let permit = std::sync::Arc::clone(&self.compile_slots)
-            .try_acquire_owned()
-            .map_err(|_| {
-                Status::resource_exhausted(format!(
-                    "{POLICY_COMPILE_SLOTS} policy candidate compiles are already running; retry"
-                ))
-            })?;
+        let slot = std::sync::Arc::clone(slot);
         #[cfg(test)]
         let gate = self.compile_gate.clone();
         let compile = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _slot = slot;
             #[cfg(test)]
             if let Some(gate) = gate {
                 gate.hold();
@@ -517,6 +562,93 @@ impl PolicyService {
                 "policy candidate compile exceeded {} s",
                 POLICY_COMPILE_DEADLINE.as_secs()
             ))),
+        }
+    }
+
+    /// Walk a dry run's version-fenced route pages from `page`, evaluating
+    /// each on the blocking pool so no async worker runs policy code, until
+    /// `limit` routes (0 = the whole walk) or the last page. `evaluate`
+    /// returns the running count of evaluated routes; it and `state` move
+    /// into each page's blocking task and back out.
+    ///
+    /// The walk ends with `DEADLINE_EXCEEDED` once it outlasts
+    /// [`Self::dry_run_deadline`]. A dropped request or an expired deadline
+    /// cannot stop a page already running on the blocking pool, so one page
+    /// ([`TEST_POLICY_PAGE_SIZE`] routes) is the bound on work after either.
+    /// That page keeps its reference to `slot` until it returns, and its
+    /// result is discarded.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one walk shared by TestPolicy and ComparePolicy; each argument is per request"
+    )]
+    async fn walk_dry_run_pages<S, F>(
+        &self,
+        slot: &DryRunSlot,
+        rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+        query_scope: rustbgpd_rib::RouteQueryScope,
+        row_scope: Option<&PeerKey>,
+        mut page: rustbgpd_rib::RoutePage,
+        limit: u32,
+        state: S,
+        evaluate: F,
+    ) -> Result<S, Status>
+    where
+        S: Send + 'static,
+        F: FnMut(&rustbgpd_rib::RoutePage, &mut S) -> u64 + Send + 'static,
+    {
+        let deadline = tokio::time::Instant::now() + self.dry_run_deadline;
+        let snapshot_version = page.version;
+        let mut evaluated = 0;
+        let mut job = (state, evaluate);
+        let expired = |evaluated: u64| {
+            Status::deadline_exceeded(format!(
+                "policy dry run exceeded {} s after evaluating {evaluated} routes; \
+                 set a limit or a family or peer filter",
+                self.dry_run_deadline.as_secs()
+            ))
+        };
+        loop {
+            let page_slot = std::sync::Arc::clone(slot);
+            #[cfg(test)]
+            let gate = self.page_gate.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                let _slot = page_slot;
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    gate.hold();
+                }
+                let (mut state, mut evaluate) = job;
+                let evaluated = evaluate(&page, &mut state);
+                let next = page.has_more.then(|| {
+                    page.routes
+                        .last()
+                        .map(|route| rustbgpd_rib::route_query_key_in(route, &page.peer_scope))
+                });
+                ((state, evaluate), evaluated, next)
+            });
+            let (returned, total, next) = match tokio::time::timeout_at(deadline, task).await {
+                Ok(Ok(done)) => done,
+                Ok(Err(error)) => {
+                    return Err(Status::internal(format!(
+                        "policy dry-run evaluation failed: {error}"
+                    )));
+                }
+                Err(_) => return Err(expired(evaluated)),
+            };
+            (job, evaluated) = (returned, total);
+            let Some(after) = next.filter(|_| limit == 0 || evaluated < u64::from(limit)) else {
+                return Ok(job.0);
+            };
+            let after = after.ok_or_else(|| {
+                Status::unavailable("route pagination returned an empty continuation page")
+            })?;
+            page = tokio::time::timeout_at(
+                deadline,
+                query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version)),
+            )
+            .await
+            .map_err(|_| expired(evaluated))??;
+            require_row_scope(row_scope, &page.routes)?;
         }
     }
 
@@ -1495,7 +1627,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::{RouteQueryScope, route_query_key_in};
+        use rustbgpd_rib::RouteQueryScope;
 
         let mut req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
@@ -1503,9 +1635,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 "TestPolicy candidate input exceeds the request size limit",
             ));
         }
-        if req.show_rejected > TEST_POLICY_MAX_REJECTED_SAMPLES {
+        if req.show_changes > TEST_POLICY_MAX_SAMPLES {
             return Err(Status::invalid_argument(format!(
-                "show_rejected exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+                "show_changes exceeds {TEST_POLICY_MAX_SAMPLES}"
+            )));
+        }
+        if req.show_rejected > TEST_POLICY_MAX_SAMPLES {
+            return Err(Status::invalid_argument(format!(
+                "show_rejected exceeds {TEST_POLICY_MAX_SAMPLES}"
             )));
         }
         if req.datasets.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
@@ -1539,12 +1676,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
 
         // Compile the candidate source server-side, off the async workers.
         // Diagnostics are a successful RPC with compiled=false — the dry
-        // run's answer.
+        // run's answer. The slot covers the compile and the whole walk.
+        let slot = self.admit_dry_run()?;
         let source = std::mem::take(&mut req.rpol_source);
         let datasets = std::mem::take(&mut req.datasets);
         let policy = req.policy.clone();
         let compiled = self
-            .compile_off_worker(move || {
+            .compile_off_worker(&slot, move || {
                 let file = match RpolFile::parse(&source) {
                     Ok(file) => file,
                     Err(diagnostics) => {
@@ -1588,9 +1726,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             RouteQueryScope::Best
         };
         let row_scope = if import { peer_key.as_ref() } else { None };
-        let mut page = query_test_policy_page(rib_tx, query_scope, None, None).await?;
+        let page = query_test_policy_page(rib_tx, query_scope, None, None).await?;
         require_row_scope(row_scope, &page.routes)?;
-        let snapshot_version = page.version;
 
         // Peer context (ASN / peer-group) so guards on peer.* fields
         // see real values.
@@ -1609,36 +1746,28 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             show_changes: req.show_changes as usize,
             show_rejected: req.show_rejected as usize,
         };
-        let mut hits = chain.zero_term_hits();
-        let mut response = proto::TestPolicyResponse {
+        let chain = std::sync::Arc::new(chain);
+        let hits = chain.zero_term_hits();
+        let response = proto::TestPolicyResponse {
             compiled: true,
             ..Default::default()
         };
-        loop {
-            run_test_policy_page(
-                &chain,
-                &page,
-                &scope,
-                &peer_context,
-                &mut response,
-                &mut hits,
-            );
-            if (scope.limit != 0 && response.routes_evaluated >= req.limit.into()) || !page.has_more
-            {
-                break;
-            }
-            let after = page
-                .routes
-                .last()
-                .map(|route| route_query_key_in(route, &page.peer_scope))
-                .ok_or_else(|| {
-                    Status::unavailable("route pagination returned an empty continuation page")
-                })?;
-            drop(page);
-            page = query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version))
-                .await?;
-            require_row_scope(row_scope, &page.routes)?;
-        }
+        let walk_chain = std::sync::Arc::clone(&chain);
+        let (mut response, hits) = self
+            .walk_dry_run_pages(
+                &slot,
+                rib_tx,
+                query_scope,
+                row_scope,
+                page,
+                req.limit,
+                (response, hits),
+                move |page, (response, hits)| {
+                    run_test_policy_page(&walk_chain, page, &scope, &peer_context, response, hits);
+                    response.routes_evaluated
+                },
+            )
+            .await?;
         response.term_hits = render_test_policy_term_hits(&chain, &hits);
         Ok(Response::new(response))
     }
@@ -1654,7 +1783,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key_in};
+        use rustbgpd_rib::{RibUpdate, RouteQueryScope};
 
         let mut req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
@@ -1662,9 +1791,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 "ComparePolicy candidate input exceeds the request size limit",
             ));
         }
-        if req.max_samples > TEST_POLICY_MAX_REJECTED_SAMPLES {
+        if req.max_samples > TEST_POLICY_MAX_SAMPLES {
             return Err(Status::invalid_argument(format!(
-                "max_samples exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+                "max_samples exceeds {TEST_POLICY_MAX_SAMPLES}"
             )));
         }
         if req.datasets.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
@@ -1702,12 +1831,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             target_key.interface.as_deref(),
         );
 
-        // Compile off the async workers, as TestPolicy does.
+        // Compile off the async workers, as TestPolicy does, under one slot
+        // for the compile and the whole walk.
+        let slot = self.admit_dry_run()?;
         let source = std::mem::take(&mut req.rpol_source);
         let datasets = std::mem::take(&mut req.datasets);
         let policies = req.policies.clone();
         let compiled = self
-            .compile_off_worker(move || {
+            .compile_off_worker(&slot, move || {
                 let file = match RpolFile::parse(&source) {
                     Ok(file) => file,
                     Err(diagnostics) => {
@@ -1845,8 +1976,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             candidate: pins.frame(&candidate),
         };
 
-        let mut page = query_test_policy_page(rib_tx, RouteQueryScope::Best, None, None).await?;
-        let snapshot_version = page.version;
+        let page = query_test_policy_page(rib_tx, RouteQueryScope::Best, None, None).await?;
         let peer_context = dry_run_peer_context(
             &self.peer_mgr_tx,
             self.operator_tx.as_ref(),
@@ -1860,42 +1990,35 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             limit: req.limit as usize,
             max_samples: req.max_samples as usize,
         };
-        let mut response = proto::ComparePolicyResponse {
+        let response = proto::ComparePolicyResponse {
             compiled: true,
             installed_chain: chain_member_names(&installed),
             candidate_chain: chain_member_names(&candidate),
             ..Default::default()
         };
-        loop {
-            run_compare_policy_page(
-                &installed,
-                &candidate,
-                &frames,
-                &page,
-                &scope,
-                &peer_context,
-                &mut response,
-            );
-            if (scope.limit != 0 && response.routes_evaluated >= req.limit.into()) || !page.has_more
-            {
-                break;
-            }
-            let after = page
-                .routes
-                .last()
-                .map(|route| route_query_key_in(route, &page.peer_scope))
-                .ok_or_else(|| {
-                    Status::unavailable("route pagination returned an empty continuation page")
-                })?;
-            drop(page);
-            page = query_test_policy_page(
+        let response = self
+            .walk_dry_run_pages(
+                &slot,
                 rib_tx,
                 RouteQueryScope::Best,
-                Some(after),
-                Some(snapshot_version),
+                None,
+                page,
+                req.limit,
+                response,
+                move |page, response| {
+                    run_compare_policy_page(
+                        &installed,
+                        &candidate,
+                        &frames,
+                        page,
+                        &scope,
+                        &peer_context,
+                        response,
+                    );
+                    response.routes_evaluated
+                },
             )
             .await?;
-        }
         Ok(Response::new(response))
     }
 
@@ -4729,10 +4852,8 @@ policy customer-in(peer_lp: u32) {
     /// single-threaded runtime, `GetHealth` answers while the compile is
     /// held in flight on its blocking thread. The gate orders the
     /// observation; nothing depends on how long the compile takes.
-    #[tokio::test]
-    async fn health_answers_while_a_large_test_policy_compiles() {
-        use crate::proto::control_service_server::ControlService as _;
-
+    /// A control service whose peer manager and RIB answer `GetHealth`.
+    fn health_service() -> crate::control_service::ControlService {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (rib_tx, mut rib_rx) = mpsc::channel(4);
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
@@ -4759,13 +4880,15 @@ policy customer-in(peer_lp: u32) {
                 }
             }
         });
+        health
+    }
 
-        let (release, held) = std::sync::mpsc::channel();
-        let gate = std::sync::Arc::new(CompileGate {
-            started: tokio::sync::Notify::new(),
-            release: std::sync::Mutex::new(held),
-            timed_out: std::sync::atomic::AtomicBool::new(false),
-        });
+    #[tokio::test]
+    async fn health_answers_while_a_large_test_policy_compiles() {
+        use crate::proto::control_service_server::ControlService as _;
+
+        let health = health_service();
+        let (gate, release) = BlockingGate::new();
         let mut svc = test_policy_service(Vec::new());
         svc.compile_gate = Some(std::sync::Arc::clone(&gate));
         let dry_run = tokio::spawn(async move {
@@ -4780,7 +4903,7 @@ policy customer-in(peer_lp: u32) {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(20), gate.started.notified())
+        tokio::time::timeout(Duration::from_secs(20), gate.started(1))
             .await
             .expect("the compile starts");
         let health = tokio::time::timeout(
@@ -4814,9 +4937,9 @@ policy customer-in(peer_lp: u32) {
     #[tokio::test]
     async fn test_policy_refuses_compiles_past_the_slot_count() {
         let svc = test_policy_service(Vec::new());
-        let held: Vec<_> = (0..POLICY_COMPILE_SLOTS)
+        let held: Vec<_> = (0..POLICY_DRY_RUN_SLOTS)
             .map(|_| {
-                std::sync::Arc::clone(&svc.compile_slots)
+                std::sync::Arc::clone(&svc.dry_run_slots)
                     .try_acquire_owned()
                     .unwrap()
             })
@@ -4834,6 +4957,220 @@ policy customer-in(peer_lp: u32) {
         .unwrap_err();
         assert_eq!(status.code(), tonic::Code::ResourceExhausted);
         drop(held);
+    }
+
+    fn customer_routes(count: u32) -> Vec<rustbgpd_rib::Route> {
+        (0..count).map(customer_route).collect()
+    }
+
+    fn customer_dry_run() -> proto::TestPolicyRequest {
+        proto::TestPolicyRequest {
+            rpol_source: TEST_RPOL.to_string(),
+            policy: "customer-in(200)".to_string(),
+            direction: "import".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Route evaluation runs off the async workers: on this single-threaded
+    /// runtime, `GetHealth` answers while a page of a multi-page walk is
+    /// held in evaluation on its blocking thread. The hold stands in for a
+    /// near-budget candidate's page, whatever it costs.
+    #[tokio::test]
+    async fn health_answers_while_a_test_policy_walk_evaluates() {
+        use crate::proto::control_service_server::ControlService as _;
+
+        let health = health_service();
+        let (gate, release) = BlockingGate::new();
+        let mut svc = test_policy_service(customer_routes(2500));
+        svc.page_gate = Some(std::sync::Arc::clone(&gate));
+        let dry_run = tokio::spawn(async move {
+            PolicyServiceRpc::test_policy(&svc, Request::new(customer_dry_run())).await
+        });
+        tokio::time::timeout(Duration::from_secs(20), gate.started(1))
+            .await
+            .expect("the first page starts evaluating");
+        let health = tokio::time::timeout(
+            Duration::from_secs(5),
+            health.get_health(Request::new(proto::HealthRequest {})),
+        )
+        .await
+        .expect("health answers while the page is held")
+        .expect("health answers");
+        assert!(health.into_inner().healthy);
+        assert!(
+            !gate.timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "health must answer before the held page is released"
+        );
+        for _ in 0..3 {
+            release.send(()).unwrap();
+        }
+        let response = tokio::time::timeout(Duration::from_secs(60), dry_run)
+            .await
+            .expect("the dry run finishes")
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.routes_evaluated, 2500);
+    }
+
+    /// One slot covers a dry run from compile through its last page, and
+    /// both RPCs share the slots: a request past the slot count is refused
+    /// while the walks run, and the slots free when the walks complete and
+    /// when a cancelled request's running page returns.
+    #[tokio::test]
+    async fn dry_runs_hold_their_slot_through_evaluation() {
+        // Every walk reads one unversioned page, so concurrent walks can
+        // share a stateless RIB.
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(Vec::new());
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(rustbgpd_rib::RibUpdate::QueryRoutesPage { reply, .. }) =
+                rib_rx.recv().await
+            {
+                let _ = reply.send(Ok(rustbgpd_rib::RoutePage {
+                    routes: customer_routes(3),
+                    total: 3,
+                    ..Default::default()
+                }));
+            }
+        });
+        let (gate, release) = BlockingGate::new();
+        let mut svc =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        svc.page_gate = Some(std::sync::Arc::clone(&gate));
+        let svc = std::sync::Arc::new(svc);
+        let start = || {
+            let svc = std::sync::Arc::clone(&svc);
+            tokio::spawn(async move {
+                PolicyServiceRpc::test_policy(&*svc, Request::new(customer_dry_run())).await
+            })
+        };
+        let running: Vec<_> = (0..POLICY_DRY_RUN_SLOTS).map(|_| start()).collect();
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            gate.started(u32::try_from(POLICY_DRY_RUN_SLOTS).unwrap()),
+        )
+        .await
+        .expect("every admitted walk is evaluating");
+        let refused = PolicyServiceRpc::test_policy(&*svc, Request::new(customer_dry_run()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::ResourceExhausted, "{refused}");
+        let refused = PolicyServiceRpc::compare_policy(
+            &*svc,
+            Request::new(compare_request(COMPARE_INSTALLED_RPOL, &["client-x"], "")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::ResourceExhausted, "{refused}");
+
+        // Completion frees the slots.
+        for _ in 0..POLICY_DRY_RUN_SLOTS {
+            release.send(()).unwrap();
+        }
+        for walk in running {
+            assert_eq!(
+                walk.await.unwrap().unwrap().into_inner().routes_evaluated,
+                3
+            );
+        }
+        release.send(()).unwrap();
+        let admitted = PolicyServiceRpc::test_policy(&*svc, Request::new(customer_dry_run()))
+            .await
+            .expect("a slot is free after the walks complete");
+        assert_eq!(admitted.into_inner().routes_evaluated, 3);
+        gate.started(1).await;
+
+        // A cancelled request keeps its slot until its running page returns.
+        let cancelled = start();
+        tokio::time::timeout(Duration::from_secs(20), gate.started(1))
+            .await
+            .expect("the walk is evaluating");
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            svc.dry_run_slots.available_permits(),
+            POLICY_DRY_RUN_SLOTS - 1
+        );
+        release.send(()).unwrap();
+        let all = tokio::time::timeout(
+            Duration::from_secs(20),
+            svc.dry_run_slots
+                .acquire_many(u32::try_from(POLICY_DRY_RUN_SLOTS).unwrap()),
+        )
+        .await
+        .expect("the cancelled walk's slot frees when its page returns");
+        drop(all);
+        assert!(!gate.timed_out.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A walk that outlasts its deadline ends with `DEADLINE_EXCEEDED`,
+    /// saying how far it got; the page still running keeps the slot until
+    /// it returns, and its result is discarded.
+    #[tokio::test]
+    async fn test_policy_walk_stops_at_its_deadline() {
+        let (gate, release) = BlockingGate::new();
+        let mut svc = test_policy_service(customer_routes(1500));
+        svc.page_gate = Some(std::sync::Arc::clone(&gate));
+        svc.dry_run_deadline = Duration::from_secs(2);
+        // The first page evaluates; the second is held past the deadline.
+        release.send(()).unwrap();
+        let status = PolicyServiceRpc::test_policy(&svc, Request::new(customer_dry_run()))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status}");
+        assert!(
+            status.message().contains("after evaluating 1000 routes"),
+            "{status}"
+        );
+        assert_eq!(
+            svc.dry_run_slots.available_permits(),
+            POLICY_DRY_RUN_SLOTS - 1
+        );
+        release.send(()).unwrap();
+        let all = tokio::time::timeout(
+            Duration::from_secs(20),
+            svc.dry_run_slots
+                .acquire_many(u32::try_from(POLICY_DRY_RUN_SLOTS).unwrap()),
+        )
+        .await
+        .expect("the slot frees when the late page returns");
+        drop(all);
+        assert!(!gate.timed_out.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// `show_changes` is capped like the other sample counts.
+    #[tokio::test]
+    async fn test_policy_show_changes_is_capped_at_1000() {
+        let svc = test_policy_service(customer_routes(1001));
+        let response = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                show_changes: TEST_POLICY_MAX_SAMPLES,
+                ..customer_dry_run()
+            }),
+        )
+        .await
+        .expect("show_changes at the cap is admitted")
+        .into_inner();
+        assert_eq!((response.modified, response.diffs.len()), (1001, 1000));
+        let status = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                show_changes: TEST_POLICY_MAX_SAMPLES + 1,
+                ..customer_dry_run()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("show_changes"), "{status}");
     }
 
     #[tokio::test]
@@ -5063,7 +5400,7 @@ policy customer-in(peer_lp: u32) {
             ),
             (
                 proto::TestPolicyRequest {
-                    show_rejected: TEST_POLICY_MAX_REJECTED_SAMPLES + 1,
+                    show_rejected: TEST_POLICY_MAX_SAMPLES + 1,
                     ..test_policy_request()
                 },
                 "show_rejected",
@@ -5724,7 +6061,7 @@ policy client-x {
                 "client-x",
             ),
             proto::ComparePolicyRequest {
-                max_samples: TEST_POLICY_MAX_REJECTED_SAMPLES + 1,
+                max_samples: TEST_POLICY_MAX_SAMPLES + 1,
                 ..compare_request(COMPARE_INSTALLED_RPOL, &["client-x"], "")
             },
         ] {
