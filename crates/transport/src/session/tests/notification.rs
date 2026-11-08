@@ -2521,6 +2521,60 @@ fn policy_otc_warnings_are_bounded_per_connection() {
 }
 
 #[test]
+fn next_hop_ownership_reasons_keep_independent_schedules() {
+    let mut fixture = PeerWarningFixture::new();
+    let foreign = peer_warning_update(Some(PeerWarningCase::NextHopOwnership));
+    let mut reach =
+        empty_nonunicast_reach(Afi::Ipv6, Safi::Unicast, "2001:db8::2".parse().unwrap());
+    reach.link_local_next_hop = Some("fe80::2".parse().unwrap());
+    reach.announced.push(NlriEntry {
+        path_id: 0,
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+    });
+    let companion = nonunicast_update(
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ],
+        reach,
+        None,
+        false,
+    );
+    let ownership_reasons = |events: &[SessionLogFields]| -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter(|event| {
+                event.get("message").is_some_and(|text| {
+                    text.starts_with(PeerWarningCase::NextHopOwnership.message())
+                })
+            })
+            .map(|event| {
+                (
+                    event.get("reason").cloned().unwrap_or_default(),
+                    event.get("warning_updates").cloned().unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    // Four companion rejections put a shared schedule on count 5, which
+    // would not log; the first foreign next hop must log at its own count 1.
+    let flooded: Vec<_> = (0..4)
+        .map(|_| ownership_reasons(&fixture.receive(&companion)).len())
+        .collect();
+    assert_eq!(flooded, [1, 1, 0, 1]);
+    assert_eq!(
+        ownership_reasons(&fixture.receive(&foreign)),
+        [("foreign_next_hop".to_string(), "1".to_string())]
+    );
+    assert_eq!(
+        ownership_reasons(&fixture.receive(&companion)),
+        Vec::<(String, String)>::new()
+    );
+}
+
+#[test]
 fn peer_warning_classes_keep_independent_schedules() {
     let mut fixture = PeerWarningFixture::new();
     let malformed = with_attributes(&peer_warning_update(None), |attrs| attrs[3] = 9);

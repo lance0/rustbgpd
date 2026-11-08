@@ -23,19 +23,34 @@ use rustbgpd_wire::{AspaValidationContext, ErrorDisposition, ParsedUpdate};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// Independent schedules for peer-repeatable inbound warnings.
+/// Independent schedules for peer-repeatable inbound warnings. Each
+/// strict-peer next-hop ownership reason has its own schedule, so a flood
+/// of one reason cannot hide the first rejection for another.
 #[derive(Clone, Copy)]
 pub(super) enum InboundWarningClass {
     AttributeDiscard,
     MalformedWithdrawal,
     UnnegotiatedMpReach,
     ScopedIpv4Body,
-    NextHopOwnership,
+    ForeignNextHop,
+    UnverifiedLinkLocalCompanion,
+    UnscopedLinkLocal,
+    /// Must stay the last variant: `COUNT` derives from it.
     OtcPolicy,
 }
 
 impl InboundWarningClass {
-    pub(super) const COUNT: usize = 6;
+    pub(super) const COUNT: usize = Self::OtcPolicy as usize + 1;
+
+    fn next_hop_ownership(reason: NextHopOwnershipBlockReason) -> Self {
+        match reason {
+            NextHopOwnershipBlockReason::ForeignNextHop => Self::ForeignNextHop,
+            NextHopOwnershipBlockReason::UnverifiedLinkLocalCompanion => {
+                Self::UnverifiedLinkLocalCompanion
+            }
+            NextHopOwnershipBlockReason::UnscopedLinkLocal => Self::UnscopedLinkLocal,
+        }
+    }
 }
 
 /// Canonical `bgp_update_malformed_total` label for a wire-crate
@@ -2527,7 +2542,7 @@ impl PeerSession {
         };
         if let Some((reason, next_hop, link_local)) = next_hop_ownership_rejection {
             let (warn, warning_updates) =
-                self.inbound_warning_due(InboundWarningClass::NextHopOwnership);
+                self.inbound_warning_due(InboundWarningClass::next_hop_ownership(reason));
             if warn {
                 warn!(
                     peer = %self.peer_label,
