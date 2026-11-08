@@ -40,6 +40,8 @@ pub(super) fn peer_up(
 
 fn source_update(manager: &mut RibManager, announce: &[u8], withdraw: &[u8]) {
     let source = Ipv4Addr::new(192, 0, 2, 1);
+
+    register_test_peer(manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -864,6 +866,9 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
     receiver.try_recv().map(delivered).unwrap();
     let encoder = MockExactExportEncoder::accepting(1);
     manager.peer_export_encoders.insert(member, encoder.clone());
+    for source in [source_b, source_c] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
     let inject = |manager: &mut RibManager, source, preference| {
         manager.handle_update(RibUpdate::RoutesReceived {
             peer: peer_v4(source),
@@ -958,6 +963,8 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::OnlyToCustomer(64_496));
     });
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1107,6 +1114,7 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
     }
     manager.handle_update(registration);
     while receiver.try_recv().map(delivered).is_ok() {}
+    register_test_peer(&mut manager, peer_v4(source), 0);
     let expected: HashSet<_> = if vpn {
         let routes: Vec<_> = (1..=128)
             .map(|n| make_vpn_rib_route(source, n, 100, 100))
@@ -1263,6 +1271,8 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
         128
     );
     // These staged own-source rows must never enter the actual admitted OLD set.
+
+    register_test_peer(&mut manager, peer_v4(member), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(member),
         session_id: 0,
@@ -1354,6 +1364,7 @@ fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
     manager.handle_update(peer_up(second, second_tx, None));
     while first_rx.try_recv().map(delivered).is_ok() {}
     while second_rx.try_recv().map(delivered).is_ok() {}
+    register_test_peer(&mut manager, peer_v4(source), 0);
     let inject = |manager: &mut RibManager,
                   announce: std::ops::Range<u32>,
                   withdraw: std::ops::Range<u32>| {

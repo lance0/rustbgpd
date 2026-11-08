@@ -251,7 +251,7 @@ struct Harness {
     ticks_per_second: u64,
 }
 
-async fn setup(n_clients: u32) -> Harness {
+async fn setup(n_clients: u32, n_sources: u32) -> Harness {
     let ticks_per_second = clock_ticks_per_second().expect("failed to query sysconf(_SC_CLK_TCK)");
     let (tx, rx) = mpsc::channel::<RibUpdate>(1024);
     let (qtx, qrx) = mpsc::channel::<RibUpdate>(64);
@@ -284,7 +284,40 @@ async fn setup(n_clients: u32) -> Harness {
         mgr_tid,
         ticks_per_second,
     };
+    for index in 0..n_sources {
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        harness
+            .tx
+            .send(RibUpdate::PeerUp {
+                peer: PeerId::from_ipv4(source_addr(index)),
+                session_id: 0,
+                peer_asn: 64512,
+                peer_router_id: source_addr(index),
+                outbound_tx,
+                export_policy: None,
+                sendable_families: Vec::new(),
+                is_ebgp: false,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: Vec::new(),
+                add_path_send_max: 0,
+                negotiated_orf_recv: Vec::new(),
+                negotiated_llgr_families: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
     harness.add_clients(n_clients).await;
+    // The primary FIFO acknowledges registration before setup measurements end.
+    let (reply, response) = oneshot::channel();
+    harness
+        .tx
+        .send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap(), 0);
     harness
 }
 
@@ -627,7 +660,7 @@ fn main() {
                 let n_prefixes: u64 = args[3].parse().expect("n_prefixes must be a u64");
                 assert!(n_clients > 0, "n_clients must be greater than zero");
                 assert!(n_prefixes > 0, "n_prefixes must be greater than zero");
-                let mut h = setup(0).await;
+                let mut h = setup(0, INGRESS_FLOOD).await;
                 println!("# late-join clients={n_clients} prefixes={n_prefixes}");
                 println!(
                     "late_join_unicast_slot_bytes {}",
@@ -677,7 +710,7 @@ fn main() {
                 let n_prefixes: u64 = args[3].parse().unwrap();
                 let secs: u64 = args[4].parse().unwrap();
                 let out = args[5].clone();
-                let h = setup(n_clients).await;
+                let h = setup(n_clients, INGRESS_FLOOD).await;
                 println!("# flood clients={n_clients} prefixes={n_prefixes} secs={secs}");
                 println!("rss_established_mib {}", rss_mib());
 
@@ -727,7 +760,7 @@ fn main() {
                 let n_prefixes: u64 = args[4].parse().unwrap();
                 let secs: u64 = args[5].parse().unwrap();
                 let out = args[6].clone();
-                let h = setup(n_clients).await;
+                let h = setup(n_clients, n_cand).await;
                 println!(
                     "# churn clients={n_clients} candidates={n_cand} prefixes={n_prefixes} secs={secs}"
                 );
@@ -921,7 +954,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authoritative_encoder_allows_fail_closed_manager_to_stage_routes() {
-        let harness = setup(2).await;
+        let harness = setup(2, INGRESS_FLOOD).await;
         harness.inject_flood_block(0, 8).await;
         tokio::time::timeout(Duration::from_secs(5), harness.wait_staged(8))
             .await

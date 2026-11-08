@@ -12,6 +12,7 @@ async fn gr_marks_stale_and_demotes_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -52,7 +53,7 @@ async fn gr_marks_stale_and_demotes_routes() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(update.announce.len(), 1);
 
     // Source enters graceful restart
@@ -87,6 +88,8 @@ async fn gr_eor_clears_stale() {
     let dropped_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
     // Source sends two routes
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -173,6 +176,7 @@ async fn gr_consecutive_restart_deletes_stale_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -225,6 +229,8 @@ async fn gr_eor_sweep_scopes_to_family() {
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
     let mut v6_route = make_v6_route(v6_prefix, "2001:db8::1".parse().unwrap());
     set_peer(&mut v6_route, source);
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -284,6 +290,7 @@ async fn gr_timer_sweeps_stale_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -341,6 +348,8 @@ async fn gr_peer_up_defers_stale_to_eor() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -447,6 +456,8 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -538,6 +549,7 @@ async fn gr_peer_down_aborts_gr() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -599,6 +611,7 @@ async fn gr_withdraws_non_gr_family_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = PeerId::from_addr("10.0.0.1".parse().unwrap());
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -687,6 +700,7 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -747,6 +761,7 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -814,20 +829,15 @@ async fn llgr_eor_clears_llgr_stale() {
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let dropped_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
-    tx.send(RibUpdate::RoutesReceived {
-        session_id: 0,
-        peer: source,
-        announced: vec![
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
+
+    tx.send(super::lifecycle::test_routes_received(
+        source,
+        vec![
             make_route(kept_prefix, Ipv4Addr::new(10, 0, 0, 1)),
             make_route(dropped_prefix, Ipv4Addr::new(10, 0, 0, 1)),
         ],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    })
+    ))
     .await
     .unwrap();
 
@@ -1014,6 +1024,7 @@ async fn llgr_peer_down_aborts_llgr() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -1082,6 +1093,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -1275,6 +1287,7 @@ async fn llgr_expiry_sweep_drops_llgr_peer_config() {
 async fn gr_expiry_without_reestablish_releases_peer_state() {
     let (_tx, mut manager) = direct_manager(None);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1335,6 +1348,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
 async fn llgr_expiry_without_reestablish_releases_peer_state() {
     let (_tx, mut manager) = direct_manager(None);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1399,6 +1413,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
 async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
     let (_tx, mut manager) = direct_manager(None);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1743,6 +1758,7 @@ async fn llgr_mixed_stale_times_sweep_per_family() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1835,6 +1851,7 @@ async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let family = vec![(Afi::Ipv4, Safi::Unicast)];
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1903,6 +1920,8 @@ async fn llgr_reestablish_carries_llgr_stale_until_eor() {
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let family = vec![(Afi::Ipv4, Safi::Unicast)];
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -2041,6 +2060,7 @@ async fn llgr_reconnect_before_expiry_across_families() {
         .await
         .unwrap();
     };
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_all(tx.clone()).await;
 
     tx.send(gr_with_llgr(
@@ -2124,6 +2144,7 @@ async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
@@ -2139,7 +2160,7 @@ async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(first.evpn_announce.len(), 1);
 
     // Source enters GR covering EVPN (no LLGR).
@@ -2281,6 +2302,7 @@ async fn deferred_retention_peer(
     let (tx, mut manager) = direct_manager(None);
     let source = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(source);
+    manager.handle_update(registering_peer_up(peer, 0));
     let _old_rx = establish_peer(&mut manager, peer);
     let mut old_route = make_flowspec_route(source);
     old_route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
@@ -2433,6 +2455,8 @@ fn announce_dual_stack(manager: &mut RibManager, source: PeerId) {
         "2001:db8::1".parse().unwrap(),
     );
     set_peer(&mut v6, source);
+
+    register_test_peer(manager, source, 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -2547,6 +2571,7 @@ async fn llgr_only_peer_retains_routes_as_llgr_stale_until_llst_expiry() {
     announce_dual_stack(&mut manager, source);
     // A fresh alternative that loses to the source on router ID alone.
     let alternative = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    manager.handle_update(registering_peer_up(alternative, 0));
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: alternative,
@@ -3029,6 +3054,7 @@ async fn gr_eor_after_llgr_reconnect_resolves_mixed_paths() {
     let lost = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
     let fallback = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let announce = |manager: &mut RibManager, peer, announced| {
+        register_test_peer(manager, peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer,
@@ -3446,6 +3472,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         ))
     };
     let announce = |manager: &mut RibManager, source: Ipv4Addr, routes: Vec<Route>| {
+        register_test_peer(manager, peer_v4(source), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(source),
@@ -3823,6 +3850,7 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
     let mut manager = manager.with_summary_queries(summary_rx);
     let source = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(source);
+    manager.handle_update(registering_peer_up(peer, 0));
     let _out_rx = establish_peer(&mut manager, peer);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,

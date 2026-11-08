@@ -945,6 +945,7 @@ mod tests {
         flow.attributes = vec![path(65001)];
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), peer);
         cover.attributes = AttrSet::new(vec![path(65001)]);
+        crate::manager::tests::register_test_peer(&mut manager, flow.peer, 0);
         let mut rib = AdjRibIn::new(flow.peer);
         rib.insert(cover.clone());
         rib.insert_flowspec(flow.clone());
@@ -1100,6 +1101,7 @@ mod tests {
             (cover.peer, vec![cover.clone()], vec![]),
             (flow.peer, vec![], vec![flow.clone()]),
         ] {
+            crate::manager::tests::register_test_peer(&mut manager, peer, 0);
             manager.handle_update(RibUpdate::RoutesReceived {
                 peer,
                 session_id: 0,
@@ -1131,6 +1133,7 @@ mod tests {
         assert!(!rows[0].pending);
         assert_eq!(rows[0].route.received_at, flow.received_at);
 
+        crate::manager::tests::register_test_peer(&mut manager, cover.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             peer: cover.peer,
             session_id: 0,

@@ -107,6 +107,7 @@ fn external() -> PeerId {
 fn manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
     let (tx, rx) = mpsc::channel(4096);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, external(), 0);
     super::distribution_window::untimed_window(&mut manager);
     (tx, manager)
 }
@@ -845,6 +846,7 @@ fn deferred_unicast_local_replay(size: usize) -> Work {
             100,
             u8::try_from(index + 1).unwrap(),
         ));
+        register_test_peer(&mut manager, source, 0);
         manager.handle_update(routes_from(source, 0, index, ROUTES));
         drain_route_chunks(&mut manager);
         assert_eq!(manager.ribs[&source].len(), ROUTES);
@@ -1618,6 +1620,7 @@ fn incremental_policy_rejection_updates_work_is_linear() {
 }
 
 fn withdraw_policy_rejection(manager: &mut RibManager, index: usize) {
+    register_test_peer(manager, member(0), 1);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: member(0),
         session_id: 1,

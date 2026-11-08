@@ -20,6 +20,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
@@ -64,7 +65,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     .unwrap();
 
     // Drain the successful send so we can verify AdjRibOut
-    let update = out_rx.recv().await.unwrap();
+    let update = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(update.announce.len(), 1);
 
     // Verify AdjRibOut has the route
@@ -126,14 +127,14 @@ async fn channel_full_marks_dirty_and_resyncs() {
     );
 
     // Now drain the channel to allow resync
-    let _ = out_rx.recv().await.unwrap();
+    let _ = fixture_delivery(out_rx.recv()).await.unwrap();
 
     // Advance time to trigger the dirty-peer resync timer — no external
     // route mutation needed; the timer fires independently.
     tokio::time::advance(Duration::from_secs(2)).await;
 
     // Drain the resync update
-    let resync = out_rx.recv().await.unwrap();
+    let resync = fixture_delivery(out_rx.recv()).await.unwrap();
 
     // The resync should withdraw prefix1 (no longer in Loc-RIB). Prefix2
     // was already successfully enqueued before the channel filled, so it
@@ -176,6 +177,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -215,7 +217,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     })
     .await
     .unwrap();
-    let _ = out_rx.recv().await.unwrap(); // drain
+    let _ = fixture_delivery(out_rx.recv()).await.unwrap(); // drain
 
     // Withdraw prefix1 — channel is empty so this fills it
     tx.send(RibUpdate::RoutesReceived {
@@ -282,7 +284,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     let _ = reply_rx.await;
 
     // Drain the outbound channel to allow resync
-    let _ = out_rx.recv().await.unwrap();
+    let _ = fixture_delivery(out_rx.recv()).await.unwrap();
 
     // Advance 500ms — not enough for the 1s timer
     tokio::time::advance(Duration::from_millis(500)).await;
@@ -306,7 +308,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     tokio::time::advance(Duration::from_millis(600)).await;
 
     // The resync should fire despite the intervening queries.
-    let resync = out_rx.recv().await.unwrap();
+    let resync = fixture_delivery(out_rx.recv()).await.unwrap();
     assert!(
         !resync.announce.is_empty() || resync.unicast_withdrawals().next().is_some(),
         "resync should produce updates despite query churn"
@@ -328,6 +330,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -396,6 +399,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -449,13 +453,13 @@ async fn initial_dump_failure_resyncs_via_timer() {
     );
 
     // Drain the channel to make room for the resync
-    let _ = out_rx.recv().await.unwrap();
+    let _ = fixture_delivery(out_rx.recv()).await.unwrap();
 
     // Advance time to trigger the resync timer
     tokio::time::advance(Duration::from_secs(2)).await;
 
     // The resync should deliver the initial table
-    let resync = out_rx.recv().await.unwrap();
+    let resync = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(
         resync.announce.len(),
         1,
@@ -1990,6 +1994,7 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
     assert_ne!(eor.end_of_rib.len(), 0);
 
     // A third peer's route lands in the table (feeds the eventual dump).
+    register_test_peer(&mut manager, third, 0);
     manager.handle_update(test_routes_received(
         third,
         vec![make_route(third_prefix, Ipv4Addr::new(10, 0, 0, 3))],
@@ -2363,6 +2368,7 @@ async fn cohort_skips_unregistered_member(member: UnregisteredMember) {
         manager.handle_update(test_peer_up(peer, session_id, outbound_tx));
         receivers.push(outbound_rx);
     }
+    register_test_peer(&mut manager, source, 0);
     manager.handle_update(test_routes_received(
         source,
         vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 9))],
@@ -2506,6 +2512,7 @@ async fn dataset_reevaluation_skips_member_with_deferred_registration() {
         registered_tx,
         chain.clone(),
     ));
+    register_test_peer(&mut manager, source, 0);
     manager.handle_update(test_routes_received(
         source,
         vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 9))],
@@ -2562,6 +2569,7 @@ async fn dataset_reevaluation_of_only_unregistered_targets_scans_nothing() {
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 9));
     let (registered_tx, _registered_rx) = mpsc::channel(64);
     manager.handle_update(test_peer_up(registered, 1, registered_tx));
+    register_test_peer(&mut manager, source, 0);
     manager.handle_update(test_routes_received(
         source,
         vec![make_route(
@@ -2634,6 +2642,7 @@ async fn all_deferred_cohort_releases_prepared_destination() {
         manager.handle_update(test_peer_up(peer, session_id, outbound_tx));
         first_sessions.push(outbound_rx);
     }
+    register_test_peer(&mut manager, source, 0);
     manager.handle_update(test_routes_received(
         source,
         vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 9))],

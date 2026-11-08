@@ -178,10 +178,14 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     let source = peer_v4(Ipv4Addr::new(198, 51, 100, 40));
     let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 40), vec![65010]);
 
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![plain.clone()]).await;
     let _ = query_best_routes(&tx).await;
     for out_rx in [&mut a_rx, &mut b_rx, &mut t_rx] {
-        let update = out_rx.try_recv().expect("plain route announced");
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update timed out")
+            .expect("plain route announced");
         assert_eq!(update.announce.len(), 1);
     }
 
@@ -193,8 +197,9 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     let _ = query_best_routes(&tx).await;
 
     // A: withdrawn, explained by the rs_control rung.
-    let update = a_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), a_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("tagged replacement must withdraw from the steered-away client");
     assert!(update.announce.is_empty());
     assert_eq!(
@@ -214,7 +219,10 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     );
 
     // B: announced with the control community scrubbed, unrelated kept.
-    let update = b_rx.try_recv().expect("other client keeps receiving");
+    let update = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("other client keeps receiving");
     assert_eq!(update.announce.len(), 1);
     let advertised = &update.announce[0];
     assert_eq!(advertised.communities(), [unrelated]);
@@ -224,8 +232,9 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     );
 
     // Transparent session: control community delivered untouched.
-    let update = t_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), t_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("transparent session keeps receiving");
     assert_eq!(update.announce.len(), 1);
     let advertised = &update.announce[0];
@@ -278,12 +287,16 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
         vec![unrelated],
         vec![large(0, 65001)], // do not announce to 65001
     );
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![plain, steered]).await;
     let _ = query_best_routes(&tx).await;
 
     // A (the steered-away target): only the untagged route, no
     // withdraw residue for a route it never held.
-    let update = a_rx.try_recv().expect("shared route still announced");
+    let update = tokio::time::timeout(Duration::from_secs(5), a_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("shared route still announced");
     assert_eq!(
         update
             .announce
@@ -295,7 +308,10 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
     assert_eq!(update.unicast_withdrawals().count(), 0);
 
     // B: both routes, the tagged one scrubbed (unrelated kept).
-    let update = b_rx.try_recv().expect("other enabled client gets both");
+    let update = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("other enabled client gets both");
     assert_eq!(update.announce.len(), 2);
     let advertised = update
         .announce
@@ -306,7 +322,10 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
     assert_eq!(advertised.large_communities().len(), 0);
 
     // Transparent session: both routes, control community verbatim.
-    let update = t_rx.try_recv().expect("transparent session gets both");
+    let update = tokio::time::timeout(Duration::from_secs(5), t_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("transparent session gets both");
     assert_eq!(update.announce.len(), 2);
     let advertised = update
         .announce
@@ -391,6 +410,7 @@ async fn announce_to_none_std_form_with_announce_override() {
         vec![std_c(0, RS_AS), std_c(RS_AS, 65002)],
         vec![],
     );
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![route]).await;
     let _ = query_best_routes(&tx).await;
 
@@ -398,7 +418,10 @@ async fn announce_to_none_std_form_with_announce_override() {
         a_rx.try_recv().is_err(),
         "announce-to-none must suppress the client without an override"
     );
-    let update = b_rx.try_recv().expect("override client must receive");
+    let update = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("override client must receive");
     assert_eq!(update.announce.len(), 1);
     let advertised = &update.announce[0];
     assert!(
@@ -438,10 +461,14 @@ async fn prepend_toward_target_asn_only() {
         vec![],
         vec![large(102, 65001)],
     );
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![route]).await;
     let _ = query_best_routes(&tx).await;
 
-    let update = a_rx.try_recv().expect("prepend target still receives");
+    let update = tokio::time::timeout(Duration::from_secs(5), a_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("prepend target still receives");
     assert_eq!(update.announce.len(), 1);
     let advertised = &update.announce[0];
     assert_eq!(
@@ -451,7 +478,10 @@ async fn prepend_toward_target_asn_only() {
     );
     assert_eq!(advertised.large_communities().len(), 0);
 
-    let update = b_rx.try_recv().expect("other client still receives");
+    let update = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("other client still receives");
     assert_eq!(update.announce.len(), 1);
     let advertised = &update.announce[0];
     assert_eq!(
@@ -532,6 +562,7 @@ async fn policy_stripped_suppression_community_still_suppresses_toward_target() 
         vec![],
         vec![large(0, 65001)], // source says: do not announce to 65001
     );
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![steered]).await;
     let _ = query_best_routes(&tx).await;
 
@@ -540,7 +571,10 @@ async fn policy_stripped_suppression_community_still_suppresses_toward_target() 
         "route must stay suppressed toward the named peer even though the \
          export policy stripped the control community (decision is source-based)"
     );
-    let update = b_rx.try_recv().expect("other client still receives");
+    let update = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("other client still receives");
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].large_communities().len(), 0);
 
@@ -573,11 +607,13 @@ async fn policy_added_control_communities_scrub_but_do_not_steer() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 125, 0), 24);
     let source = peer_v4(Ipv4Addr::new(198, 51, 100, 45));
     let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 45), vec![65010]);
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     announce_unicast(&tx, source, vec![plain]).await;
     let _ = query_best_routes(&tx).await;
 
-    let update = a_rx
-        .try_recv()
+    let update = tokio::time::timeout(Duration::from_secs(5), a_rx.recv())
+        .await
+        .expect("outbound update timed out")
         .expect("a policy-added deny tag must not suppress — the source carried no tags");
     assert_eq!(update.announce.len(), 1);
     assert!(
@@ -586,7 +622,10 @@ async fn policy_added_control_communities_scrub_but_do_not_steer() {
     );
     assert_eq!(sequence_asns(&update.announce[0]), vec![65010]);
 
-    let update = b_rx.try_recv().expect("other client receives");
+    let update = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .expect("outbound update timed out")
+        .expect("other client receives");
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].large_communities().len(), 0);
     assert_eq!(
@@ -630,6 +669,7 @@ async fn grouped_matches_ungrouped_for_stripped_suppression_tag() {
         // Pass 1: untagged — everyone receives. Pass 2: the source
         // re-announces with a deny-to-65001 tag the policy strips —
         // the named member must see a withdraw, the other an update.
+        tx.send(registering_peer_up(source, 0)).await.unwrap();
         announce_unicast(&tx, source, vec![plain.clone()]).await;
         let _ = query_best_routes(&tx).await;
         let steered = tagged(plain, vec![], vec![large(0, 65001)]);
@@ -862,6 +902,7 @@ fn explain_best_path_add_path_ranks_match_live_rs_control_staging() {
         vec![large(0, 65001)],
     );
     for route in [best, sibling] {
+        register_test_peer(&mut manager, route.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -966,6 +1007,8 @@ async fn otc_blocked_fallback_is_reported_for_the_suppressed_client() {
             vec![std_c(0, 65001)],
             vec![],
         );
+        tx.send(registering_peer_up(best, 0)).await.unwrap();
+        tx.send(registering_peer_up(fallback, 0)).await.unwrap();
         announce_unicast(&tx, best, vec![winner]).await;
         let mut runner_up =
             make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 42), vec![64602, 64602]);
@@ -1028,6 +1071,7 @@ async fn otc_blocked_same_source_fallback_is_reported_on_join_and_refresh() {
         AttrSet::edit(&mut fallback.attributes, |attrs| {
             attrs.push(PathAttribute::OnlyToCustomer(64603));
         });
+        tx.send(registering_peer_up(source, 0)).await.unwrap();
         announce_unicast(&tx, source, vec![best, fallback]).await;
         let _ = query_best_routes(&tx).await;
         let collect = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
@@ -1096,6 +1140,7 @@ async fn suppressed_otc_winner_is_not_reported_for_the_suppressed_client() {
         AttrSet::edit(&mut winner.attributes, |attrs| {
             attrs.push(PathAttribute::OnlyToCustomer(64604));
         });
+        tx.send(registering_peer_up(source, 0)).await.unwrap();
         announce_unicast(&tx, source, vec![winner]).await;
         let _ = query_best_routes(&tx).await;
         let blocked = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
@@ -1320,6 +1365,12 @@ async fn grouped_advertised_surfaces_follow_rs_control() {
                     .starts_with("group:"),
                 !force_ungrouped
             );
+            tx.send(registering_peer_up(peer_v4(first), 0))
+                .await
+                .unwrap();
+            tx.send(registering_peer_up(peer_v4(second), 0))
+                .await
+                .unwrap();
             announce_unicast(
                 &tx,
                 peer_v4(first),
@@ -1437,6 +1488,9 @@ async fn grouped_counts_follow_a_tag_only_transition() {
                 .starts_with("group:"),
             !force_ungrouped
         );
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
         let mut snapshots = Vec::new();
         for tag in [std_c(0, 65004), std_c(0, 65005)] {
             announce_unicast(
@@ -1536,6 +1590,15 @@ async fn grouped_counts_follow_every_control_form() {
             client_rxs.push(rx);
         }
         // p1: `0:RS` suppresses toward D and E, not toward J.
+        tx.send(registering_peer_up(peer_v4(source_a), 0))
+            .await
+            .unwrap();
+        tx.send(registering_peer_up(peer_v4(source_b), 0))
+            .await
+            .unwrap();
+        tx.send(registering_peer_up(peer_v4(source_c), 0))
+            .await
+            .unwrap();
         announce_unicast(
             &tx,
             peer_v4(source_b),
@@ -1679,6 +1742,9 @@ async fn grouped_counts_seed_when_routes_precede_the_first_rs_client() {
         let handle = tokio::spawn(manager.run());
         let observer = PeerId::from_addr("192.0.2.235".parse().unwrap());
         let mut o_rx = rs_peer_up(&tx, observer, 65009, None).await;
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
         announce_unicast(
             &tx,
             peer_v4(source),
@@ -1761,6 +1827,9 @@ async fn grouped_filtered_listing_filters_the_rewritten_row() {
             !force_ungrouped
         );
         // Two prepends toward B; `0:65009` names no client and is scrubbed.
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
         announce_unicast(
             &tx,
             peer_v4(source),

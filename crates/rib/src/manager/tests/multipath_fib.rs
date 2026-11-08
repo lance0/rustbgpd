@@ -45,7 +45,9 @@ async fn multipath_send_advertises_multiple_routes() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -111,7 +113,7 @@ async fn multipath_send_advertises_multiple_routes() {
     .unwrap();
 
     // Initial dump should contain both routes
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(
         update.announce.len(),
         2,
@@ -139,6 +141,7 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
     let source = peer_v4(Ipv4Addr::new(10, 0, 7, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 7, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
 
@@ -185,7 +188,7 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     .await
     .unwrap();
 
-    let initial = out_rx.recv().await.map(delivered).unwrap();
+    let initial = fixture_update(out_rx.recv()).await;
     assert_eq!(initial.announce.len(), 2);
     assert_eq!(
         initial
@@ -299,6 +302,9 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
 
     for (source, local_pref) in [(source_a, 200), (source_b, 100)] {
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(source),
@@ -340,7 +346,7 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
     })
     .await
     .unwrap();
-    let initial = out_rx.recv().await.map(delivered).unwrap();
+    let initial = fixture_update(out_rx.recv()).await;
     assert_eq!(initial.announce.len(), 2);
     assert_eq!(
         initial
@@ -355,6 +361,7 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
 
     let scoped =
         super::unicast::with_no_advertise(make_multipath_route(prefix, source_a, vec![65001], 200));
+
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source_a),
@@ -476,6 +483,9 @@ async fn multipath_send_respects_send_max() {
         (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 150),
         (peer3, Ipv4Addr::new(10, 0, 0, 3), 65003, 100),
     ] {
+        tx.send(registering_peer_up(PeerId::from_addr(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: PeerId::from_addr(peer),
@@ -514,7 +524,11 @@ async fn multipath_send_respects_send_max() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("initial Add-Path dump within 2s")
+        .map(delivered)
+        .unwrap();
     assert_eq!(
         update.announce.len(),
         2,
@@ -536,46 +550,9 @@ async fn multipath_send_split_horizon() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
-
-    // Inject route from peer1 and target (target's own route)
-    tx.send(RibUpdate::RoutesReceived {
-        session_id: 0,
-        peer: peer1,
-        announced: vec![make_multipath_route(
-            prefix,
-            Ipv4Addr::new(10, 0, 0, 1),
-            vec![65001],
-            200,
-        )],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    })
-    .await
-    .unwrap();
-    tx.send(RibUpdate::RoutesReceived {
-        session_id: 0,
-        peer: target,
-        announced: vec![make_multipath_route(
-            prefix,
-            Ipv4Addr::new(10, 0, 0, 2),
-            vec![65002],
-            100,
-        )],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    })
-    .await
-    .unwrap();
 
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
@@ -600,7 +577,49 @@ async fn multipath_send_split_horizon() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Inject route from peer1 and target (target's own route)
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer1,
+        announced: vec![make_multipath_route(
+            prefix,
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![65001],
+            200,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: target,
+        announced: vec![make_multipath_route(
+            prefix,
+            Ipv4Addr::new(10, 0, 0, 2),
+            vec![65002],
+            100,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(query_received_routes(&tx, target).await.len(), 1);
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(
         update.announce.len(),
         1,
@@ -611,6 +630,10 @@ async fn multipath_send_split_horizon() {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
     );
 
+    assert!(
+        out_rx.try_recv().is_err(),
+        "the target's own candidate stays suppressed"
+    );
     drop(tx);
     handle.await.unwrap();
 }
@@ -622,7 +645,9 @@ async fn multipath_withdrawal_on_candidate_removal() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -669,7 +694,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -690,7 +715,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     // Should now have an announcement for the second path
     assert!(!update.announce.is_empty());
 
@@ -708,7 +733,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     // Should have a withdrawal for the removed path
     assert!(
         update.unicast_withdrawals().next().is_some(),
@@ -726,7 +751,9 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -791,7 +818,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(
         update.announce.len(),
         1,
@@ -853,6 +880,7 @@ async fn multipath_peer_down_cleans_up_state() {
     // Re-register as single-best (send_max=0) — should work fine,
     // state was properly cleaned up
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -895,7 +923,7 @@ async fn multipath_peer_down_cleans_up_state() {
     .await
     .unwrap();
 
-    let update = reconnect_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(reconnect_rx.recv()).await;
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].path_id, 0);
 
@@ -910,7 +938,9 @@ async fn multipath_send_incremental_route_addition() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -957,7 +987,7 @@ async fn multipath_send_incremental_route_addition() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1, "first route announced");
     assert_eq!(update.announce[0].path_id, 1);
 
@@ -980,7 +1010,7 @@ async fn multipath_send_incremental_route_addition() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     // The new route should be announced (path_id 2)
     let new_announcements: Vec<_> = update
         .announce
@@ -1003,7 +1033,9 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     let handle = tokio::spawn(manager.run());
 
     let source1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source1, 0)).await.unwrap();
     let source2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(source2, 0)).await.unwrap();
     let multi_target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let single_target = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1093,11 +1125,11 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     .unwrap();
 
     // Multi-path target gets 2 routes
-    let multi_update = multi_rx.recv().await.map(delivered).unwrap();
+    let multi_update = fixture_update(multi_rx.recv()).await;
     assert_eq!(multi_update.announce.len(), 2);
 
     // Single-best target gets 1 route
-    let single_update = single_rx.recv().await.map(delivered).unwrap();
+    let single_update = fixture_update(single_rx.recv()).await;
     assert_eq!(single_update.announce.len(), 1);
     assert_eq!(single_update.announce[0].path_id, 0);
 
@@ -1112,7 +1144,9 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
 
@@ -1190,7 +1224,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(
         update.announce.len(),
         2,
@@ -1211,7 +1245,9 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
@@ -1283,7 +1319,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     let v4_routes: Vec<_> = update
         .announce
         .iter()
@@ -1313,7 +1349,9 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix6 = Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48);
@@ -1385,7 +1423,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     let v4_routes: Vec<_> = update
         .announce
         .iter()
@@ -1419,7 +1457,9 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 10, 0), 24);
     let prefix6 = Ipv6Prefix::new("2001:db8:10::".parse().unwrap(), 48);
@@ -1490,7 +1530,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     })
     .await
     .unwrap();
-    let _ = out_rx.recv().await.map(delivered).unwrap();
+    let _ = fixture_update(out_rx.recv()).await;
     drain_eor(&mut out_rx).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
@@ -1502,7 +1542,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     let v4_routes: Vec<_> = update
         .announce
         .iter()
@@ -1523,7 +1563,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     let v6_routes: Vec<_> = update
         .announce
         .iter()
@@ -1545,7 +1585,9 @@ async fn multipath_send_max_one_uses_path_id_one() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -1608,7 +1650,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(update.announce.len(), 1, "send_max=1 sends only one route");
     assert_eq!(
         update.announce[0].path_id, 1,
@@ -1671,7 +1713,9 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -1786,7 +1830,9 @@ async fn fib_install_candidates_groups_equal_cost_ecmp() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     // Two equal-cost eBGP paths (empty attrs ⇒ same LP/AS/origin/MED/class).
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1858,6 +1904,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         received_as_path: None,
         aspa_context: crate::route::AspaContextId::DEFAULT,
     };
+    tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: route.peer,
@@ -1918,6 +1965,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         make_scoped("eth1", 7, "fe80::2"),
         make_scoped("eth2", 9, "fe80::3"),
     ] {
+        tx.send(registering_peer_up(route.peer, 0)).await.unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -1962,6 +2010,10 @@ async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
     let peer2 = Ipv4Addr::new(1, 0, 0, 2);
     // Same AS_PATH *length* (2), different ASNs: strict refuses to group, relax
     // (ADR-0066 multipath-relax) groups them as ECMP.
+
+    tx.send(registering_peer_up(peer_v4(peer1), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer1),
@@ -1975,6 +2027,10 @@ async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
     })
     .await
     .unwrap();
+
+    tx.send(registering_peer_up(peer_v4(peer2), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer2),
@@ -2039,6 +2095,9 @@ async fn fib_install_candidates_weighted_proportional_to_link_bandwidth() {
     let peer1 = Ipv4Addr::new(1, 0, 0, 1); // best (lowest BGP Identifier), 40G
     let peer2 = Ipv4Addr::new(1, 0, 0, 2); // sibling, 10G
     for (peer, bw) in [(peer1, 40e9), (peer2, 10e9)] {
+        tx.send(registering_peer_up(peer_v4(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(peer),
@@ -2087,6 +2146,10 @@ async fn fib_install_candidates_weighted_all_or_nothing_on_missing_bandwidth() {
     let peer1 = Ipv4Addr::new(1, 0, 0, 1);
     let peer2 = Ipv4Addr::new(1, 0, 0, 2);
     // peer1 carries a Link Bandwidth community; peer2 does not.
+
+    tx.send(registering_peer_up(peer_v4(peer1), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer1),
@@ -2105,6 +2168,10 @@ async fn fib_install_candidates_weighted_all_or_nothing_on_missing_bandwidth() {
     })
     .await
     .unwrap();
+
+    tx.send(registering_peer_up(peer_v4(peer2), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(peer2),
@@ -2153,6 +2220,9 @@ async fn fib_install_candidates_respects_max_paths() {
             Ipv4Addr::new(10, 0, 0, 2),
         ),
     ] {
+        tx.send(registering_peer_up(PeerId::from_addr(peer), 0))
+            .await
+            .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: PeerId::from_addr(peer),
@@ -2188,7 +2258,9 @@ async fn fib_install_candidates_dedupes_same_next_hop_before_cap() {
     let shared_nh = Ipv4Addr::new(10, 0, 0, 9);
     // Two peers advertising the SAME next-hop ⇒ collapses to one ECMP member.
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let mut r1 = make_route(prefix, shared_nh);
     set_peer(&mut r1, peer1);
     let mut r2 = make_route(prefix, shared_nh);
@@ -2240,6 +2312,10 @@ async fn fib_install_candidates_excludes_non_equal_cost() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     // peer2 has higher LOCAL_PREF ⇒ it is the sole best; peer1 is not equal-cost.
+
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(1, 0, 0, 1)), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(1, 0, 0, 1)),
@@ -2253,6 +2329,10 @@ async fn fib_install_candidates_excludes_non_equal_cost() {
     })
     .await
     .unwrap();
+
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(1, 0, 0, 2)), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(1, 0, 0, 2)),

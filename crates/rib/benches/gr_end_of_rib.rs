@@ -233,6 +233,7 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
         |_| Arc::new(PermissiveExactExport),
     );
     manager.bench_seed_loc_rib(table(ipv4, ipv6, &attributes));
+    manager.bench_assert_empty_source_group(&[PeerId::from_addr(SOURCE)]);
     drain(&mut receivers);
     let receipt = manager.bench_adj_rib_out_fanout_receipt();
     let grouped = mode != Mode::PerClientBestFallback;
@@ -242,8 +243,8 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
             receipt.grouped_peers,
             receipt.ungrouped_peers
         ),
-        if grouped { (1, 2, 0) } else { (0, 0, 2) },
-        "{} clients must take the intended distribution path",
+        if grouped { (2, 3, 0) } else { (1, 1, 2) },
+        "{} clients must take the intended path beside one empty ingress group",
         mode.name()
     );
     manager.bench_gr_restart(PeerId::from_addr(SOURCE), mode.gr_families());

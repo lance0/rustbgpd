@@ -361,6 +361,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
 
     let source_v4 = Ipv4Addr::new(192, 0, 2, 51);
     let source = peer_v4(source_v4);
+    manager.handle_update(registering_peer_up(source, 0));
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -718,6 +719,8 @@ fn distribute_direct_routes(
     source: Ipv4Addr,
     prefixes: impl IntoIterator<Item = Ipv4Prefix>,
 ) {
+    register_test_peer(manager, peer_v4(source), 0);
+
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1271,6 +1274,8 @@ fn grouped_join_replay_reserves_only_retained_entries() {
             route
         })
         .collect();
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1358,6 +1363,8 @@ fn distribute_dual_stack_routes(
 ) {
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
+
+    register_test_peer(manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1526,6 +1533,8 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0), 48);
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1621,6 +1630,8 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
     let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 3, 0, 0, 0, 0, 0), 48);
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1775,6 +1786,8 @@ fn family_unlock_from_a_superseded_session_survives_failback() {
     let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 4, 0, 0, 0, 0, 0), 48);
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1903,6 +1916,8 @@ fn family_made_sendable_mid_session_installs_its_add_path_limit() {
             source,
         );
         route.prefix = Prefix::V6(v6);
+
+        register_test_peer(&mut manager, peer_v4(source), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             peer: peer_v4(source),
             session_id: 0,
@@ -2024,6 +2039,8 @@ fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
     let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 7), 31, 100, 100);
     route.origin_type = crate::route::RouteOrigin::Ebgp;
     let route_key = route.key();
+
+    register_test_peer(&mut manager, route.peer, 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: route.peer,
         session_id: 0,
@@ -2112,6 +2129,8 @@ fn drive_exact_precommit_step(
     route: Route,
 ) -> (ExactPrecommitState, u64) {
     let hits_before = manager.test_exact_export_fast_path_hits;
+
+    register_test_peer(manager, source, 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -2279,6 +2298,7 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                 let seed = peer_v4(Ipv4Addr::new(10, 90, 1, 2));
                 let _seed_outbound = register_direct_peer(&mut manager, seed);
                 for route in &routes {
+                    register_test_peer(&mut manager, route.peer, 0);
                     manager.handle_update(RibUpdate::RoutesReceived {
                         peer: route.peer,
                         session_id: 0,
@@ -2454,6 +2474,9 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
         );
     }
     let third_source = Ipv4Addr::new(192, 0, 2, 14);
+    tx.send(registering_peer_up(peer_v4(third_source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(third_source),
@@ -2926,6 +2949,8 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     // per-client-best group stages the same (sole) candidate.
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let source = peer_v4(Ipv4Addr::new(10, 0, 3, 9));
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -2943,9 +2968,9 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     .await
     .unwrap();
 
-    let u1 = rx1.recv().await.map(delivered).unwrap();
-    let u2 = rx2.recv().await.map(delivered).unwrap();
-    let u4 = rx4.recv().await.map(delivered).unwrap();
+    let u1 = fixture_update(rx1.recv()).await;
+    let u2 = fixture_update(rx2.recv()).await;
+    let u4 = fixture_update(rx4.recv()).await;
     assert_eq!(u1.announce.len(), 1);
     assert_eq!(u1.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(u1.announce[0].attributes, u2.announce[0].attributes);
@@ -3269,6 +3294,10 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
             )
         })
         .collect();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -3283,7 +3312,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        let initial = receiver.recv().await.map(delivered).unwrap();
+        let initial = fixture_update(receiver.recv()).await;
         assert_eq!(initial.announce.len(), ROUTE_COUNT);
     }
     probes.store(0, Ordering::Relaxed);
@@ -3322,7 +3351,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
 
     let mut updates = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.announce.len(), ROUTE_COUNT);
         updates.push(update);
     }
@@ -3380,8 +3409,11 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         poll_counts.values().sum::<u64>(),
         u64::try_from(actor_polls).unwrap()
     );
+    let destination_group = query_update_group(&tx, peers[0]).await;
+    assert_ne!(destination_group, "group:0");
+    assert!(destination_group.starts_with("group:"));
     for &peer in &peers {
-        assert_eq!(query_update_group(&tx, peer).await, "group:1");
+        assert_eq!(query_update_group(&tx, peer).await, destination_group);
     }
 
     let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -3399,7 +3431,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, Prefix::V4(later_prefix));
     }
@@ -3555,6 +3587,9 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     let source = Ipv4Addr::new(192, 0, 2, 41);
     let first_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24);
     let second_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
@@ -3590,7 +3625,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]) > 0.0,
         "withdrawal residue must exist before the clean cohort commit"
     );
-    let initially_delivered = dirty_receiver.recv().await.map(delivered).unwrap();
+    let initially_delivered = fixture_update(dirty_receiver.recv()).await;
     assert_eq!(initially_delivered.announce.len(), 1);
     for receiver in &mut cohort_receivers {
         while receiver.try_recv().map(delivered).is_ok() {}
@@ -3630,7 +3665,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         0.0,
         "residue after pre-reply dirty drain",
     );
-    let healed = dirty_receiver.recv().await.map(delivered).unwrap();
+    let healed = fixture_update(dirty_receiver.recv()).await;
     assert!(
         healed
             .unicast_withdrawals()
@@ -3709,6 +3744,10 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
 
     let source = Ipv4Addr::new(192, 0, 2, 17);
     let first_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 53, 0, 0), 24);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -3723,10 +3762,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     .await
     .unwrap();
     for receiver in &mut moving_receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
     assert_eq!(
         destination_receiver
@@ -3757,10 +3793,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
     );
     for receiver in &mut moving_receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
     assert!(destination_receiver.try_recv().map(delivered).is_err());
 
@@ -3788,10 +3821,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     .await
     .unwrap();
     for receiver in &mut moving_receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
     assert_eq!(
         destination_receiver
@@ -3865,6 +3895,10 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         );
     }
     let source = Ipv4Addr::new(192, 0, 2, 14);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -3887,7 +3921,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     .unwrap();
     for receiver in &mut receivers {
         assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            fixture_update(receiver.recv()).await.announce.len(),
             ROUTE_COUNT
         );
     }
@@ -4045,20 +4079,19 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     );
     for receiver in &mut receivers {
         assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            fixture_update(receiver.recv()).await.announce.len(),
             ROUTE_COUNT
         );
     }
     for reply in general_replies {
         assert_eq!(reply.await.unwrap(), ROUTE_COUNT);
     }
-    assert_eq!(
-        query_update_group(&query_tx, PeerId::from_addr(peers[0])).await,
-        "group:1"
-    );
+    let destination_group = query_update_group(&query_tx, PeerId::from_addr(peers[0])).await;
+    assert_ne!(destination_group, "group:0");
+    assert!(destination_group.starts_with("group:"));
     assert_eq!(
         query_update_group(&query_tx, PeerId::from_addr(peers[1])).await,
-        "group:1"
+        destination_group
     );
 
     drop(tx);
@@ -4435,6 +4468,13 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
         );
     }
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24);
+
+    tx.send(registering_peer_up(
+        peer_v4(Ipv4Addr::new(192, 0, 2, 15)),
+        0,
+    ))
+    .await
+    .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(192, 0, 2, 15)),
@@ -4452,10 +4492,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     let (reply, dropped_response) = oneshot::channel();
@@ -4484,7 +4521,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     drop(query_tx);
 
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.announce.len(), 1);
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_2002))
@@ -4542,6 +4579,13 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         );
     }
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+    tx.send(registering_peer_up(
+        peer_v4(Ipv4Addr::new(192, 0, 2, 10)),
+        0,
+    ))
+    .await
+    .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(192, 0, 2, 10)),
@@ -4559,10 +4603,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
     probes.store(0, Ordering::Relaxed);
     reuses.store(0, Ordering::Relaxed);
@@ -4740,10 +4781,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
     for peer in peers {
         assert_eq!(
@@ -4793,6 +4831,13 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
             .await,
         );
     }
+
+    tx.send(registering_peer_up(
+        peer_v4(Ipv4Addr::new(192, 0, 2, 11)),
+        0,
+    ))
+    .await
+    .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(192, 0, 2, 11)),
@@ -4810,10 +4855,7 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     let (reply, response) = oneshot::channel();
@@ -4837,7 +4879,7 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.announce.len(), 1);
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
@@ -4946,6 +4988,10 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
             )
         })
         .collect();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -4961,7 +5007,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
     .unwrap();
     for receiver in &mut receivers {
         assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            fixture_update(receiver.recv()).await.announce.len(),
             ROUTE_COUNT
         );
     }
@@ -4987,7 +5033,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
 
     let mut updates = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.announce.len(), ROUTE_COUNT);
         updates.push(update);
     }
@@ -5006,8 +5052,11 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
         1,
         "the cohort must commit through exactly one shared plan, not per-member resyncs"
     );
+    let destination_group = query_update_group(&tx, peers[0]).await;
+    assert_ne!(destination_group, "group:0");
+    assert!(destination_group.starts_with("group:"));
     for &peer in &peers {
-        assert_eq!(query_update_group(&tx, peer).await, "group:1");
+        assert_eq!(query_update_group(&tx, peer).await, destination_group);
     }
 
     drop(tx);
@@ -5078,6 +5127,9 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24);
     let source = Ipv4Addr::new(192, 0, 2, 62);
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     let mut steered = make_route_with_as_path(prefix, source, vec![65010]);
     AttrSet::edit(&mut steered.attributes, |attrs| {
         attrs.push(PathAttribute::LargeCommunities(vec![deny_to_a]));
@@ -5204,6 +5256,13 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
         spec.export_policy = Some(old_policy.clone());
         receivers.push(peer_up_with_capacity(&tx, spec, 1).await);
     }
+
+    tx.send(registering_peer_up(
+        peer_v4(Ipv4Addr::new(192, 0, 2, 12)),
+        0,
+    ))
+    .await
+    .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(192, 0, 2, 12)),
@@ -5324,6 +5383,13 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
             .await,
         );
     }
+
+    tx.send(registering_peer_up(
+        peer_v4(Ipv4Addr::new(192, 0, 2, 13)),
+        0,
+    ))
+    .await
+    .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(192, 0, 2, 13)),
@@ -5341,10 +5407,7 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     let (reply, response) = oneshot::channel();
@@ -5367,7 +5430,7 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
         }));
@@ -5437,6 +5500,9 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     .await
     .unwrap();
     drain_eor(&mut out_rx).await;
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 0, 5, 9)), 0))
+        .await
+        .unwrap();
     assert_eq!(query_update_group(&tx, peer).await, "group:0");
 
     let p1 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -5460,10 +5526,10 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     );
 
     // Free the channel and let the resync timer clear the residue.
-    let jammed = out_rx.recv().await.map(delivered).unwrap();
+    let jammed = fixture_update(out_rx.recv()).await;
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    let resync = out_rx.recv().await.map(delivered).unwrap();
+    let resync = fixture_update(out_rx.recv()).await;
     assert!(
         resync
             .unicast_withdrawals()
@@ -5537,6 +5603,9 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     .await
     .unwrap();
     drain_eor(&mut out_rx).await;
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 0, 5, 9)), 0))
+        .await
+        .unwrap();
     assert_eq!(query_update_group(&tx, peer).await, "group:0");
 
     let p1 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -5581,7 +5650,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     );
 
     // Free the channel and let the resync timer drain the residue.
-    let jammed = out_rx.recv().await.map(delivered).unwrap();
+    let jammed = fixture_update(out_rx.recv()).await;
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
     assert_eq!(jammed.announce[0].prefix, Prefix::V4(p1));
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
@@ -5660,7 +5729,10 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     let mut spec = PeerUpSpec::ibgp(peer);
     spec.export_policy = Some(deny_chain(denied));
     let mut out_rx = peer_up(&tx, spec).await;
-    assert_eq!(query_update_group(&tx, peer).await, "group:0");
+    let original_group = query_update_group(&tx, peer).await;
+    assert!(original_group.starts_with("group:"));
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
 
     // One permitted route: the shared group staging pass evaluates the
     // chain once, through the handle sharing the installed instance's
@@ -5671,10 +5743,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
     )
     .await;
-    assert_eq!(
-        out_rx.recv().await.map(delivered).unwrap().announce.len(),
-        1
-    );
+    assert_eq!(fixture_update(out_rx.recv()).await.announce.len(), 1);
     assert_eq!(hits_for(&tx, &roster, peer).await, (1, 0));
 
     // Content-equal reinstall (fresh instance, zeroed counters — the
@@ -5695,10 +5764,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24),
     )
     .await;
-    assert_eq!(
-        out_rx.recv().await.map(delivered).unwrap().announce.len(),
-        1
-    );
+    assert_eq!(fixture_update(out_rx.recv()).await.announce.len(), 1);
     assert_eq!(
         hits_for(&tx, &roster, peer).await,
         (2, 0),
@@ -5727,7 +5793,9 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     .await
     .unwrap();
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
-    assert_eq!(query_update_group(&tx, peer).await, "group:1");
+    let replacement_group = query_update_group(&tx, peer).await;
+    assert!(replacement_group.starts_with("group:"));
+    assert_ne!(replacement_group, original_group);
     assert_eq!(
         hits_for(&tx, &roster, peer).await,
         (3, 0),
@@ -5991,6 +6059,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
             negotiated_llgr_families: Vec::new(),
         });
     }
+    register_test_peer(&mut manager, source, 0);
     let fill = FillChannelOnSnapshot::install(&mut manager, ungrouped);
     let handle = tokio::spawn(manager.run());
     drain_eor(&mut g_rx).await;
@@ -6004,6 +6073,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
         if prefix == prefix2 {
             fill.arm();
         }
+
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: source,
@@ -6034,12 +6104,12 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     // Drain the stuck first announce so the resync has room, then fire
     // the dirty-resync timer.
     fill.release();
-    let _ = g_rx.recv().await.map(delivered).unwrap();
-    let _ = u_rx.recv().await.map(delivered).unwrap();
+    let _ = fixture_update(g_rx.recv()).await;
+    let _ = fixture_update(u_rx.recv()).await;
     tokio::time::advance(Duration::from_secs(2)).await;
     // The resync delivers the previously-dropped prefix2 to both peers.
-    let _ = g_rx.recv().await.map(delivered).unwrap();
-    let _ = u_rx.recv().await.map(delivered).unwrap();
+    let _ = fixture_update(g_rx.recv()).await;
+    let _ = fixture_update(u_rx.recv()).await;
 
     let post_grouped = query_neighbor_policy_stats(&tx, grouped).await;
     let post_ungrouped = query_neighbor_policy_stats(&tx, ungrouped).await;
@@ -6094,7 +6164,7 @@ fn direct_clean_transition_manager_with_policy(
     Vec<PeerId>,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
-    let (_tx, rx) = mpsc::channel(1);
+    let (ingress_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Zero flush budget parks the commit poll after every stride, making the
     // per-poll batch boundaries deterministic for the seam assertions below.
@@ -6146,6 +6216,7 @@ fn direct_clean_transition_manager_with_policy(
         receivers.push(outbound_rx);
     }
     let source = Ipv4Addr::new(192, 0, 2, 42);
+    register_deferred_test_peer(&mut manager, &ingress_tx, peer_v4(source), 0);
     let announced = (0..route_count)
         .map(|index| {
             crate::test_support::make_route(
@@ -6493,6 +6564,7 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
         Ipv4Addr::new(192, 0, 2, 42),
     )];
     manager.traced(PostCommitWork::PrimaryUpdate, |manager| {
+        register_test_peer(manager, peer_v4(Ipv4Addr::new(192, 0, 2, 42)), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(Ipv4Addr::new(192, 0, 2, 42)),
@@ -6676,6 +6748,9 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
         );
     }
     let source = Ipv4Addr::new(192, 0, 2, 16);
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     let routes_received = |prefix: Ipv4Prefix| RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -7138,6 +7213,10 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
             )
         })
         .collect();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -7153,7 +7232,7 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
     .unwrap();
     for receiver in &mut receivers {
         assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            fixture_update(receiver.recv()).await.announce.len(),
             ROUTE_COUNT
         );
     }
@@ -7211,16 +7290,16 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
         "the second cohort must queue behind the fence, not race the flush"
     );
     for receiver in &mut receivers {
-        let flush = receiver.recv().await.map(delivered).unwrap();
+        let flush = fixture_update(receiver.recv()).await;
         assert_eq!(
             flush.announce.len(),
             ROUTE_COUNT,
             "cohort flush precedes the queued primary update"
         );
-        let primary = receiver.recv().await.map(delivered).unwrap();
+        let primary = fixture_update(receiver.recv()).await;
         assert_eq!(primary.announce.len(), 1);
         assert_eq!(primary.announce[0].prefix, Prefix::V4(later_prefix));
-        let second_flush = receiver.recv().await.map(delivered).unwrap();
+        let second_flush = fixture_update(receiver.recv()).await;
         assert_eq!(
             second_flush.announce.len(),
             ROUTE_COUNT + 1,
@@ -7388,6 +7467,8 @@ fn full_channel_pass(manager: &mut RibManager, announce: &[u8], withdraw: &[u8])
         .iter()
         .map(|&third| (full_channel_prefix(third), 0))
         .collect();
+
+    register_test_peer(manager, peer_v4(FULL_CHANNEL_SOURCE), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(FULL_CHANNEL_SOURCE),
@@ -7616,6 +7697,7 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
         ))
     };
     let pass = |manager: &mut RibManager, announced: Option<u32>, withdrawn: Option<u32>| {
+        register_test_peer(manager, peer_v4(FULL_CHANNEL_SOURCE), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(FULL_CHANNEL_SOURCE),
@@ -7782,6 +7864,7 @@ fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
         route
     };
     let pass = |manager: &mut RibManager, announced: Vec<Prefix>, withdrawn: Vec<Prefix>| {
+        register_test_peer(manager, peer_v4(FULL_CHANNEL_SOURCE), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(FULL_CHANNEL_SOURCE),
@@ -8252,6 +8335,7 @@ fn family_distribution_cases() -> [(Afi, Safi, bool); 7] {
 fn announce_family_route(manager: &mut RibManager, source: Ipv4Addr, safi: Safi, index: u8) {
     use crate::route::RouteOrigin;
     let peer = peer_v4(source);
+    register_test_peer(manager, peer, 0);
     let update = match safi {
         Safi::MplsVpn => RibUpdate::VpnRoutesReceived {
             peer,
@@ -8858,6 +8942,10 @@ async fn prepared_destination_commits_with_interleaved_churn() {
         );
     }
     let source = Ipv4Addr::new(192, 0, 2, 61);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -8881,10 +8969,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            2
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 2);
     }
 
     let (reply, response) = oneshot::channel();
@@ -8919,10 +9004,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     let (reply, response) = oneshot::channel();
@@ -8944,7 +9026,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     );
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.announce.len(), 3, "all three routes changed chains");
         assert!(
@@ -8987,6 +9069,10 @@ async fn discarded_prepared_destination_is_removed() {
         receivers.push(peer_up(&tx, spec).await);
     }
     let source = Ipv4Addr::new(192, 0, 2, 62);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -9004,10 +9090,7 @@ async fn discarded_prepared_destination_is_removed() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     let (reply, response) = oneshot::channel();
@@ -9076,6 +9159,10 @@ async fn destination_prestage_completes_under_sustained_ingress() {
             )
         })
         .collect::<Vec<_>>();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -9090,10 +9177,7 @@ async fn destination_prestage_completes_under_sustained_ingress() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            4
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 4);
     }
 
     // Output-neutral ingress (withdrawals of a never-announced prefix) that
@@ -9190,6 +9274,10 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
         );
     }
     let source = Ipv4Addr::new(192, 0, 2, 63);
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -9207,10 +9295,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     // No await between the two commands: the transition may supersede the
@@ -9244,7 +9329,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     // dropped/Err when superseded); it must never hang.
     let _ = prepare_response.await;
     for receiver in &mut receivers {
-        let update = receiver.recv().await.map(delivered).unwrap();
+        let update = fixture_update(receiver.recv()).await;
         assert_eq!(update.announce.len(), 1);
         assert!(update.shared_group_encode.is_some());
     }
@@ -9292,6 +9377,10 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
             )
         })
         .collect();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -9306,10 +9395,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            3
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 3);
     }
 
     // Queue the prestage AND a stranger's PeerUp (content-equal policy)
@@ -9374,10 +9460,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     // Collect everything the stranger was ever sent.
@@ -9436,6 +9519,10 @@ async fn prestage_control_join_without_prestage() {
             )
         })
         .collect();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -9450,10 +9537,7 @@ async fn prestage_control_join_without_prestage() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            3
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 3);
     }
 
     // The same join as the regression test above, with no prestage queued.
@@ -9504,10 +9588,7 @@ async fn prestage_control_join_without_prestage() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            1
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 1);
     }
 
     // Collect everything the stranger was ever sent.
@@ -9563,6 +9644,10 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
             )
         })
         .collect();
+
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -9577,10 +9662,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(
-            receiver.recv().await.map(delivered).unwrap().announce.len(),
-            3
-        );
+        assert_eq!(fixture_update(receiver.recv()).await.announce.len(), 3);
     }
 
     // Prepare one destination and let the walk complete.
@@ -10151,6 +10233,8 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
         set_peer(&mut route, peer_v4(source));
         announced.push(route);
     }
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -11399,6 +11483,8 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     manager.flush_poll_budget = Duration::ZERO;
     let source = Ipv4Addr::new(192, 0, 2, 35);
     let survivor = Ipv4Addr::new(192, 0, 2, 36);
+    register_deferred_test_peer(&mut manager, &tx, peer_v4(source), 0);
+    register_deferred_test_peer(&mut manager, &tx, peer_v4(survivor), 0);
     let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 5, 1).into());
     let (outbound_tx, mut output) = mpsc::channel(64);
     let mut registration = super::update_groups_recovery::peer_up(peer, outbound_tx, None);
@@ -11677,10 +11763,12 @@ fn source_peer_down_preserves_nested_owner_kind_identity_and_age() {
             RibReadinessError::PeerTeardownStalled,
         ),
     ] {
-        let (_tx, rx) = mpsc::channel(8);
+        let (ingress_tx, rx) = mpsc::channel(8);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         manager.flush_poll_budget = Duration::ZERO;
         let source = Ipv4Addr::new(192, 0, 2, 37);
+        register_deferred_test_peer(&mut manager, &ingress_tx, peer_v4(source), 0);
+        manager.replacement_readiness_receipts.clear();
         for index in 1..=2 {
             announce_family_route(&mut manager, source, Safi::MplsVpn, index);
         }
@@ -11758,14 +11846,8 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 4, 1).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let source_peer = peer_v4(source);
+    register_test_peer(&mut manager, source_peer, 0);
     let empty_credit = manager.pending_group_admitted.bytes();
-    if matches!(kind, PeerRetirement::Regroup) {
-        manager.handle_update(RibUpdate::PeerSlowState {
-            peer,
-            session_id: 0,
-            slow: true,
-        });
-    }
     let (outbound_tx, mut output) = mpsc::channel(8);
     let mut registration = super::update_groups_recovery::peer_up(peer, outbound_tx, None);
     if let RibUpdate::PeerUp {
@@ -11778,6 +11860,14 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         *route_reflector_client = true;
     }
     manager.handle_update(registration);
+    if matches!(kind, PeerRetirement::Regroup) {
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 0,
+            slow: true,
+        });
+    }
+
     manager.peer_export_encoders.insert(
         peer,
         super::exportability::MockExactExportEncoder::accepting(1),
@@ -11910,6 +12000,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     }
     let live_attrs = if matches!(kind, PeerRetirement::Attributes) {
         let survivor = Ipv4Addr::new(192, 0, 2, 2);
+        register_test_peer(&mut manager, peer_v4(survivor), 0);
         let route = make_route(
             Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
             survivor,
@@ -12190,6 +12281,8 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
         super::exportability::MockExactExportEncoder::accepting(1),
     );
     while outbound.try_recv().map(delivered).is_ok() {}
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -12394,6 +12487,8 @@ async fn vpn_group_stage_retirement_services_readiness() {
     );
     while output.try_recv().map(delivered).is_ok() {}
     let empty_credit = manager.pending_group_admitted.bytes();
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -12404,6 +12499,8 @@ async fn vpn_group_stage_retirement_services_readiness() {
     });
     while manager.process_next_route_chunk() {}
     let never_admitted = make_vpn_rib_route(source, 0, 100, 100).key();
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -12558,6 +12655,8 @@ async fn evpn_refusal_prior_retirement_readiness(
     let routes: Vec<_> = (0..128)
         .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
         .collect();
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -12793,6 +12892,8 @@ fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
     let routes: Vec<_> = (0..128)
         .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
         .collect();
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -13275,6 +13376,8 @@ async fn evpn_refused_arc_retirement(
         .collect();
     let encoder = super::exportability::MockExactExportEncoder::accepting(1);
     manager.peer_export_encoders.insert(peer, encoder.clone());
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -13938,6 +14041,8 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
             })
         })
         .collect();
+
+    register_test_peer(&mut manager, peer_v4(FULL_CHANNEL_SOURCE), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(FULL_CHANNEL_SOURCE),
         session_id: 0,
@@ -15349,6 +15454,8 @@ fn prepared_policy_contents_release_after_discard_or_rejection() {
 /// staging pass so every group (both transition groups included) restages.
 fn churn_fixture_source(manager: &mut RibManager, announced: Vec<Route>, withdrawn: Vec<Prefix>) {
     let source = Ipv4Addr::new(192, 0, 2, 42);
+
+    register_test_peer(manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -18110,6 +18217,8 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
 
     // Churn queued, not yet drained: a new route and a withdrawal the
     // refresh must not overtake or duplicate.
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -18245,6 +18354,8 @@ fn vpn_dirty_resync_case(
             route
         })
         .collect();
+
+    register_test_peer(&mut manager, peer_v4(Ipv4Addr::new(192, 0, 2, 7)), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(Ipv4Addr::new(192, 0, 2, 7)),
         session_id: 0,
@@ -18325,6 +18436,8 @@ fn vpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
         let mut receivers: Vec<_> = peers
             .iter()
             .map(|peer| {
+                let mut receiver =
+                    register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
                 if private {
                     manager.handle_update(RibUpdate::PeerSlowState {
                         peer: *peer,
@@ -18332,8 +18445,7 @@ fn vpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
                         slow: true,
                     });
                 }
-                let mut receiver =
-                    register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
+
                 while receiver.try_recv().map(delivered).is_ok() {}
                 receiver
             })
@@ -18346,6 +18458,8 @@ fn vpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
                 route
             })
             .collect();
+
+        register_test_peer(&mut manager, peer_v4(source), 0);
         manager.handle_update(RibUpdate::VpnRoutesReceived {
             peer: peer_v4(source),
             session_id: 0,
@@ -18394,6 +18508,8 @@ fn vpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
         .collect();
     let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 252), 1, 100, 100);
     route.origin_type = crate::route::RouteOrigin::Ebgp;
+
+    register_test_peer(&mut manager, route.peer, 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: route.peer,
         session_id: 0,
@@ -18423,6 +18539,8 @@ fn vpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
             }
         }
     });
+
+    register_test_peer(&mut manager, route.peer, 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: route.peer,
         session_id: 0,
@@ -18496,6 +18614,8 @@ fn vpn_shared_fanout_isolates_rtc_and_exact_export_rejections() {
     let encoder = super::exportability::MockExactExportEncoder::accepting(1);
     encoder.set_profile(1, [rejected.clone()]);
     manager.peer_export_encoders.insert(peers[3], encoder);
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -18551,6 +18671,8 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
         route.origin_type = crate::route::RouteOrigin::Ebgp;
         route
     };
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -18574,6 +18696,8 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
             .try_send(OutboundRouteUpdate::default())
             .unwrap();
     }
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,

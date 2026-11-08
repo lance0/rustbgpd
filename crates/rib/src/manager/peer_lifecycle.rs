@@ -304,7 +304,7 @@ impl RibManager {
     }
 
     /// Registration is authoritative; a deferred session already owns ingress.
-    fn current_session_id(&self, peer: PeerId) -> Option<u64> {
+    pub(super) fn current_session_id(&self, peer: PeerId) -> Option<u64> {
         self.outbound_session_ids.get(&peer).copied().or_else(|| {
             self.live_sessions
                 .get(&peer)

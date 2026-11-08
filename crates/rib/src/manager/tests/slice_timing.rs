@@ -55,6 +55,7 @@ async fn seeded_actor_stall_lands_in_its_bucket_and_moves_the_max() {
     // Enough routes that the sampled cut after the stall still falls inside
     // key collection.
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,

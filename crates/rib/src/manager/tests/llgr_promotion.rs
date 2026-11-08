@@ -28,6 +28,7 @@ fn sibling(family: (Afi, Safi)) -> Option<(Afi, Safi)> {
 fn announce_case(manager: &mut RibManager, family: (Afi, Safi), index: u8, other_family: bool) {
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
+    register_test_peer(manager, peer, 0);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24);
     let v6 = Ipv6Prefix::new(
         Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, u16::from(index), 0),
@@ -547,6 +548,7 @@ fn run_orr_llgr_case(
         .insert(peer_v4(Ipv4Addr::new(10, 0, 0, 2)), orr_vantage());
     for feed in [restarting, steady] {
         let peer = peer_v4(feed);
+        register_test_peer(&mut manager, peer, 0);
         manager.ribs.insert(peer, AdjRibIn::new(peer));
         manager.handle_update(RibUpdate::BgpLsRoutesReceived {
             session_id: 0,
@@ -787,6 +789,8 @@ fn llgr_timer_retires_cached_orr_page_topology_under_readiness() {
     let feed = Ipv4Addr::new(10, 9, 9, 1);
     let peer = peer_v4(feed);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    register_test_peer(&mut manager, peer, 0);
     manager.handle_update(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -951,6 +955,7 @@ fn run_llgr_expiry_case(
 fn announce_fresh(manager: &mut RibManager, family: (Afi, Safi), index: u8) {
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
+    register_test_peer(manager, peer, 0);
     let update = match family.1 {
         Safi::FlowSpec => {
             let mut route = make_flowspec_route(addr);
@@ -1191,6 +1196,8 @@ fn llgr_expiry_rebuilds_orr_and_retires_page_cache_under_readiness() {
         for feed in [restarting, steady] {
             let peer = peer_v4(feed);
             manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+            register_test_peer(&mut manager, peer, 0);
             manager.handle_update(RibUpdate::BgpLsRoutesReceived {
                 session_id: 0,
                 peer,
@@ -1418,6 +1425,11 @@ fn run_gr_walk_case(
             Box::new(move |manager| manager.sweep_gr_stale(peer))
         }
     };
+    if walk == GrWalk::Entry {
+        // Measure retained-route walks, not the zero-work teardown of an empty exporter.
+        assert!(manager.adj_ribs_out[&peer].is_empty_all_families());
+        manager.adj_ribs_out.remove(&peer);
+    }
     let initial = manager.loc_rib.len();
     crate::orr::rebuild_growth::take();
     let (answered, observations) =
@@ -1586,6 +1598,7 @@ fn run_add_path_expiry_case(family: (Afi, Safi), paths: u8, one_nlri: bool) -> u
     let (mut manager, readiness_tx) = readiness_manager();
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
+    register_test_peer(&mut manager, peer, 0);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
     let nlri = |path: u8| if one_nlri { 1 } else { path + 1 };
     let path_id = |path: u8| if one_nlri { u32::from(path) + 1 } else { 0 };
@@ -1736,6 +1749,7 @@ fn run_rtc_restage_expiry_case(fresh: u16, vpn: u8) -> BTreeMap<&'static str, us
             .ribs
             .insert(peer_v4(addr), AdjRibIn::new(peer_v4(addr)));
     }
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: peer_v4(source),
@@ -1842,6 +1856,8 @@ fn eor_add_path_removal_scans_answer_readiness() {
         let addr = Ipv4Addr::new(10, 0, 0, 1);
         let peer = peer_v4(addr);
         manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+        register_test_peer(&mut manager, peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer,

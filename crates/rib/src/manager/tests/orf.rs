@@ -98,6 +98,7 @@ async fn orf_setup() -> (
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -146,7 +147,7 @@ async fn orf_setup() -> (
 
     // RFC 5291 §6 gate: the initial dump must advertise no routes for the
     // gated family — only the EoR marker.
-    let initial = out_rx.recv().await.map(delivered).unwrap();
+    let initial = fixture_update(out_rx.recv()).await;
     assert!(
         initial.announce.is_empty(),
         "gated family must not advertise routes initially, got {}",
@@ -1062,6 +1063,10 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
 
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
     let v6_prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64);
+
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 0, 0, 1)), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -1103,7 +1108,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     .await
     .unwrap();
     // First (non-GR) session: both families gated, immediate honest-empty EoR.
-    let initial = out_rx.recv().await.map(delivered).unwrap();
+    let initial = fixture_update(out_rx.recv()).await;
     assert!(initial.announce.is_empty());
     assert_ne!(initial.end_of_rib.len(), 0);
 
@@ -1749,6 +1754,7 @@ fn explain_best_path_orf_case(afi: Afi, denied: Prefix, permitted: Prefix) {
 
     let sibling = Ipv4Addr::new(198, 51, 100, 131);
     for (source, local_pref) in [(Ipv4Addr::new(198, 51, 100, 130), 200), (sibling, 100)] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
         let route = |prefix: Prefix| {
             let unspecified = Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0);
             let mut route = make_route_with_lp(unspecified, source, local_pref);

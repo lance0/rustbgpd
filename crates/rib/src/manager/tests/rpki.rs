@@ -372,6 +372,8 @@ fn aspa_delta_matches_full_rescan_on_deterministic_sequences() {
             ]);
             routes[3].attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]);
             routes[4].origin_type = crate::route::RouteOrigin::Ibgp;
+
+            register_test_peer(&mut manager, peer_v4(peer), 0);
             manager.handle_update(RibUpdate::RoutesReceived {
                 session_id: 0,
                 peer: peer_v4(peer),
@@ -622,6 +624,7 @@ async fn routes_validated_on_insert_with_vrp_table() {
 
     // Now send a route with matching origin
     let peer = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let route = make_route_with_as_path(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
         Ipv4Addr::new(1, 0, 0, 1),
@@ -658,6 +661,7 @@ async fn rpki_cache_update_revalidates_existing_routes() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let route = make_route_with_as_path(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
         Ipv4Addr::new(1, 0, 0, 1),
@@ -714,7 +718,9 @@ async fn rpki_cache_update_changes_best_path() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
 
     // Both routes same LP, same AS_PATH length. peer1 has the lower BGP
@@ -804,7 +810,9 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
     let handle = tokio::spawn(manager.run());
 
     let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
 
     // peer1 has the lower BGP Identifier → wins initially
@@ -876,6 +884,7 @@ async fn rpki_no_table_all_not_found() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let route = make_route_with_as_path(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
         Ipv4Addr::new(1, 0, 0, 1),
@@ -913,6 +922,7 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
     let peer = peer_v4(Ipv4Addr::new(1, 0, 0, 5));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let valid_table = Arc::new(AspaTable::new(vec![AspaRecord {
         customer_asn: 65003,
         provider_asns: vec![65002],
@@ -988,6 +998,7 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
     let handle = tokio::spawn(manager.run());
 
     let peer = peer_v4(Ipv4Addr::new(1, 0, 0, 4));
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let mut route = make_route_with_as_path(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
         Ipv4Addr::new(1, 0, 0, 4),
@@ -1792,6 +1803,7 @@ async fn aspa_revalidation_keeps_each_route_session_context_across_gr_reconnect(
     // First session: one route under the old context, then a GR restart.
     let mut route = make_route_with_as_path(old_prefix, peer_addr, asns.clone());
     route.aspa_context = crate::route::AspaContextId::intern(old_session);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(routes_received(vec![route])).await.unwrap();
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -1809,6 +1821,7 @@ async fn aspa_revalidation_keeps_each_route_session_context_across_gr_reconnect(
     // Second session: a different role, one fresh route, no End-of-RIB yet.
     let mut route = make_route_with_as_path(new_prefix, peer_addr, asns);
     route.aspa_context = crate::route::AspaContextId::intern(new_session);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(routes_received(vec![route])).await.unwrap();
 
     tx.send(RibUpdate::AspaTableUpdate {
@@ -1878,6 +1891,7 @@ fn receive_batch(
     announced: Vec<Route>,
     validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
 ) {
+    register_test_peer(manager, peer, 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer,
         session_id: 0,

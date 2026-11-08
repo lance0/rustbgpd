@@ -75,7 +75,9 @@ async fn bgpls_routes_received_recompute_and_withdraw() {
     let first_advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let better_advertiser = Ipv4Addr::new(10, 0, 0, 2);
     let first_peer = peer_v4(first_advertiser);
+    tx.send(registering_peer_up(first_peer, 0)).await.unwrap();
     let better_peer = peer_v4(better_advertiser);
+    tx.send(registering_peer_up(better_peer, 0)).await.unwrap();
     let route_a = make_bgpls_route(first_advertiser, 7, 100);
     let route_b = make_bgpls_route(better_advertiser, 7, 200);
     let key: BgpLsRouteKey = route_a.key();
@@ -149,6 +151,10 @@ async fn query_topology_reflects_adj_rib_in_across_multiple_peers() {
 
     let peer1 = Ipv4Addr::new(10, 0, 0, 1);
     let peer2 = Ipv4Addr::new(10, 0, 0, 2);
+
+    tx.send(registering_peer_up(peer_v4(peer1), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: peer_v4(peer1),
@@ -157,6 +163,10 @@ async fn query_topology_reflects_adj_rib_in_across_multiple_peers() {
     })
     .await
     .unwrap();
+
+    tx.send(registering_peer_up(peer_v4(peer2), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: peer_v4(peer2),
@@ -214,6 +224,7 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100);
     let key = route.key();
 
@@ -226,7 +237,7 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(update.announce.is_empty());
     assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.bgpls_announce.len(), 1);
@@ -242,7 +253,7 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.map(delivered).unwrap();
+    let withdraw = fixture_update(out_rx.recv()).await;
     assert!(withdraw.bgpls_announce.is_empty());
     assert_eq!(withdraw.bgpls_withdraw, vec![key]);
 
@@ -301,6 +312,8 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
 
         let route = make_bgpls_policy_route(family, source);
         let key = route.key();
+
+        tx.send(registering_peer_up(source_ip, 0)).await.unwrap();
         tx.send(RibUpdate::BgpLsRoutesReceived {
             session_id: 0,
             peer: source_ip,
@@ -423,6 +436,7 @@ async fn bgpls_export_policy_does_not_match_dummy_default_prefix() {
     drain_eor(&mut out_rx).await;
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 36, 100);
     let key = route.key();
 
@@ -435,7 +449,7 @@ async fn bgpls_export_policy_does_not_match_dummy_default_prefix() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert_eq!(
         update.bgpls_announce.len(),
         1,
@@ -559,6 +573,10 @@ async fn bgpls_routes_received_does_not_reflect_to_unsendable_peer() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
+    tx.send(registering_peer_up(peer_v4(Ipv4Addr::new(10, 0, 0, 1)), 0))
+        .await
+        .unwrap();
+
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -585,6 +603,7 @@ async fn dirty_resync_includes_bgpls_routes_after_channel_full() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     let (out_tx, mut out_rx) = mpsc::channel(1);
@@ -675,6 +694,7 @@ async fn send_initial_table_includes_bgpls_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 33, 100);
     let key = route.key();
 
@@ -710,13 +730,13 @@ async fn send_initial_table_includes_bgpls_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.map(delivered).unwrap();
+    let update = fixture_update(out_rx.recv()).await;
     assert!(update.announce.is_empty());
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
     assert_eq!(update.bgpls_withdraw.len(), 0);
 
-    let eor = out_rx.recv().await.map(delivered).unwrap();
+    let eor = fixture_update(out_rx.recv()).await;
     assert_eq!(eor.end_of_rib, bgpls_sendable());
 
     drop(tx);
@@ -738,7 +758,11 @@ async fn bgpls_peer_down_clears_or_falls_back_loc_rib() {
     let best_advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let alternate_advertiser = Ipv4Addr::new(10, 0, 0, 2);
     let best_peer = peer_v4(best_advertiser);
+    tx.send(registering_peer_up(best_peer, 0)).await.unwrap();
     let alternate_peer = peer_v4(alternate_advertiser);
+    tx.send(registering_peer_up(alternate_peer, 0))
+        .await
+        .unwrap();
 
     // Same opaque key (same NLRI payload suffix), different LOCAL_PREF so the
     // tie-break has a defined winner: peer A (200) beats peer B (100).
@@ -822,7 +846,11 @@ async fn bgpls_gr_marks_stale_and_demotes_routes() {
     let best_advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let alternate_advertiser = Ipv4Addr::new(10, 0, 0, 2);
     let best_peer = peer_v4(best_advertiser);
+    tx.send(registering_peer_up(best_peer, 0)).await.unwrap();
     let alternate_peer = peer_v4(alternate_advertiser);
+    tx.send(registering_peer_up(alternate_peer, 0))
+        .await
+        .unwrap();
 
     let route_a = make_bgpls_route(best_advertiser, 10, 200);
     let route_b = make_bgpls_route(alternate_advertiser, 10, 100);
@@ -910,6 +938,7 @@ async fn bgpls_gr_family_not_in_capability_is_withdrawn() {
 
     let advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(advertiser);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -956,6 +985,8 @@ async fn bgpls_gr_eor_clears_stale() {
     let kept = make_bgpls_route(advertiser, 10, 200);
     let dropped = make_bgpls_route(advertiser, 20, 200);
     let kept_key = kept.key();
+
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -1024,6 +1055,7 @@ async fn bgpls_gr_timer_sweeps_stale_routes() {
 
     let advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(advertiser);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,
@@ -1072,6 +1104,7 @@ async fn bgpls_gr_consecutive_restart_deletes_stale_routes() {
 
     let advertiser = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(advertiser);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer,

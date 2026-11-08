@@ -525,6 +525,37 @@ fn registering_peer_up(peer: PeerId, session_id: u64) -> RibUpdate {
     }
 }
 
+/// Register a synthetic source once, preserving any real session fixture.
+pub(super) fn register_test_peer(manager: &mut RibManager, peer: PeerId, session_id: u64) {
+    if manager.current_session_id(peer).is_none() {
+        manager.handle_update(registering_peer_up(peer, session_id));
+    }
+}
+
+/// Establish ingress while real queued work defers the outbound registration.
+/// Direct-drive fanout/teardown controls keep this source out of their receiver set.
+fn register_deferred_test_peer(
+    manager: &mut RibManager,
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    session_id: u64,
+) {
+    assert!(manager.rx.is_empty());
+    let (reply, _response) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let threshold = manager.initial_dump_defer_min_routes;
+    manager.initial_dump_defer_min_routes = 0;
+    manager.handle_update(registering_peer_up(peer, session_id));
+    manager.initial_dump_defer_min_routes = threshold;
+    assert!(matches!(
+        manager.rx.try_recv(),
+        Ok(RibUpdate::QueryLocRibCount { .. })
+    ));
+    assert_eq!(manager.current_session_id(peer), Some(session_id));
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(!manager.outbound_peers.contains_key(&peer));
+}
+
 /// Sendable families for dual-stack test peers.
 fn dual_stack_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
@@ -535,9 +566,23 @@ fn ipv4_flowspec_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::FlowSpec)]
 }
 
+/// Bound positive fixture deliveries so a missing route fails instead of hanging.
+async fn fixture_delivery<T>(receive: impl std::future::Future<Output = Option<T>>) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(5), receive)
+        .await
+        .expect("expected fixture delivery within five seconds")
+}
+
+/// Receive one expected outbound update, acknowledging its delivery budget.
+async fn fixture_update(
+    receive: impl std::future::Future<Output = Option<OutboundRouteUpdate>>,
+) -> OutboundRouteUpdate {
+    delivered(fixture_delivery(receive).await.unwrap())
+}
+
 /// Drain the initial End-of-RIB marker sent at `PeerUp` time.
 async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
-    let eor = out_rx.recv().await.unwrap();
+    let eor = fixture_delivery(out_rx.recv()).await.unwrap();
     assert!(eor.announce.is_empty());
     assert_eq!(eor.unicast_withdrawals().count(), 0);
     assert_ne!(eor.end_of_rib.len(), 0);
@@ -1271,6 +1316,7 @@ fn route_chunk_and_its_coalesced_flush_are_observed_as_separate_work_units() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.handle_update(registering_peer_up(peer, 0));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -1309,12 +1355,12 @@ fn route_chunk_and_its_coalesced_flush_are_observed_as_separate_work_units() {
 /// so the initial dump always carries at least the local default NLRI
 /// followed by the SAFI-132 `EoR`. Drain both.
 async fn drain_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
-    let dump = out_rx.recv().await.unwrap();
+    let dump = fixture_delivery(out_rx.recv()).await.unwrap();
     assert!(
         dump.rtc_announce.iter().any(|r| r.nlri.is_default()),
         "initial dump must carry the locally-originated default RTC NLRI"
     );
-    let eor = out_rx.recv().await.unwrap();
+    let eor = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(eor.end_of_rib, rtc_sendable());
 }
 
@@ -1322,7 +1368,7 @@ async fn drain_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>
 /// strict rule: the dump carries the local default RTC NLRI and ZERO VPN
 /// routes (SAFI 132 negotiated + empty membership ⇒ advertise nothing).
 async fn drain_strict_vpn_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
-    let dump = out_rx.recv().await.unwrap();
+    let dump = fixture_delivery(out_rx.recv()).await.unwrap();
     assert!(
         dump.rtc_announce.iter().any(|r| r.nlri.is_default()),
         "initial dump must carry the locally-originated default RTC NLRI"
@@ -1334,7 +1380,7 @@ async fn drain_strict_vpn_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundR
     assert_eq!(dump.vpn_withdraw.len(), 0);
     // RFC 4684 §6: the VPN End-of-RIB waits for the peer's RT membership
     // End-of-RIB (or the cap); only RT-Constrain's own marker is immediate.
-    let eor = out_rx.recv().await.unwrap();
+    let eor = fixture_delivery(out_rx.recv()).await.unwrap();
     assert_eq!(eor.end_of_rib, rtc_sendable());
 }
 

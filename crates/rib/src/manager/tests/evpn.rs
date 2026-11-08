@@ -1112,6 +1112,7 @@ async fn deferred_evpn_churn_recovers_exact_announces_and_withdrawals() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     let mut outputs = Vec::new();
@@ -1244,6 +1245,7 @@ async fn evpn_gr_marks_stale_and_demotes_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
 
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
@@ -1294,6 +1296,8 @@ async fn evpn_gr_eor_clears_stale() {
     let kept = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let dropped = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 200);
     let kept_key = kept.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1375,6 +1379,7 @@ async fn evpn_gr_consecutive_restart_deletes_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1424,6 +1429,7 @@ async fn evpn_gr_timer_sweeps_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1480,6 +1486,7 @@ async fn evpn_llgr_gr_timer_promotes_to_llgr_stale() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1547,6 +1554,7 @@ async fn evpn_llgr_timer_sweeps_llgr_stale_routes() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1614,6 +1622,8 @@ async fn evpn_llgr_eor_clears_llgr_stale() {
     let kept = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let dropped = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 200);
     let kept_key = kept.key();
+
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1720,6 +1730,7 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let route = EvpnRoute::Imet(EvpnImet {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
         ethernet_tag: EthernetTagId(100),
@@ -2458,6 +2469,7 @@ async fn evpn_no_export_honors_neighbor_mode_and_source_precedence() {
 
     let source_addr = Ipv4Addr::new(198, 51, 100, 110);
     let source = peer_v4(source_addr);
+    tx.send(registering_peer_up(source, 0)).await.unwrap();
     let mut policy_added_route = with_evpn_community(make_evpn_imet(source_addr, 510), marker);
     policy_added_route.origin_type = crate::route::RouteOrigin::Ebgp;
     let added_key = policy_added_route.key();
@@ -2569,6 +2581,7 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
     let handle = tokio::spawn(manager.run());
     let source = Ipv4Addr::new(198, 51, 100, 11);
     let source_ip = peer_v4(source);
+    tx.send(registering_peer_up(source_ip, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 31));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
@@ -2738,6 +2751,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     let handle = tokio::spawn(manager.run());
     let source = Ipv4Addr::new(198, 51, 100, 12);
     let source_ip = peer_v4(source);
+    tx.send(registering_peer_up(source_ip, 0)).await.unwrap();
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 32));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
@@ -3348,6 +3362,7 @@ async fn evpn_route_event_added_on_new_best() {
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(peer_addr);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let route = make_evpn_macip(
         peer_addr,
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
@@ -3391,6 +3406,7 @@ async fn evpn_event_history_records_events_without_subscriber() {
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(peer_addr);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let route = make_evpn_macip(
         peer_addr,
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
@@ -3432,7 +3448,9 @@ async fn evpn_event_history_filters_peer_rd_type_and_limit() {
     let peer1_addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer2_addr = Ipv4Addr::new(10, 0, 0, 2);
     let peer1 = peer_v4(peer1_addr);
+    tx.send(registering_peer_up(peer1, 0)).await.unwrap();
     let peer2 = peer_v4(peer2_addr);
+    tx.send(registering_peer_up(peer2, 0)).await.unwrap();
     let route1 = make_evpn_macip(peer1_addr, mac, Some(0), false);
     let rd = crate::event::evpn_key_rd(&route1.key()).expect("MAC/IP key carries an RD");
 
@@ -3484,6 +3502,7 @@ async fn evpn_event_history_capacity_evicts_oldest_event() {
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(peer_addr);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     for index in 0..=EVPN_ROUTE_EVENT_HISTORY_CAPACITY {
         let index_bytes = u32::try_from(index)
             .expect("test history capacity fits in u32")
@@ -3534,6 +3553,10 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
     let new_peer = Ipv4Addr::new(10, 0, 0, 2);
 
     // First peer originates with seq=0.
+
+    tx.send(registering_peer_up(peer_v4(original_peer), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(original_peer),
@@ -3554,6 +3577,10 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
 
     // Second peer originates the same MAC with a higher mobility seq.
     // Best-path tiebreak (RFC 7432 §15.1) prefers the higher seq.
+
+    tx.send(registering_peer_up(peer_v4(new_peer), 0))
+        .await
+        .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(new_peer),
@@ -3677,6 +3704,7 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 3);
     let peer = peer_v4(peer_addr);
+    tx.send(registering_peer_up(peer, 0)).await.unwrap();
     let route = make_evpn_macip(
         peer_addr,
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x66],
@@ -4082,7 +4110,7 @@ async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
 /// The chunk is applied directly, without the actor loop, so only seams
 /// inside the chunk can answer.
 fn readiness_answered_during_evpn_fanout(receivers: u8, queued: usize) -> usize {
-    let (_tx, rx) = mpsc::channel(8);
+    let (ingress_tx, rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(queued.max(1));
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_readiness_queries(readiness_rx);
@@ -4103,6 +4131,8 @@ fn readiness_answered_during_evpn_fanout(receivers: u8, queued: usize) -> usize 
         manager.handle_update(up);
         outbound.push(outbound_rx);
     }
+    let source = Ipv4Addr::new(10, 0, 2, 1);
+    register_deferred_test_peer(&mut manager, &ingress_tx, peer_v4(source), 0);
     let mut responses: Vec<_> = (0..queued)
         .map(|_| {
             let (reply, response) = oneshot::channel();
@@ -4115,7 +4145,6 @@ fn readiness_answered_during_evpn_fanout(receivers: u8, queued: usize) -> usize 
             response
         })
         .collect();
-    let source = Ipv4Addr::new(10, 0, 2, 1);
     let routes: Vec<_> = (0..4).map(|tag| make_evpn_imet(source, tag)).collect();
     let mut update = super::lifecycle::test_routes_received(peer_v4(source), vec![]);
     if let RibUpdate::RoutesReceived { evpn_announced, .. } = &mut update {
@@ -4159,7 +4188,7 @@ fn evpn_fanout_serves_readiness_at_each_receiver_boundary() {
 /// A manager with `receivers` EVPN-capable eBGP receivers and a flush budget
 /// of zero, so a paced EVPN fanout parks at every receiver boundary.
 fn zero_budget_evpn_fanout(receivers: u8) -> (RibManager, Vec<PeerId>) {
-    let (_tx, rx) = mpsc::channel(8);
+    let (ingress_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peers: Vec<_> = (0..receivers)
         .map(|index| peer_v4(Ipv4Addr::new(10, 0, 3, index + 2)))
@@ -4177,6 +4206,12 @@ fn zero_budget_evpn_fanout(receivers: u8) -> (RibManager, Vec<PeerId>) {
         }
         manager.handle_update(up);
     }
+    register_deferred_test_peer(
+        &mut manager,
+        &ingress_tx,
+        peer_v4(Ipv4Addr::new(10, 0, 3, 1)),
+        0,
+    );
     manager.flush_poll_budget = Duration::ZERO;
     (manager, peers)
 }
@@ -4222,6 +4257,7 @@ fn evpn_inbound_fanout_parks_at_receiver_boundaries() {
     let receivers = 4;
     let (mut manager, peers) = zero_budget_evpn_fanout(receivers);
     let source = Ipv4Addr::new(10, 0, 3, 1);
+    register_test_peer(&mut manager, peer_v4(source), 0);
     let routes: Vec<_> = (0..3).map(|tag| make_evpn_imet(source, tag)).collect();
     manager.handle_update(evpn_update(source, routes.clone(), vec![]));
     manager.handle_update(evpn_update(source, vec![make_evpn_imet(source, 9)], vec![]));
@@ -4277,6 +4313,7 @@ fn parked_evpn_withdrawal_survives_its_source_going_down() {
     let receivers = 3;
     let (mut manager, peers) = zero_budget_evpn_fanout(receivers);
     let source = Ipv4Addr::new(10, 0, 3, 1);
+    register_test_peer(&mut manager, peer_v4(source), 0);
     let route = make_evpn_imet(source, 1);
     manager.handle_update(evpn_update(source, vec![route.clone()], vec![]));
     while manager.process_next_route_chunk() {}
@@ -4321,6 +4358,7 @@ fn evpn_refresh_answer_settles_the_owed_withdrawal() {
     const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
     let source: Ipv4Addr = "192.0.2.10".parse().unwrap();
     let pass = |manager: &mut RibManager, announced: Option<u32>, withdrawn: Option<u32>| {
+        register_test_peer(manager, peer_v4(source), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             peer: peer_v4(source),
             session_id: 0,

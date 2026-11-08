@@ -234,6 +234,12 @@ async fn add_path_source_explain_separates_inbound_identity_from_outbound_rank_a
 
     let mut best = make_route_with_lp(prefix, source_a, 300);
     best.path_id = 77;
+    tx.send(registering_peer_up(peer_v4(source_a), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(source_b), 0))
+        .await
+        .unwrap();
     feed_routes(&tx, peer_v4(source_a), vec![best]).await;
     let mut selected = make_route_with_lp(prefix, source_b, 200);
     selected.path_id = 0;
@@ -295,6 +301,9 @@ async fn add_path_source_explain_compacts_policy_rank_and_enforces_send_max() {
     for (peer, path_id, local_pref) in sources {
         let mut route = make_route_with_lp(prefix, peer, local_pref);
         route.path_id = path_id;
+        tx.send(registering_peer_up(peer_v4(peer), 0))
+            .await
+            .unwrap();
         feed_routes(&tx, peer_v4(peer), vec![route]).await;
     }
 
@@ -376,6 +385,9 @@ async fn add_path_source_explain_retains_attempted_rank_on_post_rank_otc_denial(
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::OnlyToCustomer(64512));
     });
+    tx.send(registering_peer_up(peer_v4(source_peer), 0))
+        .await
+        .unwrap();
     feed_routes(&tx, peer_v4(source_peer), vec![route]).await;
 
     let explain = query_explain_advertised_source(
@@ -430,6 +442,9 @@ async fn add_path_source_explain_fails_closed_for_mode_and_identity_mismatch() {
     .await
     .unwrap();
     let _add_path_rx = add_path_explain_peer_up(&tx, add_path, 2, None).await;
+    tx.send(registering_peer_up(peer_v4(source_peer), 0))
+        .await
+        .unwrap();
     feed_routes(
         &tx,
         peer_v4(source_peer),
@@ -987,7 +1002,10 @@ async fn advertised_route_reports_in_sync_and_staged_modifications() {
     );
     feed_routes(&tx, source, vec![route]).await;
     // Live distribution announced the (modified) route.
-    let update = rx_t.recv().await.unwrap();
+    let update = tokio::time::timeout(Duration::from_secs(5), rx_t.recv())
+        .await
+        .expect("advertised route update timed out")
+        .unwrap();
     assert_eq!(update.announce.len(), 1);
 
     let explain = query_explain_advertised_route(&tx, target, Prefix::V4(prefix)).await;
@@ -1631,6 +1649,8 @@ fn grouped_resync_window_keeps_explain_and_advertised_listing_in_agreement() {
     let Prefix::V4(v4) = prefix else {
         unreachable!()
     };
+
+    register_test_peer(&mut manager, peer_v4(source), 0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1710,6 +1730,7 @@ fn grouped_closed_receiver_keeps_explain_and_listing_on_admitted_state() {
         let old = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let new = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
         for announced in [vec![make_route(old, source)], vec![make_route(new, source)]] {
+            register_test_peer(&mut manager, peer_v4(source), 0);
             manager.handle_update(RibUpdate::RoutesReceived {
                 peer: peer_v4(source),
                 session_id: 0,
@@ -1756,6 +1777,8 @@ fn grouped_closed_receiver_keeps_explain_and_listing_on_admitted_state() {
                 (None, None)
             });
         }
+
+        register_test_peer(&mut manager, peer_v4(source), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             peer: peer_v4(source),
             session_id: 0,
@@ -1888,22 +1911,16 @@ fn add_path_mirrors_probe_after_route_server_control_egress() {
         route
     };
     let blackhole = rustbgpd_wire::COMMUNITY_BLACKHOLE;
-    manager.handle_update(RibUpdate::RoutesReceived {
-        peer: PeerId::from_addr(IpAddr::V4(source)),
-        session_id: 0,
-        // `0:X` asks the route server not to announce to AS X (not this
-        // receiver), and egress scrubs it.
-        announced: vec![
+
+    register_test_peer(&mut manager, PeerId::from_addr(IpAddr::V4(source)), 0);
+    // Control communities are scrubbed before the exact export probe.
+    manager.handle_update(super::lifecycle::test_routes_received(
+        peer_v4(source),
+        vec![
             path(1, 300, vec![blackhole, 65_100, 65_101]),
             path(2, 200, vec![blackhole]),
         ],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    });
+    ));
     drain_route_chunks(&mut manager);
     let mut wire = BTreeMap::new();
     while let Ok(update) = outbound.try_recv() {
@@ -2019,6 +2036,7 @@ fn add_path_commit_probes_with_the_planning_snapshot() {
     };
     let blackhole = rustbgpd_wire::COMMUNITY_BLACKHOLE;
     let mut receive = |announced, withdrawn| {
+        register_test_peer(&mut manager, PeerId::from_addr(IpAddr::V4(source)), 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             peer: PeerId::from_addr(IpAddr::V4(source)),
             session_id: 0,
@@ -2123,6 +2141,7 @@ fn add_path_rank_past_gated_sibling(
         sibling,
         make_route_with_lp(prefix, third, 100),
     ] {
+        register_test_peer(&mut manager, route.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -2254,6 +2273,7 @@ fn per_client_best_explain_skips_an_llgr_stale_sibling_like_live_staging() {
         make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 150), 300),
         stale,
     ] {
+        register_test_peer(&mut manager, route.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
@@ -2353,6 +2373,7 @@ fn explain_best_path_add_path_ranks_match_live_otc_egress() {
         make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 160), 200),
         otc,
     ] {
+        register_test_peer(&mut manager, route.peer, 0);
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: route.peer,
