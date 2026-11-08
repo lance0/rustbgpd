@@ -60,7 +60,7 @@ VmHWM limitation: a separate barrier-frozen control on this environment reported
 
 Timing covers summed synchronous session intervals with writer drains excluded; it is not CPU time. Allocator release does not establish RSS reduction. This component campaign does not qualify daemon scale, remote application, TCP delivery, convergence or forwarding.
 
-Reproduction uses the existing benchmark and ignored probe; the JSON gives the arm identities, controls, leg order and raw numerical rows:
+Reproduction uses the existing benchmark and ignored probe; the JSON gives the arm identities, controls, leg order, per-leg timing medians and per-leg memory maxima:
 
 ```sh
 cargo bench --locked -p rustbgpd-transport --features bench-internals --bench outbound_encode --no-run
