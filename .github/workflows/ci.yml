@@ -348,6 +348,8 @@ jobs:
       - run: cargo check --locked -p rustbgpd-rib --features bench-internals --benches
       # Transport has the same feature-gated `bench-internals` bench surface.
       - run: cargo check --locked -p rustbgpd-transport --features bench-internals --benches
+      # The ignored shared-stream retention probe is compiled only by its own feature.
+      - run: cargo check --locked -p rustbgpd-transport --features retention-probe --tests
       # API owns the feature-gated VPN query benches.
       - run: cargo check --locked -p rustbgpd-api --features bench-internals --benches
       # Same class of gap for the root crate: `bench-internals` exposes
