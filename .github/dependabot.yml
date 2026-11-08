@@ -103,7 +103,6 @@ updates:
       - "/bench/scale/reloadstall"
       - "/crates/evpn-linux/tests/docker"
       - "/fuzz/oss-fuzz"
-      - "/tests/compat/ixp-manager-birdseye"
       - "/tests/interop"
       - "/tests/interop/m126-fastnetmon-rtbh"
     schedule:
@@ -112,8 +111,17 @@ updates:
     ignore:
       # This image is built locally from the current checkout.
       - dependency-name: "rustbgpd"
-      # Base-image versions change deliberately: the rust tag tracks the
-      # workspace MSRV and compat images match their pinned oracles.
-      # Dependabot here is for digest and patch refreshes only.
+      # Base-image versions change deliberately (the rust tag tracks the
+      # workspace MSRV). Dependabot here is for digest and patch refreshes only.
       - dependency-name: "*"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # The compat-oracle images (golang, node, composer, php, python, alpine)
+  # are fixed by the pinned upstream compatibility contract, which asserts
+  # exact versions. They are bumped by hand together with that contract.
+  - package-ecosystem: "docker"
+    directory: "/tests/compat/ixp-manager-birdseye"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
