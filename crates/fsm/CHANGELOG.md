@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.15.0 - Unreleased
+## 0.15.0 - 2026-11-08
 
 - Unexpected BGP messages in OpenSent, OpenConfirm and Established now
   produce FSM Error subcodes 1, 2 and 3 with the unexpected message type
@@ -17,8 +17,7 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   negotiated like any other; Add-Path is never advertised for it, and
   `graceful_restart_preserves_family` includes it, so it joins the Graceful
   Restart and LLGR capability families. This family change alters no FSM
-  transition. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These crate
-  versions are not published by this change.
+  transition. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together.
 - `Event::ManualStart` outside `Idle` is now ignored and yields no actions, as
   RFC 4271 §8.2.2 specifies for start events in Connect, Active, OpenSent,
   OpenConfirm and Established. Previously it hit each state's catch-all: an

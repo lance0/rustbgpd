@@ -10,7 +10,7 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.15.0 is unpublished. It moves to wire `0.28.0` for IPv4/IPv6 VPN
+`rustbgpd-fsm` 0.15.0 moves to wire `0.28.0` for IPv4/IPv6 VPN
 FlowSpec (SAFI 134); configuring
 `(Afi::Ipv4, Safi::FlowSpecVpn)` or `(Afi::Ipv6, Safi::FlowSpecVpn)`
 in `PeerConfig::families` advertises that family, never with Add-Path. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10

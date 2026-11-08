@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.82.0] — 2026-11-08
+
+> **Release framing — hardening and composable policy.** This release hardens
+> the daemon against peers, RTR caches and API clients: explicit resource
+> limits on Add-Path paths, RPKI records, BFD timers and outbound queues,
+> fail-closed handling of runtime state, and refusal of malformed or
+> out-of-state input. `.rpol` becomes composable, with callable policies and
+> typed parameters, and several policy semantics change; read the upgrade
+> notes before reloading existing policy files. The daemon also originates
+> IPv4 and IPv6 VPN FlowSpec through the controller API, outside the v1
+> inventory. `rustbgpd-wire` 0.28.0, `rustbgpd-fsm` 0.15.0 and
+> `rustbgpd-rpki` 0.10.0 move to a new wire line together.
+
 ### Security
 
 - BFD local discriminators are now drawn at random from the operating

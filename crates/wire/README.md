@@ -18,7 +18,7 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
 ### 0.28.0 compatibility note
 
-`rustbgpd-wire` 0.28.0 is an unpublished breaking minor release that pairs
+`rustbgpd-wire` 0.28.0 is a breaking minor release that pairs
 with FSM 0.15 and RPKI 0.10. Upgrade the three crates together when
 exchanging public wire types. It adds IPv4/IPv6 VPN FlowSpec (AFI 1/2 / SAFI 134,
 RFC 8955 §8 and RFC 8956): `Safi::FlowSpecVpn`, the `VpnFlowSpecRule` NLRI type and the
@@ -29,7 +29,11 @@ family. The existing standalone VPN codec functions retain their IPv4
 signatures; `decode_vpn_flowspec_nlri_for_afi` and
 `try_encode_vpn_flowspec_nlri_for_afi` add explicit AFI selection. IPv6
 prefix offsets use the RFC 8956 pattern length and reject invalid offset
-bounds in both global and VPN FlowSpec. See the
+bounds in both global and VPN FlowSpec. The line also adds
+`DecodeError::InvalidTypeLength`, records a repeated attribute type once per
+cause in revised RFC 7606 decoding (the new `coalesced_duplicates` fields also
+break struct literals), decodes Flow Label only in IPv6 FlowSpec, and keeps the
+modeled tuples of a capability that also carries unmodeled AFI/SAFIs. See the
 [wire changelog](CHANGELOG.md).
 
 ### 0.27.0 compatibility note
