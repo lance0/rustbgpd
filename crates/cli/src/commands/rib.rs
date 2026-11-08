@@ -219,6 +219,17 @@ pub(crate) enum RouteListRpc {
 /// server's per-page cap so the loop takes the fewest round trips.
 pub(crate) const ROUTE_PAGE_SIZE: u32 = 1000;
 
+/// Reject a repeated continuation before consuming the page it accompanies.
+pub(super) fn check_page_token(seen: &mut HashSet<String>, next: &str) -> Result<(), CliError> {
+    if !next.is_empty() && !seen.insert(next.to_string()) {
+        return Err(CliError::Rpc(
+            "daemon returned a repeated page token (non-advancing or cyclic pagination)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 struct RouteListing {
     routes: Vec<Route>,
     total_count: u64,
@@ -267,6 +278,7 @@ async fn walk_route_pages(
     mut consume: impl FnMut(Vec<Route>) -> Result<(), CliError>,
 ) -> Result<(u64, String), CliError> {
     req.page_size = limit.unwrap_or(ROUTE_PAGE_SIZE);
+    let mut seen_tokens = HashSet::from([req.page_token.clone()]);
     loop {
         let resp = match rpc {
             RouteListRpc::Best => {
@@ -288,6 +300,9 @@ async fn walk_route_pages(
             }
         }
         .into_inner();
+        if limit.is_none() {
+            check_page_token(&mut seen_tokens, &resp.next_page_token)?;
+        }
         let total_count = resp.total_count;
         let mut routes = resp.routes;
         routes.iter_mut().for_each(scope_route);
@@ -2200,6 +2215,7 @@ pub async fn bgpls(
     let mut request = make_bgpls_request(family, peer, nlri_type)?;
     let mut client = connection.rib_listing_client();
     let mut routes = Vec::new();
+    let mut seen_tokens = HashSet::new();
     // Walk every page; a failed page stops the walk without retrying its token.
     loop {
         let page = read_rpc(
@@ -2208,6 +2224,7 @@ pub async fn bgpls(
         )
         .await?
         .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
         routes.extend(page.routes);
         if page.next_page_token.is_empty() {
             break;
@@ -2820,6 +2837,130 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use prost::Message;
+
+    #[tokio::test]
+    async fn route_walk_rejects_repeated_and_cyclic_tokens_before_consuming_page() {
+        use rustbgpd_api::proto as server_proto;
+
+        for rpc in [
+            RouteListRpc::Best,
+            RouteListRpc::Received,
+            RouteListRpc::Advertised,
+        ] {
+            for tokens in [vec!["a", "a"], vec!["a", "b", "a"]] {
+                let server = spawn_mock_server(None).await;
+                *server.state.list_route_pages.lock().await = tokens
+                    .iter()
+                    .map(|token| server_proto::ListRoutesResponse {
+                        routes: vec![server_proto::Route::default()],
+                        next_page_token: (*token).into(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let mut client = connect(&server.addr, None)
+                    .await
+                    .unwrap()
+                    .rib_listing_client();
+                let mut consumed = 0;
+                let result = walk_route_pages(
+                    &mut client,
+                    &rpc,
+                    ListRoutesRequest::default(),
+                    None,
+                    |page| {
+                        consumed += page.len();
+                        Ok(())
+                    },
+                )
+                .await;
+                assert!(
+                    matches!(result, Err(CliError::Rpc(ref message)) if message.contains("repeated page token")),
+                    "{result:?}"
+                );
+                assert_eq!(consumed, tokens.len() - 1);
+                assert_eq!(
+                    server.state.list_route_requests.lock().await.len(),
+                    tokens.len()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn route_walk_rejects_initial_token_reuse_but_preserves_single_page() {
+        use rustbgpd_api::proto as server_proto;
+
+        for limit in [None, Some(1)] {
+            let server = spawn_mock_server(None).await;
+            *server.state.list_route_pages.lock().await = vec![server_proto::ListRoutesResponse {
+                routes: vec![server_proto::Route::default()],
+                next_page_token: "initial".into(),
+                ..Default::default()
+            }];
+            let mut client = connect(&server.addr, None)
+                .await
+                .unwrap()
+                .rib_listing_client();
+            let mut consumed = 0;
+            let result = walk_route_pages(
+                &mut client,
+                &RouteListRpc::Best,
+                ListRoutesRequest {
+                    page_token: "initial".into(),
+                    ..Default::default()
+                },
+                limit,
+                |page| {
+                    consumed += page.len();
+                    Ok(())
+                },
+            )
+            .await;
+            if limit.is_some() {
+                assert_eq!(result.unwrap().1, "initial");
+                assert_eq!(consumed, 1);
+            } else {
+                assert!(
+                    matches!(result, Err(CliError::Rpc(ref message)) if message.contains("repeated page token")),
+                    "{result:?}"
+                );
+                assert_eq!(consumed, 0);
+            }
+            assert_eq!(server.state.list_route_requests.lock().await.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn bgpls_walk_rejects_repeated_and_cyclic_tokens() {
+        use rustbgpd_api::proto as server_proto;
+
+        for tokens in [vec!["a", "a"], vec!["a", "b", "a"]] {
+            let server = spawn_mock_server(None).await;
+            *server.state.bgpls_pages.lock().await = tokens
+                .iter()
+                .map(|token| server_proto::ListBgpLsRibRoutesResponse {
+                    next_page_token: (*token).into(),
+                    ..Default::default()
+                })
+                .collect();
+            let result = bgpls(
+                connect(&server.addr, None).await.unwrap(),
+                None,
+                None,
+                None,
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.contains("repeated page token")),
+                "{result:?}"
+            );
+            assert_eq!(
+                server.state.bgpls_page_requests.lock().await.len(),
+                tokens.len()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn family_page_adapters_preserve_invalid_views_and_mixed_selectors() {

@@ -899,6 +899,11 @@ impl Config {
 
         // Validate MRT config if present
         if let Some(ref mrt) = self.mrt {
+            rustbgpd_mrt::writer::validate_file_prefix(&mrt.file_prefix).map_err(|error| {
+                ConfigError::InvalidMrtConfig {
+                    reason: error.to_string(),
+                }
+            })?;
             if mrt.output_dir.trim().is_empty() {
                 return Err(ConfigError::InvalidMrtConfig {
                     reason: "output_dir must not be empty".to_string(),

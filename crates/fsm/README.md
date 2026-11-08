@@ -11,11 +11,14 @@ Requires Rust 1.95 or newer.
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
 `rustbgpd-fsm` 0.15.0 is unpublished. It moves to wire `0.28.0` for IPv4/IPv6 VPN
-FlowSpec (SAFI 134) with no FSM API or state-machine change; configuring
+FlowSpec (SAFI 134); configuring
 `(Afi::Ipv4, Safi::FlowSpecVpn)` or `(Afi::Ipv6, Safi::FlowSpecVpn)`
 in `PeerConfig::families` advertises that family, never with Add-Path. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10
 together when exchanging public wire types. See the
-[wire changelog](../wire/CHANGELOG.md).
+[wire changelog](../wire/CHANGELOG.md). This line also corrects unexpected-message
+NOTIFICATIONs to carry RFC 6608 state subcodes and the message type, and
+uses FSM Error for malformed UPDATEs received before Established. See the
+[FSM changelog](CHANGELOG.md) for the other state-machine corrections.
 
 `rustbgpd-fsm` 0.14.0 moves to wire `0.27.0` with no FSM API or
 state-machine change. Upgrade wire 0.27, FSM 0.14 and RPKI 0.9 together when

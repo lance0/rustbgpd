@@ -1983,6 +1983,7 @@ and `bfd_unavailable` (a `[[dynamic_neighbors]]` range runs BFD but the new
 session's BFD session could not be registered without waiting on the BFD
 actor, because a BFD membership change was in progress or the range's socket
 family is not open; the peer retries).
+The metric HELP text lists the same six canonical `reason` values.
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
 The Grafana overview graphs every reason in "Inbound connection drops by

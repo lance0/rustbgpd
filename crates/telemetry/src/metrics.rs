@@ -1195,7 +1195,7 @@ impl BgpMetrics {
         let inbound_connections_dropped = IntCounterVec::new(
             Opts::new(
                 "bgp_inbound_connections_dropped_total",
-                "Inbound connections dropped by the accept-path admission checks, by bounded reason: unconfigured source, per-source rate limit, dynamic-neighbor slot saturation (ADR-0120), or a configured neighbor held by its NOTIFICATION reconnect backoff.",
+                "Inbound connections dropped by the accept-path admission checks, by bounded reason: unconfigured, rate_limited, dynamic_limit, notification_backoff, rib_cleanup_pending, or bfd_unavailable.",
             ),
             &["reason"],
         )
@@ -9297,6 +9297,23 @@ mod tests {
                 "bgp_rib_policy_transition_total{{outcome=\"{}\"}} 1",
                 outcome.as_str()
             )));
+        }
+    }
+
+    #[test]
+    fn inbound_connection_drop_help_lists_every_reason() {
+        use crate::reason_labels::InboundConnectionDropReason;
+        let metrics = BgpMetrics::new();
+        let text = gather_text(&metrics);
+        let help = text
+            .lines()
+            .find(|line| line.starts_with("# HELP bgp_inbound_connections_dropped_total "))
+            .unwrap();
+        for reason in InboundConnectionDropReason::ALL {
+            assert!(
+                help.contains(reason.as_str()),
+                "HELP omits {reason}: {help}"
+            );
         }
     }
 

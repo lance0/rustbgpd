@@ -8,12 +8,29 @@ use tracing::{debug, info};
 
 use crate::types::MrtWriterConfig;
 
+/// Validate the filename prefix without touching the filesystem.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::InvalidInput`] unless `prefix` is a nonempty
+/// filename component other than `.` or `..`, without separators or NUL.
+pub fn validate_file_prefix(prefix: &str) -> std::io::Result<()> {
+    if prefix.is_empty() || matches!(prefix, "." | "..") || prefix.contains(['/', '\\', '\0']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "file_prefix must be a nonempty filename component without separators or NUL, other than '.' or '..'",
+        ));
+    }
+    Ok(())
+}
+
 /// Ensure the configured output path exists as a directory.
 ///
 /// The manager calls this before asking the RIB actor to materialize a
 /// snapshot. `write_dump` repeats the check so direct library callers retain
 /// the same lazy-directory-creation contract.
 pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()> {
+    validate_file_prefix(&config.file_prefix)?;
     std::fs::create_dir_all(&config.output_dir)
 }
 
@@ -23,7 +40,7 @@ pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()
 ///
 /// # Errors
 ///
-/// Returns an error if directory creation, staging, syncing or renaming fails.
+/// Returns an error if prefix validation, directory creation, staging, syncing or renaming fails.
 /// A parent-directory sync error occurs after the final file is published;
 /// retrying after that error can produce a second dump.
 pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
@@ -96,6 +113,45 @@ mod tests {
     use std::io::Read;
 
     use super::*;
+
+    #[test]
+    fn absolute_file_prefix_cannot_publish_outside_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = dir.path().join("dumps");
+        let escaped_prefix = dir.path().join("escaped");
+        // Reproduce the existing staging path: prepending '.' makes the
+        // absolute prefix relative, while the final path remains absolute.
+        std::fs::create_dir_all(output_dir.join(format!(".{}", dir.path().display()))).unwrap();
+        let config = MrtWriterConfig {
+            output_dir,
+            dump_interval: 3600,
+            compress: false,
+            file_prefix: escaped_prefix.to_str().unwrap().to_string(),
+        };
+        let result = write_dump(&config, b"must stay inside dumps");
+        assert!(result.is_err(), "published outside output_dir: {result:?}");
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn invalid_file_prefix_is_rejected_before_creating_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        for prefix in [
+            "", ".", "..", "/rib", "../rib", "dir/rib", "dir\\rib", "rib\0",
+        ] {
+            let output_dir = dir.path().join("not-created");
+            let config = MrtWriterConfig {
+                output_dir: output_dir.clone(),
+                dump_interval: 3600,
+                compress: false,
+                file_prefix: prefix.to_string(),
+            };
+            let error = write_dump(&config, b"no dump").unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{prefix:?}");
+            assert!(!output_dir.exists(), "{prefix:?} created output directory");
+        }
+    }
 
     #[test]
     fn write_uncompressed() {

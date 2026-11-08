@@ -132,6 +132,18 @@ pub mod update_subcode {
     pub const MALFORMED_AS_PATH: u8 = 11;
 }
 
+/// Finite State Machine Error subcodes (code 5, RFC 6608 §4).
+pub mod fsm_subcode {
+    /// Subcode 0: Unspecified Error.
+    pub const UNSPECIFIED: u8 = 0;
+    /// Subcode 1: Receive Unexpected Message in `OpenSent` State.
+    pub const UNEXPECTED_MESSAGE_IN_OPEN_SENT: u8 = 1;
+    /// Subcode 2: Receive Unexpected Message in `OpenConfirm` State.
+    pub const UNEXPECTED_MESSAGE_IN_OPEN_CONFIRM: u8 = 2;
+    /// Subcode 3: Receive Unexpected Message in Established State.
+    pub const UNEXPECTED_MESSAGE_IN_ESTABLISHED: u8 = 3;
+}
+
 /// Cease subcodes (code 6, RFC 4486).
 pub mod cease_subcode {
     /// Subcode 1: Maximum Number of Prefixes Reached.

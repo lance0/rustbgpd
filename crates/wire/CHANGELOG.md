@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.28.0 - Unreleased
 
+- Add `notification::fsm_subcode` constants for the RFC 6608 FSM Error
+  subcodes. NOTIFICATION decoding and encoding are unchanged.
 - Report the violated per-type bound for invalid BGP message lengths. The
   additive `DecodeError::InvalidTypeLength` variant covers OPEN, UPDATE,
   NOTIFICATION and short ROUTE-REFRESH messages; KEEPALIVE uses the existing

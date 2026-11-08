@@ -1090,12 +1090,14 @@ async fn query_state_returns_router_id_at_open_confirm() {
 
 /// The session state a peer message is injected in.
 #[derive(Clone, Copy)]
-enum PreEstablished {
+enum InjectionState {
     /// Our OPEN is sent; the peer has not sent its OPEN.
     OpenSent,
     /// Both OPENs are exchanged and our KEEPALIVE is read; the peer has not
     /// sent its KEEPALIVE.
     OpenConfirm,
+    /// The peer has completed its KEEPALIVE handshake.
+    Established,
 }
 
 /// A classic IPv4 UPDATE: ORIGIN IGP, AS_PATH [65002] (two-octet), NEXT_HOP
@@ -1144,8 +1146,8 @@ fn peer_input_kind(update: &RibUpdate) -> Option<&'static str> {
 /// The session hands a PDU's RIB messages to the channel before it drives the
 /// FSM for that PDU, so once the NOTIFICATION is on the wire the channel
 /// already holds everything the PDU produced.
-async fn inject_before_established(
-    stage: PreEstablished,
+async fn inject_at_state(
+    stage: InjectionState,
     pdu: &[u8],
     import_policy: Option<PolicyChain>,
 ) -> (NotificationMessage, Vec<&'static str>) {
@@ -1178,7 +1180,10 @@ async fn inject_before_established(
     .expect("session sends OPEN");
     assert!(matches!(msg, Message::Open(_)));
 
-    if matches!(stage, PreEstablished::OpenConfirm) {
+    if matches!(
+        stage,
+        InjectionState::OpenConfirm | InjectionState::Established
+    ) {
         let mut open = mock_open();
         open.capabilities.push(Capability::RouteRefresh);
         send_bgp_message(&mut peer_stream, &Message::Open(open)).await;
@@ -1190,6 +1195,10 @@ async fn inject_before_established(
         .expect("session answers OPEN with KEEPALIVE");
         assert!(matches!(msg, Message::Keepalive));
     }
+    if matches!(stage, InjectionState::Established) {
+        send_bgp_message(&mut peer_stream, &Message::Keepalive).await;
+        wait_for_fsm_state(&handle, SessionState::Established).await;
+    }
 
     peer_stream.write_all(pdu).await.unwrap();
     peer_stream.flush().await.unwrap();
@@ -1200,7 +1209,7 @@ async fn inject_before_established(
             read_bgp_message(&mut peer_stream, &mut buf),
         )
         .await
-        .expect("session answers a pre-Established message with a NOTIFICATION");
+        .expect("session answers an unexpected message with a NOTIFICATION");
         match msg {
             Message::Notification(notification) => break notification,
             Message::Keepalive => {}
@@ -1217,50 +1226,50 @@ async fn inject_before_established(
     (notification, seen)
 }
 
-/// RFC 4271 §8.2.2: UPDATE and ROUTE-REFRESH in OpenSent or OpenConfirm are
-/// FSM errors. RFC 6608 subcodes are not modeled, so the subcode is 0.
-fn assert_fsm_error(notification: &NotificationMessage) {
+/// RFC 6608 §4 identifies the state and unexpected message type.
+fn assert_fsm_error(notification: &NotificationMessage, subcode: u8, message_type: u8) {
     assert_eq!(notification.code, NotificationCode::FsmError);
-    assert_eq!(notification.subcode, 0);
+    assert_eq!(notification.subcode, subcode);
+    assert_eq!(notification.data.as_ref(), &[message_type]);
 }
 
 #[tokio::test]
 async fn update_in_open_sent_is_an_fsm_error_and_reaches_no_rib() {
     let (notification, seen) =
-        inject_before_established(PreEstablished::OpenSent, &PRE_ESTABLISHED_UPDATE, None).await;
+        inject_at_state(InjectionState::OpenSent, &PRE_ESTABLISHED_UPDATE, None).await;
     assert!(
         seen.is_empty(),
         "pre-Established UPDATE reached the RIB: {seen:?}"
     );
-    assert_fsm_error(&notification);
+    assert_fsm_error(&notification, 1, 2);
 }
 
 #[tokio::test]
 async fn update_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
     let (notification, seen) =
-        inject_before_established(PreEstablished::OpenConfirm, &PRE_ESTABLISHED_UPDATE, None).await;
+        inject_at_state(InjectionState::OpenConfirm, &PRE_ESTABLISHED_UPDATE, None).await;
     assert!(
         seen.is_empty(),
         "pre-Established UPDATE reached the RIB: {seen:?}"
     );
-    assert_fsm_error(&notification);
+    assert_fsm_error(&notification, 2, 2);
 }
 
 #[tokio::test]
 async fn end_of_rib_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
     let (notification, seen) =
-        inject_before_established(PreEstablished::OpenConfirm, &PRE_ESTABLISHED_EOR, None).await;
+        inject_at_state(InjectionState::OpenConfirm, &PRE_ESTABLISHED_EOR, None).await;
     assert!(
         seen.is_empty(),
         "pre-Established End-of-RIB reached the RIB: {seen:?}"
     );
-    assert_fsm_error(&notification);
+    assert_fsm_error(&notification, 2, 2);
 }
 
 #[tokio::test]
 async fn route_refresh_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
-    let (notification, seen) = inject_before_established(
-        PreEstablished::OpenConfirm,
+    let (notification, seen) = inject_at_state(
+        InjectionState::OpenConfirm,
         &PRE_ESTABLISHED_ROUTE_REFRESH,
         None,
     )
@@ -1269,7 +1278,86 @@ async fn route_refresh_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
         seen.is_empty(),
         "pre-Established ROUTE-REFRESH reached the RIB: {seen:?}"
     );
-    assert_fsm_error(&notification);
+    assert_fsm_error(&notification, 2, 5);
+}
+
+async fn check_malformed_update(state: InjectionState, subcode: u8) {
+    let mut pdu = PRE_ESTABLISHED_UPDATE;
+    pdu[19..21].copy_from_slice(&u16::MAX.to_be_bytes());
+    let (notification, seen) = inject_at_state(state, &pdu, None).await;
+    assert!(
+        seen.is_empty(),
+        "malformed UPDATE reached the RIB: {seen:?}"
+    );
+    assert_fsm_error(&notification, subcode, 2);
+}
+
+#[tokio::test]
+async fn malformed_update_in_open_sent_is_an_fsm_error() {
+    check_malformed_update(InjectionState::OpenSent, 1).await;
+}
+
+#[tokio::test]
+async fn malformed_update_in_open_confirm_is_an_fsm_error() {
+    check_malformed_update(InjectionState::OpenConfirm, 2).await;
+}
+
+#[tokio::test]
+async fn keepalive_in_open_sent_names_the_unexpected_message() {
+    let pdu = encode_message(&Message::Keepalive).unwrap();
+    let (notification, seen) = inject_at_state(InjectionState::OpenSent, &pdu, None).await;
+    assert!(seen.is_empty());
+    assert_fsm_error(&notification, 1, 4);
+}
+
+#[tokio::test]
+async fn open_in_open_confirm_names_the_unexpected_message() {
+    let pdu = encode_message(&Message::Open(mock_open())).unwrap();
+    let (notification, seen) = inject_at_state(InjectionState::OpenConfirm, &pdu, None).await;
+    assert!(seen.is_empty());
+    assert_fsm_error(&notification, 2, 1);
+}
+
+#[tokio::test]
+async fn open_in_established_names_the_unexpected_message_and_withdraws() {
+    let pdu = encode_message(&Message::Open(mock_open())).unwrap();
+    let (notification, seen) = inject_at_state(InjectionState::Established, &pdu, None).await;
+    assert_eq!(seen, ["PeerDown"]);
+    assert_fsm_error(&notification, 3, 1);
+}
+
+#[tokio::test]
+async fn malformed_update_in_established_keeps_update_error_and_withdraws() {
+    let mut pdu = PRE_ESTABLISHED_UPDATE;
+    pdu[19..21].copy_from_slice(&u16::MAX.to_be_bytes());
+    let (notification, seen) = inject_at_state(InjectionState::Established, &pdu, None).await;
+    assert_eq!(seen, ["PeerDown"]);
+    assert_eq!(notification.code, NotificationCode::UpdateMessage);
+    assert_eq!(notification.subcode, 1);
+}
+
+#[tokio::test]
+async fn malformed_open_in_open_confirm_keeps_open_error() {
+    let mut pdu = encode_message(&Message::Open(mock_open())).unwrap();
+    pdu[19] = 3;
+    let (notification, seen) = inject_at_state(InjectionState::OpenConfirm, &pdu, None).await;
+    assert!(seen.is_empty());
+    assert_eq!(notification.code, NotificationCode::OpenMessage);
+    assert_eq!(notification.subcode, 1);
+    assert_eq!(notification.data.as_ref(), &[0, 4]);
+}
+
+#[tokio::test]
+async fn short_update_header_before_established_keeps_header_error() {
+    let mut pdu = PRE_ESTABLISHED_EOR[..22].to_vec();
+    pdu[17] = 22;
+    for state in [InjectionState::OpenSent, InjectionState::OpenConfirm] {
+        let (notification, seen) = inject_at_state(state, &pdu, None).await;
+        assert!(seen.is_empty());
+        assert_eq!(notification.code, NotificationCode::MessageHeader);
+        assert_eq!(notification.subcode, 2);
+        assert_eq!(notification.data.as_ref(), &[0, 22]);
+    }
 }
 
 /// One import deny statement for an eBGP neighbor, with default permit.
@@ -1319,8 +1407,8 @@ async fn update_in_open_confirm_bypassing_ebgp_import_deny_reaches_no_rib() {
         ],
         default_action: PolicyAction::Permit,
     }]);
-    let (notification, seen) = inject_before_established(
-        PreEstablished::OpenConfirm,
+    let (notification, seen) = inject_at_state(
+        InjectionState::OpenConfirm,
         &PRE_ESTABLISHED_UPDATE,
         Some(import_policy),
     )
@@ -1329,5 +1417,5 @@ async fn update_in_open_confirm_bypassing_ebgp_import_deny_reaches_no_rib() {
         seen.is_empty(),
         "pre-Established UPDATE bypassed the eBGP import deny: {seen:?}"
     );
-    assert_fsm_error(&notification);
+    assert_fsm_error(&notification, 2, 2);
 }
