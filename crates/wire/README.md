@@ -705,6 +705,13 @@ use with standard error propagation. `ShutdownCommunicationError` displays
 bounded descriptions without malformed input bytes; `category()` retains
 its stable machine-readable labels.
 
+Per-type length violations use `DecodeError::InvalidTypeLength` or the
+existing `InvalidKeepaliveLength`; the general header range still uses
+`InvalidLength`. All three map to Bad Message Length (1/2) with the received
+Length field. ROUTE-REFRESH has a minimum of 23 octets because ORF payloads
+can extend the base message; Enhanced Route Refresh error handling remains
+the session's responsibility.
+
 Downstream matches on any of these enums must include
 a wildcard arm:
 

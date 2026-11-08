@@ -175,7 +175,21 @@ fn check_type_length(message_type: MessageType, length: u16) -> Result<(), Decod
     if (min..=max).contains(&length) {
         Ok(())
     } else {
-        Err(DecodeError::InvalidLength { length })
+        if message_type == MessageType::Keepalive {
+            return Err(DecodeError::InvalidKeepaliveLength { length });
+        }
+        let expected = match message_type {
+            MessageType::Open if length < min => "at least 29",
+            MessageType::Open => "at most 4096",
+            MessageType::Update => "at least 23",
+            MessageType::Notification => "at least 21",
+            MessageType::Keepalive | MessageType::RouteRefresh => unreachable!(),
+        };
+        Err(DecodeError::InvalidTypeLength {
+            message_type,
+            length,
+            expected,
+        })
     }
 }
 
@@ -237,11 +251,9 @@ mod tests {
                 "type {msg_type} at its minimum"
             );
             for length in [min - 1, max + 1] {
-                assert_eq!(
-                    peek_message_length(&make_header(length, msg_type), MAX_MESSAGE_LEN),
-                    Err(DecodeError::InvalidLength { length }),
-                    "type {msg_type} length {length}"
-                );
+                let err = peek_message_length(&make_header(length, msg_type), MAX_MESSAGE_LEN)
+                    .unwrap_err();
+                assert_eq!(err.to_notification().2.as_ref(), &length.to_be_bytes());
             }
         }
     }
@@ -336,10 +348,8 @@ mod tests {
 
             // Mutation-red: removing either per-type branch lets its 4097-byte
             // header through under the negotiated extended limit.
-            assert_eq!(
-                BgpHeader::decode(&mut buf, EXTENDED_MAX_MESSAGE_LEN),
-                Err(DecodeError::InvalidLength { length: 4097 })
-            );
+            let err = BgpHeader::decode(&mut buf, EXTENDED_MAX_MESSAGE_LEN).unwrap_err();
+            assert_eq!(err.to_notification().2.as_ref(), &4097_u16.to_be_bytes());
         }
     }
 
@@ -368,10 +378,8 @@ mod tests {
 
             // Mutation-red: removing the peek guard returns Some(4097), which
             // makes transport wait for and buffer an invalid excluded PDU.
-            assert_eq!(
-                peek_message_length(&buf, EXTENDED_MAX_MESSAGE_LEN),
-                Err(DecodeError::InvalidLength { length: 4097 })
-            );
+            let err = peek_message_length(&buf, EXTENDED_MAX_MESSAGE_LEN).unwrap_err();
+            assert_eq!(err.to_notification().2.as_ref(), &4097_u16.to_be_bytes());
         }
     }
 

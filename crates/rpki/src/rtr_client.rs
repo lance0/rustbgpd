@@ -1373,6 +1373,10 @@ impl RtrClient {
 
             loop {
                 while let Some(pdu) = self.next_pdu(parse_buf)? {
+                    // A ready read can carry PDUs past the captured data expiry.
+                    if expired() {
+                        return Err(RtrError::Expired);
+                    }
                     match pdu {
                         RtrPdu::CacheResponse { session_id } => {
                             // One Cache Response opens one response. A second
@@ -4022,6 +4026,151 @@ mod tests {
 
         client_handle.abort();
         let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffered_end_of_data_cannot_renew_expired_data() {
+        for query in [QueryKind::Serial, QueryKind::Reset] {
+            for elapsed in [Duration::from_secs(1), Duration::from_secs(2)] {
+                buffered_end_of_data_at_expiry(query, elapsed).await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffered_end_of_data_before_expiry_renews_data() {
+        for query in [QueryKind::Serial, QueryKind::Reset] {
+            buffered_end_of_data_at_expiry(query, Duration::ZERO).await;
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "drive buffered responses through the client and verify both published tables and renewal state at expiry"
+    )]
+    async fn buffered_end_of_data_at_expiry(query: QueryKind, elapsed: Duration) {
+        use crate::vrp_manager::VrpManager;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (connected, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let mut stream = connected.unwrap();
+        let (mut cache, _) = accepted.unwrap();
+        let (vrp_tx, vrp_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(8);
+        let manager = tokio::spawn(VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx).run());
+        let mut client = zero_retry_client(addr, vrp_tx);
+        let mut read_buf = [0u8; 8192];
+        let mut parse_buf = Vec::new();
+        let response = [
+            RtrPdu::CacheResponse { session_id: 7 },
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+            RtrPdu::Aspa {
+                flags: 1,
+                customer_asn: 65001,
+                provider_asns: vec![65010],
+            },
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 1,
+                expire: 120,
+            },
+        ];
+        write_pdus(&mut cache, &response).await;
+        client
+            .fetch_until_end_of_data(&mut stream, &mut read_buf, &mut parse_buf, QueryKind::Reset)
+            .await
+            .unwrap();
+        assert_eq!(read_pdu(&mut cache).await, RtrPdu::ResetQuery);
+        assert_eq!(rib_rx.recv().await.unwrap().table.len(), 1);
+        assert_eq!(aspa_rx.recv().await.unwrap().table.len(), 1);
+        let accepted_at = client.last_end_of_data_at;
+        let epoch = client.epoch;
+        let timers = (
+            client.refresh_interval,
+            client.retry_interval,
+            client.expire_interval,
+        );
+        let expiry = client.data_expires_at.unwrap();
+
+        // Buffer before expiry; advance explicitly before processing. No
+        // sleeper races a socket read or another task.
+        tokio::time::advance(
+            (expiry - TokioInstant::now())
+                .checked_sub(Duration::from_secs(1))
+                .unwrap(),
+        )
+        .await;
+        let eod = RtrPdu::EndOfData {
+            session_id: 7,
+            serial: 101,
+            refresh: 90,
+            retry: 2,
+            expire: 240,
+        };
+        let pdus = if matches!(query, QueryKind::Reset) {
+            vec![
+                response[0].clone(),
+                response[1].clone(),
+                response[2].clone(),
+                eod,
+            ]
+        } else {
+            vec![response[0].clone(), eod]
+        };
+        let mut encoded = Vec::new();
+        for pdu in pdus {
+            pdu.encode_with_version(&mut encoded, crate::rtr_codec::RTR_VERSION_2)
+                .unwrap();
+        }
+        cache.write_all(&encoded).await.unwrap();
+        parse_buf.resize(encoded.len(), 0);
+        stream.read_exact(&mut parse_buf).await.unwrap();
+        assert!(TokioInstant::now() < expiry);
+        tokio::time::advance(elapsed).await;
+        let expired = TokioInstant::now() >= expiry;
+        let result = client
+            .fetch_until_end_of_data(&mut stream, &mut read_buf, &mut parse_buf, query)
+            .await;
+        if expired {
+            assert!(
+                matches!(result, Err(RtrError::Expired)),
+                "buffered response renewed expired data: {result:?}"
+            );
+            assert_eq!(client.data_expires_at, Some(expiry));
+            assert_eq!(client.last_end_of_data_at, accepted_at);
+            assert_eq!(client.epoch, epoch);
+            assert_eq!(
+                (
+                    client.refresh_interval,
+                    client.retry_interval,
+                    client.expire_interval
+                ),
+                timers
+            );
+            client.end_session(&result.unwrap_err()).await;
+            assert!(client.data_expires_at.is_none());
+            assert!(client.last_end_of_data_at.is_none());
+            assert!(client.epoch.is_none());
+            assert_eq!(client.held_records, 0);
+            assert!(rib_rx.recv().await.unwrap().table.is_empty());
+            assert!(aspa_rx.recv().await.unwrap().table.is_empty());
+        } else {
+            result.unwrap();
+            assert!(client.data_expires_at.unwrap() > expiry);
+            assert!(client.epoch.is_some());
+        }
+        manager.abort();
+        let _ = manager.await;
     }
 
     /// §6: held data expires on time while a refresh query is in flight. A

@@ -306,8 +306,9 @@ mod tests {
 
         assert!(matches!(
             codec.decode(&mut src),
-            Err(BgpCodecError::Decode(DecodeError::InvalidLength {
-                length: 20
+            Err(BgpCodecError::Decode(DecodeError::InvalidTypeLength {
+                length: 20,
+                ..
             }))
         ));
         assert_eq!(src, original);
@@ -347,8 +348,8 @@ mod tests {
 
         assert!(matches!(
             codec.decode(&mut src),
-            Err(BgpCodecError::Decode(DecodeError::InvalidLength {
-                length
+            Err(BgpCodecError::Decode(DecodeError::InvalidTypeLength {
+                length, ..
             })) if length == MAX_MESSAGE_LEN + 1
         ));
         assert_eq!(src, original);

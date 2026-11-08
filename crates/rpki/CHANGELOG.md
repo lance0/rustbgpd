@@ -5,6 +5,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.10.0 - Unreleased
 
+- Recheck the held data expiry while applying buffered RTR PDUs. An End of
+  Data processed at or after the captured expiry ends the transaction and
+  flushes that cache's VRPs and ASPAs instead of renewing expired data.
+  Both incremental and full responses use the existing expiry path.
+
 - Decode the RTR Router Key PDU (type 9, RFC 8210 §5.10) into the new
   `RtrPdu::RouterKey` variant, and encode it. The client ignores it, because
   it does not validate BGPsec paths. Previously the codec rejected type 9 as an

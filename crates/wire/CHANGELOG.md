@@ -5,6 +5,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.28.0 - Unreleased
 
+- Report the violated per-type bound for invalid BGP message lengths. The
+  additive `DecodeError::InvalidTypeLength` variant covers OPEN, UPDATE,
+  NOTIFICATION and short ROUTE-REFRESH messages; KEEPALIVE uses the existing
+  `InvalidKeepaliveLength`. Rejected bytes and NOTIFICATION code, subcode
+  and data are unchanged. ROUTE-REFRESH requires at least 23 octets because
+  ORF payloads may extend its base body.
+
 - Add IPv4/IPv6 VPN FlowSpec (AFI 1/2 / SAFI 134, RFC 8955 §8 and
   RFC 8956): `Safi::FlowSpecVpn`, both `l3vpn_ipv4_flowspec` and
   `l3vpn_ipv6_flowspec` in `CONFIGURED_FAMILIES`, and `VpnFlowSpecRule`
