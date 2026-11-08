@@ -104,10 +104,11 @@ deterministic growth checks.
 - **SRv6 service eligibility** — RFC 9252 service SID structure and
   family-specific transposition checks exclude unusable candidates before
   selection, Add-Path, ORR, and ECMP, while preserving received attributes.
-  Unicast and EVPN explain report `srv6_sid_invalid`. VPN has no explain RPC:
-  the bounded received view (`ListVpnRibRoutes` with
-  `FAMILY_ROUTE_VIEW_RECEIVED`, `rbgp rib vpn received`) lists the rows without
-  that reason. This does not originate
+  Unicast and EVPN explain, and VPN export explain (`ExplainAdvertisedRoute`
+  with an `rd`, `rbgp rib --prefix P advertised PEER --explain --rd RD`),
+  report `srv6_sid_invalid`. The bounded received VPN view
+  (`ListVpnRibRoutes` with `FAMILY_ROUTE_VIEW_RECEIVED`,
+  `rbgp rib vpn received`) lists rows without that reason. This does not originate
   SRv6 services or install SRv6 forwarding state.
 - **Adj-RIB-Out** — per-peer outbound route tracking with split horizon,
   iBGP suppression, route reflector reflection rules
