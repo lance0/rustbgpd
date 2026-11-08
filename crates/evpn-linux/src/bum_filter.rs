@@ -13,8 +13,8 @@
 //! These three flags map 1:1 to the kernel's
 //! `IFLA_BRPORT_UNICAST_FLOOD` / `IFLA_BRPORT_MCAST_FLOOD` /
 //! `IFLA_BRPORT_BCAST_FLOOD` netlink attributes. `bcast_flood` was
-//! added in Linux 4.18 (commit 4ce1b1bb05a3); the other two predate
-//! it. The privileged spike at
+//! added in [Linux 4.12](https://github.com/torvalds/linux/blob/v4.12/net/bridge/br_netlink.c);
+//! the other two predate it. The privileged spike at
 //! `tests/scripts/netns-bum-filter-spike.sh` proves all three
 //! together suppress broadcast / multicast / unknown-unicast flooding
 //! toward the CE-facing port while leaving known-unicast forwarding
@@ -23,7 +23,7 @@
 //!
 //! This module deliberately does **not** speak netlink. The
 //! [`BumPortFlagPlan`] rows it returns feed the rtnetlink-backed
-//! `RTM_SETLINK` bridge-port `slave_data` triplet in the Linux
+//! `RTM_NEWLINK` bridge-port `slave_data` triplet in the Linux
 //! dataplane implementation, while this pure layer keeps the
 //! mapping contract easy to pin with unit tests.
 
@@ -40,7 +40,7 @@ pub struct BumPortFlags {
     pub unicast_flood: bool,
     /// `IFLA_BRPORT_MCAST_FLOOD` — unknown multicast.
     pub multicast_flood: bool,
-    /// `IFLA_BRPORT_BCAST_FLOOD` — broadcast (kernel >= 4.18).
+    /// `IFLA_BRPORT_BCAST_FLOOD` — broadcast (kernel >= 4.12).
     pub broadcast_flood: bool,
 }
 
@@ -129,7 +129,7 @@ pub fn compute_flag_plan(rows: &[BumEnforcementStatus]) -> Vec<BumPortFlagPlan> 
 /// Diff two plan snapshots and return only the entries that need to
 /// change. Idempotent: an unchanged port emits nothing. Used by the
 /// reconciler to translate a level-triggered intent into the minimal
-/// set of `RTM_SETLINK` calls.
+/// set of `RTM_NEWLINK` calls.
 #[must_use]
 pub fn diff_flag_plans(prior: &[BumPortFlagPlan], new: &[BumPortFlagPlan]) -> Vec<BumPortFlagPlan> {
     use std::collections::BTreeMap;

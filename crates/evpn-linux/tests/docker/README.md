@@ -117,9 +117,9 @@ idempotent.
 
 ## Kernel requirements
 
-- Linux >= 4.18 on the **host** for the Gate 8b BUM selectors (the
+- Linux >= 4.12 on the **host** for the Gate 8b BUM selectors (the
   container shares the host kernel; `IFLA_BRPORT_BCAST_FLOOD` was
-  added in 4.18).
+  added in 4.12).
 - Linux >= 5.8 on the **host** for the ADR-0059 FDB-NHG selectors
   (`RTM_NEWNEXTHOP` / `NHA_FDB` support).
 - Netns-capable Linux for the ADR-0061 `fib_runtime` selector; it
@@ -159,7 +159,7 @@ container around it.
 The default Gate 8b BUM selector is wired into PR-CI via the
 `evpn_bum_filter_kernel` job in `.github/workflows/ci.yml`. Every PR
 runs the shell spike and Rust round-trip against the GitHub-hosted
-runner's kernel (Ubuntu 24.04, kernel 6.x — well past the 4.18 floor
+runner's kernel (Ubuntu 24.04, kernel 6.x — well past the 4.12 floor
 for `IFLA_BRPORT_BCAST_FLOOD`).
 
 The kernel-dataplane workflow names its CI-gated privileged selector

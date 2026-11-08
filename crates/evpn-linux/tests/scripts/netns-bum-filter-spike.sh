@@ -25,7 +25,8 @@
 # FRR uses for the same job (zebra/zebra_evpn.c) and matches the
 # `IFLA_BRPORT_{,M,B}CAST_FLOOD` netlink attributes the eventual
 # rtnetlink wiring will set directly. `bcast_flood` requires Linux
-# >= 4.18 (commit 4ce1b1bb05a3).
+# >= 4.12; see the upstream bridge attribute handler:
+# https://github.com/torvalds/linux/blob/v4.12/net/bridge/br_netlink.c
 #
 # Usage:
 #   sudo bash crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh
@@ -143,7 +144,7 @@ require_tool ip
 require_tool bridge
 require_tool ping
 
-# Kernel must support per-port bcast_flood (>= 4.18). We probe lazily
+# Kernel must support per-port bcast_flood (>= 4.12). We probe lazily
 # by attempting to set it on a throwaway interface inside the netns
 # below; if it errors, we abort with a kernel-version message.
 

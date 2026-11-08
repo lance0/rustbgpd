@@ -30,6 +30,8 @@ use tokio::sync::{mpsc, oneshot};
 mod rr1000;
 mod rr1000_support;
 
+use rr1000_support::{next_task, HarnessTasks};
+
 const PEERS: usize = 2;
 const PREFIXES: usize = 100;
 const SOURCES: usize = 4;
@@ -404,6 +406,26 @@ async fn smoke() -> Result<()> {
     );
     let manager_task = tokio::spawn(manager.run());
 
+    let mut tasks = HarnessTasks::new(manager_task);
+    let result = smoke_run(&metrics, &rib_tx, &query_tx, &mut tasks).await;
+    drop(rib_tx);
+    drop(query_tx);
+    let cleanup = tasks.settle(tokio::time::Instant::now() + DEADLINE).await;
+    if let Err(error) = &cleanup {
+        eprintln!("{error:#}");
+    }
+    let output = result?;
+    cleanup?;
+    println!("{output}");
+    Ok(())
+}
+
+async fn smoke_run(
+    metrics: &BgpMetrics,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    query_tx: &mpsc::Sender<RibUpdate>,
+    tasks: &mut HarnessTasks<WireStats>,
+) -> Result<String> {
     let expected = Arc::new((0..PREFIXES).map(prefix).collect::<BTreeSet<_>>());
     for source_index in 0..SOURCES {
         let source = source(source_index);
@@ -432,8 +454,6 @@ async fn smoke() -> Result<()> {
         TcpListener::bind((Ipv4Addr::new(127, 0, 0, 3), 0)).await?,
     ];
     let addresses = [listeners[0].local_addr()?, listeners[1].local_addr()?];
-    let mut stub_tasks = Vec::new();
-    let mut sessions = Vec::new();
     for (index, (listener, address)) in listeners.into_iter().zip(addresses).enumerate() {
         let stub_config = StubConfig {
             listen: SocketAddr::new(address.ip(), 0),
@@ -442,8 +462,10 @@ async fn smoke() -> Result<()> {
             hold_time: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         };
-        stub_tasks.push(tokio::spawn(establish_on(listener, stub_config)));
-        let session = PeerHandle::spawn(
+        tasks
+            .handshakes
+            .push_back(tokio::spawn(establish_on(listener, stub_config)));
+        tasks.sessions.push(PeerHandle::spawn(
             transport_config(address),
             metrics.clone(),
             rib_tx.clone(),
@@ -453,33 +475,43 @@ async fn smoke() -> Result<()> {
             None,
             None,
             false,
-        );
-        session.start().await?;
-        sessions.push(session);
+        ));
+        tasks.sessions.last().unwrap().start().await?;
     }
 
     let mut stubs = Vec::new();
-    for task in stub_tasks {
-        stubs.push(tokio::time::timeout(DEADLINE, task).await???);
+    while !tasks.handshakes.is_empty() {
+        let stub = next_task(
+            &mut tasks.handshakes,
+            tokio::time::Instant::now() + DEADLINE,
+        )
+        .await??;
+        tasks.background.extend(stub.tasks);
+        stubs.push((stub.tx, stub.rx));
     }
-    for session in &sessions {
+    for session in &tasks.sessions {
         wait_established(session).await?;
     }
 
     let peers = addresses.map(|address| address.ip());
-    let mut stub_senders = Vec::new();
-    let collectors = stubs
+    tasks.collectors = stubs
         .into_iter()
-        .map(|stub| {
-            stub_senders.push(stub.tx);
-            tokio::spawn(collect_wire(stub.rx, expected.clone()))
+        .map(|(sender, receiver)| {
+            tasks.stub_senders.push(sender);
+            tokio::spawn(collect_wire(receiver, expected.clone()))
         })
-        .collect::<Vec<_>>();
-    let staged = wait_staged(&query_tx, &peers).await?;
-    let _group = wait_shared_group(&query_tx, &peers).await?;
+        .collect();
+    let staged = wait_staged(query_tx, &peers).await?;
+    let _group = wait_shared_group(query_tx, &peers).await?;
     let mut wire = Vec::new();
-    for collector in collectors {
-        wire.push(tokio::time::timeout(DEADLINE, collector).await???);
+    while !tasks.collectors.is_empty() {
+        wire.push(
+            next_task(
+                &mut tasks.collectors,
+                tokio::time::Instant::now() + DEADLINE,
+            )
+            .await??,
+        );
     }
 
     let expected_checksum = checksum(&expected);
@@ -502,7 +534,7 @@ async fn smoke() -> Result<()> {
         );
     }
 
-    println!(
+    let receipt = format!(
         "{{\"kind\":\"rrtransport_smoke\",\"sessions\":{PEERS},\"groups\":1,\
          \"injected\":{PREFIXES},\"staged\":[{},{}],\"decoded_update_messages\":[{},{}],\
          \"decoded_nlri\":[{},{}],\"withdrawals\":[{},{}],\"duplicates\":[{},{}],\
@@ -523,21 +555,14 @@ async fn smoke() -> Result<()> {
         wire[0].eor_seen,
         wire[1].eor_seen,
     );
-    println!(
+    let summary = format!(
         "rrtransport smoke: sessions={PEERS} groups=1 injected={PREFIXES} \
          staged={PREFIXES}/{PREFIXES} decoded_updates={}/{} decoded_nlri={PREFIXES}/{PREFIXES} \
          withdrawals=0/0 duplicates=0/0 eor_seen={}/{} set_equality=true/true",
         wire[0].update_messages, wire[1].update_messages, wire[0].eor_seen, wire[1].eor_seen
     );
 
-    for session in sessions {
-        tokio::time::timeout(DEADLINE, session.shutdown()).await???;
-    }
-    drop(stub_senders);
-    drop(rib_tx);
-    drop(query_tx);
-    manager_task.abort();
-    Ok(())
+    Ok(format!("{receipt}\n{summary}"))
 }
 
 fn main() -> Result<()> {

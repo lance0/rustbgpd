@@ -19,7 +19,7 @@
 #
 # Requires:
 #   - Docker daemon running on a Linux host with kernel >= 5.8 for
-#     the fdb_nhg selectors (>= 4.18 if running only the Gate 8b
+#     the fdb_nhg selectors (>= 4.12 if running only the Gate 8b
 #     bundle). The container shares the host's `net` capabilities
 #     via `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN --security-opt
 #     apparmor=unconfined`.

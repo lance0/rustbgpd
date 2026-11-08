@@ -3,9 +3,9 @@
 //! The FDB apply path re-reads an SVD VXLAN's bridge VLAN tunnel mapping
 //! before each write. The `AF_BRIDGE` link dump returns every port in the
 //! namespace, so a per-row read through it costs a full dump per row. The
-//! bridge VLAN database (`RTM_GETVLAN`, Linux 5.13+) dumps only the port
+//! bridge VLAN database (`RTM_GETVLAN`, Linux 5.6+) dumps only the port
 //! named in the request's `br_vlan_msg.ifindex`, and its per-VLAN options
-//! carry the tunnel ID (`BRIDGE_VLANDB_ENTRY_TUNNEL_INFO`, Linux 5.14+).
+//! carry the tunnel ID (`BRIDGE_VLANDB_ENTRY_TUNNEL_INFO`, Linux 5.7+).
 //! `netlink-packet-route` has no `RTM_GETVLAN` support, so this module
 //! encodes the request and parses the reply directly.
 
