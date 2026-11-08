@@ -249,7 +249,13 @@ the configured path and its resolved form, must be owned by root or the daemon
 user and not writable by other users: world-writable, or group-writable by a
 group other than the daemon's, is refused unless the directory is sticky, as
 `/tmp` is. The default `/var/lib/rustbgpd`, a systemd `StateDirectory=`, and
-the container images satisfy this.
+the container images satisfy this. After startup, FIB receipts, config history,
+commit-confirm pending files, and crash reports use the retained directory
+handle. Replacing an ancestor symlink cannot redirect those reads or writes.
+The commit-confirm locator records the resolved pending-directory path for
+recovery after restart. Confirmed apply refuses if that path no longer names
+the retained directory, resolves through a new symlink, or the directory's
+ownership or mode is unsafe.
 
 The **directory holding the config file** must also be writable by the
 rustbgpd process if you use runtime mutation. Every accepted `rbgp neighbor

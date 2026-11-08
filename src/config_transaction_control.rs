@@ -88,6 +88,7 @@ pub struct ConfigTransactionController {
     accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
     peer_mgr_internal_tx: Option<mpsc::Sender<InternalCommand>>,
     confirm_v3_launch: Option<crate::confirm_journal::v3::LaunchIdentity>,
+    state_directory: Option<Arc<crate::PinnedRuntimeStateDirectory>>,
     v3_residue_cleanup_active: Arc<AtomicBool>,
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     #[cfg(test)]
@@ -424,6 +425,7 @@ impl ConfigTransactionController {
             accepted_rx: None,
             peer_mgr_internal_tx: None,
             confirm_v3_launch: None,
+            state_directory: None,
             v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
             settlement: None,
             v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
@@ -445,6 +447,7 @@ impl ConfigTransactionController {
             accepted_rx: Some(accepted_rx),
             peer_mgr_internal_tx: None,
             confirm_v3_launch: None,
+            state_directory: None,
             v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
             settlement: None,
             #[cfg(test)]
@@ -467,6 +470,15 @@ impl ConfigTransactionController {
     #[must_use]
     pub(crate) fn with_preloaded_planner(mut self, tx: mpsc::Sender<InternalCommand>) -> Self {
         self.peer_mgr_internal_tx = Some(tx);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_state_directory(
+        mut self,
+        directory: Arc<crate::PinnedRuntimeStateDirectory>,
+    ) -> Self {
+        self.state_directory = Some(directory);
         self
     }
 
@@ -1586,7 +1598,13 @@ impl ConfigTransactionController {
 
     fn history(&self) -> Result<proto::ListConfigHistoryResponse, ConfigTransactionApplyError> {
         let dir = self.history_dir()?;
-        let entries = crate::config_history::list_mixed(dir).map_err(|error| {
+        let entries = crate::config_history::list_mixed_at(
+            dir,
+            self.state_directory
+                .as_ref()
+                .map(|directory| &directory.file),
+        )
+        .map_err(|error| {
             warn!(
                 error_kind = ?error.kind(),
                 "failed to list config history"
@@ -1746,7 +1764,13 @@ impl ConfigTransactionController {
     > {
         let dir = self.history_dir()?;
         let index = usize::try_from(index).unwrap_or(usize::MAX);
-        let entries = crate::config_history::list_mixed(dir).map_err(|_| {
+        let entries = crate::config_history::list_mixed_at(
+            dir,
+            self.state_directory
+                .as_ref()
+                .map(|directory| &directory.file),
+        )
+        .map_err(|_| {
             ConfigTransactionApplyError::FailedPrecondition(
                 "cannot roll back: config history storage is unavailable or unsafe".to_string(),
             )
@@ -1772,7 +1796,14 @@ impl ConfigTransactionController {
                     "cannot roll back: selected config-history row is metadata-only because its normalized TOML exceeded the history payload limit".to_string(),
                 ));
         }
-        let payload = crate::config_history::read_mixed_rollback(dir, entry).map_err(|_| {
+        let payload = crate::config_history::read_mixed_rollback_at(
+            dir,
+            self.state_directory
+                .as_ref()
+                .map(|directory| &directory.file),
+            entry,
+        )
+        .map_err(|_| {
             ConfigTransactionApplyError::FailedPrecondition(
                 "cannot roll back: config history entry became unavailable or unsafe".to_string(),
             )

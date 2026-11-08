@@ -382,9 +382,10 @@ struct WarmCheckpointPlan {
 /// authority, so replacing a pathname or planting a final symlink cannot
 /// redirect shutdown state.
 #[derive(Debug)]
-struct PinnedRuntimeStateDirectory {
+pub(crate) struct PinnedRuntimeStateDirectory {
     file: File,
     display_path: PathBuf,
+    real_path: PathBuf,
 }
 
 impl PinnedRuntimeStateDirectory {
@@ -460,9 +461,17 @@ impl PinnedRuntimeStateDirectory {
             ));
         }
         verify_runtime_state_ancestors(path, geteuid().as_raw(), nix::unistd::getegid().as_raw())?;
+        let real_path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+        let resolved = std::fs::metadata(&real_path).map_err(|error| error.to_string())?;
+        if (metadata.dev(), metadata.ino()) != (resolved.dev(), resolved.ino()) {
+            return Err(
+                "runtime-state directory changed while resolving its durable identity".to_string(),
+            );
+        }
         Ok(Self {
             file,
             display_path: path.to_path_buf(),
+            real_path,
         })
     }
 
@@ -489,9 +498,41 @@ impl PinnedRuntimeStateDirectory {
     }
 }
 
+/// Open a direct child through its retained parent; final symlinks are refused.
+fn open_state_child_directory(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    create: bool,
+) -> std::io::Result<File> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, mkdirat};
+    if create {
+        match mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
+            Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let directory = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(std::io::Error::other(
+            "unsafe runtime-state child directory owner or type",
+        ));
+    }
+    Ok(directory)
+}
+
 /// Refuse a runtime-state directory reachable through a directory another
-/// user could rewrite. Some state writers still use the pathname, so after
-/// `prepare` an ancestor swap must not be able to redirect them elsewhere.
+/// user could rewrite. Runtime writers use the retained descriptor; this
+/// check also keeps durable recovery paths beneath trusted ancestors.
 /// Every directory traversed is checked, sshd `StrictModes` style: those
 /// along the path as written and along its canonical form. Each must be owned
 /// by root or the daemon user, and must not be world-writable, or writable by
@@ -3460,11 +3501,29 @@ fn main() -> ExitCode {
         Err(e) => warn!(error = %e, "failed to raise the soft nofile limit"),
     }
 
-    // Panic hygiene: write a bounded, secret-free crash report under
-    // `<runtime_state_dir>/crash/` for `rbgp doctor` to sweep into
-    // support bundles. Installed after config resolution so reports
-    // land under the operator's runtime_state_dir.
-    install_panic_hook(config.runtime_state_dir().join("crash"));
+    let runtime_state_path = config.runtime_state_dir();
+    // Pin the shared authority before any marker, receipt, or bundle access.
+    // Every daemon-owned state file lives here, so an unusable directory, an
+    // unsafe owner or mode, or a final symlink refuses boot.
+    let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
+        Ok(directory) => Arc::new(directory),
+        Err(error) => {
+            error!(
+                path = %runtime_state_path.display(),
+                %error,
+                "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
+            );
+            // The log may go to stdout or a collector; a refusal to start
+            // must also say why where a supervisor shows it.
+            eprintln!(
+                "error: refusing to start: runtime_state_dir {}: {error}",
+                runtime_state_path.display()
+            );
+            process::exit(1);
+        }
+    };
+    // Panic reports use the same retained authority as all other runtime state.
+    install_panic_hook(Arc::clone(&runtime_state_directory));
 
     #[cfg(feature = "dhat-heap")]
     let profiler = Some(
@@ -3489,6 +3548,7 @@ fn main() -> ExitCode {
         accepted,
         boot_revert_notice,
         launch_identity.expect("daemon boot resolved launch config identity"),
+        runtime_state_directory,
         profiler,
     ));
     shutdown_daemon_runtime(rt);
@@ -3635,7 +3695,7 @@ struct PanicReport<'a> {
 /// `crash_dir` before delegating to the previous hook (the default
 /// stderr backtrace). `rbgp doctor` sweeps these reports into support
 /// bundles.
-fn install_panic_hook(crash_dir: std::path::PathBuf) {
+fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let message = info
@@ -3650,13 +3710,31 @@ fn install_panic_hook(crash_dir: std::path::PathBuf) {
             .unwrap_or("unnamed")
             .to_string();
         // Best-effort: a failing report write must never mask the panic.
-        let _ = write_panic_report(&crash_dir, &message, &location, &thread);
+        let _ = open_state_child_directory(&directory.file, std::ffi::OsStr::new("crash"), true)
+            .and_then(|crash| {
+                let metadata = crash.metadata()?;
+                if metadata.mode() & 0o022 != 0 {
+                    return Err(std::io::Error::other("unsafe crash directory mode"));
+                }
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                write_panic_report_in(
+                    &crash,
+                    &directory.display_path.join("crash"),
+                    now,
+                    &message,
+                    &location,
+                    &thread,
+                )
+            });
         previous(info);
     }));
 }
 
 /// Write one panic report and prune the crash directory to the most
 /// recent [`PANIC_REPORTS_KEPT`] reports.
+#[cfg(test)]
 fn write_panic_report(
     crash_dir: &Path,
     message: &str,
@@ -3670,7 +3748,27 @@ fn write_panic_report(
 }
 
 /// [`write_panic_report`] with the clock read by the caller.
+#[cfg(test)]
 fn write_panic_report_at(
+    crash_dir: &Path,
+    now: Duration,
+    message: &str,
+    location: &str,
+    thread: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(crash_dir)?;
+    write_panic_report_in(
+        &File::open(crash_dir)?,
+        crash_dir,
+        now,
+        message,
+        location,
+        thread,
+    )
+}
+
+fn write_panic_report_in(
+    directory: &File,
     crash_dir: &Path,
     now: Duration,
     message: &str,
@@ -3680,7 +3778,6 @@ fn write_panic_report_at(
     /// Distinguishes reports written by this process in one millisecond.
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    std::fs::create_dir_all(crash_dir)?;
     let report = PanicReport {
         message,
         location,
@@ -3703,30 +3800,43 @@ fn write_panic_report_at(
     // Staged under `<name>.toml.tmp` and renamed into place, so a process
     // that dies mid-write leaves no empty or truncated report; the prune
     // below and `rbgp doctor` only read `*.toml`.
-    confirm_journal::write_state_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
-    prune_panic_reports(crash_dir);
+    confirm_journal::write_state_at(directory, &path, body.as_bytes(), true)
+        .map_err(std::io::Error::other)?;
+    prune_panic_reports(directory);
     Ok(())
 }
 
 /// Remove the oldest `panic-*.toml` reports beyond [`PANIC_REPORTS_KEPT`].
-fn prune_panic_reports(crash_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(crash_dir) else {
+fn prune_panic_reports(directory: &File) {
+    let Ok(mut entries) = nix::dir::Dir::openat(
+        directory,
+        ".",
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    ) else {
         return;
     };
     let mut names: Vec<String> = entries
+        .iter()
         .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| {
-            n.starts_with("panic-")
-                && Path::new(n)
+        .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+        .filter(|name| {
+            name.starts_with("panic-")
+                && Path::new(name)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
         })
         .collect();
     names.sort();
-    while names.len() > PANIC_REPORTS_KEPT {
-        let oldest = names.remove(0);
-        let _ = std::fs::remove_file(crash_dir.join(oldest));
+    for oldest in names
+        .iter()
+        .take(names.len().saturating_sub(PANIC_REPORTS_KEPT))
+    {
+        let _ = nix::unistd::unlinkat(
+            directory,
+            oldest.as_str(),
+            nix::unistd::UnlinkatFlags::NoRemoveDir,
+        );
     }
 }
 
@@ -4474,6 +4584,7 @@ async fn run<T>(
     accepted: Arc<AcceptedConfigSnapshot>,
     boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
     launch_identity: confirm_journal::v3::LaunchIdentity,
+    runtime_state_directory: Arc<PinnedRuntimeStateDirectory>,
     profiler: Option<T>,
 ) -> bool {
     // Install every Unix signal handler before startup can bind or spawn an
@@ -4508,27 +4619,7 @@ async fn run<T>(
 
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
-    let runtime_state_path = config.runtime_state_dir();
-    // Pin the shared authority before any marker, receipt, or bundle access.
-    // Every daemon-owned state file lives here, so an unusable directory, an
-    // unsafe owner or mode, or a final symlink refuses boot.
-    let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
-        Ok(directory) => Some(Arc::new(directory)),
-        Err(error) => {
-            error!(
-                path = %runtime_state_path.display(),
-                %error,
-                "refusing to start: runtime_state_dir must be a directory owned by the daemon user and not group- or world-writable"
-            );
-            // The log may go to stdout or a collector; a refusal to start
-            // must also say why where a supervisor shows it.
-            eprintln!(
-                "error: refusing to start: runtime_state_dir {}: {error}",
-                runtime_state_path.display()
-            );
-            process::exit(1);
-        }
-    };
+    let runtime_state_directory = Some(runtime_state_directory);
     let gr_restart_marker_store = runtime_state_directory
         .as_ref()
         .map(|directory| GrRestartMarkerStore::new(Arc::clone(directory)));
@@ -5666,11 +5757,11 @@ async fn run<T>(
         let (accepted_tx, accepted_rx) = accepted_watch
             .take()
             .expect("accepted watch is created whenever a config file path exists");
-        let persister = ConfigPersister::new_accepted(
+        let persister = ConfigPersister::new_pinned(
             mutation_rx,
             path.clone(),
             Arc::clone(&accepted),
-            Some(config.runtime_state_dir()),
+            runtime_state_directory.clone(),
         );
         tokio::spawn(persister.run());
         tokio::spawn(run_config_bridge_accepted(
@@ -6217,6 +6308,7 @@ async fn run<T>(
         fib_runtime::FibRuntimeConfig {
             tables: config.fib_tables.clone(),
             owned_state_path: Some(config.runtime_state_dir().join("fib-owned.json")),
+            owned_state_directory: runtime_state_directory.clone(),
             multipath_relax: config.global.multipath_relax,
             link_bandwidth_weighted: config.global.link_bandwidth_weighted,
         },
@@ -6444,7 +6536,18 @@ async fn run<T>(
         )
         .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
         .with_preloaded_planner(peer_mgr_internal_tx.clone())
-        .with_confirm_v3_launch(launch_identity);
+        .with_state_directory(Arc::clone(
+            runtime_state_directory
+                .as_ref()
+                .expect("runtime state pinned"),
+        ))
+        .with_confirm_v3_launch(
+            launch_identity.with_pending_directory(Arc::clone(
+                runtime_state_directory
+                    .as_ref()
+                    .expect("runtime state pinned"),
+            )),
+        );
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
     // stops admitting persisted config mutations and inbound BGP sessions.
@@ -10748,6 +10851,28 @@ mod tests {
         // Human-panic pattern: never environment or argv material.
         assert!(value.get("env").is_none());
         assert!(value.get("args").is_none());
+    }
+
+    #[test]
+    fn panic_report_stays_in_the_pinned_directory_after_a_chained_symlink_swap() {
+        let state = crate::test_support::RuntimeStateRedirect::new();
+        let pinned = PinnedRuntimeStateDirectory::prepare(&state.path).unwrap();
+        let crash = state.path.join("crash");
+        std::fs::create_dir(&crash).unwrap();
+        state.redirect();
+        let directory =
+            open_state_child_directory(&pinned.file, std::ffi::OsStr::new("crash"), true).unwrap();
+        write_panic_report_in(
+            &directory,
+            &crash,
+            Duration::from_secs(1),
+            "test panic",
+            "test location",
+            "test thread",
+        )
+        .unwrap();
+        assert_eq!(read_panic_reports(&state.original.join("crash")).len(), 1);
+        assert_eq!(std::fs::read_dir(&state.replacement).unwrap().count(), 0);
     }
 
     /// Every `panic-*.toml` report in `dir`, parsed.

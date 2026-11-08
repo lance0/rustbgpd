@@ -1,6 +1,77 @@
 use super::*;
 use rustbgpd_rib::PeerId;
 
+#[test]
+fn runtime_neighbor_add_does_not_read_unchanged_credentials() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let token = directory.path().join("token");
+    std::fs::write(&token, "operator-token\n").unwrap();
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (events, observed) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let mut manager = test_peer_manager();
+                manager.replace_current_config(load_test_config(
+                    "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n",
+                ));
+                manager
+                    .current_config
+                    .global
+                    .telemetry
+                    .grpc_uds
+                    .as_mut()
+                    .unwrap()
+                    .token_file = Some(token.display().to_string());
+                manager.current_config.validate().unwrap();
+                crate::config::credential_read_probe::arm(token, events.clone(), held);
+
+                let (commands, incoming) = mpsc::channel(4);
+                manager.rx = incoming;
+                let running = tokio::spawn(manager.run());
+                let (reply, result) = oneshot::channel();
+                let mut config = make_config("192.0.2.2".parse().unwrap(), 65002);
+                config.admin_down = Some(String::new());
+                commands
+                    .send(PeerManagerCommand::AddPeer {
+                        config,
+                        sync_config_snapshot: true,
+                        reply,
+                    })
+                    .await
+                    .unwrap();
+                let result = tokio::time::timeout(Duration::from_secs(5), result).await.unwrap().unwrap();
+                events.send("neighbor_added").unwrap();
+                commands.send(PeerManagerCommand::Shutdown).await.unwrap();
+                running.await.unwrap();
+                result.unwrap();
+            });
+    });
+    // Both events are sent by the same runtime thread: a credential read
+    // reaches its hold before the actor can acknowledge the add.
+    let first = observed.recv_timeout(Duration::from_secs(10));
+    if first
+        .as_ref()
+        .is_ok_and(|event| *event == "credential_read")
+    {
+        release.send(()).unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "neighbor_added"
+        );
+    } else {
+        drop(release);
+    }
+    thread.join().unwrap();
+    assert_eq!(first.unwrap(), "neighbor_added");
+}
+
 #[tokio::test]
 async fn runtime_create_rejects_an_omitted_listen_family_before_mutation() {
     let (_tx, rx) = mpsc::channel(16);

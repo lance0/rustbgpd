@@ -6,7 +6,6 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -83,6 +82,7 @@ enum Pending<'a> {
 
 pub(super) fn record_snapshot(
     dir: &Path,
+    parent: Option<&File>,
     snapshot: &crate::config::AcceptedConfigSnapshot,
 ) -> io::Result<(bool, usize)> {
     let pending = if snapshot.normalized_toml().len() > MAX_TOML {
@@ -93,15 +93,25 @@ pub(super) fn record_snapshot(
             manifest: super::stored_manifest(snapshot),
         }
     };
-    record_with(dir, pending, |_| Ok(()))
+    record_with_parent(dir, parent, pending, |_| Ok(()))
+}
+
+#[cfg(test)]
+fn record_with(
+    dir: &Path,
+    pending: Pending<'_>,
+    step: impl FnMut(WriteStep) -> io::Result<()>,
+) -> io::Result<(bool, usize)> {
+    record_with_parent(dir, None, pending, step)
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "one ordered crash-consistency transaction shared by both history formats"
 )]
-fn record_with(
+fn record_with_parent(
     dir: &Path,
+    parent: Option<&File>,
     pending: Pending<'_>,
     mut step: impl FnMut(WriteStep) -> io::Result<()>,
 ) -> io::Result<(bool, usize)> {
@@ -133,7 +143,7 @@ fn record_with(
         }
     }
 
-    let directory = open_or_create_writer_directory(dir)?;
+    let directory = open_or_create_writer_directory(dir, parent)?;
     step(WriteStep::Pinned)?;
     // A newer release owns this chronology: refuse before any cleanup,
     // allocation, or eviction so its rows and sequences are never reused.
@@ -278,27 +288,36 @@ fn record_with(
     result.map(|()| (true, original_count - rows.len()))
 }
 
-fn open_or_create_writer_directory(path: &Path) -> io::Result<File> {
+fn open_or_create_writer_directory(path: &Path, parent: Option<&File>) -> io::Result<File> {
     use nix::fcntl::{OFlag, open};
     use nix::sys::stat::{Mode, fchmod};
     use nix::unistd::geteuid;
 
     use std::os::unix::fs::DirBuilderExt;
 
-    let mut builder = std::fs::DirBuilder::new();
-    builder.mode(0o700);
-    match builder.create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    let fd = open(
-        path,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(errno)?;
-    let file = File::from(fd);
+    let file = if let Some(parent) = parent {
+        crate::open_state_child_directory(
+            parent,
+            path.file_name()
+                .ok_or_else(|| invalid("history directory has no name"))?,
+            true,
+        )?
+    } else {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let fd = open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(errno)?;
+        File::from(fd)
+    };
     let metadata = file.metadata()?;
     if !metadata.is_dir() || metadata.uid() != geteuid().as_raw() {
         return Err(invalid("unsafe config history directory owner or type"));
@@ -318,8 +337,13 @@ fn cleanup_stages(directory: &File) -> io::Result<()> {
     use nix::dir::Dir;
     use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
 
-    let owned: OwnedFd = directory.try_clone()?.into();
-    let mut entries = Dir::from_fd(owned).map_err(errno)?;
+    let mut entries = Dir::openat(
+        directory,
+        ".",
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(errno)?;
     for item in entries.iter() {
         let item = item.map_err(errno)?;
         let name = OsString::from_vec(item.file_name().to_bytes().to_vec());
@@ -439,8 +463,13 @@ struct ParsedName {
 
 /// Scan active v2/v3 entries. Retired TOML entries are foreign files: they are
 /// ignored and retained rather than decoded, indexed, or evicted.
+#[cfg(test)]
 pub(crate) fn scan_mixed(dir: &Path) -> io::Result<Vec<StoredRow>> {
-    let directory = match open_directory(dir) {
+    scan_mixed_at(dir, None)
+}
+
+pub(crate) fn scan_mixed_at(dir: &Path, parent: Option<&File>) -> io::Result<Vec<StoredRow>> {
+    let directory = match open_directory_at(dir, parent) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -462,8 +491,13 @@ fn collect_names(
     cap: Option<usize>,
 ) -> io::Result<Vec<StoredRow>> {
     use nix::dir::Dir;
-    let owned: OwnedFd = directory.try_clone()?.into();
-    let mut entries = Dir::from_fd(owned).map_err(errno)?;
+    let mut entries = Dir::openat(
+        directory,
+        ".",
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(errno)?;
     let mut rows = Vec::new();
     for item in entries.iter() {
         let item = item.map_err(errno)?;
@@ -540,12 +574,21 @@ fn decode_rows(directory: &File, rows: &mut [StoredRow]) {
     }
 }
 
-/// Reopen and revalidate the exact object observed by [`scan_mixed`].
+/// Reopen and revalidate the exact object observed by [`scan_mixed_at`].
+#[cfg(test)]
 pub(crate) fn read_mixed(dir: &Path, row: &StoredRow) -> io::Result<StoredPayload> {
+    read_mixed_at(dir, None, row)
+}
+
+pub(crate) fn read_mixed_at(
+    dir: &Path,
+    parent: Option<&File>,
+    row: &StoredRow,
+) -> io::Result<StoredPayload> {
     if row.status == StoredStatus::Unreadable || row.path != dir.join(&row.filename) {
         return Err(invalid("config history entry is not readable"));
     }
-    let directory = open_directory(dir)?;
+    let directory = open_directory_at(dir, parent)?;
     let (payload, identity) = open_and_decode(&directory, row, true)?;
     if row.identity != Some(identity) {
         return Err(invalid("config history entry was replaced after listing"));
@@ -553,18 +596,32 @@ pub(crate) fn read_mixed(dir: &Path, row: &StoredRow) -> io::Result<StoredPayloa
     Ok(payload)
 }
 
+#[cfg(test)]
 fn open_directory(path: &Path) -> io::Result<File> {
+    open_directory_at(path, None)
+}
+
+fn open_directory_at(path: &Path, parent: Option<&File>) -> io::Result<File> {
     use nix::fcntl::{OFlag, open};
     use nix::sys::stat::Mode;
     use nix::unistd::geteuid;
 
-    let fd = open(
-        path,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(errno)?;
-    let file = File::from(fd);
+    let file = if let Some(parent) = parent {
+        crate::open_state_child_directory(
+            parent,
+            path.file_name()
+                .ok_or_else(|| invalid("history directory has no name"))?,
+            false,
+        )?
+    } else {
+        let fd = open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(errno)?;
+        File::from(fd)
+    };
     let metadata = file.metadata()?;
     validate_directory_metadata(
         metadata.is_dir(),
