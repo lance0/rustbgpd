@@ -1520,6 +1520,46 @@ async fn resumed_groups_keep_original_override_indices_after_filtering_and_slici
     assert!(session.pending_outbound.is_none());
 }
 
+/// A resume is bounded by writer bytes, not routes, so it is cheap. It must
+/// not undo the halving that an expensive fresh slice earned.
+#[tokio::test(start_paused = true)]
+async fn cheap_resumes_keep_fresh_slices_halving() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, _wire) = shared_group_member(65001).await;
+    let (mut frames, completed) = hand_writer(&mut session);
+    let maximum = u64::from(session.outbound_max_message_len());
+    // Distinct MEDs: one group and one frame per route.
+    let routes = pacing_routes(u32::try_from(3 * SLICE).unwrap(), true);
+    session.writer_bulk_admitted = BYTE_BUDGET;
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    assert!(
+        frames.try_recv().is_err(),
+        "no room before the cost is pinned"
+    );
+    session.pending_outbound.as_mut().unwrap().test_slice_cost =
+        Some(super::outbound::SLICE_TIME_BUDGET + Duration::from_millis(1));
+    let mut sizes = Vec::new();
+    for _ in 0..3 {
+        // Two frames of headroom park the fresh slice; a drained writer
+        // then resumes the rest of it.
+        completed.send_replace(session.writer_bulk_admitted);
+        session.writer_bulk_admitted += BYTE_BUDGET - 2 * maximum;
+        session.advance_pending_outbound();
+        assert!(session.pending_outbound.as_ref().unwrap().slice_parked());
+        completed.send_replace(session.writer_bulk_admitted);
+        session.advance_pending_outbound();
+        assert!(!session.pending_outbound.as_ref().unwrap().slice_parked());
+        let mut sent = Vec::new();
+        while let Ok(frame) = frames.try_recv() {
+            sent.push(frame);
+        }
+        sizes.push(delivered(sent).len());
+    }
+    assert_eq!(sizes, [SLICE, SLICE / 2, SLICE / 4]);
+}
+
 /// Private families move source rows into the active slice. A paused slice
 /// must retain those originals, release them under the same retirement budget,
 /// and keep its credit/latch until both that slice and the remainder are gone.

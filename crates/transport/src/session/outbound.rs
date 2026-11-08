@@ -654,6 +654,12 @@ impl PendingOutbound {
         self.retiring()
     }
 
+    /// Whether a partly sent slice is parked for resumption.
+    #[cfg(test)]
+    pub(super) fn slice_parked(&self) -> bool {
+        self.pending_slice.is_some()
+    }
+
     /// Whether admission waits for the writer to drain under its byte
     /// budget.
     #[cfg(test)]
@@ -1259,12 +1265,17 @@ impl PeerSession {
                     return;
                 }
                 let cost = started.elapsed();
+                // Tests pin resumes as cheap; `test_slice_cost` prices fresh slices.
                 #[cfg(test)]
                 let cost = {
                     let _ = cost;
-                    pending.test_slice_cost.unwrap_or_default()
+                    Duration::ZERO
                 };
-                pending.charge_slice(cost);
+                // Writer bytes, not routes, bound a resume, so a cheap one says
+                // nothing about the next fresh slice: it may only shrink it.
+                if cost > SLICE_TIME_BUDGET {
+                    pending.charge_slice(cost);
+                }
             } else if pending.phase == 0 && pending.offset < pending.requests.len() {
                 let (afi, safi) = pending.requests[pending.offset];
                 match self.send_refresh_frame(afi, safi, RouteRefreshSubtype::Normal, max_len) {
