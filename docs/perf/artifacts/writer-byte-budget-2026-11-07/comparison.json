@@ -56,8 +56,12 @@
     "independent_build": "Both timed arms were freshly rebuilt for the common harness correction; matching library feature/profile graphs and corresponding executable hashes were verified against independent builds.",
     "adaptive_slice_target_ms": 4,
     "adaptive_charging": "The 4 ms target and initial charging boundary are unchanged. Both begin charging after source-slice materialization; the candidate also charges partial-group resumption.",
-    "cell_identity": "cell is Criterion directory_name, which can flatten function-name slashes; canonical_id is the benchmark.json full_id. Both are retained for traceability.",
-    "design": "Per-frame negotiated-maximum headroom; exact length for already encoded shared frames. No route-size estimator or RIB change."
+    "cell_identity": "cell is the Criterion benchmark id.",
+    "design": "Per-frame negotiated-maximum headroom; exact length for already encoded shared frames. No route-size estimator or RIB change.",
+    "arm_identity": {
+      "A": "parent (control)",
+      "B": "candidate"
+    }
   },
   "binaries_sha256": {
     "parent": {
@@ -79,300 +83,56 @@
         "legs": [
           {
             "label": "aa1",
+            "arm": "A",
             "exit": 0,
-            "started": "2026-11-07T21:59:19Z",
-            "finished": "2026-11-07T22:02:17Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794088729",
-                "load1": "0.15",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794088759",
-                "load1": "0.14",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "aa2",
+            "arm": "A",
             "exit": 0,
-            "started": "2026-11-07T22:02:47Z",
-            "finished": "2026-11-07T22:05:49Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794088937",
-                "load1": "0.98",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794088967",
-                "load1": "0.65",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "abba1",
+            "arm": "A",
             "exit": 0,
-            "started": "2026-11-07T22:06:19Z",
-            "finished": "2026-11-07T22:09:20Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794089149",
-                "load1": "1.09",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794089179",
-                "load1": "0.66",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "abba2",
+            "arm": "B",
             "exit": 0,
-            "started": "2026-11-07T22:09:50Z",
-            "finished": "2026-11-07T22:12:49Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794089360",
-                "load1": "1.23",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794089390",
-                "load1": "0.75",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "abba3",
+            "arm": "B",
             "exit": 0,
-            "started": "2026-11-07T22:13:19Z",
-            "finished": "2026-11-07T22:16:15Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794089569",
-                "load1": "1.09",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794089599",
-                "load1": "0.66",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "abba4",
+            "arm": "A",
             "exit": 0,
-            "started": "2026-11-07T22:16:45Z",
-            "finished": "2026-11-07T22:19:46Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794089775",
-                "load1": "1.17",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794089805",
-                "load1": "0.71",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "confirmation1",
+            "arm": "A",
             "exit": 0,
-            "started": "2026-11-07T22:20:16Z",
-            "finished": "2026-11-07T22:23:17Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794089986",
-                "load1": "1.18",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794090016",
-                "load1": "0.71",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           },
           {
             "label": "confirmation2",
+            "arm": "B",
             "exit": 0,
-            "started": "2026-11-07T22:23:47Z",
-            "finished": "2026-11-07T22:26:47Z",
-            "quiet_samples": [
-              {
-                "sample": "1",
-                "epoch_s": "1794090197",
-                "load1": "1.07",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "1"
-              },
-              {
-                "sample": "2",
-                "epoch_s": "1794090227",
-                "load1": "0.95",
-                "pswpin": "2424677",
-                "pswpout": "2447475",
-                "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
-                "performance_governors": "64",
-                "governor_count": "64",
-                "competitors": "none",
-                "quiet": "true",
-                "failed_dimensions": "none",
-                "original_attempt": "2"
-              }
-            ]
+            "quiet_gate": "PASS"
           }
         ],
         "cells": [
           {
             "cell": "failover_encode/announce_only/32",
-            "aa_samples_ns": [
-              184200.5353174603,
-              194469.21444444446
-            ],
             "aa_ratio": 1.0557472816747606,
             "requires_independent_replication": true,
             "abba_pair_ratios": [
@@ -383,7 +143,6 @@
             "confirmation_ratio": 0.9850455751701882,
             "threshold": 1.0657472816747606,
             "verdict": "PASS",
-            "canonical_id": "failover_encode/announce_only/32",
             "medians_ns": {
               "aa1": 184200.5353174603,
               "aa2": 194469.21444444446,
@@ -397,10 +156,6 @@
           },
           {
             "cell": "failover_encode/announce_only/8",
-            "aa_samples_ns": [
-              122014.86804812835,
-              122314.64385901456
-            ],
             "aa_ratio": 1.0024568793597184,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -411,7 +166,6 @@
             "confirmation_ratio": 0.9892994786253168,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "failover_encode/announce_only/8",
             "medians_ns": {
               "aa1": 122014.86804812835,
               "aa2": 122314.64385901456,
@@ -425,10 +179,6 @@
           },
           {
             "cell": "failover_encode/mixed/32",
-            "aa_samples_ns": [
-              671941.9444444445,
-              674877.1318681319
-            ],
             "aa_ratio": 1.0043682158078615,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -439,7 +189,6 @@
             "confirmation_ratio": 1.0006662489345899,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "failover_encode/mixed/32",
             "medians_ns": {
               "aa1": 671941.9444444445,
               "aa2": 674877.1318681319,
@@ -453,10 +202,6 @@
           },
           {
             "cell": "failover_encode/mixed/8",
-            "aa_samples_ns": [
-              247462.93907563025,
-              245135.1916221034
-            ],
             "aa_ratio": 1.009495770224274,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -467,7 +212,6 @@
             "confirmation_ratio": 0.989932486852919,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "failover_encode/mixed/8",
             "medians_ns": {
               "aa1": 247462.93907563025,
               "aa2": 245135.1916221034,
@@ -481,10 +225,6 @@
           },
           {
             "cell": "outbound_admission/distinct_values",
-            "aa_samples_ns": [
-              5379955.053571429,
-              5383148.5855263155
-            ],
             "aa_ratio": 1.0005935982592953,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -495,7 +235,6 @@
             "confirmation_ratio": 1.031608198607889,
             "threshold": 1.02,
             "verdict": "FAIL",
-            "canonical_id": "outbound_admission/distinct_values",
             "medians_ns": {
               "aa1": 5379955.053571429,
               "aa2": 5383148.5855263155,
@@ -509,10 +248,6 @@
           },
           {
             "cell": "outbound_admission/equal_values",
-            "aa_samples_ns": [
-              2664320.3899456523,
-              2673549.791666667
-            ],
             "aa_ratio": 1.003464073523531,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -523,7 +258,6 @@
             "confirmation_ratio": 1.0036153594880257,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/equal_values",
             "medians_ns": {
               "aa1": 2664320.3899456523,
               "aa2": 2673549.791666667,
@@ -537,10 +271,6 @@
           },
           {
             "cell": "outbound_admission/evpn_distinct_values",
-            "aa_samples_ns": [
-              4413126.916666666,
-              4421045.775
-            ],
             "aa_ratio": 1.0017943871732824,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -551,7 +281,6 @@
             "confirmation_ratio": 1.0001426004254217,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/evpn_distinct_values",
             "medians_ns": {
               "aa1": 4413126.916666666,
               "aa2": 4421045.775,
@@ -565,10 +294,6 @@
           },
           {
             "cell": "outbound_admission/evpn_shared_arc",
-            "aa_samples_ns": [
-              474970.237654321,
-              475269.69212962966
-            ],
             "aa_ratio": 1.0006304699780506,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -579,7 +304,6 @@
             "confirmation_ratio": 1.015490830630243,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/evpn_shared_arc",
             "medians_ns": {
               "aa1": 474970.237654321,
               "aa2": 475269.69212962966,
@@ -593,10 +317,6 @@
           },
           {
             "cell": "outbound_admission/evpn_withdraw",
-            "aa_samples_ns": [
-              407996.01988636365,
-              407265.67167207797
-            ],
             "aa_ratio": 1.0017932967718275,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -607,7 +327,6 @@
             "confirmation_ratio": 1.0402178831918203,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/evpn_withdraw",
             "medians_ns": {
               "aa1": 407996.01988636365,
               "aa2": 407265.67167207797,
@@ -621,10 +340,6 @@
           },
           {
             "cell": "outbound_admission/flowspec_v4_distinct_values",
-            "aa_samples_ns": [
-              44316720.75,
-              47069640.5
-            ],
             "aa_ratio": 1.0621192115167952,
             "requires_independent_replication": true,
             "abba_pair_ratios": [
@@ -635,7 +350,6 @@
             "confirmation_ratio": 0.8868988818795399,
             "threshold": 1.0721192115167952,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/flowspec_v4_distinct_values",
             "medians_ns": {
               "aa1": 44316720.75,
               "aa2": 47069640.5,
@@ -649,10 +363,6 @@
           },
           {
             "cell": "outbound_admission/flowspec_v4_equal_values",
-            "aa_samples_ns": [
-              3848114.0,
-              3790948.458333333
-            ],
             "aa_ratio": 1.0150794826927823,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -663,7 +373,6 @@
             "confirmation_ratio": 0.9990392190924406,
             "threshold": 1.0250794826927823,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/flowspec_v4_equal_values",
             "medians_ns": {
               "aa1": 3848114.0,
               "aa2": 3790948.458333333,
@@ -677,10 +386,6 @@
           },
           {
             "cell": "outbound_admission/flowspec_v4_withdraw",
-            "aa_samples_ns": [
-              2226280.3726086956,
-              2235648.9444444445
-            ],
             "aa_ratio": 1.0042081724975058,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -691,7 +396,6 @@
             "confirmation_ratio": 1.0104796252744541,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/flowspec_v4_withdraw",
             "medians_ns": {
               "aa1": 2226280.3726086956,
               "aa2": 2235648.9444444445,
@@ -705,10 +409,6 @@
           },
           {
             "cell": "outbound_admission/large_extended",
-            "aa_samples_ns": [
-              109801316.0,
-              104210171.5
-            ],
             "aa_ratio": 1.0536525793933655,
             "requires_independent_replication": true,
             "abba_pair_ratios": [
@@ -719,7 +419,6 @@
             "confirmation_ratio": 0.6035070467533759,
             "threshold": 1.0636525793933655,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/large_extended",
             "medians_ns": {
               "aa1": 109801316.0,
               "aa2": 104210171.5,
@@ -733,10 +432,6 @@
           },
           {
             "cell": "outbound_admission/large_standard",
-            "aa_samples_ns": [
-              5370137.525,
-              5347009.075
-            ],
             "aa_ratio": 1.0043254929392467,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -747,7 +442,6 @@
             "confirmation_ratio": 1.136512552862817,
             "threshold": 1.02,
             "verdict": "FAIL",
-            "canonical_id": "outbound_admission/large_standard",
             "medians_ns": {
               "aa1": 5370137.525,
               "aa2": 5347009.075,
@@ -761,10 +455,6 @@
           },
           {
             "cell": "outbound_admission/shared_arc",
-            "aa_samples_ns": [
-              391647.2392376142,
-              391503.43181818177
-            ],
             "aa_ratio": 1.0003673209676978,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -775,7 +465,6 @@
             "confirmation_ratio": 1.021214393644262,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/shared_arc",
             "medians_ns": {
               "aa1": 391647.2392376142,
               "aa2": 391503.43181818177,
@@ -789,10 +478,6 @@
           },
           {
             "cell": "outbound_admission/vpn_distinct_values",
-            "aa_samples_ns": [
-              5112645.24789916,
-              5121254.152173913
-            ],
             "aa_ratio": 1.0016838454180428,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -803,7 +488,6 @@
             "confirmation_ratio": 1.0646631875648205,
             "threshold": 1.02,
             "verdict": "FAIL",
-            "canonical_id": "outbound_admission/vpn_distinct_values",
             "medians_ns": {
               "aa1": 5112645.24789916,
               "aa2": 5121254.152173913,
@@ -817,10 +501,6 @@
           },
           {
             "cell": "outbound_admission/vpn_flowspec_v6_distinct_values",
-            "aa_samples_ns": [
-              45020557.0,
-              48277758.75
-            ],
             "aa_ratio": 1.0723492103840475,
             "requires_independent_replication": true,
             "abba_pair_ratios": [
@@ -831,7 +511,6 @@
             "confirmation_ratio": 0.9360343298204121,
             "threshold": 1.0823492103840475,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/vpn_flowspec_v6_distinct_values",
             "medians_ns": {
               "aa1": 45020557.0,
               "aa2": 48277758.75,
@@ -845,10 +524,6 @@
           },
           {
             "cell": "outbound_admission/vpn_flowspec_v6_equal_values",
-            "aa_samples_ns": [
-              7910882.513736264,
-              7846507.1125
-            ],
             "aa_ratio": 1.0082043386073924,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -859,7 +534,6 @@
             "confirmation_ratio": 0.9699000087885087,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/vpn_flowspec_v6_equal_values",
             "medians_ns": {
               "aa1": 7910882.513736264,
               "aa2": 7846507.1125,
@@ -873,10 +547,6 @@
           },
           {
             "cell": "outbound_admission/vpn_flowspec_v6_withdraw",
-            "aa_samples_ns": [
-              6547635.3,
-              6566022.423076923
-            ],
             "aa_ratio": 1.0028082081903558,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -887,7 +557,6 @@
             "confirmation_ratio": 0.9981106737196378,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/vpn_flowspec_v6_withdraw",
             "medians_ns": {
               "aa1": 6547635.3,
               "aa2": 6566022.423076923,
@@ -901,10 +570,6 @@
           },
           {
             "cell": "outbound_admission/vpn_shared_arc",
-            "aa_samples_ns": [
-              905755.5166666666,
-              913011.4285714286
-            ],
             "aa_ratio": 1.0080108945198203,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -915,7 +580,6 @@
             "confirmation_ratio": 0.9654316691486439,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/vpn_shared_arc",
             "medians_ns": {
               "aa1": 905755.5166666666,
               "aa2": 913011.4285714286,
@@ -929,10 +593,6 @@
           },
           {
             "cell": "outbound_admission/vpn_withdraw",
-            "aa_samples_ns": [
-              375556.1709307992,
-              370412.7989304813
-            ],
             "aa_ratio": 1.0138855137165041,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -943,7 +603,6 @@
             "confirmation_ratio": 0.9557672751944695,
             "threshold": 1.0238855137165042,
             "verdict": "PASS",
-            "canonical_id": "outbound_admission/vpn_withdraw",
             "medians_ns": {
               "aa1": 375556.1709307992,
               "aa2": 370412.7989304813,
@@ -957,10 +616,6 @@
           },
           {
             "cell": "outbound_encode/distinct_values/100",
-            "aa_samples_ns": [
-              46042.074515132146,
-              46506.58691308691
-            ],
             "aa_ratio": 1.0100888676899669,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -971,7 +626,6 @@
             "confirmation_ratio": 1.0321858888722935,
             "threshold": 1.0200888676899669,
             "verdict": "FAIL",
-            "canonical_id": "outbound_encode/distinct_values/100",
             "medians_ns": {
               "aa1": 46042.074515132146,
               "aa2": 46506.58691308691,
@@ -985,10 +639,6 @@
           },
           {
             "cell": "outbound_encode/distinct_values/1000",
-            "aa_samples_ns": [
-              508912.26851851854,
-              513310.5055555556
-            ],
             "aa_ratio": 1.0086424268171814,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -999,7 +649,6 @@
             "confirmation_ratio": 1.0318785990841732,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_encode/distinct_values/1000",
             "medians_ns": {
               "aa1": 508912.26851851854,
               "aa2": 513310.5055555556,
@@ -1013,10 +662,6 @@
           },
           {
             "cell": "outbound_encode/distinct_values/10000",
-            "aa_samples_ns": [
-              5553472.0,
-              5528373.6875
-            ],
             "aa_ratio": 1.004539908826487,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1027,7 +672,6 @@
             "confirmation_ratio": 1.0380854016398893,
             "threshold": 1.02,
             "verdict": "FAIL",
-            "canonical_id": "outbound_encode/distinct_values/10000",
             "medians_ns": {
               "aa1": 5553472.0,
               "aa2": 5528373.6875,
@@ -1041,10 +685,6 @@
           },
           {
             "cell": "outbound_encode/equal_values/100",
-            "aa_samples_ns": [
-              21168.80136138614,
-              21264.80777914614
-            ],
             "aa_ratio": 1.0045352788814546,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1055,7 +695,6 @@
             "confirmation_ratio": 1.0086053910077586,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_encode/equal_values/100",
             "medians_ns": {
               "aa1": 21168.80136138614,
               "aa2": 21264.80777914614,
@@ -1069,10 +708,6 @@
           },
           {
             "cell": "outbound_encode/equal_values/1000",
-            "aa_samples_ns": [
-              236232.32514619885,
-              237699.61403508772
-            ],
             "aa_ratio": 1.0062112113064154,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1083,7 +718,6 @@
             "confirmation_ratio": 0.9995306485261046,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_encode/equal_values/1000",
             "medians_ns": {
               "aa1": 236232.32514619885,
               "aa2": 237699.61403508772,
@@ -1097,10 +731,6 @@
           },
           {
             "cell": "outbound_encode/equal_values/10000",
-            "aa_samples_ns": [
-              2683723.8446969697,
-              2695746.824404762
-            ],
             "aa_ratio": 1.0044799615771012,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1111,7 +741,6 @@
             "confirmation_ratio": 1.0141937929373006,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_encode/equal_values/10000",
             "medians_ns": {
               "aa1": 2683723.8446969697,
               "aa2": 2695746.824404762,
@@ -1125,10 +754,6 @@
           },
           {
             "cell": "outbound_encode/shared_arc/100",
-            "aa_samples_ns": [
-              3468.1529973585875,
-              3469.641143180532
-            ],
             "aa_ratio": 1.0004290888617307,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1139,7 +764,6 @@
             "confirmation_ratio": 1.0181878906429205,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_encode/shared_arc/100",
             "medians_ns": {
               "aa1": 3468.1529973585875,
               "aa2": 3469.641143180532,
@@ -1153,10 +777,6 @@
           },
           {
             "cell": "outbound_encode/shared_arc/1000",
-            "aa_samples_ns": [
-              27638.12003576134,
-              27373.32741935484
-            ],
             "aa_ratio": 1.009673380672723,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1167,7 +787,6 @@
             "confirmation_ratio": 1.038439614279144,
             "threshold": 1.02,
             "verdict": "PASS",
-            "canonical_id": "outbound_encode/shared_arc/1000",
             "medians_ns": {
               "aa1": 27638.12003576134,
               "aa2": 27373.32741935484,
@@ -1181,10 +800,6 @@
           },
           {
             "cell": "outbound_encode/shared_arc/10000",
-            "aa_samples_ns": [
-              276064.3621710526,
-              276115.509375
-            ],
             "aa_ratio": 1.0001852727514162,
             "requires_independent_replication": false,
             "abba_pair_ratios": [
@@ -1195,7 +810,6 @@
             "confirmation_ratio": 1.0268067141192934,
             "threshold": 1.02,
             "verdict": "FAIL",
-            "canonical_id": "outbound_encode/shared_arc/10000",
             "medians_ns": {
               "aa1": 276064.3621710526,
               "aa2": 276115.509375,
@@ -1213,10 +827,6 @@
     "independent_replication": {
       "verdict": null,
       "reason": "Not run: the full campaign has six confirmed failures; none of those six is A/A-noisy. The single-campaign stop rule applies."
-    },
-    "independent_audit": {
-      "verdict": "PASS",
-      "reason": "All 30 canonical cells, every raw median, all eight command exits and quiet gates, and post-run executable hashes independently verified."
     }
   },
   "final_timing_reason": "Historical timing rule FAIL: 24 PASS and six confirmed regressions. The measured cost is accepted for this correctness fix; no further timing campaign is required.",
@@ -1537,17 +1147,6 @@
     "Allocation numbers are requested bytes, not RSS or whole-daemon capacity.",
     "No private or non-unicast TCP throughput, fleet scale, sustained memory soak, forwarding or release-wide qualification is established."
   ],
-  "publication": {
-    "hosted_run_url": null,
-    "campaign_record": "README.md",
-    "raw_logs_published": false
-  },
-  "disposition": {
-    "correctness_cost": "accepted",
-    "date": "2026-11-07",
-    "timing_verdict_preserved": true,
-    "further_campaigns": false
-  },
   "tcp_comparison": {
     "verdict": "INVALID",
     "reason": "Parent Linux peak-memory accounting integrity failure stopped comparison before any candidate repetition. Separately tracked measurement-tool defect; excluded from correctness gate."
