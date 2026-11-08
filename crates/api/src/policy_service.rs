@@ -393,7 +393,7 @@ pub struct PolicyService {
     /// `TestPolicy` / `ComparePolicy` dry runs in flight, from compile
     /// through the last evaluated page ([`POLICY_DRY_RUN_SLOTS`]).
     dry_run_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Wall-clock bound on one dry run's route walk
+    /// Wall-clock bound on one dry run after its compile
     /// ([`POLICY_DRY_RUN_DEADLINE`]; tests shorten it).
     dry_run_deadline: Duration,
     /// Test-only holds on the blocking compile and on each blocking page
@@ -456,8 +456,9 @@ const POLICY_DRY_RUN_SLOTS: usize = 2;
 /// compile that misses it keeps its slot until it finishes.
 const POLICY_COMPILE_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Wall-clock bound on one dry run's route walk, after the compile. A
-/// route-server import policy evaluates a 1M-route table in well under a
+/// Wall-clock bound on one dry run after its compile: the RIB and peer
+/// reads that set up the walk, and the walk itself. A route-server import
+/// policy evaluates a 1M-route table in well under a
 /// second of evaluation time in a release build, so this leaves room for
 /// heavier legitimate policies and the RIB page reads while bounding a
 /// near-budget candidate (about 1.5 ms per route) to a few tens of
@@ -571,8 +572,8 @@ impl PolicyService {
     /// returns the running count of evaluated routes; it and `state` move
     /// into each page's blocking task and back out.
     ///
-    /// The walk ends with `DEADLINE_EXCEEDED` once it outlasts
-    /// [`Self::dry_run_deadline`]. A dropped request or an expired deadline
+    /// The walk ends with `DEADLINE_EXCEEDED` at `deadline`, the dry run's
+    /// post-compile bound (see [`Self::dry_run_setup_read`]). A dropped request or an expired deadline
     /// cannot stop a page already running on the blocking pool, so one page
     /// ([`TEST_POLICY_PAGE_SIZE`] routes) is the bound on work after either.
     /// That page keeps its reference to `slot` until it returns, and its
@@ -587,6 +588,7 @@ impl PolicyService {
         rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
         query_scope: rustbgpd_rib::RouteQueryScope,
         row_scope: Option<&PeerKey>,
+        deadline: tokio::time::Instant,
         mut page: rustbgpd_rib::RoutePage,
         limit: u32,
         state: S,
@@ -596,7 +598,6 @@ impl PolicyService {
         S: Send + 'static,
         F: FnMut(&rustbgpd_rib::RoutePage, &mut S) -> u64 + Send + 'static,
     {
-        let deadline = tokio::time::Instant::now() + self.dry_run_deadline;
         let snapshot_version = page.version;
         let mut evaluated = 0;
         let mut job = (state, evaluate);
@@ -650,6 +651,30 @@ impl PolicyService {
             .map_err(|_| expired(evaluated))??;
             require_row_scope(row_scope, &page.routes)?;
         }
+    }
+
+    /// The deadline for one dry run's reads and walk, started once its
+    /// compile succeeds ([`Self::dry_run_deadline`]).
+    fn dry_run_deadline_from_now(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.dry_run_deadline
+    }
+
+    /// Run one read that sets up a dry run's walk (the first route page,
+    /// the installed export chain, peer context) under the dry run's
+    /// `deadline`. The RIB reads have no bound of their own, and the request
+    /// holds its admission slot while it waits.
+    async fn dry_run_setup_read<T>(
+        &self,
+        deadline: tokio::time::Instant,
+        source: &str,
+        read: impl std::future::Future<Output = Result<T, Status>>,
+    ) -> Result<T, Status> {
+        tokio::time::timeout_at(deadline, read).await.map_err(|_| {
+            Status::deadline_exceeded(format!(
+                "policy dry run exceeded {} s waiting on the {source} before evaluating any routes",
+                self.dry_run_deadline.as_secs()
+            ))
+        })?
     }
 
     /// Attach the daemon's local ASN, which `ComparePolicy` stamps into
@@ -1705,6 +1730,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 }));
             }
         };
+        let deadline = self.dry_run_deadline_from_now();
 
         // Start the version-fenced route walk before reading peer context.
         // Import evaluates Adj-RIB-In (optionally one peer's); export
@@ -1726,17 +1752,28 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             RouteQueryScope::Best
         };
         let row_scope = if import { peer_key.as_ref() } else { None };
-        let page = query_test_policy_page(rib_tx, query_scope, None, None).await?;
+        let page = self
+            .dry_run_setup_read(
+                deadline,
+                "RIB",
+                query_test_policy_page(rib_tx, query_scope, None, None),
+            )
+            .await?;
         require_row_scope(row_scope, &page.routes)?;
 
         // Peer context (ASN / peer-group) so guards on peer.* fields
         // see real values.
-        let peer_context = dry_run_peer_context(
-            &self.peer_mgr_tx,
-            self.operator_tx.as_ref(),
-            peer_key.as_ref(),
-        )
-        .await?;
+        let peer_context = self
+            .dry_run_setup_read(
+                deadline,
+                "peer manager",
+                dry_run_peer_context(
+                    &self.peer_mgr_tx,
+                    self.operator_tx.as_ref(),
+                    peer_key.as_ref(),
+                ),
+            )
+            .await?;
 
         let scope = TestPolicyScope {
             import,
@@ -1759,6 +1796,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 rib_tx,
                 query_scope,
                 row_scope,
+                deadline,
                 page,
                 req.limit,
                 (response, hits),
@@ -1874,6 +1912,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 }));
             }
         };
+        let deadline = self.dry_run_deadline_from_now();
         let mut charge =
             |policy: &rustbgpd_policy::ir::CompiledPolicy| charge_chain_budget(&mut budget, policy);
 
@@ -1882,12 +1921,17 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
             Status::failed_precondition("route snapshot runtime unavailable on this listener")
         })?;
-        let installed = rib_manager_read(rib_tx, |reply| RibUpdate::QueryInstalledExportChain {
-            peer: target,
-            reply,
-        })
-        .await?
-        .ok_or_else(|| {
+        let installed = self
+            .dry_run_setup_read(
+                deadline,
+                "RIB",
+                rib_manager_read(rib_tx, |reply| RibUpdate::QueryInstalledExportChain {
+                    peer: target,
+                    reply,
+                }),
+            )
+            .await?
+            .ok_or_else(|| {
             Status::failed_precondition(format!(
                 "peer {target} has no live outbound registration; its export chain is installed per session"
             ))
@@ -1976,13 +2020,24 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             candidate: pins.frame(&candidate),
         };
 
-        let page = query_test_policy_page(rib_tx, RouteQueryScope::Best, None, None).await?;
-        let peer_context = dry_run_peer_context(
-            &self.peer_mgr_tx,
-            self.operator_tx.as_ref(),
-            Some(&target_key),
-        )
-        .await?;
+        let page = self
+            .dry_run_setup_read(
+                deadline,
+                "RIB",
+                query_test_policy_page(rib_tx, RouteQueryScope::Best, None, None),
+            )
+            .await?;
+        let peer_context = self
+            .dry_run_setup_read(
+                deadline,
+                "peer manager",
+                dry_run_peer_context(
+                    &self.peer_mgr_tx,
+                    self.operator_tx.as_ref(),
+                    Some(&target_key),
+                ),
+            )
+            .await?;
 
         let scope = ComparePolicyScope {
             target: target_key.clone(),
@@ -2002,6 +2057,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 rib_tx,
                 RouteQueryScope::Best,
                 None,
+                deadline,
                 page,
                 req.limit,
                 response,
@@ -5143,6 +5199,60 @@ policy customer-in(peer_lp: u32) {
         .expect("the slot frees when the late page returns");
         drop(all);
         assert!(!gate.timed_out.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The reads that set up a walk share the dry run's deadline: a RIB that
+    /// never answers the first route page (`TestPolicy`) or the installed
+    /// export chain (`ComparePolicy`) ends the request with
+    /// `DEADLINE_EXCEEDED`, and the slot frees, instead of holding the slot
+    /// until the client gives up.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_dry_run_setup_reads_stop_at_the_deadline() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        let (stalled_tx, mut stalled) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Keep every query, and so its reply sender, unanswered.
+            let mut held = Vec::new();
+            while let Some(update) = rib_rx.recv().await {
+                let kind = match &update {
+                    rustbgpd_rib::RibUpdate::QueryRoutesPage { .. } => "page",
+                    rustbgpd_rib::RibUpdate::QueryInstalledExportChain { .. } => "chain",
+                    _ => "other",
+                };
+                held.push(update);
+                let _ = stalled_tx.send(kind);
+            }
+        });
+        let svc =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        let bounded = Duration::from_secs(3600);
+        let status = tokio::time::timeout(
+            bounded,
+            PolicyServiceRpc::test_policy(&svc, Request::new(customer_dry_run())),
+        )
+        .await
+        .expect("a stalled first-page read is bounded")
+        .unwrap_err();
+        assert_eq!(stalled.recv().await, Some("page"));
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status}");
+        assert!(status.message().contains("waiting on the RIB"), "{status}");
+        assert_eq!(svc.dry_run_slots.available_permits(), POLICY_DRY_RUN_SLOTS);
+
+        let status = tokio::time::timeout(
+            bounded,
+            PolicyServiceRpc::compare_policy(
+                &svc,
+                Request::new(compare_request(COMPARE_INSTALLED_RPOL, &["client-x"], "")),
+            ),
+        )
+        .await
+        .expect("a stalled installed-chain read is bounded")
+        .unwrap_err();
+        assert_eq!(stalled.recv().await, Some("chain"));
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status}");
+        assert!(status.message().contains("waiting on the RIB"), "{status}");
+        assert_eq!(svc.dry_run_slots.available_permits(), POLICY_DRY_RUN_SLOTS);
     }
 
     /// `show_changes` is capped like the other sample counts.

@@ -16,7 +16,10 @@ use serde::Serialize;
 
 use crate::commands::neighbor::{bare_ip_rpc_address, scope_address};
 use crate::commands::policy_input::{JsonPolicyDefinition, load_json};
-use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
+use crate::connection::{
+    Connection, READ_RPC_TIMEOUT, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc,
+    rpc_with_timeout,
+};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
@@ -1048,6 +1051,19 @@ pub struct TestOptions<'a> {
 // Bound file reads before allocation, then check the exact encoded request size.
 const TEST_POLICY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const TEST_POLICY_MAX_SAMPLES: u32 = 1000;
+/// The daemon's bound on a dry-run candidate compile (`POLICY_COMPILE_DEADLINE`).
+const DAEMON_POLICY_COMPILE_DEADLINE_SECS: u64 = 30;
+/// The daemon's bound on a dry run's reads and route walk after the compile
+/// (`POLICY_DRY_RUN_DEADLINE`).
+const DAEMON_POLICY_DRY_RUN_DEADLINE_SECS: u64 = 60;
+/// Client wait for `TestPolicy` / `ComparePolicy`: both daemon bounds plus
+/// the lightweight-read budget for admission and response transfer, so the
+/// daemon's own `DEADLINE_EXCEEDED` arrives before the client gives up.
+const POLICY_DRY_RUN_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
+    DAEMON_POLICY_COMPILE_DEADLINE_SECS
+        + DAEMON_POLICY_DRY_RUN_DEADLINE_SECS
+        + READ_RPC_TIMEOUT.as_secs(),
+);
 
 fn read_test_policy_file(path: &str, limit: usize) -> Result<String, CliError> {
     let file = std::fs::File::open(path)
@@ -1224,9 +1240,13 @@ pub async fn test(
     }
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut resp = read_rpc("TestPolicy", client.test_policy(request))
-        .await?
-        .into_inner();
+    let mut resp = rpc_with_timeout(
+        "TestPolicy",
+        POLICY_DRY_RUN_RPC_TIMEOUT,
+        client.test_policy(request),
+    )
+    .await?
+    .into_inner();
     for diff in &mut resp.diffs {
         scope_address(&mut diff.peer, &diff.peer_interface);
     }
@@ -1410,9 +1430,13 @@ pub async fn compare(
     }
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = read_rpc("ComparePolicy", client.compare_policy(request))
-        .await?
-        .into_inner();
+    let resp = rpc_with_timeout(
+        "ComparePolicy",
+        POLICY_DRY_RUN_RPC_TIMEOUT,
+        client.compare_policy(request),
+    )
+    .await?
+    .into_inner();
 
     if json {
         output::print_json_pretty(&compare_to_json(&resp, &opts))?;
@@ -2636,6 +2660,38 @@ fn print_statement_details(s: &proto::PolicyStatement, indent: &str) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    /// The client waits longer than the daemon's compile and post-compile
+    /// bounds together, and those mirror the daemon's constants.
+    #[test]
+    fn dry_run_client_timeout_outlasts_the_daemon_bounds() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../api/src/policy_service.rs"),
+        )
+        .unwrap();
+        for (name, secs) in [
+            (
+                "POLICY_COMPILE_DEADLINE",
+                DAEMON_POLICY_COMPILE_DEADLINE_SECS,
+            ),
+            (
+                "POLICY_DRY_RUN_DEADLINE",
+                DAEMON_POLICY_DRY_RUN_DEADLINE_SECS,
+            ),
+        ] {
+            let declaration = format!("const {name}: Duration = Duration::from_secs({secs});");
+            assert!(
+                source.contains(&declaration),
+                "daemon {name} is not {secs} s"
+            );
+        }
+        assert!(
+            POLICY_DRY_RUN_RPC_TIMEOUT
+                > std::time::Duration::from_secs(
+                    DAEMON_POLICY_COMPILE_DEADLINE_SECS + DAEMON_POLICY_DRY_RUN_DEADLINE_SECS
+                )
+        );
+    }
+
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;

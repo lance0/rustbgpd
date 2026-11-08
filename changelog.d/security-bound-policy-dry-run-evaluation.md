@@ -3,8 +3,10 @@
 - `TestPolicy` and `ComparePolicy` (`rbgp policy test` and
   `rbgp policy compare`) now evaluate route pages on the blocking pool
   instead of the async runtime that serves BGP sessions and other RPCs, and
-  bound the route walk at 60 s, after which the request returns
-  `DEADLINE_EXCEEDED` with the number of routes it evaluated. The two
+  bound the reads that set up the walk and the walk itself at 60 s after
+  the compile, after which the request returns `DEADLINE_EXCEEDED` with the
+  number of routes it evaluated. The CLI waits long enough for the
+  daemon's compile and walk bounds to report first. The two
   dry-run slots per API listener now cover evaluation as well as the
   compile, so a third concurrent request returns `RESOURCE_EXHAUSTED` while
   two walks run. Previously a costly candidate over a large table held one
