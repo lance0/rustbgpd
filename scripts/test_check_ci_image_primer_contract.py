@@ -737,6 +737,82 @@ class PrimerContractTests(unittest.TestCase):
                 _check_build_inputs(root, errors)
                 self.assertEqual([], errors)
 
+    def test_quoted_hashes_cannot_hide_action_or_image_refs(self):
+        audit = ".github/workflows/audit.yml"
+        checkout = re.search(
+            r"(?m)^      - uses: actions/checkout@[^\n]+$", (ROOT / audit).read_text()
+        )[0]
+        for name in ('"checkout #1"', "'checkout #1'", '"checkout \\"#1"', "'checkout '' #1'"):
+            with self.subTest(name=name):
+                self.assert_red(
+                    "action ref is not pinned to a full commit SHA",
+                    (audit, checkout, f"      - {{name: {name}, uses: actions/checkout@v7}}"),
+                )
+                pinned = checkout.split("uses: ", 1)[1]
+                ref, comment = pinned.split(" #", 1)
+                self.assertEqual([], self.mutated_errors(
+                    (audit, checkout, f"      - {{name: {name}, uses: {ref}}} #{comment}"),
+                ))
+        runner = "    runs-on: ubuntu-latest\n"
+        for container in (
+            '    container: {options: "--label=note=#one", image: alpine:3.22}\n',
+            "    services: {database: {options: '--label=note=#one', image: alpine:3.22}}\n",
+        ):
+            with self.subTest(container=container):
+                self.assert_red(
+                    "external image is not pinned to a SHA-256 digest",
+                    (audit, runner, runner + container),
+                )
+                self.assertEqual([], self.mutated_errors((
+                    audit, runner, runner + container.replace("alpine:3.22", "alpine:3.22@sha256:" + "a" * 64),
+                )))
+
+    def test_plain_scalar_apostrophes_do_not_hide_version_comments(self):
+        audit = ".github/workflows/audit.yml"
+        checkout = re.search(
+            r"(?m)^      - uses: actions/checkout@[^\n]+$", (ROOT / audit).read_text()
+        )[0]
+        ref, comment = checkout.split("uses: ", 1)[1].split(" #", 1)
+        for name in ("don't", "a 'quoted' name"):
+            with self.subTest(name=name):
+                self.assertEqual([], self.mutated_errors((
+                    audit, checkout, f"      - {{name: {name}, uses: {ref}}} #{comment}",
+                )))
+
+    def test_from_uses_only_global_argument_defaults(self):
+        base = re.search(r"(?m)^FROM (\S+) AS chef$", (ROOT / "Dockerfile").read_text())
+        self.assert_red(
+            "external image is not pinned to a SHA-256 digest: rust:1.95-bookworm",
+            ("Dockerfile", base[0], "ARG BASE=rust:1.95-bookworm\nFROM scratch\n"
+             f"ARG BASE={base[1]}\nFROM ${{BASE}} AS chef"),
+        )
+        self.assertEqual([], self.mutated_errors((
+            "Dockerfile", base[0], f"ARG BASE={base[1]}\nFROM scratch\n"
+            "ARG BASE=rust:1.95-bookworm\nFROM ${BASE} AS chef",
+        )))
+
+    def test_continued_workflow_image_scalars_are_rejected(self):
+        audit = ".github/workflows/audit.yml"
+        runner = "    runs-on: ubuntu-latest\n"
+        for container in (
+            "    container:\n      alpine:3.22\n",
+            "    container:\n      image:\n        alpine:3.22\n",
+            "    services:\n      database:\n        image:\n          alpine:3.22\n",
+            "    container: # comment\n\n      # image follows\n      alpine:3.22\n",
+        ):
+            with self.subTest(container=container):
+                self.assert_red(
+                    "external image",
+                    (audit, runner, runner + container),
+                )
+        for container in (
+            "    container:\n      image: alpine:3.22@sha256:" + "a" * 64 + "\n",
+            "    container: # comment\n\n      # options first\n      options: --cpus 1\n"
+            "      image: alpine:3.22@sha256:" + "a" * 64 + "\n",
+        ):
+            with self.subTest(container=container):
+                self.assertEqual([], self.mutated_errors((audit, runner, runner + container)))
+
     # 3. Permissions.
 
     def test_workflow_permissions_stay_read_only(self):

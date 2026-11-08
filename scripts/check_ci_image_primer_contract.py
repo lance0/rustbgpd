@@ -96,9 +96,31 @@ def _jobs(text: str) -> dict[str, str]:
     }
 
 
+def _yaml_code_and_comment(line: str) -> tuple[str, str]:
+    """Split comments outside quoted scalars, including escaped quote characters."""
+    single_quoted = double_quoted = escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+        elif character == "\\" and double_quoted:
+            escaped = True
+        elif character == '"' and not single_quoted:
+            if double_quoted or not line[:index].strip() or line[:index].rstrip().endswith((":", "{", "[", ",", "-")):
+                double_quoted = not double_quoted
+        elif character == "'" and not double_quoted:
+            if single_quoted and line[index + 1:index + 2] == "'":
+                escaped = True
+            elif single_quoted or not line[:index].strip() or line[:index].rstrip().endswith((":", "{", "[", ",", "-")):
+                single_quoted = not single_quoted
+        elif character == "#" and not single_quoted and not double_quoted:
+            if index == 0 or line[index - 1].isspace():
+                return line[:index], line[index + 1:]
+    return line, ""
+
+
 def _check_action_refs(relative: str, text: str, errors: list[str]) -> None:
     for line in text.splitlines():
-        code, _, comment = line.partition("#")
+        code, comment = _yaml_code_and_comment(line)
         # Match block and flow mapping keys, including quoted keys and values.
         for match in re.finditer(
             r'''(?:^|[,{])[ \t]*(?:-[ \t]+)?(?:uses|"uses"|'uses')[ \t]*:[ \t]*("[^"]*"|'[^']*'|[^\s,}#]*)''',
@@ -123,19 +145,21 @@ def _check_image_ref(relative: str, ref: str, errors: list[str]) -> None:
 def _check_base_images(relative: str, text: str, errors: list[str]) -> None:
     stages: set[str] = set()
     arguments: dict[str, str] = {}
+    before_from = True
     for line in text.replace("\\\n", " ").splitlines():
         line = line.strip()
         frontend = re.fullmatch(r"#\s*syntax\s*=\s*(\S+)", line)
         if frontend:
             _check_image_ref(relative, frontend[1], errors)
         argument = re.fullmatch(r"ARG\s+(\w+)=(\S+)", line, re.I)
-        if argument:
+        if argument and before_from:
             arguments[argument[1]] = argument[2]
         source = re.fullmatch(r"FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", line, re.I)
         if not source:
             if re.match(r"FROM\b", line, re.I):
                 errors.append(f"{relative}: cannot parse Dockerfile base: {line}")
             continue
+        before_from = False
         ref = re.sub(r"\$\{(\w+)\}|\$(\w+)", lambda m: arguments.get(m[1] or m[2], m[0]), source[1])
         local_build = (
             relative == "tests/interop/m126-fastnetmon-rtbh/Dockerfile"
@@ -154,13 +178,27 @@ def _check_build_inputs(root: Path, errors: list[str]) -> None:
         text = path.read_text()
         _check_action_refs(relative, text, errors)
         # Scalar job containers and object-form container/service images.
-        for line in text.splitlines():
-            code = line.partition("#")[0]
+        lines = [_yaml_code_and_comment(line)[0] for line in text.splitlines()]
+        for number, code in enumerate(lines):
             for match in re.finditer(
-                r'''(?:^|[,{])[ \t]*(?:container|image|"container"|"image"|'container'|'image')[ \t]*:[ \t]*("[^"]*"|'[^']*'|[^{}\s,#]+)''',
+                r'''(?:^|[,{])[ \t]*(container|image|"container"|"image"|'container'|'image')[ \t]*:[ \t]*("[^"]*"|'[^']*'|[^{}\s,#]*)''',
                 code,
             ):
-                _check_image_ref(relative, match[1].strip("\"'"), errors)
+                ref = match[2].strip("\"'")
+                if ref:
+                    _check_image_ref(relative, ref, errors)
+                    continue
+                if match[1].strip("\"'") == "container":
+                    if code[match.end():].lstrip().startswith("{"):
+                        continue
+                    following = next((line for line in lines[number + 1:] if line.strip()), "")
+                    indent = len(code) - len(code.lstrip())
+                    if len(following) - len(following.lstrip()) > indent and re.match(
+                        r'''(?:[\w-]+|"[^"]+"|'[^']+')[ \t]*:(?:[ \t]|$)|\{''',
+                        following.lstrip(),
+                    ):
+                        continue
+                errors.append(f"{relative}: external image must use a same-line digest reference")
     for directory, dirs, files in os.walk(root):
         dirs[:] = [name for name in dirs if name not in {".git", ".claude", "target", "node_modules", ".venv"}]
         for name in files:
