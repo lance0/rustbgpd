@@ -48,7 +48,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--max-scan-routes` matching/returned-row limit (10,000 rows by default).
   This bounds adapter transfer and retention, not native RIB query CPU work.
   Operators serving larger nonempty views may need to raise this limit.
-- Prepare FIB status rows and filter indexes before publication, so paged
+- Prepare FIB status rows and their unfiltered order before publication, and
+  build each filter's order on first use within that publication, so paged
   `ListFibRoutes` requests copy only their returned rows instead of converting
   and sorting the complete FIB on every page. Retired publications are released
   by the blocking publisher rather than by an API reader.
@@ -391,8 +392,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A `prepend` count may also be a `u32` parameter. Arguments are checked
   against the parameter types wherever a policy is instantiated:
   `apply(p(...))`, a test `expect`, and a configured chain reference such
-  as `import_policy_chain = ["customer-in(200, cust-65001)"]`. That
-  includes the set's existence and kind, and the range of a parameterized
+  as
+  `import_policy_chain = ["customer-in(200, cust-65001, 65000:100, 192.0.2.1)"]`.
+  That includes the set's existence and kind, and the range of a parameterized
   `prepend` count or `set next-hop` address. Policies still compile to
   constants and interned sets, so there is no per-route cost. See
   [Parameters](docs/reference/rpol-language.md#parameters).
