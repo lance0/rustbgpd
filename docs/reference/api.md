@@ -4420,10 +4420,10 @@ Repeat `--route-target` for multiple RTs. Each peer must explicitly enable
 the corresponding VPN family; see the
 [controller configuration](../../examples/vpn-flowspec-controller/config.toml).
 
-The release floor is **UNASSIGNED**: the first published release containing
-this API has not been assigned. `HealthResponse.daemon_version` alone does
-not establish support. Pin a build containing this contract and require the
-read-only local-intent probe for each required family, which needs no peer:
+The release floor is **0.82.0**: it is the first published release containing
+this API. `HealthResponse.daemon_version` alone does not establish support.
+Pin a build containing this contract and require the read-only local-intent
+probe for each required family, which needs no peer:
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
