@@ -49,16 +49,26 @@ type IndexedPathId = u32;
 #[cfg(test)]
 type IndexedPathId = tests::CountedPathId;
 
-/// One inline path for ordinary BGP; logarithmic lookup for retained Add-Path
-/// siblings, whose count can span several LLGR sessions.
+/// Path count above which a key's sorted vector becomes an ordered tree.
+const PATH_INDEX_PROMOTE_ABOVE: usize = 16;
+/// Path count at which an ordered tree returns to a sorted vector. The gap to
+/// [`PATH_INDEX_PROMOTE_ABOVE`] keeps a path flapping at the boundary from
+/// rebuilding the index on every flap.
+const PATH_INDEX_DEMOTE_AT: usize = 8;
+
+/// One inline path for ordinary BGP; a sorted vector for ordinary Add-Path
+/// keys; an ordered tree for retained siblings, whose count can span several
+/// LLGR sessions. The vector grows and keeps capacity like the `SmallVec` it
+/// replaced, so heap per key at up to 16 paths does not grow.
 #[derive(Debug, Default)]
 enum PathIndex<V> {
     #[default]
     Empty,
     One(u32, V),
+    Small(Vec<(IndexedPathId, V)>),
     #[expect(
         clippy::box_collection,
-        reason = "Boxing keeps ordinary single-path entries at 16 bytes on 64-bit targets."
+        reason = "Boxing keeps the rare crowded variant from widening every entry."
     )]
     Many(Box<BTreeMap<IndexedPathId, V>>),
 }
@@ -75,6 +85,10 @@ impl<V: Copy> PathIndex<V> {
         match self {
             Self::Empty => None,
             Self::One(id, value) => (*id == path_id).then_some(*value),
+            Self::Small(paths) => paths
+                .binary_search_by(|(id, _)| id.cmp(&path_id.into()))
+                .ok()
+                .map(|pos| paths[pos].1),
             Self::Many(paths) => paths.get(&path_id.into()).copied(),
         }
     }
@@ -87,16 +101,35 @@ impl<V: Copy> PathIndex<V> {
             }
             Self::One(id, old) if *id == path_id => Some(std::mem::replace(old, value)),
             Self::One(id, old) => {
-                *self = Self::Many(Box::new(BTreeMap::from([
-                    ((*id).into(), *old),
-                    (path_id.into(), value),
-                ])));
+                let (old, new) = (((*id).into(), *old), (path_id.into(), value));
+                let mut paths = Vec::with_capacity(2);
+                if *id < path_id {
+                    paths.extend([old, new]);
+                } else {
+                    paths.extend([new, old]);
+                }
+                *self = Self::Small(paths);
                 None
             }
+            Self::Small(paths) => match paths.binary_search_by(|(id, _)| id.cmp(&path_id.into())) {
+                Ok(pos) => Some(std::mem::replace(&mut paths[pos].1, value)),
+                Err(_) if paths.len() >= PATH_INDEX_PROMOTE_ABOVE => {
+                    let mut tree: BTreeMap<_, _> = std::mem::take(paths).into_iter().collect();
+                    tree.insert(path_id.into(), value);
+                    *self = Self::Many(Box::new(tree));
+                    None
+                }
+                Err(pos) => {
+                    paths.insert(pos, (path_id.into(), value));
+                    None
+                }
+            },
             Self::Many(paths) => paths.insert(path_id.into(), value),
         }
     }
 
+    /// Remove one path. A vector keeps its capacity, as the `SmallVec` did,
+    /// so a second path flapping on a key does not reallocate.
     fn remove(&mut self, path_id: u32) -> Option<V> {
         match self {
             Self::One(id, value) if *id == path_id => {
@@ -105,11 +138,20 @@ impl<V: Copy> PathIndex<V> {
                 Some(removed)
             }
             Self::Empty | Self::One(..) => None,
+            Self::Small(paths) => {
+                let pos = paths
+                    .binary_search_by(|(id, _)| id.cmp(&path_id.into()))
+                    .ok()?;
+                let (_, removed) = paths.remove(pos);
+                if paths.is_empty() {
+                    *self = Self::Empty;
+                }
+                Some(removed)
+            }
             Self::Many(paths) => {
                 let removed = paths.remove(&path_id.into());
-                if paths.len() == 1 {
-                    let (id, value) = paths.pop_first().expect("one remaining path");
-                    *self = Self::One(id.into(), value);
+                if paths.len() <= PATH_INDEX_DEMOTE_AT {
+                    *self = Self::Small(std::mem::take(&mut **paths).into_iter().collect());
                 }
                 removed
             }
@@ -126,21 +168,30 @@ impl<V: Copy> PathIndex<V> {
 
     fn iter_after(&self, after: Option<u32>) -> impl Iterator<Item = (u32, V)> + '_ {
         use std::ops::Bound::{Excluded, Unbounded};
-        let (one, many) = match self {
-            Self::Empty => (None, None),
+        let (one, small, many) = match self {
+            Self::Empty => (None, &[][..], None),
             Self::One(id, value) => (
                 after
                     .is_none_or(|after| *id > after)
                     .then_some((*id, *value)),
+                &[][..],
                 None,
             ),
+            Self::Small(paths) => {
+                let start = after.map_or(0, |after| {
+                    let after = IndexedPathId::from(after);
+                    paths.partition_point(|(id, _)| *id <= after)
+                });
+                (None, &paths[start..], None)
+            }
             Self::Many(paths) => {
                 let start: std::ops::Bound<IndexedPathId> =
                     after.map_or(Unbounded, |id| Excluded(id.into()));
-                (None, Some(paths.range((start, Unbounded))))
+                (None, &[][..], Some(paths.range((start, Unbounded))))
             }
         };
         one.into_iter()
+            .chain(small.iter().map(|&(id, value)| (id.into(), value)))
             .chain(
                 many.into_iter()
                     .flatten()
@@ -152,17 +203,14 @@ impl<V: Copy> PathIndex<V> {
             })
     }
 
-    fn clear_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
-        match std::mem::take(self) {
-            Self::Many(paths) => {
-                // Consuming the tree releases nodes incrementally, instead of
-                // leaving a crowded prefix's entire subtree to one destructor.
-                for _ in *paths {
-                    checkpoint.checkpoint(RetirementProgress::Progress);
-                }
+    /// Release a retired entry. Inline and vector entries free in one step;
+    /// consuming a tree releases its nodes incrementally instead of leaving a
+    /// crowded key's whole tree to one destructor.
+    fn retire_with(self, checkpoint: &mut impl RetirementCheckpoint) {
+        if let Self::Many(paths) = self {
+            for _ in *paths {
+                checkpoint.checkpoint(RetirementProgress::Progress);
             }
-            Self::One(..) => checkpoint.checkpoint(RetirementProgress::Progress),
-            Self::Empty => {}
         }
     }
 }
@@ -499,7 +547,7 @@ impl AdjRibIn {
     pub(crate) fn retire_with(mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.release_with(checkpoint);
         for paths in self.prefix_index.values_mut() {
-            paths.clear_with(checkpoint);
+            std::mem::take(paths).retire_with(checkpoint);
         }
         self.prefix_index.release_with(checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.flowspec_routes.map, checkpoint);
@@ -507,12 +555,12 @@ impl AdjRibIn {
         crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_routes.map, checkpoint);
         for (_, paths) in self.vpn_key_index.iter_mut() {
-            paths.clear_with(checkpoint);
+            std::mem::take(paths).retire_with(checkpoint);
         }
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_key_index, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
         for (_, paths) in self.labeled_key_index.iter_mut() {
-            paths.clear_with(checkpoint);
+            std::mem::take(paths).retire_with(checkpoint);
         }
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_key_index, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
@@ -3750,17 +3798,63 @@ mod tests {
         assert_eq!(paths.remove(8), None);
         assert_eq!(paths.remove(1), Some(101));
         assert_eq!(paths.remove(9), Some(109));
-        assert!(matches!(paths, PathIndex::One(7, 700)));
+        // Like the `SmallVec` it replaced, a vector keeps its capacity, so a
+        // flapping second path does not reallocate.
+        assert!(matches!(&paths, PathIndex::Small(v) if v.len() == 1 && v.capacity() == 4));
         assert_eq!(paths.insert(7, 701), Some(700));
         assert_eq!(paths.remove(7), Some(701));
         assert!(paths.is_empty());
+        assert_eq!(paths.insert(7, 702), None);
+        assert!(matches!(paths, PathIndex::One(7, 702)));
         #[cfg(target_pointer_width = "64")]
         {
-            assert_eq!(std::mem::size_of::<PathIndex<u32>>(), 16);
-            assert_eq!(std::mem::size_of::<PathIndex<()>>(), 16);
+            assert_eq!(std::mem::size_of::<PathIndex<u32>>(), 24);
+            assert_eq!(std::mem::size_of::<PathIndex<()>>(), 24);
             assert_eq!(std::mem::size_of::<SmallVec<[(u32, u32); 1]>>(), 24);
             assert_eq!(std::mem::size_of::<SmallVec<[u32; 1]>>(), 24);
         }
+    }
+
+    #[test]
+    fn path_index_tiers_grow_like_smallvec_and_switch_with_hysteresis() {
+        let mut paths = PathIndex::default();
+        let mut capacities = Vec::new();
+        for id in (0..16).rev() {
+            paths.insert(id * 2, id);
+            if let PathIndex::Small(v) = &paths {
+                capacities.push(v.capacity());
+            }
+        }
+        // The parent `SmallVec<[_; 1]>` spilled to 2, then doubled.
+        assert_eq!(
+            capacities,
+            [2, 4, 4, 8, 8, 8, 8, 16, 16, 16, 16, 16, 16, 16, 16]
+        );
+        assert_eq!(
+            paths.iter_after(Some(25)).collect::<Vec<_>>(),
+            [(26, 13), (28, 14), (30, 15)]
+        );
+        assert_eq!(paths.insert(1, 99), None);
+        assert!(matches!(&paths, PathIndex::Many(tree) if tree.len() == 17));
+        for _ in 0..4 {
+            assert_eq!(paths.remove(1), Some(99));
+            assert!(matches!(&paths, PathIndex::Many(tree) if tree.len() == 16));
+            assert_eq!(paths.insert(1, 99), None);
+        }
+        let ids: Vec<u32> = paths.iter().map(|(id, _)| id).collect();
+        for &id in &ids[..8] {
+            assert!(paths.remove(id).is_some());
+        }
+        assert!(matches!(&paths, PathIndex::Many(tree) if tree.len() == 9));
+        assert!(paths.remove(ids[8]).is_some());
+        assert!(matches!(&paths, PathIndex::Small(v) if v.len() == 8 && v.capacity() == 8));
+        assert_eq!(paths.iter().map(|(id, _)| id).collect::<Vec<_>>(), ids[9..]);
+        for &id in &ids[..8] {
+            assert_eq!(paths.insert(id, 0), None);
+        }
+        assert!(matches!(&paths, PathIndex::Small(v) if v.len() == 16));
+        assert_eq!(paths.get(ids[0]), Some(0));
+        assert_eq!(paths.get(3), None);
     }
 
     fn crowded_path_routes(path_id: u32) -> (Route, VpnRibRoute, LabeledRibRoute) {
@@ -3849,22 +3943,22 @@ mod tests {
 
     #[test]
     fn crowded_path_index_retirement_checkpoints_each_entry() {
-        let mut inline = PathIndex::One(7, ());
-        let mut visits = 0;
-        inline.clear_with(&mut || visits += 1);
-        assert_eq!(
-            visits, 1,
-            "retirement must service ordinary single-path entries too"
-        );
-        assert!(inline.is_empty());
+        for count in [1, 16] {
+            let mut paths = PathIndex::default();
+            for id in 0..count {
+                paths.insert(id, ());
+            }
+            let mut visits = 0;
+            paths.retire_with(&mut || visits += 1);
+            assert_eq!(visits, 0, "a {count}-path entry frees in one step");
+        }
         let mut paths = PathIndex::default();
         for id in 0..4096 {
             paths.insert(id, ());
         }
         let mut visits = 0;
-        paths.clear_with(&mut || visits += 1);
+        paths.retire_with(&mut || visits += 1);
         assert_eq!(visits, 4096);
-        assert!(paths.is_empty());
 
         let mut rib = AdjRibIn::new(PeerId::from_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
         for id in 0..4096 {
