@@ -2239,10 +2239,14 @@ without a `reason` label encode the mechanism in the metric name.
 
 Other repeatable inbound WARNs use independent per-connection counts for
 non-negotiated `MP_REACH_NLRI` families, IPv4 body NLRI from scoped link-local
-peers, strict-peer next-hop rejection, and policy OTC rejection. Each class
-logs at counts 1, 2, 4, 8, ... and includes its count as `warning_updates`.
-Reconnect re-arms every class. UPDATE and rejection counters still count
-every event; suppressing a warning does not change route handling.
+peers, strict-peer next-hop rejection (one count per `reason`), and policy OTC
+rejection. Each class logs at counts 1, 2, 4, 8, ... and includes its count as
+`warning_updates`. Reconnect re-arms every class. Suppressing a warning does
+not change route handling. `bgp_messages_received_total{type="update"}` and
+`bgp_otc_routes_blocked_total` still count every event. Strict-peer next-hop
+rejection, non-negotiated `MP_REACH_NLRI` and scoped-peer body NLRI have no
+counter: `warning_updates` shows them only to power-of-two resolution, and
+`rbgp rib received <peer> --rejected` lists retained next-hop rejections.
 
 Malformed UPDATE cause reasons are bounded to `attribute_list`,
 `unrecognized_well_known`, `missing_well_known`, `attribute_flags`,

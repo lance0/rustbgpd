@@ -2896,10 +2896,14 @@ unauthorized next hop — and it is fail-closed:
 Rejected announcements are dropped treat-as-withdraw style: a rejection that
 replaces a previously accepted route withdraws exactly that prior
 `(prefix, path_id)` identity; a first-seen rejection emits no withdrawal.
-Withdrawals in the same UPDATE are always processed. Each rejection logs at
-`warn` with the peer, the rejected prefixes, the offending next-hop tuple,
-and a stable `reason` token (`foreign_next_hop`,
-`unverified_link_local_companion`, or `unscoped_link_local`).
+Withdrawals in the same UPDATE are always processed. A rejecting UPDATE
+logs at `warn` with the peer, the rejected prefixes, the offending next-hop
+tuple, and a stable `reason` token (`foreign_next_hop`,
+`unverified_link_local_companion`, or `unscoped_link_local`). Each reason
+logs only its 1st, 2nd, 4th, 8th, ... rejecting UPDATE per connection, and
+the line's `warning_updates` field gives that count; a reconnect starts the
+schedule again. `rbgp rib received <peer> --rejected` lists the retained
+rejected prefixes, including those from unlogged UPDATEs.
 
 `next_hop_ownership` requires `route_server_client = true` and inherits from
 the peer-group. Unset means no ownership enforcement (RFC 7947 transparency
