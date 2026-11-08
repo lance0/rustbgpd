@@ -9,6 +9,9 @@
   `set`s in separate terms, were already correct.
   **Operator-visible:** policies with a literal `set` after a computed `set`
   of the same attribute in one term now advertise, and select on, the
-  literal value. Accept and reject verdicts are unchanged. If a policy
-  relied on the old result, check it with `rbgp policy check`, which runs
-  its `test` blocks, before upgrading.
+  literal value. A route can now be accepted where it was denied: a
+  computed `set` that fails closed (for example `set med route.origin-as`
+  on a route with no origin AS) used to deny the route even when a literal
+  `set` of the same attribute followed it, and now the literal replaces it
+  and the route is accepted. If a policy relied on the old result, check it
+  with `rbgp policy check`, which runs its `test` blocks, before upgrading.

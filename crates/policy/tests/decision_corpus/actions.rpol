@@ -206,3 +206,19 @@ test applied-policy-literal-set-replaces-computed-set {
     route { prefix 192.0.2.0/24; med 100; local-pref 150 }
     expect applies-literal-after-computed == accept with med 10, local-pref 200
 }
+
+# A computed `set` that would fail closed on a route without the operand
+# (no origin AS on an empty path) is replaced by the later literal, so the
+# route is accepted rather than denied.
+policy literal-after-fail-closed {
+    term t {
+        set med route.origin-as
+        set med 10
+        accept
+    }
+}
+
+test literal-set-replaces-fail-closed-computed-set {
+    route { prefix 192.0.2.0/24 }
+    expect literal-after-fail-closed == accept with med 10
+}
