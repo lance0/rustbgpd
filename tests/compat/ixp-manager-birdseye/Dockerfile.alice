@@ -6,7 +6,7 @@ RUN corepack enable && yarn install --frozen-lockfile
 COPY ui/ ./
 RUN yarn build
 
-FROM golang:1.22.7-bookworm@sha256:af1bb8730643ca372b0fe9613a17300ade3ad113d36328e2a7e604ccb2b1584b AS backend
+FROM golang:1.22.12-bookworm@sha256:3d699e4d15d0f8f13c9195c0632a16702b8cbdece2955af1c23b37ae5d55a253 AS backend
 
 ENV GOTOOLCHAIN=local
 ARG ALICE_VERSION
