@@ -1298,7 +1298,7 @@ fn heavy_routes(count: u32) -> Vec<Route> {
 fn admit_until_blocked(session: &mut PeerSession) {
     for _ in 0..10_000 {
         match session.pending_outbound.as_ref() {
-            Some(pending) if !pending.bytes_blocked() || !session.writer_bytes_exhausted() => {
+            Some(pending) if !pending.bytes_blocked() => {
                 session.advance_pending_outbound();
             }
             _ => return,
@@ -1358,10 +1358,1297 @@ async fn envelope_wakes(session: &PeerSession) -> bool {
 
 const BYTE_BUDGET: u64 = super::super::writer::WRITER_BYTE_BUDGET;
 
+/// A1, B1, A2 groups as A1/A2 then B1. Byte pressure inside A must keep
+/// that membership order instead of rewinding the already-advanced source.
+#[tokio::test(start_paused = true)]
+async fn partial_attribute_group_resumes_before_later_groups_and_eor() {
+    let (mut session, _wire) = shared_group_member(65001).await;
+    let (mut frames, completed) = hand_writer(&mut session);
+    let profile = session.publish_export_profile();
+    let mut routes = pacing_routes(3, false);
+    let mut attrs = routes[0].attributes.to_vec();
+    attrs.push(PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+        flags: 0xc0,
+        type_code: 200,
+        data: Bytes::from(vec![0; 4_000]),
+    }));
+    routes[0].attributes = AttrSet::new(attrs);
+    let prepared = profile.prepare_unicast_candidate(&routes[0], None).unwrap();
+    let export::PreparedUnicastCandidate::Ipv4Body { attrs, entry } = prepared else {
+        panic!("IPv4 body fixture")
+    };
+    let initial = profile
+        .build_ipv4_body(&[entry], &[], &attrs)
+        .unwrap()
+        .encoded_len();
+    let payload = 4_000 + profile.max_message_len() - initial;
+    AttrSet::edit(&mut routes[0].attributes, |attrs| {
+        let PathAttribute::Unknown(raw) = attrs.last_mut().unwrap() else {
+            panic!("raw attr")
+        };
+        raw.data = Bytes::from(vec![0; payload]);
+    });
+    routes[2].attributes = Arc::clone(&routes[0].attributes);
+    routes[1].attributes = Arc::clone(&routes[0].attributes);
+    AttrSet::edit(&mut routes[1].attributes, |attrs| {
+        let PathAttribute::Unknown(raw) = attrs.last_mut().unwrap() else {
+            panic!("raw attr")
+        };
+        raw.data = Bytes::from(vec![1; payload]);
+    });
+    session.writer_bulk_admitted = BYTE_BUDGET - u64::try_from(profile.max_message_len()).unwrap();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    let first = frames.try_recv().unwrap();
+    assert_eq!(first.len(), profile.max_message_len());
+    assert_eq!(delivered(vec![first]), vec![Some(0)]);
+    assert!(frames.try_recv().is_err());
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    for _ in 0..4 {
+        session.advance_pending_outbound();
+    }
+    assert!(frames.try_recv().is_err(), "no duplicate A1 while blocked");
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    let mut rest = Vec::new();
+    while let Ok(frame) = frames.try_recv() {
+        rest.push(frame);
+    }
+    assert_eq!(delivered(rest), vec![Some(2), Some(1), None]);
+    assert!(session.pending_outbound.is_none());
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+}
+
+#[tokio::test(start_paused = true)]
+async fn resumed_groups_keep_original_override_indices_after_filtering_and_slicing() {
+    let (mut session, _wire) = shared_group_member(65001).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .extended_nexthop_families
+        .insert((Afi::Ipv4, Safi::Unicast), Afi::Ipv6);
+    let (mut frames, completed) = hand_writer(&mut session);
+    let mut routes = pacing_routes(7, false);
+    routes[1] = make_v6_unicast_route("2001:db8::1".parse().unwrap());
+    let excluded = PeerId::from_addr("192.0.2.99".parse().unwrap());
+    routes[3].peer = excluded;
+    let v4 = "192.0.2.20".parse::<IpAddr>().unwrap();
+    let other_v4 = "192.0.2.30".parse::<IpAddr>().unwrap();
+    let mp4 = "2001:db8::40".parse::<IpAddr>().unwrap();
+    let v6 = "2001:db8::60".parse::<IpAddr>().unwrap();
+    let prefixes: Vec<_> = routes.iter().map(|route| route.prefix).collect();
+    let profile = session.publish_export_profile();
+    let maximum = u64::try_from(profile.max_message_len()).unwrap();
+    let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(profile),
+        announce: routes.into(),
+        announce_source_exclusion: Some(excluded),
+        next_hop_override: vec![
+            None,
+            Some(rustbgpd_policy::NextHopAction::Specific(v6)),
+            Some(rustbgpd_policy::NextHopAction::Specific(v4)),
+            None,
+            Some(rustbgpd_policy::NextHopAction::Specific(mp4)),
+            Some(rustbgpd_policy::NextHopAction::Specific(v4)),
+            Some(rustbgpd_policy::NextHopAction::Specific(other_v4)),
+        ]
+        .into(),
+        exempt_announce: 1,
+        end_of_rib: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        ..OutboundRouteUpdate::default()
+    };
+    session.writer_bulk_admitted = BYTE_BUDGET - maximum;
+    session.handle_outbound_route_update(update).await;
+    assert_eq!(delivered(vec![frames.try_recv().unwrap()]), vec![Some(0)]);
+    completed.send_replace(session.writer_bulk_admitted);
+    // A second slice starts at source index 1, with one frame's headroom.
+    session.writer_bulk_admitted += BYTE_BUDGET - maximum;
+    session.advance_pending_outbound();
+    assert_eq!(
+        delivered(vec![frames.try_recv().unwrap()]),
+        vec![Some(2), Some(5)]
+    );
+    assert!(frames.try_recv().is_err());
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    let mut seen = Vec::new();
+    let mut eors = 0;
+    while let Ok(mut frame) = frames.try_recv() {
+        let Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("UPDATE")
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        for entry in parsed.announced {
+            let next_hop = parsed
+                .attributes
+                .iter()
+                .find_map(|attr| match attr {
+                    PathAttribute::NextHop(ip) => Some(IpAddr::V4(*ip)),
+                    _ => None,
+                })
+                .expect("body NEXT_HOP");
+            seen.push((Prefix::V4(entry.prefix), next_hop));
+        }
+        for attr in parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    for entry in mp.announced {
+                        seen.push((entry.prefix, mp.next_hop));
+                    }
+                }
+                PathAttribute::MpUnreachNlri(mp) if mp.withdrawn.is_empty() => eors += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![
+            (prefixes[6], other_v4),
+            (prefixes[4], mp4),
+            (prefixes[1], v6)
+        ]
+    );
+    assert_eq!(
+        eors, 1,
+        "extended next hop suppresses the IPv4 empty-body EoR"
+    );
+    assert!(session.pending_outbound.is_none());
+}
+
+/// A resume is bounded by writer bytes, not routes, so it is cheap. It must
+/// not undo the halving that an expensive fresh slice earned.
+#[tokio::test(start_paused = true)]
+async fn cheap_resumes_keep_fresh_slices_halving() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, _wire) = shared_group_member(65001).await;
+    let (mut frames, completed) = hand_writer(&mut session);
+    let maximum = u64::from(session.outbound_max_message_len());
+    // Distinct MEDs: one group and one frame per route.
+    let routes = pacing_routes(u32::try_from(3 * SLICE).unwrap(), true);
+    session.writer_bulk_admitted = BYTE_BUDGET;
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    assert!(
+        frames.try_recv().is_err(),
+        "no room before the cost is pinned"
+    );
+    session.pending_outbound.as_mut().unwrap().test_slice_cost =
+        Some(super::outbound::SLICE_TIME_BUDGET + Duration::from_millis(1));
+    let mut sizes = Vec::new();
+    for _ in 0..3 {
+        // Two frames of headroom park the fresh slice; a drained writer
+        // then resumes the rest of it.
+        completed.send_replace(session.writer_bulk_admitted);
+        session.writer_bulk_admitted += BYTE_BUDGET - 2 * maximum;
+        session.advance_pending_outbound();
+        assert!(session.pending_outbound.as_ref().unwrap().slice_parked());
+        completed.send_replace(session.writer_bulk_admitted);
+        session.advance_pending_outbound();
+        assert!(!session.pending_outbound.as_ref().unwrap().slice_parked());
+        let mut sent = Vec::new();
+        while let Ok(frame) = frames.try_recv() {
+            sent.push(frame);
+        }
+        sizes.push(delivered(sent).len());
+    }
+    assert_eq!(sizes, [SLICE, SLICE / 2, SLICE / 4]);
+}
+
+/// The peer's view of `frames`: one entry per NLRI, refresh marker and
+/// End-of-RIB, in wire order.
+fn wire_items(frames: Vec<Bytes>) -> Vec<String> {
+    let mut items = Vec::new();
+    for mut frame in frames {
+        let update = match rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN)
+            .unwrap()
+        {
+            Message::Update(update) => update,
+            Message::RouteRefresh(marker) => {
+                items.push(format!("{marker:?}"));
+                continue;
+            }
+            other => panic!("unexpected bulk frame {other:?}"),
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let before = items.len();
+        macro_rules! push {
+            ($kind:literal, $($list:expr),+) => {
+                $(items.extend($list.iter().map(|nlri| format!("{} {nlri:?}", $kind)));)+
+            };
+        }
+        push!("withdraw", parsed.withdrawn);
+        push!("announce", parsed.announced);
+        let mut family = None;
+        for attr in parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    family = Some((mp.afi, mp.safi));
+                    push!(
+                        "announce",
+                        mp.announced,
+                        mp.flowspec_announced,
+                        mp.evpn_announced,
+                        mp.bgpls_announced,
+                        mp.vpn_announced,
+                        mp.labeled_announced,
+                        mp.rtc_announced,
+                        mp.vpn_flowspec_announced
+                    );
+                }
+                PathAttribute::MpUnreachNlri(mp) => {
+                    family = Some((mp.afi, mp.safi));
+                    push!(
+                        "withdraw",
+                        mp.withdrawn,
+                        mp.flowspec_withdrawn,
+                        mp.evpn_withdrawn,
+                        mp.bgpls_withdrawn,
+                        mp.vpn_withdrawn,
+                        mp.labeled_withdrawn,
+                        mp.rtc_withdrawn,
+                        mp.vpn_flowspec_withdrawn
+                    );
+                }
+                _ => {}
+            }
+        }
+        if items.len() == before {
+            items.push(format!("EoR {family:?}"));
+        }
+    }
+    items
+}
+
+/// Drain one envelope to completion and return the peer's view. Pressured,
+/// every step starts with little more than one frame of writer headroom, so
+/// slices park partway through a group and resume across many steps.
+async fn drain_envelope(
+    families: &[(Afi, Safi)],
+    mut update: OutboundRouteUpdate,
+    pressured: bool,
+) -> Vec<String> {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    negotiated.peer_enhanced_route_refresh = true;
+    for family in families {
+        if !negotiated.negotiated_families.contains(family) {
+            negotiated.negotiated_families.push(*family);
+        }
+    }
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    // One maximum frame plus two markers' worth: a full frame or two
+    // markers per step.
+    let headroom = u64::from(session.outbound_max_message_len()) + 40;
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    if update.end_of_rib.is_empty() {
+        update.end_of_rib = families.to_vec();
+    }
+    if pressured {
+        session.writer_bulk_admitted = BYTE_BUDGET - headroom;
+    }
+    session.handle_outbound_route_update(update).await;
+    let mut sink = Vec::new();
+    let mut parked = false;
+    for _ in 0..10_000 {
+        parked |= session
+            .pending_outbound
+            .as_ref()
+            .is_some_and(super::outbound::PendingOutbound::slice_parked);
+        assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+        while let Ok(frame) = frames.try_recv() {
+            sink.push(frame);
+        }
+        if session.pending_outbound.is_none() {
+            break;
+        }
+        completed.send_replace(session.writer_bulk_admitted);
+        if pressured {
+            session.writer_bulk_admitted += BYTE_BUDGET - headroom;
+            session.advance_pending_outbound();
+        } else {
+            admit_until_blocked(&mut session);
+        }
+    }
+    assert!(session.pending_outbound.is_none(), "envelope completed");
+    assert!(session.writer_priority_tx.is_some(), "session remains up");
+    assert_eq!(parked, pressured, "only the pressured drain parks a slice");
+    wire_items(sink)
+}
+
+/// A slice parked mid-group and resumed in one-frame steps delivers exactly
+/// what an unpressured drain of the same envelope does: every item once, in
+/// order, with End-of-RIB last.
+async fn assert_resume_matches_unpressured(
+    families: &[(Afi, Safi)],
+    update: impl Fn() -> OutboundRouteUpdate,
+    expected: usize,
+) {
+    let reference = drain_envelope(families, update(), false).await;
+    assert_eq!(
+        reference.len(),
+        expected,
+        "{families:?}: complete reference"
+    );
+    let unique: std::collections::HashSet<_> = reference.iter().collect();
+    assert_eq!(unique.len(), expected, "{families:?}: no duplicates");
+    let eors = reference
+        .iter()
+        .filter(|item| item.starts_with("EoR"))
+        .count();
+    assert!(eors > 0, "{families:?}");
+    assert!(
+        reference[expected - eors..]
+            .iter()
+            .all(|item| item.starts_with("EoR")),
+        "{families:?}: End-of-RIB follows every route"
+    );
+    let resumed = drain_envelope(families, update(), true).await;
+    assert_eq!(resumed, reference, "{families:?}");
+}
+
+/// More rows than one 2,048-row slice, so the second slice resumes from a
+/// nonzero source index.
+const RESUME_ROWS: u32 = 3_000;
+
+fn resume_rows<T: Clone>(template: &T, vary: impl Fn(&mut T, u32)) -> Vec<T> {
+    (0..RESUME_ROWS)
+        .map(|index| {
+            let mut row = template.clone();
+            vary(&mut row, index);
+            row
+        })
+        .collect()
+}
+
+fn resume_vpn_routes() -> Vec<rustbgpd_rib::VpnRibRoute> {
+    resume_rows(&make_vpn_rib_route(100), |route, index| {
+        route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x1400_0000 | index), 32).unwrap();
+    })
+}
+
+fn resume_evpn_routes() -> Vec<rustbgpd_rib::EvpnRibRoute> {
+    resume_rows(&make_smet_route(2), |route, index| {
+        let EvpnRoute::Smet(nlri) = &mut route.route else {
+            panic!("SMET")
+        };
+        nlri.originator_ip = IpAddr::V4(Ipv4Addr::from(0xc633_0000 | index));
+    })
+}
+
+fn resume_bgpls_routes() -> Vec<rustbgpd_rib::BgpLsRibRoute> {
+    resume_rows(&make_bgpls_route(1), |route, index| {
+        route.nlri.payload = Bytes::copy_from_slice(&index.to_be_bytes());
+    })
+}
+
+fn resume_labeled_routes() -> Vec<rustbgpd_rib::LabeledRibRoute> {
+    resume_rows(&make_labeled_rib_route(100), |route, index| {
+        route.nlri.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 | index), 32));
+    })
+}
+
+fn resume_rtc_routes() -> Vec<rustbgpd_rib::RtcRibRoute> {
+    resume_rows(&make_rtc_rib_route(1), |route, index| {
+        route.nlri =
+            rustbgpd_wire::RtcNlri::new(65002, 0x0002_fdea_0000_0000 | u64::from(index), 96)
+                .unwrap();
+    })
+}
+
+fn resume_flowspec_routes(vpn_v6: bool) -> Vec<FlowSpecRoute> {
+    (0..RESUME_ROWS as usize)
+        .map(|index| small_flowspec_route(index, vpn_v6, false))
+        .collect()
+}
+
+const RESUME_ITEMS: usize = RESUME_ROWS as usize + 1;
+
+#[tokio::test(start_paused = true)]
+async fn parked_end_of_rib_markers_resume_across_families() {
+    let families = [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::BgpLs, Safi::BgpLs),
+    ];
+    assert_resume_matches_unpressured(&families, OutboundRouteUpdate::default, families.len())
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_refresh_markers_resume_in_order() {
+    let marked = [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+    ];
+    let families = [marked.as_slice(), &[(Afi::L2Vpn, Safi::Evpn)]].concat();
+    assert_resume_matches_unpressured(
+        &families,
+        || OutboundRouteUpdate {
+            refresh_markers: [RouteRefreshSubtype::BoRR, RouteRefreshSubtype::EoRR]
+                .into_iter()
+                .flat_map(|subtype| marked.map(|(afi, safi)| (afi, safi, subtype)))
+                .collect(),
+            end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
+            ..OutboundRouteUpdate::default()
+        },
+        2 * marked.len() + 1,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_unicast_withdrawals_resume_across_shared_and_own_rows() {
+    for v6 in [false, true] {
+        let rows: Vec<(Prefix, u32)> = (0..RESUME_ROWS)
+            .map(|index| {
+                let prefix = if v6 {
+                    Prefix::V6(Ipv6Prefix::new(
+                        Ipv6Addr::from((0x2001_0db8_u128 << 96) | u128::from(index)),
+                        128,
+                    ))
+                } else {
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32))
+                };
+                (prefix, 0)
+            })
+            .collect();
+        let (shared, own) = rows.split_at(RESUME_ROWS as usize / 2);
+        let shared = Arc::new(shared.to_vec());
+        let family = (if v6 { Afi::Ipv6 } else { Afi::Ipv4 }, Safi::Unicast);
+        assert_resume_matches_unpressured(
+            &[family],
+            || OutboundRouteUpdate {
+                shared_withdraw: SharedWithdrawals::from(Arc::clone(&shared)),
+                withdraw: own.to_vec(),
+                ..OutboundRouteUpdate::default()
+            },
+            RESUME_ITEMS,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_flowspec_announcements_and_withdrawals_resume_in_order() {
+    for vpn_v6 in [false, true] {
+        let family = if vpn_v6 {
+            (Afi::Ipv6, Safi::FlowSpecVpn)
+        } else {
+            (Afi::Ipv4, Safi::FlowSpec)
+        };
+        let routes = resume_flowspec_routes(vpn_v6);
+        assert_resume_matches_unpressured(
+            &[family],
+            || OutboundRouteUpdate {
+                flowspec_announce: routes.clone(),
+                ..OutboundRouteUpdate::default()
+            },
+            RESUME_ITEMS,
+        )
+        .await;
+        assert_resume_matches_unpressured(
+            &[family],
+            || OutboundRouteUpdate {
+                flowspec_withdraw: routes.iter().map(FlowSpecRoute::selection_key).collect(),
+                ..OutboundRouteUpdate::default()
+            },
+            RESUME_ITEMS,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_vpn_withdrawals_resume_in_order() {
+    let keys: Vec<_> = resume_vpn_routes()
+        .iter()
+        .map(rustbgpd_rib::VpnRibRoute::key)
+        .collect();
+    assert_resume_matches_unpressured(
+        &[(Afi::Ipv4, Safi::MplsVpn)],
+        || OutboundRouteUpdate {
+            vpn_withdraw: keys.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+/// An inventory another owner still holds stays in the envelope instead of
+/// moving into the slice; resumption reads it by source index.
+#[tokio::test(start_paused = true)]
+async fn parked_shared_evpn_and_vpn_announcements_resume_in_order() {
+    let evpn = Arc::new(resume_evpn_routes());
+    assert_resume_matches_unpressured(
+        &[(Afi::L2Vpn, Safi::Evpn)],
+        || OutboundRouteUpdate {
+            evpn_announce: Arc::clone(&evpn),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+    let vpn = Arc::new(resume_vpn_routes());
+    assert_resume_matches_unpressured(
+        &[(Afi::Ipv4, Safi::MplsVpn)],
+        || OutboundRouteUpdate {
+            vpn_announce: Arc::clone(&vpn),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_evpn_withdrawals_resume_in_order() {
+    let keys: Vec<_> = resume_evpn_routes()
+        .iter()
+        .map(rustbgpd_rib::EvpnRibRoute::key)
+        .collect();
+    assert_resume_matches_unpressured(
+        &[(Afi::L2Vpn, Safi::Evpn)],
+        || OutboundRouteUpdate {
+            evpn_withdraw: keys.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_bgpls_announcements_and_withdrawals_resume_in_order() {
+    let routes = resume_bgpls_routes();
+    let family = [(Afi::BgpLs, Safi::BgpLs)];
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            bgpls_announce: routes.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            bgpls_withdraw: routes
+                .iter()
+                .map(rustbgpd_rib::BgpLsRibRoute::key)
+                .collect(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_labeled_withdrawals_resume_in_order() {
+    let keys: Vec<_> = resume_labeled_routes()
+        .iter()
+        .map(rustbgpd_rib::LabeledRibRoute::key)
+        .collect();
+    assert_resume_matches_unpressured(
+        &[(Afi::Ipv4, Safi::LabeledUnicast)],
+        || OutboundRouteUpdate {
+            labeled_withdraw: keys.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_rtc_announcements_and_withdrawals_resume_in_order() {
+    let routes = resume_rtc_routes();
+    let family = [(Afi::Ipv4, Safi::RtConstrain)];
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            rtc_announce: routes.clone(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+    assert_resume_matches_unpressured(
+        &family,
+        || OutboundRouteUpdate {
+            rtc_withdraw: routes.iter().map(rustbgpd_rib::RtcRibRoute::key).collect(),
+            ..OutboundRouteUpdate::default()
+        },
+        RESUME_ITEMS,
+    )
+    .await;
+}
+
+/// Private families move source rows into the active slice. A paused slice
+/// must retain those originals, release them under the same retirement budget,
+/// and keep its credit/latch until both that slice and the remainder are gone.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ownership regression compares complete drain and abort for all moved source families"
+)]
+async fn moved_partial_slices_resume_and_retire_before_releasing_credit() {
+    const ROWS: usize = 3 * QUEUE_SLICE;
+    for family in [
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ] {
+        for abort in [false, true] {
+            let (mut session, _wire) = shared_group_member(65001).await;
+            Arc::make_mut(session.negotiated.as_mut().unwrap())
+                .negotiated_families
+                .push(family);
+            let (mut frames, completed) = hand_writer(&mut session);
+            let attrs = make_smet_route(2).attributes;
+            let credit = Arc::new(rustbgpd_rib::OutboundCredit::default());
+            let latch = Arc::new(rustbgpd_rib::OperationLatch::new(Arc::default()));
+            let weak = Arc::downgrade(&latch);
+            let mut update = OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                credit: Some(rustbgpd_rib::OutboundCharge::new(&credit, 7)),
+                latch: Some(latch),
+                end_of_rib: vec![family],
+                ..OutboundRouteUpdate::default()
+            };
+            match family.1 {
+                Safi::Evpn => {
+                    update.evpn_announce = (0..ROWS)
+                        .map(|row| {
+                            let mut route = make_smet_route(2);
+                            route.attributes = Arc::clone(&attrs);
+                            let EvpnRoute::Smet(nlri) = &mut route.route else {
+                                panic!("SMET")
+                            };
+                            nlri.originator_ip = IpAddr::V4(Ipv4Addr::from(
+                                0xc633_0000 | u32::try_from(row).unwrap(),
+                            ));
+                            route
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                }
+                Safi::MplsVpn => {
+                    update.vpn_announce = (0..ROWS)
+                        .map(|row| {
+                            let mut route = make_vpn_rib_route(100 + u32::try_from(row).unwrap());
+                            route.attributes = Arc::clone(&attrs);
+                            route.nlri.prefix = VpnPrefix::v4(
+                                Ipv4Addr::from(0x1400_0000 | u32::try_from(row).unwrap()),
+                                32,
+                            )
+                            .unwrap();
+                            route
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                }
+                Safi::LabeledUnicast => {
+                    update.labeled_announce = (0..ROWS)
+                        .map(|row| {
+                            let mut route =
+                                make_labeled_rib_route(100 + u32::try_from(row).unwrap());
+                            route.attributes = Arc::clone(&attrs);
+                            route.nlri.prefix = Prefix::V4(Ipv4Prefix::new(
+                                Ipv4Addr::from(0x1400_0000 | u32::try_from(row).unwrap()),
+                                32,
+                            ));
+                            route
+                        })
+                        .collect();
+                }
+                _ => unreachable!(),
+            }
+            let live = || Arc::strong_count(&attrs) - 1;
+            session.writer_bulk_admitted = BYTE_BUDGET - u64::from(rustbgpd_wire::MAX_MESSAGE_LEN);
+            session.handle_outbound_route_update(update).await;
+            assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+            assert_eq!(frames.len(), 1, "{family:?}: first chunk sent");
+            assert_eq!(
+                live(),
+                ROWS,
+                "{family:?}: only original source owners remain parked"
+            );
+            assert_eq!(credit.rows(), 7);
+            assert_eq!(weak.strong_count(), 1);
+            if abort {
+                let mut before = live();
+                session.retire_pending_outbound();
+                assert_eq!(
+                    before - live(),
+                    QUEUE_SLICE,
+                    "moved and remaining rows share one release budget"
+                );
+                while session.pending_outbound.is_some() {
+                    assert_eq!(credit.rows(), 7);
+                    assert_eq!(weak.strong_count(), 1);
+                    before = live();
+                    session.advance_pending_outbound();
+                    assert!(before - live() <= QUEUE_SLICE);
+                }
+                assert_eq!(frames.len(), 1, "teardown never resumes the partial group");
+            } else {
+                let mut seen = Vec::new();
+                let mut eors = 0;
+                for _ in 0..16 {
+                    while let Ok(mut frame) = frames.try_recv() {
+                        let Message::Update(message) = rustbgpd_wire::decode_message(
+                            &mut frame,
+                            rustbgpd_wire::MAX_MESSAGE_LEN,
+                        )
+                        .unwrap() else {
+                            panic!("UPDATE")
+                        };
+                        for attr in message.parse(true, false, &[]).unwrap().attributes {
+                            match attr {
+                                PathAttribute::MpReachNlri(mp) => {
+                                    for nlri in mp.evpn_announced {
+                                        let EvpnRoute::Smet(nlri) = nlri else {
+                                            panic!("SMET")
+                                        };
+                                        let IpAddr::V4(ip) = nlri.originator_ip else {
+                                            panic!("v4 originator")
+                                        };
+                                        seen.push(u32::from(ip) & 0xffff);
+                                    }
+                                    seen.extend(
+                                        mp.vpn_announced
+                                            .into_iter()
+                                            .map(|entry| entry.nlri.labels[0].label - 100),
+                                    );
+                                    seen.extend(
+                                        mp.labeled_announced
+                                            .into_iter()
+                                            .map(|entry| entry.nlri.labels[0].label - 100),
+                                    );
+                                }
+                                PathAttribute::MpUnreachNlri(_) => eors += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    if session.pending_outbound.is_none() {
+                        break;
+                    }
+                    assert_eq!(credit.rows(), 7);
+                    assert_eq!(weak.strong_count(), 1);
+                    completed.send_replace(session.writer_bulk_admitted);
+                    admit_until_blocked(&mut session);
+                }
+                assert_eq!(
+                    seen,
+                    (0..u32::try_from(ROWS).unwrap()).collect::<Vec<_>>(),
+                    "{family:?}"
+                );
+                assert_eq!(eors, 1);
+            }
+            assert!(session.pending_outbound.is_none());
+            assert_eq!(live(), 0);
+            assert_eq!(credit.rows(), 0);
+            assert_eq!(weak.strong_count(), 0);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn extended_message_admission_stays_within_writer_byte_budget() {
+    large_frame_admission_stays_within_budget(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_message_admission_stays_within_writer_byte_budget() {
+    large_frame_admission_stays_within_budget(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn marker_only_envelope_waits_for_complete_frame_capacity() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - 22;
+    session
+        .handle_outbound_route_update(OutboundRouteUpdate {
+            end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await;
+    assert!(frames.try_recv().is_err(), "the 23-byte EoR cannot fit");
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    for _ in 0..8 {
+        session.advance_pending_outbound();
+    }
+    assert!(
+        frames.try_recv().is_err(),
+        "waiting does not consume the marker"
+    );
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(session.pending_outbound.is_none());
+    assert_eq!(delivered(vec![frames.try_recv().unwrap()]), vec![None]);
+    assert!(frames.try_recv().is_err(), "the marker is admitted once");
+}
+
+#[tokio::test(start_paused = true)]
+async fn oversized_route_resumes_to_existing_post_commit_failure() {
+    for communities in [1_100, 20_000] {
+        let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        session.timers.hold = None;
+        let (mut frames, completed) = hand_writer(&mut session);
+        session.writer_bulk_admitted = BYTE_BUDGET - 1;
+        let mut route = pacing_routes(1, true).pop().unwrap();
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities((0..communities).collect()));
+        });
+        session
+            .handle_outbound_route_update(pacing_update(&session, vec![route]))
+            .await;
+        assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+        assert!(
+            session.writer_priority_tx.is_some(),
+            "waiting is not an error"
+        );
+        completed.send_replace(session.writer_bulk_admitted);
+        admit_until_blocked(&mut session);
+        assert!(
+            session.writer_priority_tx.is_none(),
+            "the live encoder rejects the oversized route"
+        );
+        assert!(
+            frames.try_recv().is_err(),
+            "no oversized frame or successful EoR"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn oversized_withdrawal_resumes_to_existing_post_commit_failure() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    Arc::make_mut(session.negotiated.as_mut().unwrap())
+        .negotiated_families
+        .push((Afi::BgpLs, Safi::BgpLs));
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - 1;
+    let mut route = make_bgpls_route(1);
+    route.nlri.payload = Bytes::from(vec![0; 5_000]);
+    session
+        .handle_outbound_route_update(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            bgpls_withdraw: vec![route.key()],
+            end_of_rib: vec![(Afi::BgpLs, Safi::BgpLs)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await;
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(
+        session.writer_priority_tx.is_none(),
+        "the live encoder rejects the oversized withdrawal"
+    );
+    assert!(
+        frames.try_recv().is_err(),
+        "no oversized frame or successful EoR"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_family_waits_for_complete_announcement_and_withdrawal_frames() {
+    macro_rules! family {
+        ($family:expr, $route:expr, $announce:ident, $withdraw:ident) => {{
+            let route = $route;
+            let key = route.key();
+            for update in [
+                OutboundRouteUpdate {
+                    $announce: vec![route].into(),
+                    ..OutboundRouteUpdate::default()
+                },
+                OutboundRouteUpdate {
+                    $withdraw: vec![key],
+                    ..OutboundRouteUpdate::default()
+                },
+            ] {
+                assert_family_frame_wait($family, update).await;
+            }
+        }};
+    }
+    family!(
+        (Afi::L2Vpn, Safi::Evpn),
+        make_smet_route(2),
+        evpn_announce,
+        evpn_withdraw
+    );
+    family!(
+        (Afi::BgpLs, Safi::BgpLs),
+        make_bgpls_route(1),
+        bgpls_announce,
+        bgpls_withdraw
+    );
+    family!(
+        (Afi::Ipv4, Safi::MplsVpn),
+        make_vpn_rib_route(100),
+        vpn_announce,
+        vpn_withdraw
+    );
+    family!(
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        make_labeled_rib_route(100),
+        labeled_announce,
+        labeled_withdraw
+    );
+    family!(
+        (Afi::Ipv4, Safi::RtConstrain),
+        make_rtc_rib_route(100),
+        rtc_announce,
+        rtc_withdraw
+    );
+    for rd in [None, Some("65000:1".parse().unwrap())] {
+        let mut route = make_flowspec_route();
+        route.rd = rd;
+        let key = FlowSpecKey {
+            afi: route.afi,
+            rd,
+            rule: route.rule.clone(),
+        };
+        let family = key.family();
+        for update in [
+            OutboundRouteUpdate {
+                flowspec_announce: vec![route],
+                ..OutboundRouteUpdate::default()
+            },
+            OutboundRouteUpdate {
+                flowspec_withdraw: vec![key],
+                ..OutboundRouteUpdate::default()
+            },
+        ] {
+            assert_family_frame_wait(family, update).await;
+        }
+    }
+    for route in [
+        make_route(100),
+        make_v6_unicast_route("2001:db8::1".parse().unwrap()),
+    ] {
+        let afi = match route.prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        assert_family_frame_wait(
+            (afi, Safi::Unicast),
+            OutboundRouteUpdate {
+                withdraw: vec![(route.prefix, 0)],
+                ..OutboundRouteUpdate::default()
+            },
+        )
+        .await;
+    }
+}
+
+fn small_flowspec_route(index: usize, vpn_v6: bool, distinct: bool) -> FlowSpecRoute {
+    let mut route = make_flowspec_route();
+    route.afi = if vpn_v6 { Afi::Ipv6 } else { Afi::Ipv4 };
+    route.rd = vpn_v6.then(|| "65000:1".parse().unwrap());
+    route.rule.components = vec![FlowSpecComponent::DestinationPrefix(if vpn_v6 {
+        FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+            prefix: Ipv6Prefix::new(
+                Ipv6Addr::from((0x2001_0db8_u128 << 96) | u128::try_from(index).unwrap()),
+                128,
+            ),
+            offset: 0,
+        })
+    } else {
+        FlowSpecPrefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(0x1400_0000 | u32::try_from(index).unwrap()),
+            32,
+        ))
+    })];
+    route.attributes.extend([
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65_002, 64_600, 64_700])],
+        }),
+        PathAttribute::Communities(vec![100, 200]),
+        PathAttribute::Med(if distinct {
+            u32::try_from(index).unwrap()
+        } else {
+            0
+        }),
+    ]);
+    route
+}
+
+#[tokio::test(start_paused = true)]
+async fn small_flowspec_rules_admit_a_full_slice_with_available_credit() {
+    const SLICE: usize = super::super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    for vpn_v6 in [false, true] {
+        for mode in 0..3 {
+            let (mut session, _commands, _rib_rx) =
+                make_test_session_with_channels(65001, 65002, 64);
+            let (client, _server) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            establish_test_session(&mut session, 65002).await;
+            let family = if vpn_v6 {
+                (Afi::Ipv6, Safi::FlowSpecVpn)
+            } else {
+                (Afi::Ipv4, Safi::FlowSpec)
+            };
+            Arc::make_mut(session.negotiated.as_mut().unwrap())
+                .negotiated_families
+                .push(family);
+            session.timers.hold = None;
+            let (mut frames, completed) =
+                hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+            let routes: Vec<_> = (0..=SLICE)
+                .map(|index| small_flowspec_route(index, vpn_v6, mode == 1))
+                .collect();
+            let expected: Vec<_> = routes.iter().map(|route| route.rule.clone()).collect();
+            let mut update = OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                end_of_rib: vec![family],
+                ..OutboundRouteUpdate::default()
+            };
+            if mode == 2 {
+                update.flowspec_withdraw =
+                    routes.iter().map(FlowSpecRoute::selection_key).collect();
+            } else {
+                update.flowspec_announce = routes;
+            }
+            session.handle_outbound_route_update(update).await;
+            let mut seen = Vec::new();
+            let mut eors = 0;
+            for step in 0..2 {
+                while let Ok(mut frame) = frames.try_recv() {
+                    let Message::Update(update) =
+                        rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN)
+                            .unwrap()
+                    else {
+                        panic!("UPDATE")
+                    };
+                    let parsed = update.parse(true, false, &[]).unwrap();
+                    for attr in parsed.attributes {
+                        match attr {
+                            PathAttribute::MpReachNlri(mp) => {
+                                seen.extend(mp.flowspec_announced);
+                                seen.extend(
+                                    mp.vpn_flowspec_announced.into_iter().map(|nlri| nlri.rule),
+                                );
+                            }
+                            PathAttribute::MpUnreachNlri(mp) => {
+                                if mp.flowspec_withdrawn.is_empty()
+                                    && mp.vpn_flowspec_withdrawn.is_empty()
+                                {
+                                    eors += 1;
+                                }
+                                seen.extend(mp.flowspec_withdrawn);
+                                seen.extend(
+                                    mp.vpn_flowspec_withdrawn.into_iter().map(|nlri| nlri.rule),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if step == 0 {
+                    assert_eq!(seen.len(), SLICE, "first slice, vpn={vpn_v6}, mode={mode}");
+                    assert_eq!(seen, expected[..SLICE]);
+                    assert_eq!(eors, 0);
+                    assert!(session.pending_outbound.is_some());
+                    completed.send_replace(session.writer_bulk_admitted);
+                    admit_until_blocked(&mut session);
+                }
+            }
+            assert_eq!(seen, expected);
+            assert_eq!(eors, 1);
+            assert!(session.pending_outbound.is_none());
+            assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+            assert!(session.writer_priority_tx.is_some());
+        }
+    }
+}
+
+async fn assert_family_frame_wait(family: (Afi, Safi), mut update: OutboundRouteUpdate) {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    if !negotiated.negotiated_families.contains(&family) {
+        negotiated.negotiated_families.push(family);
+    }
+    session.timers.hold = None;
+    let profile = session.publish_export_profile();
+    let bound = profile.max_message_len();
+    update.exact_export_snapshot = Some(profile);
+    update.end_of_rib = vec![family];
+    let (mut frames, completed) = hand_writer(&mut session);
+    session.writer_bulk_admitted = BYTE_BUDGET - u64::try_from(bound).unwrap() + 1;
+    let held = session.writer_bulk_admitted;
+    session.handle_outbound_route_update(update).await;
+    for _ in 0..8 {
+        session.advance_pending_outbound();
+    }
+    assert_eq!(session.writer_bytes_held(), held, "{family:?}");
+    assert!(
+        frames.try_recv().is_err(),
+        "{family:?}: the frame cannot fit"
+    );
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    completed.send_replace(session.writer_bulk_admitted);
+    admit_until_blocked(&mut session);
+    assert!(
+        session.pending_outbound.is_none(),
+        "{family:?}: cursor completed"
+    );
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+    assert_eq!(
+        frames.len(),
+        2,
+        "{family:?}: route frame then EoR, each once"
+    );
+    while let Ok(mut frame) = frames.try_recv() {
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("{family:?}: non-UPDATE")
+        };
+        update.parse(true, false, &[]).unwrap();
+    }
+    assert!(
+        session.writer_priority_tx.is_some(),
+        "{family:?}: session remains up"
+    );
+}
+
+async fn large_frame_admission_stays_within_budget(extended: bool) {
+    const ROUTES: u32 = 2_049;
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    let mut capabilities = vec![
+        Capability::MultiProtocol {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        },
+        Capability::FourOctetAs { asn: 65002 },
+    ];
+    if extended {
+        capabilities.push(Capability::ExtendedMessage);
+    }
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities,
+        }))
+        .await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+    let communities = if extended { 16_350 } else { 1_000 };
+    let routes = pacing_routes(ROUTES, true)
+        .into_iter()
+        .map(|mut route| {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities((0..communities).collect()));
+            });
+            route
+        })
+        .collect();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    let admitted = session.writer_bulk_admitted;
+    assert!(admitted > 0, "the production cursor admitted frames");
+    assert!(
+        admitted <= BYTE_BUDGET,
+        "one admission step exceeded the writer byte budget: {admitted} > {BYTE_BUDGET}"
+    );
+    assert!(
+        session.pending_outbound.is_some(),
+        "unsent rows retain their cursor"
+    );
+    assert!(
+        session.writer_priority_tx.is_some(),
+        "backpressure keeps the session up"
+    );
+    admit_until_blocked(&mut session);
+    let plateau = session.writer_bulk_admitted;
+    for _ in 0..8 {
+        session.advance_pending_outbound();
+    }
+    assert_eq!(
+        session.writer_bulk_admitted, plateau,
+        "a paused reader stays bounded"
+    );
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+
+    let mut seen = Vec::new();
+    let mut eors = 0;
+    for _ in 0..=ROUTES {
+        while let Ok(mut frame) = frames.try_recv() {
+            let Message::Update(update) =
+                rustbgpd_wire::decode_message(&mut frame, session.outbound_max_message_len())
+                    .unwrap()
+            else {
+                panic!("expected UPDATE");
+            };
+            let parsed = update.parse(true, false, &[]).unwrap();
+            if parsed.announced.is_empty() {
+                eors += 1;
+                assert_eq!(seen.len(), ROUTES as usize, "EoR follows every route");
+            }
+            for route in parsed.announced {
+                seen.push(u32::from(route.prefix.addr) & 0x00ff_ffff);
+            }
+        }
+        completed.send_replace(session.writer_bulk_admitted);
+        if session.pending_outbound.is_none() {
+            break;
+        }
+        admit_until_blocked(&mut session);
+        assert!(session.writer_bytes_held() <= BYTE_BUDGET);
+    }
+    assert_eq!(seen, (0..ROUTES).collect::<Vec<_>>());
+    assert_eq!(eors, 1);
+    assert!(session.pending_outbound.is_none());
+}
+
 /// A reader that stops draining holds the writer at its byte budget, not at
 /// its frame count: admission stops with the cursor kept, and with send hold
-/// enabled no deadline runs and no Cease is queued. Completing the backlog wakes and resumes the same
-/// envelope, and the peer receives every route exactly once, in order, each
+/// enabled no deadline runs and no Cease is queued. Completing the backlog
+/// wakes and resumes the same envelope, and the peer receives every route once, in order, each
 /// envelope's End-of-RIB after its routes.
 #[tokio::test(start_paused = true)]
 async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
@@ -1375,6 +2662,7 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
 
     let mut routes = heavy_routes(ROUTES + 1);
     let last = routes.split_off(ROUTES as usize);
+    let reservation = u64::from(session.outbound_max_message_len());
     session
         .handle_outbound_route_update(pacing_update(&session, routes))
         .await;
@@ -1387,12 +2675,12 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     let held = session.writer_bytes_held();
     let pending = session.pending_outbound.as_ref().expect("cursor retained");
     assert!(pending.bytes_blocked(), "admission waits on bytes");
-    assert!(held >= BYTE_BUDGET, "stopped below the budget: {held}");
     let first = frames.try_recv().unwrap();
     let frame = u64::try_from(first.len()).unwrap();
+    assert!(frame <= reservation);
     assert!(
-        held < BYTE_BUDGET + 2_048 * frame,
-        "at most one admission step past the budget: {held}"
+        held <= BYTE_BUDGET && held + reservation > BYTE_BUDGET,
+        "stops before the next complete-frame reservation exceeds the budget: {held}"
     );
     assert!(
         frames.len() < frames.max_capacity() / 4,
@@ -1461,27 +2749,34 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     );
 }
 
-/// The waiting envelope wakes on the first completed byte that brings the
-/// backlog under the budget, not before: at exactly the budget it is still
-/// held, so an earlier wake would only spin the session.
+/// Wake only when the next complete-frame reservation fits, so a short
+/// completion cannot spin the session on a row it still cannot admit.
 #[tokio::test(start_paused = true)]
-async fn byte_wait_wakes_exactly_when_the_backlog_drops_under_the_budget() {
+async fn byte_wait_wakes_exactly_when_the_next_frame_reservation_fits() {
     let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
-    let (_frames, completed) = hand_writer(&mut session);
+    let (mut frames, completed) = hand_writer(&mut session);
+    let reservation = u64::from(session.outbound_max_message_len());
     session
         .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
         .await;
     admit_until_blocked(&mut session);
-    let at_budget = session.writer_bulk_admitted - BYTE_BUDGET;
-    completed.send_replace(at_budget);
-    assert!(session.writer_bytes_exhausted());
-    assert!(!envelope_wakes(&session).await, "still at the budget");
-    completed.send_replace(at_budget + 1);
-    assert!(envelope_wakes(&session).await, "one byte under the budget");
+    let next_frame = frames.try_recv().unwrap().len() as u64;
+    assert!(next_frame <= reservation);
+    let needed = session.writer_bulk_admitted + reservation - BYTE_BUDGET;
+    completed.send_replace(needed - 1);
+    assert!(
+        !envelope_wakes(&session).await,
+        "one byte short of its reservation"
+    );
+    completed.send_replace(needed);
+    assert!(
+        envelope_wakes(&session).await,
+        "the complete-frame reservation now fits"
+    );
 }
 
 /// Ask the running session for its state, so that every event it was
@@ -1510,8 +2805,8 @@ fn assert_cease_out_of_resources(mut encoded: Bytes) {
 
 /// With RFC 9687 send hold disabled, a byte wait still has the documented
 /// finite resource deadline. Each completed write re-arms it, even one that
-/// leaves the backlog over the budget, so a reader that keeps reading is
-/// never torn down; once writes stop completing, the deadline sends
+/// still leaves too little room for the next frame. A reader that keeps reading
+/// is never torn down; once writes stop completing, the deadline sends
 /// Cease/Out-of-Resources one interval after the last of them.
 #[tokio::test(start_paused = true)]
 async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
@@ -1529,7 +2824,8 @@ async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
         .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
         .await;
     admit_until_blocked(&mut session);
-    assert!(session.writer_bytes_held() >= BYTE_BUDGET + 3);
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    assert!(session.writer_bytes_held() <= BYTE_BUDGET);
     let interval = Duration::from_secs(u64::from(rustbgpd_fsm::default_send_hold_time(0)));
     let armed = session
         .outbound_admission_timer
@@ -1560,7 +2856,7 @@ async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
 }
 
 /// With send hold enabled a byte wait runs no admission deadline, even when
-/// the step that crossed the budget also filled the frame queue: a write is
+/// the final byte reservation also filled the frame queue: a write is
 /// in flight and the writer's send hold bounds it, while a peer that keeps
 /// completing writes, however slowly, is not sent Cease/8. With send hold
 /// disabled the same state runs the deadline.
@@ -1666,7 +2962,7 @@ async fn small_buffer_pair() -> (TcpStream, TcpStream) {
 }
 
 /// Through the real run loop and writer: a peer that stops reading leaves
-/// the writer holding its byte budget plus at most one admission step, the
+/// the writer holding no more than its byte budget, the
 /// envelope behind stays in the RIB channel, and the session stays up. Once
 /// the peer reads, every route arrives exactly once, in order, each
 /// envelope's End-of-RIB after its routes.
@@ -1720,12 +3016,12 @@ async fn a_paused_reader_holds_the_real_writer_at_its_budget_and_resumes_in_orde
     }
     let held = metrics.peer_outbound_writer_bytes(&label);
     assert!(
-        held >= i64::try_from(BYTE_BUDGET).unwrap(),
-        "settled below the budget: {held}"
+        held >= i64::try_from(BYTE_BUDGET).unwrap() - 4096,
+        "settled with room for another complete frame: {held}"
     );
     assert!(
-        held < i64::try_from(BYTE_BUDGET).unwrap() + 64 * 1024,
-        "at most one admission step past the budget: {held}"
+        held <= i64::try_from(BYTE_BUDGET).unwrap(),
+        "no admission step crosses the byte budget: {held}"
     );
     assert_eq!(
         outbound.max_capacity() - outbound.capacity(),
@@ -1780,7 +3076,7 @@ async fn a_lagging_peer_held_by_bytes_is_flagged_slow_at_production_queue_capaci
         .handle_outbound_route_update(pacing_update(&session, pacing_routes(140_000, false)))
         .await;
     admit_until_blocked(&mut session);
-    assert!(session.writer_bytes_exhausted());
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
     let frame_threshold = (super::super::OUTBOUND_BUFFER
         * usize::from(session.config.slow_peer_threshold_pct))
     .div_ceil(100);
@@ -1843,10 +3139,9 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
     while let Ok(frame) = encoder_frames.try_recv() {
         encoder_sink.push(frame);
     }
-    let chunk = encoder_sink.iter().map(Bytes::len).max().unwrap() as u64;
     assert!(encoder.pending_outbound.as_ref().unwrap().bytes_blocked());
     assert!(
-        encoder.writer_bytes_held() < BYTE_BUDGET + chunk,
+        encoder.writer_bytes_held() <= BYTE_BUDGET,
         "the encoder's own copy stops at the budget"
     );
 
@@ -1860,7 +3155,7 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
     admit_until_blocked(&mut follower);
     assert!(follower.pending_outbound.as_ref().unwrap().bytes_blocked());
     assert!(
-        follower.writer_bytes_held() < BYTE_BUDGET + chunk,
+        follower.writer_bytes_held() <= BYTE_BUDGET,
         "the follower's snapshot stops at its budget"
     );
     let mut follower_sink = Vec::new();
@@ -1901,8 +3196,8 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
 }
 
 /// Each slow-peer threshold is the configured share of its own limit: the
-/// frame queue's capacity and the writer's byte budget. One frame, or one
-/// byte, under the share starts no episode; reaching it does.
+/// frame queue's capacity and the writer's byte admission ceiling. One
+/// frame, or one byte, under the share starts no episode; reaching it does.
 #[tokio::test(start_paused = true)]
 async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
     let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
@@ -1912,7 +3207,8 @@ async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
     let (_frames, _completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
     let pct = usize::from(session.config.slow_peer_threshold_pct);
     let frames = (super::super::OUTBOUND_BUFFER * pct).div_ceil(100);
-    let bytes = (BYTE_BUDGET * pct as u64).div_ceil(100);
+    let ceiling = BYTE_BUDGET + 1 - u64::from(session.outbound_max_message_len());
+    let bytes = (ceiling * pct as u64).div_ceil(100);
     let bulk = session.writer_bulk_tx.clone().unwrap();
     for _ in 1..frames {
         bulk.try_send(Bytes::from_static(b"frame")).unwrap();
@@ -1939,6 +3235,69 @@ async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
         session.slow_peer_backlog_since.is_some(),
         "at the byte share"
     );
+}
+
+/// Bytes stop admission once the next maximum-size frame cannot fit, so a
+/// byte-blocked writer must reach every configured share up to 100% and
+/// start an episode, then signal isolation once flagged.
+async fn byte_blocked_writer_reaches_slow_threshold(extended: bool, pct: u8) {
+    let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    Arc::make_mut(session.negotiated.as_mut().unwrap()).peer_extended_message = extended;
+    session.timers.hold = None;
+    session.config.slow_peer_threshold_pct = pct;
+    session.config.slow_peer_isolation = true;
+    let (_frames, _completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+    // About 5,000-byte UPDATEs with Extended Messages, near-full 4,096-byte
+    // ones without.
+    let communities = if extended { 1_240 } else { 1_000 };
+    let routes = pacing_routes(200, true)
+        .into_iter()
+        .map(|mut route| {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities((0..communities).collect()));
+            });
+            route
+        })
+        .collect();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    admit_until_blocked(&mut session);
+    assert!(session.pending_outbound.as_ref().unwrap().bytes_blocked());
+    session.evaluate_slow_peer();
+    assert!(
+        session.slow_peer_backlog_since.is_some(),
+        "extended={extended}, pct={pct}: held {} B starts an episode",
+        session.writer_bytes_held()
+    );
+    session.slow_peer_backlog_since = std::time::Instant::now().checked_sub(Duration::from_secs(
+        u64::from(session.config.slow_peer_duration),
+    ));
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer, "flagged slow");
+    assert!(
+        std::iter::from_fn(|| rib_rx.try_recv().ok())
+            .any(|update| matches!(update, RibUpdate::PeerSlowState { slow: true, .. })),
+        "isolation signalled"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_blocked_extended_writer_reaches_a_95_percent_slow_threshold() {
+    byte_blocked_writer_reaches_slow_threshold(true, 95).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_blocked_extended_writer_reaches_a_100_percent_slow_threshold() {
+    byte_blocked_writer_reaches_slow_threshold(true, 100).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_blocked_standard_writer_reaches_a_100_percent_slow_threshold() {
+    byte_blocked_writer_reaches_slow_threshold(false, 100).await;
 }
 
 /// A write that completes in the same turn as the admission deadline is

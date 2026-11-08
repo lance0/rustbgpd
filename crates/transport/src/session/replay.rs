@@ -282,8 +282,23 @@ impl PeerSession {
             return true;
         }
         let export = self.export_encoder.snapshot();
+        let max_len = usize::from(self.outbound_max_message_len());
+        let initial_offset = *offset;
         let mut terminal = Vec::with_capacity(update.end_of_rib.len());
-        for &(afi, safi) in &update.end_of_rib {
+        for (index, &(afi, safi)) in update.end_of_rib.iter().enumerate() {
+            if index >= initial_offset {
+                if index - initial_offset >= budget {
+                    return false;
+                }
+                match self.writer_frame_room(max_len) {
+                    Ok(true) => {}
+                    Ok(false) => return false,
+                    Err(()) => {
+                        self.cancel_outbound_replay();
+                        return true;
+                    }
+                }
+            }
             let pdu = if let Ok(pdu) = export.build_end_of_rib(afi, safi).and_then(|update| {
                 rustbgpd_wire::encode_message_with_limit(
                     &Message::Update(update),
@@ -295,21 +310,18 @@ impl PeerSession {
                 self.cancel_outbound_replay();
                 return true;
             };
-            terminal.push(pdu);
-        }
-        for pdu in terminal.iter().skip(*offset).take(budget) {
-            // The terminal BMP tap is deliberately withheld until all preceding
-            // bulk bytes and these exact EoRs have completed local writing.
-            if self.enqueue_bulk_encoded(pdu.clone(), false).is_err() {
-                self.cancel_outbound_replay();
-                return true;
+            if index >= initial_offset {
+                // The terminal BMP tap waits until all preceding bytes and
+                // these EoRs have completed local writing.
+                if self.enqueue_bulk_encoded(pdu.clone(), false).is_err() {
+                    self.cancel_outbound_replay();
+                    return true;
+                }
+                *offset += 1;
+                self.config.neighbor_counters.record_update_sent();
+                self.metrics.record_message_sent(&self.peer_label, "update");
             }
-            *offset += 1;
-            self.config.neighbor_counters.record_update_sent();
-            self.metrics.record_message_sent(&self.peer_label, "update");
-        }
-        if *offset < terminal.len() {
-            return false;
+            terminal.push(pdu);
         }
         if let Some(pending) = &mut self.pending_replay {
             pending.target = Some(self.writer_bulk_admitted);

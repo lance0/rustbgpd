@@ -13,6 +13,7 @@ use super::{
     RtcRibRoute, VpnRibRoute,
 };
 use rustbgpd_wire::VpnFlowSpecRule;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,315 @@ pub(super) const SLICE_TIME_BUDGET: Duration = Duration::from_millis(4);
 /// Floor for a shrunken slice, so per-slice overhead stays amortized.
 const MIN_SLICE_ROUTES: usize = 64;
 
+/// A paused slice keeps source identity, never copied attributes or encoded frames.
+struct PendingSlice {
+    groups: VecDeque<PendingGroup>,
+    source_start: usize,
+    phase: OutboundPhase,
+    moved: MovedSlice,
+}
+
+struct PendingGroup {
+    wire: GroupWire,
+    rows: Vec<usize>,
+    next: usize,
+}
+
+#[derive(Clone, Copy)]
+enum GroupWire {
+    Ipv4Body,
+    Mp {
+        afi: Afi,
+        safi: Safi,
+        mode: Ipv4UnicastMode,
+        next_hop: Option<(IpAddr, Option<Ipv6Addr>)>,
+    },
+    Refresh(Afi, Safi, RouteRefreshSubtype),
+    Eor(Afi, Safi),
+}
+
+/// These rows were already moved from the envelope. Their indices stay fixed
+/// while groups remain; only retirement consumes the iterator.
+#[derive(Default)]
+enum MovedSlice {
+    #[default]
+    None,
+    Evpn(std::vec::IntoIter<EvpnRibRoute>),
+    Vpn(std::vec::IntoIter<VpnRibRoute>),
+    Labeled(std::vec::IntoIter<LabeledRibRoute>),
+}
+
+impl MovedSlice {
+    fn len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Evpn(rows) => rows.len(),
+            Self::Vpn(rows) => rows.len(),
+            Self::Labeled(rows) => rows.len(),
+        }
+    }
+
+    fn release(&mut self, left: &mut usize) {
+        let released = match self {
+            Self::None => 0,
+            Self::Evpn(rows) => rows.by_ref().take(*left).count(),
+            Self::Vpn(rows) => rows.by_ref().take(*left).count(),
+            Self::Labeled(rows) => rows.by_ref().take(*left).count(),
+        };
+        *left -= released;
+    }
+}
+
+impl PendingGroup {
+    fn new(wire: GroupWire, rows: Vec<usize>) -> Self {
+        Self {
+            wire,
+            rows,
+            next: 0,
+        }
+    }
+}
+
+impl PendingSlice {
+    fn evpn<'a>(&'a self, update: &'a OutboundRouteUpdate, row: usize) -> &'a EvpnRibRoute {
+        match &self.moved {
+            MovedSlice::Evpn(rows) => &rows.as_slice()[row],
+            _ => &update.evpn_announce[self.source_start + row],
+        }
+    }
+
+    fn vpn<'a>(&'a self, update: &'a OutboundRouteUpdate, row: usize) -> &'a VpnRibRoute {
+        match &self.moved {
+            MovedSlice::Vpn(rows) => &rows.as_slice()[row],
+            _ => &update.vpn_announce[self.source_start + row],
+        }
+    }
+
+    fn labeled(&self, row: usize) -> &LabeledRibRoute {
+        let MovedSlice::Labeled(rows) = &self.moved else {
+            unreachable!("labeled source rows move into the active slice")
+        };
+        &rows.as_slice()[row]
+    }
+
+    fn withdrawal(&self, update: &OutboundRouteUpdate, row: usize) -> (Prefix, u32) {
+        let index = self.source_start + row;
+        if index < update.shared_withdraw.len() {
+            update.shared_withdraw[index]
+        } else {
+            update.withdraw[index - update.shared_withdraw.len()]
+        }
+    }
+
+    /// Only the current group's attributes are rebuilt, after the frame guard.
+    /// The immutable source and exact snapshot are the same ones used before
+    /// parking; the first member remains the representative even after it sent.
+    fn attributes(
+        &self,
+        group: &PendingGroup,
+        update: &OutboundRouteUpdate,
+        export: &SessionExportProfile,
+    ) -> Arc<Vec<PathAttribute>> {
+        let row = group.rows[0];
+        let index = self.source_start + row;
+        let attrs = match self.phase {
+            OutboundPhase::Announce => {
+                let attrs = export.prepare_unicast_attribute_bundle(
+                    &update.announce[index],
+                    export.local_ipv4(),
+                    update.next_hop_override.get(index).and_then(Option::as_ref),
+                );
+                return if matches!(group.wire, GroupWire::Ipv4Body) {
+                    attrs.with_next_hop
+                } else {
+                    attrs.without_next_hop
+                };
+            }
+            OutboundPhase::FlowspecAnnounce => {
+                export.prepare_flowspec_attributes(&update.flowspec_announce[index])
+            }
+            OutboundPhase::EvpnAnnounce => export.prepare_evpn_attributes(self.evpn(update, row)),
+            OutboundPhase::BgplsAnnounce => {
+                export.prepare_bgpls_attributes(&update.bgpls_announce[index])
+            }
+            OutboundPhase::VpnAnnounce => export.prepare_vpn_attributes(self.vpn(update, row)),
+            OutboundPhase::LabeledAnnounce => export.prepare_labeled_attributes(self.labeled(row)),
+            OutboundPhase::RtcAnnounce => {
+                export.prepare_rtc_attributes(&update.rtc_announce[index])
+            }
+            _ => Vec::new(),
+        };
+        Arc::new(attrs)
+    }
+
+    /// Gather only the chunk being probed. No prepared attributes or copied
+    /// NLRI survive a return to the actor, and no sent prefix is visited again.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "source-index reconstruction covers the existing outbound families in one exhaustive match"
+    )]
+    fn build_chunk(
+        &self,
+        group: &PendingGroup,
+        rows: &[usize],
+        update: &OutboundRouteUpdate,
+        export: &SessionExportProfile,
+        attrs: &[PathAttribute],
+    ) -> Result<UpdateMessage, rustbgpd_wire::EncodeError> {
+        let unicast = |row: usize| {
+            let (prefix, path_id) = if matches!(self.phase, OutboundPhase::Announce) {
+                let route = &update.announce[self.source_start + row];
+                (route.prefix, route.path_id)
+            } else {
+                self.withdrawal(update, row)
+            };
+            NlriEntry { prefix, path_id }
+        };
+        if matches!(group.wire, GroupWire::Ipv4Body) {
+            let entries: Vec<_> = rows
+                .iter()
+                .map(|&row| {
+                    let entry = unicast(row);
+                    let Prefix::V4(prefix) = entry.prefix else {
+                        unreachable!("an IPv4 body group contains only IPv4 source rows")
+                    };
+                    Ipv4NlriEntry {
+                        prefix,
+                        path_id: entry.path_id,
+                    }
+                })
+                .collect();
+            return if matches!(self.phase, OutboundPhase::Announce) {
+                export.build_ipv4_body(&entries, &[], attrs)
+            } else {
+                export.build_ipv4_body(&[], &entries, &[])
+            };
+        }
+        let GroupWire::Mp {
+            afi,
+            safi,
+            mode,
+            next_hop,
+        } = group.wire
+        else {
+            unreachable!("markers have their own guarded sender")
+        };
+        macro_rules! reach {
+            ($variant:ident, $entry:expr) => {{
+                let entries: Vec<_> = rows.iter().map(|&row| $entry(row)).collect();
+                let (nh, ll) = next_hop.expect("an announcement group has a next hop");
+                export.build_mp_reach(
+                    afi,
+                    safi,
+                    nh,
+                    ll,
+                    attrs,
+                    ReachNlri::$variant(&entries),
+                    mode,
+                )
+            }};
+        }
+        macro_rules! unreach {
+            ($variant:ident, $entry:expr) => {{
+                let entries: Vec<_> = rows.iter().map(|&row| $entry(row)).collect();
+                export.build_mp_unreach(afi, safi, UnreachNlri::$variant(&entries), mode)
+            }};
+        }
+        macro_rules! withdrawn {
+            ($variant:ident, $field:ident, $row:expr) => {{
+                let prepared = export.prepare_withdrawal(ExportWithdrawal::$variant(
+                    &update.$field[self.source_start + $row],
+                )).expect("the same immutable source and export snapshot were validated before parking");
+                let PreparedWithdrawal::$variant(prepared) = prepared else {
+                    unreachable!("withdrawal preparation preserves its family")
+                };
+                prepared.nlri
+            }};
+        }
+        match self.phase {
+            OutboundPhase::Announce => reach!(Unicast, unicast),
+            OutboundPhase::Withdraw => unreach!(Unicast, unicast),
+            OutboundPhase::FlowspecAnnounce => {
+                if safi == Safi::FlowSpecVpn {
+                    reach!(VpnFlowSpec, |row: usize| {
+                        let route = &update.flowspec_announce[self.source_start + row];
+                        VpnFlowSpecRule {
+                            rd: route.rd.expect("VPN group retains its RD"),
+                            rule: route.rule.clone(),
+                        }
+                    })
+                } else {
+                    reach!(FlowSpec, |row: usize| update.flowspec_announce
+                        [self.source_start + row]
+                        .rule
+                        .clone())
+                }
+            }
+            OutboundPhase::FlowspecWithdraw => {
+                if safi == Safi::FlowSpecVpn {
+                    unreach!(VpnFlowSpec, |row: usize| {
+                        let key = &update.flowspec_withdraw[self.source_start + row];
+                        VpnFlowSpecRule {
+                            rd: key.rd.expect("VPN group retains its RD"),
+                            rule: key.rule.clone(),
+                        }
+                    })
+                } else {
+                    unreach!(FlowSpec, |row: usize| update.flowspec_withdraw
+                        [self.source_start + row]
+                        .rule
+                        .clone())
+                }
+            }
+            OutboundPhase::EvpnAnnounce => {
+                reach!(Evpn, |row: usize| self.evpn(update, row).route.clone())
+            }
+            OutboundPhase::EvpnWithdraw => {
+                unreach!(Evpn, |row: usize| withdrawn!(Evpn, evpn_withdraw, row))
+            }
+            OutboundPhase::BgplsAnnounce => reach!(BgpLs, |row: usize| update.bgpls_announce
+                [self.source_start + row]
+                .nlri
+                .clone()),
+            OutboundPhase::BgplsWithdraw => {
+                unreach!(BgpLs, |row: usize| withdrawn!(BgpLs, bgpls_withdraw, row))
+            }
+            OutboundPhase::VpnAnnounce => reach!(Vpn, |row: usize| export
+                .prepare_vpn_candidate_with(self.vpn(update, row), || ())
+                .expect("same validated VPN source and snapshot")
+                .nlri),
+            OutboundPhase::VpnWithdraw => {
+                unreach!(Vpn, |row: usize| withdrawn!(Vpn, vpn_withdraw, row))
+            }
+            OutboundPhase::LabeledAnnounce => reach!(Labeled, |row: usize| export
+                .prepare_labeled_candidate_with(self.labeled(row), || ())
+                .expect("same validated labeled source and snapshot")
+                .nlri),
+            OutboundPhase::LabeledWithdraw => {
+                unreach!(Labeled, |row: usize| withdrawn!(
+                    Labeled,
+                    labeled_withdraw,
+                    row
+                ))
+            }
+            OutboundPhase::RtcAnnounce => {
+                reach!(Rtc, |row: usize| update.rtc_announce
+                    [self.source_start + row]
+                    .nlri)
+            }
+            OutboundPhase::RtcWithdraw => {
+                unreach!(Rtc, |row: usize| withdrawn!(Rtc, rtc_withdraw, row))
+            }
+            OutboundPhase::Requests
+            | OutboundPhase::Begin
+            | OutboundPhase::End
+            | OutboundPhase::Eor => {
+                unreachable!("markers have their own guarded sender")
+            }
+        }
+    }
+}
+
 /// One envelope remains owned until its final marker is admitted. Slices
 /// reuse the exact export snapshot, without growing the bounded writer queue.
 pub(super) struct PendingOutbound {
@@ -31,8 +341,8 @@ pub(super) struct PendingOutbound {
     phase: usize,
     offset: usize,
     capacity_blocked: bool,
-    /// Set while the writer holds its whole byte budget: the completion
-    /// watermark at which the backlog is back under it. The cursor stays
+    /// Set while the next frame allowance does not fit the writer budget:
+    /// the completion watermark at which that allowance fits again. The cursor stays
     /// where it is. A paused peer is not a failed one: with RFC 9687 send
     /// hold enabled no admission deadline runs, since the writer's send hold
     /// bounds the write in flight; with it disabled the admission deadline
@@ -57,6 +367,7 @@ pub(super) struct PendingOutbound {
     /// The other heap-owning payloads, likewise moved out of `update` only
     /// once the envelope retires.
     retiring_rest: RetiringRest,
+    pending_slice: Option<PendingSlice>,
     /// The envelope. Declared after the inventory moved out of it, so its
     /// outbound credit charge and operation latch drop last, after every
     /// moved route, on every destructor path.
@@ -251,6 +562,37 @@ fn own_if_last<T>(owned: &mut std::vec::IntoIter<T>, shared: &mut Arc<Vec<T>>) {
     }
 }
 
+/// The family name and direction the first-pass senders log for `phase`,
+/// so a resumed send reports a teardown the same way.
+fn resumed_log_names(phase: OutboundPhase, afi: Afi, safi: Safi) -> (&'static str, bool) {
+    use OutboundPhase as P;
+    let family = match phase {
+        P::Announce | P::Withdraw if afi == Afi::Ipv4 => "IPv4 unicast",
+        P::Announce | P::Withdraw => "IPv6 unicast",
+        P::FlowspecAnnounce | P::FlowspecWithdraw if safi == Safi::FlowSpecVpn => "VPN FlowSpec",
+        P::FlowspecAnnounce | P::FlowspecWithdraw => "FlowSpec",
+        P::EvpnAnnounce | P::EvpnWithdraw => "EVPN",
+        P::BgplsAnnounce | P::BgplsWithdraw => "BGP-LS",
+        P::VpnAnnounce | P::VpnWithdraw => "VPN",
+        P::LabeledAnnounce | P::LabeledWithdraw => "labeled",
+        P::RtcAnnounce | P::RtcWithdraw => "RTC",
+        P::Requests | P::Begin | P::End | P::Eor => {
+            unreachable!("markers have their own guarded sender")
+        }
+    };
+    let withdrawal = matches!(
+        phase,
+        P::Withdraw
+            | P::FlowspecWithdraw
+            | P::EvpnWithdraw
+            | P::BgplsWithdraw
+            | P::VpnWithdraw
+            | P::LabeledWithdraw
+            | P::RtcWithdraw
+    );
+    (family, withdrawal)
+}
+
 impl PendingOutbound {
     fn new(
         mut update: OutboundRouteUpdate,
@@ -268,6 +610,7 @@ impl PendingOutbound {
             labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
             announce: Vec::new().into_iter(),
             retiring_rest: RetiringRest::default(),
+            pending_slice: None,
             update,
             shared,
             requests,
@@ -301,6 +644,9 @@ impl PendingOutbound {
     /// per advance, like moved private payloads, instead of in one synchronous
     /// drop. Returns whether any remains after the first batch.
     pub(super) fn begin_retirement(&mut self) -> bool {
+        if let Some(slice) = &mut self.pending_slice {
+            slice.groups.clear();
+        }
         own_if_last(&mut self.announce, &mut self.update.announce);
         own_if_last(&mut self.vpn_announce, &mut self.update.vpn_announce);
         own_if_last(&mut self.evpn_announce, &mut self.update.evpn_announce);
@@ -321,6 +667,12 @@ impl PendingOutbound {
     fn retire_step(&mut self) -> bool {
         let started = Instant::now();
         let mut left = self.slice_routes;
+        if let Some(slice) = &mut self.pending_slice {
+            slice.moved.release(&mut left);
+            if slice.moved.len() == 0 {
+                self.pending_slice = None;
+            }
+        }
         left -= self.announce.by_ref().take(left).count();
         left -= self.vpn_announce.by_ref().take(left).count();
         left -= self.evpn_announce.by_ref().take(left).count();
@@ -336,11 +688,19 @@ impl PendingOutbound {
         self.retiring()
     }
 
+    /// Whether a partly sent slice is parked for resumption.
+    #[cfg(test)]
+    pub(super) fn slice_parked(&self) -> bool {
+        self.pending_slice.is_some()
+    }
+
     /// Whether admission waits for the writer to drain under its byte
     /// budget.
     #[cfg(test)]
     pub(super) fn bytes_blocked(&self) -> bool {
-        self.bytes_wait.is_some()
+        self.bytes_wait
+            .as_ref()
+            .is_some_and(|(completed, target)| *completed.borrow() < *target)
     }
 
     /// Only a completed or abandoned envelope retires: before that, the
@@ -352,6 +712,10 @@ impl PendingOutbound {
                 + self.evpn_announce.len()
                 + self.labeled_announce.len()
                 + self.retiring_rest.len()
+                + self
+                    .pending_slice
+                    .as_ref()
+                    .map_or(0, |slice| slice.moved.len())
                 > 0
     }
 
@@ -390,6 +754,9 @@ impl PendingOutbound {
     }
 
     fn finish_empty_phases(&mut self) -> bool {
+        if self.pending_slice.is_some() {
+            return false;
+        }
         self.skip_empty_phases_before(OUTBOUND_PHASES.len())
     }
 
@@ -397,6 +764,9 @@ impl PendingOutbound {
     /// member's own withdrawals) is admitted, so withdrawals keep preceding
     /// announcements exactly as on the per-session path.
     fn withdrawals_admitted(&mut self) -> bool {
+        if self.pending_slice.is_some() {
+            return false;
+        }
         self.skip_empty_phases_before(self.shared_announce_phase())
     }
 
@@ -453,7 +823,7 @@ impl PendingOutbound {
         true
     }
 
-    fn next_slice(&mut self, budget: usize) -> Option<OutboundRouteUpdate> {
+    fn next_slice(&mut self, budget: usize) -> Option<(usize, OutboundRouteUpdate)> {
         while let Some(phase) = OUTBOUND_PHASES.get(self.phase) {
             let mut slice = OutboundRouteUpdate {
                 exact_export_snapshot: self.update.exact_export_snapshot.clone(),
@@ -547,8 +917,9 @@ impl PendingOutbound {
                 self.phase += 1;
                 self.offset = 0;
             } else {
+                let start = self.offset;
                 self.offset = end;
-                return Some(slice);
+                return Some((start, slice));
             }
         }
         None
@@ -864,13 +1235,11 @@ impl PeerSession {
         // Every valid payload entry contributes at most one UPDATE frame;
         // grouping can only reduce that count. Requests and terminal markers
         // consume their own exact frame budget in separate phases.
-        let budget = if self.writer_bytes_exhausted() {
-            0
-        } else {
-            writer
-                .capacity()
-                .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES)
-        };
+        let budget = writer
+            .capacity()
+            .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+        let max_len = usize::from(self.outbound_max_message_len());
+        let mut bytes_needed = max_len;
         let before = self.writer_bulk_admitted;
         let mut finished = false;
         pending.capacity_blocked = budget == 0;
@@ -887,8 +1256,9 @@ impl PeerSession {
                         pending.capacity_blocked = true;
                         break;
                     }
-                    if self.writer_bytes_exhausted() {
+                    if chunk.bytes.len() > self.writer_bytes_available() {
                         // Resumes from this chunk once the writer drains.
+                        bytes_needed = chunk.bytes.len();
                         break;
                     }
                     if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
@@ -920,28 +1290,90 @@ impl PeerSession {
             // Even without writer capacity, cancellation must discard a terminal.
             finished =
                 self.enqueue_replay_terminal_slice(&pending.update, &mut pending.offset, budget);
-        } else if budget > 0 {
-            if pending.phase == 0 && pending.offset < pending.requests.len() {
-                let (afi, safi) = pending.requests[pending.offset];
-                if self
-                    .enqueue_bulk(&Message::RouteRefresh(RouteRefreshMessage::new(afi, safi)))
-                    .is_err()
-                {
+        } else if budget > 0 && self.writer_frame_room(max_len) == Ok(true) {
+            if pending.pending_slice.is_some() {
+                let started = Instant::now();
+                if self.resume_pending_slice(&mut pending).is_err() {
                     self.outbound_admission_timer = None;
                     self.pending_outbound = pending.into_retiring();
                     return;
                 }
-                self.metrics
-                    .record_message_sent(&self.peer_label, "route_refresh");
-                pending.offset += 1;
+                let cost = started.elapsed();
+                // Tests pin resumes as cheap; `test_slice_cost` prices fresh slices.
+                #[cfg(test)]
+                let cost = {
+                    let _ = cost;
+                    Duration::ZERO
+                };
+                // Writer bytes, not routes, bound a resume, so a cheap one says
+                // nothing about the next fresh slice: it may only shrink it.
+                if cost > SLICE_TIME_BUDGET {
+                    pending.charge_slice(cost);
+                }
+            } else if pending.phase == 0 && pending.offset < pending.requests.len() {
+                let (afi, safi) = pending.requests[pending.offset];
+                match self.send_refresh_frame(afi, safi, RouteRefreshSubtype::Normal, max_len) {
+                    Ok(1) => pending.offset += 1,
+                    Ok(_) => {}
+                    Err(()) => {
+                        self.outbound_admission_timer = None;
+                        self.pending_outbound = pending.into_retiring();
+                        return;
+                    }
+                }
             } else {
                 if pending.phase == 0 {
                     pending.phase = 1;
                     pending.offset = 0;
                 }
-                if let Some(slice) = pending.next_slice(budget.min(pending.slice_routes)) {
+                if let Some((source_start, mut slice)) =
+                    pending.next_slice(budget.min(pending.slice_routes))
+                {
                     let started = Instant::now();
-                    self.send_route_update_slice(slice, &mut pending.dropped_ipv6_next_hops);
+                    let mut groups = VecDeque::new();
+                    let sent = self.send_route_update_slice(
+                        &slice,
+                        &mut pending.dropped_ipv6_next_hops,
+                        &mut groups,
+                    );
+                    if !sent || !groups.is_empty() {
+                        let moved = match OUTBOUND_PHASES[pending.phase] {
+                            OutboundPhase::EvpnAnnounce
+                                if pending.update.evpn_announce.is_empty() =>
+                            {
+                                MovedSlice::Evpn(
+                                    Arc::try_unwrap(std::mem::take(&mut slice.evpn_announce))
+                                        .expect("fresh moved slice has one owner")
+                                        .into_iter(),
+                                )
+                            }
+                            OutboundPhase::VpnAnnounce
+                                if pending.update.vpn_announce.is_empty() =>
+                            {
+                                MovedSlice::Vpn(
+                                    Arc::try_unwrap(std::mem::take(&mut slice.vpn_announce))
+                                        .expect("fresh moved slice has one owner")
+                                        .into_iter(),
+                                )
+                            }
+                            OutboundPhase::LabeledAnnounce => MovedSlice::Labeled(
+                                std::mem::take(&mut slice.labeled_announce).into_iter(),
+                            ),
+                            _ => MovedSlice::None,
+                        };
+                        pending.pending_slice = Some(PendingSlice {
+                            groups,
+                            source_start,
+                            phase: OUTBOUND_PHASES[pending.phase],
+                            moved,
+                        });
+                    }
+                    drop(slice);
+                    if !sent {
+                        self.outbound_admission_timer = None;
+                        self.pending_outbound = pending.into_retiring();
+                        return;
+                    }
                     let cost = started.elapsed();
                     // Tests pin the cost so slice sizes never follow host speed.
                     #[cfg(test)]
@@ -964,7 +1396,7 @@ impl PeerSession {
         if self.writer_bulk_admitted != before {
             self.outbound_admission_timer = None;
         }
-        pending.bytes_wait = self.writer_bytes_wait();
+        pending.bytes_wait = self.writer_bytes_wait(bytes_needed);
         if !finished
             && self
                 .writer_bulk_tx
@@ -1040,14 +1472,16 @@ impl PeerSession {
         }
     }
 
-    /// While the writer holds its whole byte budget, the completion
-    /// watermark that brings the backlog back under it.
-    fn writer_bytes_wait(&self) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
+    /// The completion watermark that leaves room for the next frame. Watching
+    /// a target also observes progress racing with registration of the wait.
+    fn writer_bytes_wait(&self, needed: usize) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
         let completed = self.writer_completed.as_ref()?;
-        self.writer_bytes_exhausted().then(|| {
+        (needed > self.writer_bytes_available()).then(|| {
             (
                 completed.clone(),
-                self.writer_bulk_admitted - super::writer::WRITER_BYTE_BUDGET + 1,
+                self.writer_bulk_admitted.saturating_sub(
+                    super::writer::WRITER_BYTE_BUDGET.saturating_sub(needed as u64),
+                ),
             )
         })
     }
@@ -1222,12 +1656,14 @@ impl AttrGroupIndex {
 struct V4BodyGroup {
     attrs: Arc<Vec<PathAttribute>>,
     prefixes: Vec<Ipv4NlriEntry>,
+    sources: Vec<usize>,
 }
 struct MpGroup {
     attrs: Arc<Vec<PathAttribute>>,
     next_hop: IpAddr,
     link_local_next_hop: Option<Ipv6Addr>,
     prefixes: Vec<NlriEntry>,
+    sources: Vec<usize>,
 }
 
 /// One VPN or labeled UPDATE group: family, next hop, link-local companion,
@@ -1252,7 +1688,7 @@ impl MpGroupIndex {
         groups: &mut Vec<MpRouteGroup<T>>,
         family: (Afi, Safi),
         prepared: PreparedMpCandidate<T, Arc<Vec<PathAttribute>>>,
-    ) {
+    ) -> usize {
         let nh = prepared.next_hop;
         let ll = prepared.link_local_next_hop;
         match self
@@ -1261,8 +1697,14 @@ impl MpGroupIndex {
             .or_default()
             .group(&prepared.attrs, Some(nh), ll, groups.len())
         {
-            Ok(idx) => groups[idx].4.push(prepared.nlri),
-            Err(_) => groups.push((family, nh, ll, prepared.attrs, vec![prepared.nlri])),
+            Ok(idx) => {
+                groups[idx].4.push(prepared.nlri);
+                idx
+            }
+            Err(idx) => {
+                groups.push((family, nh, ll, prepared.attrs, vec![prepared.nlri]));
+                idx
+            }
         }
     }
 }
@@ -1338,8 +1780,15 @@ impl PeerSession {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
         let mut dropped_ipv6_next_hops = DroppedIpv6NextHops::default();
-        self.send_route_update_slice(update, &mut dropped_ipv6_next_hops);
+        let mut deferred = VecDeque::new();
+        let sent =
+            self.send_route_update_slice(&update, &mut dropped_ipv6_next_hops, &mut deferred);
+        assert!(
+            !sent || deferred.is_empty(),
+            "direct test/benchmark sender did not complete its update"
+        );
         dropped_ipv6_next_hops.warn(&self.peer_label, false);
+        drop(update);
     }
 
     /// Send an outbound route update slice as wire UPDATE messages.
@@ -1353,16 +1802,16 @@ impl PeerSession {
     /// envelope.
     #[expect(
         clippy::too_many_lines,
-        clippy::needless_pass_by_value,
         reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
     )]
-    pub(super) fn send_route_update_slice(
+    fn send_route_update_slice(
         &mut self,
-        update: OutboundRouteUpdate,
+        update: &OutboundRouteUpdate,
         dropped_ipv6_next_hops: &mut DroppedIpv6NextHops,
-    ) {
-        let Some(snapshot) = self.outbound_snapshot(&update) else {
-            return;
+        deferred: &mut VecDeque<PendingGroup>,
+    ) -> bool {
+        let Some(snapshot) = self.outbound_snapshot(update) else {
+            return false;
         };
         let export = snapshot
             .as_any()
@@ -1396,23 +1845,23 @@ impl PeerSession {
                     .iter()
                     .filter(|&&family| super::commands::requests_route_refresh(family))
                 {
-                    let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
-                    if let Err(e) = self.enqueue_bulk(&msg) {
-                        warn!(
-                            peer = %self.peer_label,
-                            error = %e,
-                            "failed to send ROUTE-REFRESH request"
-                        );
-                        return;
+                    if !self.send_or_defer(
+                        deferred,
+                        PendingGroup::new(
+                            GroupWire::Refresh(afi, safi, RouteRefreshSubtype::Normal),
+                            vec![0],
+                        ),
+                        |session| {
+                            session.send_refresh_frame(
+                                afi,
+                                safi,
+                                RouteRefreshSubtype::Normal,
+                                export.max_message_len(),
+                            )
+                        },
+                    ) {
+                        return false;
                     }
-                    info!(
-                        peer = %self.peer_label,
-                        ?afi,
-                        ?safi,
-                        "sent ROUTE-REFRESH request (RIB-manager initiated)"
-                    );
-                    self.metrics
-                        .record_message_sent(&self.peer_label, "route_refresh");
                 }
             } else {
                 warn!(
@@ -1430,19 +1879,15 @@ impl PeerSession {
                 .copied()
                 .filter(|(_, _, subtype)| matches!(subtype, RouteRefreshSubtype::BoRR))
             {
-                let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(
-                    afi, safi, subtype,
-                ));
-                if let Err(e) = self.enqueue_bulk(&msg) {
-                    warn!(
-                        peer = %self.peer_label,
-                        error = %e,
-                        "failed to send Beginning-of-RIB-Refresh"
-                    );
-                    return;
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(GroupWire::Refresh(afi, safi, subtype), vec![0]),
+                    |session| {
+                        session.send_refresh_frame(afi, safi, subtype, export.max_message_len())
+                    },
+                ) {
+                    return false;
                 }
-                self.metrics
-                    .record_message_sent(&self.peer_label, "route_refresh");
             }
         }
         let use_extended_nexthop_ipv4 = export.use_extended_nexthop_ipv4();
@@ -1450,12 +1895,15 @@ impl PeerSession {
         let mut prepared_attr_cache = PreparedAttrCache::default();
         // Split withdrawals by address family, filtering by negotiated families
         let mut v4_body_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
+        let mut v4_body_sources = Vec::new();
+        let mut v4_mp_sources = Vec::new();
+        let mut v6_sources = Vec::new();
         let mut v4_mp_withdraw: Vec<NlriEntry> = Vec::new();
         let mut v4_mp_wire = None;
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
         let mut v6_wire = None;
         let mut scoped_ipv4_without_extended_nexthop = 0usize;
-        for &(ref prefix, path_id) in update.unicast_withdrawals() {
+        for (source, &(ref prefix, path_id)) in update.unicast_withdrawals().enumerate() {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }
@@ -1463,15 +1911,20 @@ impl PeerSession {
                 prefix: *prefix,
                 path_id,
             }) {
-                Ok(PreparedWithdrawal::Ipv4Body(entry)) => v4_body_withdraw.push(entry),
+                Ok(PreparedWithdrawal::Ipv4Body(entry)) => {
+                    v4_body_withdraw.push(entry);
+                    v4_body_sources.push(source);
+                }
                 Ok(PreparedWithdrawal::Unicast(prepared)) => {
                     let wire = (prepared.afi, prepared.safi, prepared.ipv4_mode);
                     if prepared.afi == Afi::Ipv4 {
                         v4_mp_wire = Some(wire);
                         v4_mp_withdraw.push(prepared.nlri);
+                        v4_mp_sources.push(source);
                     } else {
                         v6_wire = Some(wire);
                         v6_withdraw.push(prepared.nlri);
+                        v6_sources.push(source);
                     }
                 }
                 Ok(_) => unreachable!("unicast withdrawal must prepare as unicast"),
@@ -1496,24 +1949,51 @@ impl PeerSession {
         }
         if !v4_body_withdraw.is_empty() {
             let max_len = export.max_message_len();
-            if !self.send_v4_chunked(&v4_body_withdraw, max_len, "withdraw", |chunk| {
-                export
-                    .build_ipv4_body(&[], chunk, &[])
-                    .expect("IPv4 body withdrawal construction was previously infallible")
-            }) {
-                return;
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(GroupWire::Ipv4Body, v4_body_sources),
+                |session| {
+                    session.send_v4_chunked(&v4_body_withdraw, max_len, "withdraw", |chunk| {
+                        export
+                            .build_ipv4_body(&[], chunk, &[])
+                            .expect("IPv4 body withdrawal construction was previously infallible")
+                    })
+                },
+            ) {
+                return false;
             }
         }
         if let Some((afi, safi, ipv4_mode)) = v4_mp_wire {
             let max_len = export.max_message_len();
-            if !self.send_mp_chunked(
-                &v4_mp_withdraw,
-                max_len,
-                "IPv4 unicast",
-                "withdrawal",
-                |chunk| export.build_mp_unreach(afi, safi, UnreachNlri::Unicast(chunk), ipv4_mode),
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(
+                    GroupWire::Mp {
+                        afi,
+                        safi,
+                        mode: ipv4_mode,
+                        next_hop: None,
+                    },
+                    v4_mp_sources,
+                ),
+                |session| {
+                    session.send_mp_chunked(
+                        &v4_mp_withdraw,
+                        max_len,
+                        "IPv4 unicast",
+                        "withdrawal",
+                        |chunk| {
+                            export.build_mp_unreach(
+                                afi,
+                                safi,
+                                UnreachNlri::Unicast(chunk),
+                                ipv4_mode,
+                            )
+                        },
+                    )
+                },
             ) {
-                return;
+                return false;
             }
         }
         // Send IPv6 withdrawals via `MP_UNREACH_NLRI`, chunked to the
@@ -1522,19 +2002,42 @@ impl PeerSession {
         // oversized message after the RIB has already committed it.
         if let Some((afi, safi, ipv4_mode)) = v6_wire {
             let max_len = export.max_message_len();
-            if !self.send_mp_chunked(
-                &v6_withdraw,
-                max_len,
-                "IPv6 unicast",
-                "withdrawal",
-                |chunk| export.build_mp_unreach(afi, safi, UnreachNlri::Unicast(chunk), ipv4_mode),
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(
+                    GroupWire::Mp {
+                        afi,
+                        safi,
+                        mode: ipv4_mode,
+                        next_hop: None,
+                    },
+                    v6_sources,
+                ),
+                |session| {
+                    session.send_mp_chunked(
+                        &v6_withdraw,
+                        max_len,
+                        "IPv6 unicast",
+                        "withdrawal",
+                        |chunk| {
+                            export.build_mp_unreach(
+                                afi,
+                                safi,
+                                UnreachNlri::Unicast(chunk),
+                                ipv4_mode,
+                            )
+                        },
+                    )
+                },
             ) {
-                return;
+                return false;
             }
         }
         // Split announcements by address family, filtering by negotiated families
-        let mut v4_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
-        let mut v6_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
+        let mut v4_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>, usize)> =
+            Vec::new();
+        let mut v6_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>, usize)> =
+            Vec::new();
         for (i, route) in update.announce.iter().enumerate() {
             // Group-transition envelopes may share one immutable full-cohort
             // payload. Split horizon is still member-specific: never encode a
@@ -1556,8 +2059,8 @@ impl PeerSession {
             }
             let nh_override = update.next_hop_override.get(i).and_then(|o| o.as_ref());
             match route.prefix {
-                Prefix::V4(_) => v4_routes.push((route, nh_override)),
-                Prefix::V6(_) => v6_routes.push((route, nh_override)),
+                Prefix::V4(_) => v4_routes.push((route, nh_override, i)),
+                Prefix::V6(_) => v6_routes.push((route, nh_override, i)),
             }
         }
         // Send IPv4 announcements via body NLRI or IPv4 MP_REACH_NLRI;
@@ -1575,7 +2078,7 @@ impl PeerSession {
             let mut v4_body_groups: Vec<V4BodyGroup> = Vec::new();
             let mut v4_mp_index = AttrGroupIndex::default();
             let mut v4_mp_groups: Vec<MpGroup> = Vec::new();
-            for (route, nh_override) in &v4_routes {
+            for (route, nh_override, source) in &v4_routes {
                 let cached_attrs = export
                     .prepared_unicast_attributes_cached(
                         &mut prepared_attr_cache,
@@ -1588,10 +2091,14 @@ impl PeerSession {
                     Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
                         dropped_ipv6_next_hops.note_ipv4_body(*nh_override, entry.prefix);
                         match v4_body_index.group(&attrs, None, None, v4_body_groups.len()) {
-                            Ok(idx) => v4_body_groups[idx].prefixes.push(entry),
+                            Ok(idx) => {
+                                v4_body_groups[idx].prefixes.push(entry);
+                                v4_body_groups[idx].sources.push(*source);
+                            }
                             Err(_) => v4_body_groups.push(V4BodyGroup {
                                 attrs,
                                 prefixes: vec![entry],
+                                sources: vec![*source],
                             }),
                         }
                     }
@@ -1608,12 +2115,16 @@ impl PeerSession {
                             link_local_next_hop,
                             v4_mp_groups.len(),
                         ) {
-                            Ok(idx) => v4_mp_groups[idx].prefixes.push(entry),
+                            Ok(idx) => {
+                                v4_mp_groups[idx].prefixes.push(entry);
+                                v4_mp_groups[idx].sources.push(*source);
+                            }
                             Err(_) => v4_mp_groups.push(MpGroup {
                                 attrs,
                                 next_hop,
                                 link_local_next_hop,
                                 prefixes: vec![entry],
+                                sources: vec![*source],
                             }),
                         }
                     }
@@ -1632,40 +2143,60 @@ impl PeerSession {
                         self.trigger_outbound_out_of_resources_teardown(
                             crate::handle::SessionFailureCause::PostCommitInvariant,
                         );
-                        return;
+                        return false;
                     }
                     Err(_) => {}
                 }
             }
             let max_len = export.max_message_len();
-            for group in &v4_body_groups {
+            for group in v4_body_groups {
                 let attrs = group.attrs.as_ref();
-                if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                    export
-                        .build_ipv4_body(chunk, &[], attrs)
-                        .expect("IPv4 body announcement construction was previously infallible")
-                }) {
-                    return;
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(GroupWire::Ipv4Body, group.sources),
+                    |session| {
+                        session.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
+                            export.build_ipv4_body(chunk, &[], attrs).expect(
+                                "IPv4 body announcement construction was previously infallible",
+                            )
+                        })
+                    },
+                ) {
+                    return false;
                 }
             }
-            for group in &v4_mp_groups {
+            for group in v4_mp_groups {
                 let base_attrs = group.attrs.as_ref();
                 let next_hop = group.next_hop;
                 let link_local_next_hop = group.link_local_next_hop;
-                if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                    export
-                        .build_mp_reach(
-                            Afi::Ipv4,
-                            Safi::Unicast,
-                            next_hop,
-                            link_local_next_hop,
-                            base_attrs,
-                            ReachNlri::Unicast(chunk),
-                            Ipv4UnicastMode::MpReach,
-                        )
-                        .expect("IPv4 MP_REACH construction was previously infallible")
-                }) {
-                    return;
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi: Afi::Ipv4,
+                            safi: Safi::Unicast,
+                            mode: Ipv4UnicastMode::MpReach,
+                            next_hop: Some((next_hop, link_local_next_hop)),
+                        },
+                        group.sources,
+                    ),
+                    |session| {
+                        session.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
+                            export
+                                .build_mp_reach(
+                                    Afi::Ipv4,
+                                    Safi::Unicast,
+                                    next_hop,
+                                    link_local_next_hop,
+                                    base_attrs,
+                                    ReachNlri::Unicast(chunk),
+                                    Ipv4UnicastMode::MpReach,
+                                )
+                                .expect("IPv4 MP_REACH construction was previously infallible")
+                        })
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -1677,7 +2208,7 @@ impl PeerSession {
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_group_index = AttrGroupIndex::default();
         let mut v6_groups: Vec<MpGroup> = Vec::new();
-        for (route, nh_override_ref) in &v6_routes {
+        for (route, nh_override_ref, source) in &v6_routes {
             let nh_override = *nh_override_ref;
             let cached_attrs = export
                 .prepared_unicast_attributes_cached(
@@ -1716,56 +2247,74 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return;
+                    return false;
                 }
             };
             let (attrs, nh, link_local_next_hop, nlri_entry) = prepared;
             match v6_group_index.group(&attrs, Some(nh), link_local_next_hop, v6_groups.len()) {
-                Ok(idx) => v6_groups[idx].prefixes.push(nlri_entry),
+                Ok(idx) => {
+                    v6_groups[idx].prefixes.push(nlri_entry);
+                    v6_groups[idx].sources.push(*source);
+                }
                 Err(_) => v6_groups.push(MpGroup {
                     attrs,
                     next_hop: nh,
                     link_local_next_hop,
                     prefixes: vec![nlri_entry],
+                    sources: vec![*source],
                 }),
             }
         }
         let max_len = export.max_message_len();
-        for group in &v6_groups {
+        for group in v6_groups {
             let base_attrs = group.attrs.as_ref();
             let next_hop = group.next_hop;
             let link_local_next_hop = group.link_local_next_hop;
-            if !self.send_mp_chunked(
-                &group.prefixes,
-                max_len,
-                "IPv6 unicast",
-                "announcement",
-                |chunk| {
-                    export.build_mp_reach(
-                        Afi::Ipv6,
-                        Safi::Unicast,
-                        next_hop,
-                        link_local_next_hop,
-                        base_attrs,
-                        ReachNlri::Unicast(chunk),
-                        Ipv4UnicastMode::Body,
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(
+                    GroupWire::Mp {
+                        afi: Afi::Ipv6,
+                        safi: Safi::Unicast,
+                        mode: Ipv4UnicastMode::Body,
+                        next_hop: Some((next_hop, link_local_next_hop)),
+                    },
+                    group.sources,
+                ),
+                |session| {
+                    session.send_mp_chunked(
+                        &group.prefixes,
+                        max_len,
+                        "IPv6 unicast",
+                        "announcement",
+                        |chunk| {
+                            export.build_mp_reach(
+                                Afi::Ipv6,
+                                Safi::Unicast,
+                                next_hop,
+                                link_local_next_hop,
+                                base_attrs,
+                                ReachNlri::Unicast(chunk),
+                                Ipv4UnicastMode::Body,
+                            )
+                        },
                     )
                 },
             ) {
-                return;
+                return false;
             }
         }
         // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by family:
         // global rules by AFI, VPN rules apart, each in its own typed list.
         if !update.flowspec_withdraw.is_empty() {
             use super::export::FlowSpecNlri;
-            type GlobalGroup = Option<(Afi, Ipv4UnicastMode, Vec<FlowSpecRule>)>;
-            type VpnGroup = Option<(Afi, Ipv4UnicastMode, Vec<VpnFlowSpecRule>)>;
+            type GlobalGroup = Option<(Afi, Ipv4UnicastMode, Vec<FlowSpecRule>, Vec<usize>)>;
+            type VpnGroup = Option<(Afi, Ipv4UnicastMode, Vec<VpnFlowSpecRule>, Vec<usize>)>;
             // Preserve the established deterministic wire order: IPv4, then
             // IPv6, then IPv4/IPv6 VPN (SAFI 134).
             let mut global: [GlobalGroup; 2] = [None, None];
             let mut vpn: [VpnGroup; 2] = [None, None];
-            for key in &update.flowspec_withdraw {
+            for (source, key) in update.flowspec_withdraw.iter().enumerate() {
                 let PreparedWithdrawal::FlowSpec(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::FlowSpec(key))
                     .expect("FlowSpec withdrawal preparation is infallible")
@@ -1783,9 +2332,11 @@ impl PeerSession {
                                 continue;
                             }
                         };
-                        slot.get_or_insert_with(|| (prepared.afi, prepared.ipv4_mode, Vec::new()))
-                            .2
-                            .push(rule);
+                        let group = slot.get_or_insert_with(|| {
+                            (prepared.afi, prepared.ipv4_mode, Vec::new(), Vec::new())
+                        });
+                        group.2.push(rule);
+                        group.3.push(source);
                     }
                     FlowSpecNlri::Vpn(rule) => {
                         let slot = match prepared.afi {
@@ -1796,35 +2347,77 @@ impl PeerSession {
                                 continue;
                             }
                         };
-                        slot.get_or_insert_with(|| (prepared.afi, prepared.ipv4_mode, Vec::new()))
-                            .2
-                            .push(rule);
+                        let group = slot.get_or_insert_with(|| {
+                            (prepared.afi, prepared.ipv4_mode, Vec::new(), Vec::new())
+                        });
+                        group.2.push(rule);
+                        group.3.push(source);
                     }
                 }
             }
             let max_len = export.max_message_len();
-            for (afi, ipv4_mode, rules) in global.into_iter().flatten() {
-                if !self.send_mp_chunked(&rules, max_len, "FlowSpec", "withdrawal", |chunk| {
-                    export.build_mp_unreach(
-                        afi,
-                        Safi::FlowSpec,
-                        UnreachNlri::FlowSpec(chunk),
-                        ipv4_mode,
-                    )
-                }) {
-                    return;
+            for (afi, ipv4_mode, rules, sources) in global.into_iter().flatten() {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi: Safi::FlowSpec,
+                            mode: ipv4_mode,
+                            next_hop: None,
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_mp_chunked(
+                            &rules,
+                            max_len,
+                            "FlowSpec",
+                            "withdrawal",
+                            |chunk| {
+                                export.build_mp_unreach(
+                                    afi,
+                                    Safi::FlowSpec,
+                                    UnreachNlri::FlowSpec(chunk),
+                                    ipv4_mode,
+                                )
+                            },
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
-            for (afi, ipv4_mode, rules) in vpn.into_iter().flatten() {
-                if !self.send_mp_chunked(&rules, max_len, "VPN FlowSpec", "withdrawal", |chunk| {
-                    export.build_mp_unreach(
-                        afi,
-                        Safi::FlowSpecVpn,
-                        UnreachNlri::VpnFlowSpec(chunk),
-                        ipv4_mode,
-                    )
-                }) {
-                    return;
+            for (afi, ipv4_mode, rules, sources) in vpn.into_iter().flatten() {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi: Safi::FlowSpecVpn,
+                            mode: ipv4_mode,
+                            next_hop: None,
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_mp_chunked(
+                            &rules,
+                            max_len,
+                            "VPN FlowSpec",
+                            "withdrawal",
+                            |chunk| {
+                                export.build_mp_unreach(
+                                    afi,
+                                    Safi::FlowSpecVpn,
+                                    UnreachNlri::VpnFlowSpec(chunk),
+                                    ipv4_mode,
+                                )
+                            },
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -1836,7 +2429,8 @@ impl PeerSession {
         if !update.evpn_withdraw.is_empty() {
             let mut routes = Vec::with_capacity(update.evpn_withdraw.len());
             let mut wire = None;
-            for key in &update.evpn_withdraw {
+            let mut sources = Vec::new();
+            for (source, key) in update.evpn_withdraw.iter().enumerate() {
                 let PreparedWithdrawal::Evpn(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::Evpn(key))
                     .expect("EVPN withdrawal preparation is infallible")
@@ -1845,11 +2439,27 @@ impl PeerSession {
                 };
                 wire = Some((prepared.afi, prepared.safi, prepared.ipv4_mode));
                 routes.push(prepared.nlri);
+                sources.push(source);
             }
             let max_len = export.max_message_len();
             let (afi, safi, ipv4_mode) = wire.expect("non-empty EVPN withdrawal batch");
-            if !self.send_evpn_unreach_chunked(export, afi, safi, ipv4_mode, &routes, max_len) {
-                return;
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(
+                    GroupWire::Mp {
+                        afi,
+                        safi,
+                        mode: ipv4_mode,
+                        next_hop: None,
+                    },
+                    sources,
+                ),
+                |session| {
+                    session
+                        .send_evpn_unreach_chunked(export, afi, safi, ipv4_mode, &routes, max_len)
+                },
+            ) {
+                return false;
             }
         }
         // Send BGP-LS withdrawals via MP_UNREACH_NLRI, grouped by SAFI and
@@ -1861,8 +2471,9 @@ impl PeerSession {
                 Safi,
                 Ipv4UnicastMode,
                 Vec<rustbgpd_wire::bgpls::BgpLsNlri>,
+                Vec<usize>,
             )>::new();
-            for key in &update.bgpls_withdraw {
+            for (source, key) in update.bgpls_withdraw.iter().enumerate() {
                 let PreparedWithdrawal::BgpLs(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::BgpLs(key))
                     .expect("BGP-LS withdrawal preparation is infallible")
@@ -1875,29 +2486,48 @@ impl PeerSession {
                 {
                     continue;
                 }
-                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
-                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
-                }) {
+                if let Some((_, _, _, routes, sources)) =
+                    groups.iter_mut().find(|(afi, safi, mode, _, _)| {
+                        (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                    })
+                {
                     routes.push(prepared.nlri);
+                    sources.push(source);
                 } else {
                     groups.push((
                         prepared.afi,
                         prepared.safi,
                         prepared.ipv4_mode,
                         vec![prepared.nlri],
+                        vec![source],
                     ));
                 }
             }
             let max_len = export.max_message_len();
-            groups.sort_by_key(|(_, safi, _, _)| match safi {
+            groups.sort_by_key(|(_, safi, _, _, _)| match safi {
                 Safi::BgpLs => 0,
                 Safi::BgpLsVpn => 1,
                 _ => 2,
             });
-            for (afi, safi, ipv4_mode, routes) in groups {
-                if !self.send_bgpls_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len)
-                {
-                    return;
+            for (afi, safi, ipv4_mode, routes, sources) in groups {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi,
+                            mode: ipv4_mode,
+                            next_hop: None,
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_bgpls_unreach_chunked(
+                            afi, safi, ipv4_mode, &routes, export, max_len,
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -1906,9 +2536,14 @@ impl PeerSession {
         // compatibility field instead of a label stack, so the rebuilt NLRI
         // carries no labels (the withdraw encoder ignores them).
         if !update.vpn_withdraw.is_empty() {
-            let mut groups =
-                Vec::<(Afi, Safi, Ipv4UnicastMode, Vec<rustbgpd_wire::VpnNlriEntry>)>::new();
-            for key in &update.vpn_withdraw {
+            let mut groups = Vec::<(
+                Afi,
+                Safi,
+                Ipv4UnicastMode,
+                Vec<rustbgpd_wire::VpnNlriEntry>,
+                Vec<usize>,
+            )>::new();
+            for (source, key) in update.vpn_withdraw.iter().enumerate() {
                 let PreparedWithdrawal::Vpn(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::Vpn(key))
                     .expect("VPN withdrawal preparation is infallible")
@@ -1919,29 +2554,49 @@ impl PeerSession {
                 if !self.negotiated_families().contains(&family) {
                     continue;
                 }
-                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
-                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
-                }) {
+                if let Some((_, _, _, routes, sources)) =
+                    groups.iter_mut().find(|(afi, safi, mode, _, _)| {
+                        (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                    })
+                {
                     routes.push(prepared.nlri);
+                    sources.push(source);
                 } else {
                     groups.push((
                         prepared.afi,
                         prepared.safi,
                         prepared.ipv4_mode,
                         vec![prepared.nlri],
+                        vec![source],
                     ));
                 }
             }
             let max_len = export.max_message_len();
-            groups.sort_by_key(|(afi, _, _, _)| match afi {
+            groups.sort_by_key(|(afi, _, _, _, _)| match afi {
                 Afi::Ipv4 => 0,
                 Afi::Ipv6 => 1,
                 // Non-IP families (and future AFIs) keep a stable tail slot.
                 _ => 2,
             });
-            for (afi, safi, ipv4_mode, routes) in groups {
-                if !self.send_vpn_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len) {
-                    return;
+            for (afi, safi, ipv4_mode, routes, sources) in groups {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi,
+                            mode: ipv4_mode,
+                            next_hop: None,
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_vpn_unreach_chunked(
+                            afi, safi, ipv4_mode, &routes, export, max_len,
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -1956,8 +2611,9 @@ impl PeerSession {
                 Safi,
                 Ipv4UnicastMode,
                 Vec<rustbgpd_wire::LabeledNlriEntry>,
+                Vec<usize>,
             )>::new();
-            for key in &update.labeled_withdraw {
+            for (source, key) in update.labeled_withdraw.iter().enumerate() {
                 let PreparedWithdrawal::Labeled(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::Labeled(key))
                     .expect("labeled withdrawal preparation is infallible")
@@ -1968,31 +2624,49 @@ impl PeerSession {
                 if !self.negotiated_families().contains(&family) {
                     continue;
                 }
-                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
-                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
-                }) {
+                if let Some((_, _, _, routes, sources)) =
+                    groups.iter_mut().find(|(afi, safi, mode, _, _)| {
+                        (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                    })
+                {
                     routes.push(prepared.nlri);
+                    sources.push(source);
                 } else {
                     groups.push((
                         prepared.afi,
                         prepared.safi,
                         prepared.ipv4_mode,
                         vec![prepared.nlri],
+                        vec![source],
                     ));
                 }
             }
             let max_len = export.max_message_len();
-            groups.sort_by_key(|(afi, _, _, _)| match afi {
+            groups.sort_by_key(|(afi, _, _, _, _)| match afi {
                 Afi::Ipv4 => 0,
                 Afi::Ipv6 => 1,
                 // Non-IP families (and future AFIs) keep a stable tail slot.
                 _ => 2,
             });
-            for (afi, safi, ipv4_mode, routes) in groups {
-                if !self
-                    .send_labeled_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len)
-                {
-                    return;
+            for (afi, safi, ipv4_mode, routes, sources) in groups {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi,
+                            mode: ipv4_mode,
+                            next_hop: None,
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_labeled_unreach_chunked(
+                            afi, safi, ipv4_mode, &routes, export, max_len,
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -2006,7 +2680,8 @@ impl PeerSession {
         {
             let mut routes = Vec::with_capacity(update.rtc_withdraw.len());
             let mut wire = None;
-            for key in &update.rtc_withdraw {
+            let mut sources = Vec::new();
+            for (source, key) in update.rtc_withdraw.iter().enumerate() {
                 let PreparedWithdrawal::Rtc(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::Rtc(key))
                     .expect("RTC withdrawal preparation is infallible")
@@ -2015,21 +2690,36 @@ impl PeerSession {
                 };
                 wire = Some((prepared.afi, prepared.safi, prepared.ipv4_mode));
                 routes.push(prepared.nlri);
+                sources.push(source);
             }
             let max_len = export.max_message_len();
             let (afi, safi, ipv4_mode) = wire.expect("non-empty RTC withdrawal batch");
-            if !self.send_rtc_unreach_chunked(export, afi, safi, ipv4_mode, &routes, max_len) {
-                return;
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(
+                    GroupWire::Mp {
+                        afi,
+                        safi,
+                        mode: ipv4_mode,
+                        next_hop: None,
+                    },
+                    sources,
+                ),
+                |session| {
+                    session.send_rtc_unreach_chunked(export, afi, safi, ipv4_mode, &routes, max_len)
+                },
+            ) {
+                return false;
             }
         }
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
         // and chunked so each UPDATE fits the negotiated maximum message length.
         if !update.evpn_announce.is_empty() {
+            type EvpnGroup = (IpAddr, Arc<Vec<PathAttribute>>, Vec<EvpnRoute>, Vec<usize>);
             let mut attr_cache = MpAttrCache::default();
             let mut index = AttrGroupIndex::default();
-            let mut evpn_groups: Vec<(IpAddr, Arc<Vec<PathAttribute>>, Vec<EvpnRoute>)> =
-                Vec::new();
-            for evpn_route in update.evpn_announce.iter() {
+            let mut evpn_groups: Vec<EvpnGroup> = Vec::new();
+            for (source, evpn_route) in update.evpn_announce.iter().enumerate() {
                 let prepared =
                     SessionExportProfile::prepare_evpn_candidate_with(evpn_route, || {
                         export.prepare_mp_attributes_cached(
@@ -2042,14 +2732,33 @@ impl PeerSession {
                     });
                 let nh = prepared.next_hop;
                 match index.group(&prepared.attrs, Some(nh), None, evpn_groups.len()) {
-                    Ok(idx) => evpn_groups[idx].2.push(prepared.nlri),
-                    Err(_) => evpn_groups.push((nh, prepared.attrs, vec![prepared.nlri])),
+                    Ok(idx) => {
+                        evpn_groups[idx].2.push(prepared.nlri);
+                        evpn_groups[idx].3.push(source);
+                    }
+                    Err(_) => {
+                        evpn_groups.push((nh, prepared.attrs, vec![prepared.nlri], vec![source]));
+                    }
                 }
             }
             let max_len = export.max_message_len();
-            for (next_hop, attrs, routes) in evpn_groups {
-                if !self.send_evpn_reach_chunked(export, next_hop, &attrs, &routes, max_len) {
-                    return;
+            for (next_hop, attrs, routes, sources) in evpn_groups {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi: Afi::L2Vpn,
+                            safi: Safi::Evpn,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((next_hop, None)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_evpn_reach_chunked(export, next_hop, &attrs, &routes, max_len)
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -2065,8 +2774,9 @@ impl PeerSession {
                 IpAddr,
                 Vec<PathAttribute>,
                 Vec<rustbgpd_wire::bgpls::BgpLsNlri>,
+                Vec<usize>,
             )> = Vec::new();
-            for bgpls_route in &update.bgpls_announce {
+            for (source, bgpls_route) in update.bgpls_announce.iter().enumerate() {
                 let safi = bgpls_route.family.to_afi_safi().1;
                 if !self.negotiated_families().contains(&(Afi::BgpLs, safi)) {
                     continue;
@@ -2074,25 +2784,50 @@ impl PeerSession {
                 let prepared = export.prepare_bgpls_candidate(bgpls_route);
                 let attrs = prepared.attrs;
                 let nh = prepared.next_hop;
-                if let Some(group) = bgpls_groups.iter_mut().find(|(family, g_nh, g_attrs, _)| {
-                    *family == bgpls_route.family && *g_nh == nh && *g_attrs == attrs
-                }) {
+                if let Some(group) =
+                    bgpls_groups
+                        .iter_mut()
+                        .find(|(family, g_nh, g_attrs, _, _)| {
+                            *family == bgpls_route.family && *g_nh == nh && *g_attrs == attrs
+                        })
+                {
                     group.3.push(prepared.nlri);
+                    group.4.push(source);
                 } else {
-                    bgpls_groups.push((bgpls_route.family, nh, attrs, vec![prepared.nlri]));
+                    bgpls_groups.push((
+                        bgpls_route.family,
+                        nh,
+                        attrs,
+                        vec![prepared.nlri],
+                        vec![source],
+                    ));
                 }
             }
             let max_len = export.max_message_len();
-            for (family, next_hop, attrs, routes) in bgpls_groups {
-                if !self.send_bgpls_reach_chunked(
-                    family.to_afi_safi().1,
-                    next_hop,
-                    &attrs,
-                    &routes,
-                    export,
-                    max_len,
+            for (family, next_hop, attrs, routes, sources) in bgpls_groups {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi: Afi::BgpLs,
+                            safi: family.to_afi_safi().1,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((next_hop, None)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_bgpls_reach_chunked(
+                            family.to_afi_safi().1,
+                            next_hop,
+                            &attrs,
+                            &routes,
+                            export,
+                            max_len,
+                        )
+                    },
                 ) {
-                    return;
+                    return false;
                 }
             }
         }
@@ -2103,8 +2838,9 @@ impl PeerSession {
         if !update.vpn_announce.is_empty() {
             let mut attr_cache = MpAttrCache::default();
             let mut index = MpGroupIndex::default();
+            let mut source_groups: Vec<Vec<usize>> = Vec::new();
             let mut vpn_groups: Vec<MpRouteGroup<rustbgpd_wire::VpnNlriEntry>> = Vec::new();
-            for vpn_route in update.vpn_announce.iter() {
+            for (source, vpn_route) in update.vpn_announce.iter().enumerate() {
                 let family = vpn_route.afi_safi();
                 if !self.negotiated_families().contains(&family) {
                     continue;
@@ -2128,20 +2864,40 @@ impl PeerSession {
                         continue;
                     }
                 };
-                index.push(&mut vpn_groups, family, prepared);
+                let group = index.push(&mut vpn_groups, family, prepared);
+                if group == source_groups.len() {
+                    source_groups.push(Vec::new());
+                }
+                source_groups[group].push(source);
             }
             let max_len = export.max_message_len();
-            for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in vpn_groups {
-                if !self.send_vpn_reach_chunked(
-                    afi,
-                    next_hop,
-                    link_local_next_hop,
-                    &attrs,
-                    &routes,
-                    export,
-                    max_len,
+            for (((afi, _), next_hop, link_local_next_hop, attrs, routes), sources) in
+                vpn_groups.into_iter().zip(source_groups)
+            {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi: Safi::MplsVpn,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((next_hop, link_local_next_hop)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_vpn_reach_chunked(
+                            afi,
+                            next_hop,
+                            link_local_next_hop,
+                            &attrs,
+                            &routes,
+                            export,
+                            max_len,
+                        )
+                    },
                 ) {
-                    return;
+                    return false;
                 }
             }
         }
@@ -2152,8 +2908,9 @@ impl PeerSession {
         if !update.labeled_announce.is_empty() {
             let mut attr_cache = MpAttrCache::default();
             let mut index = MpGroupIndex::default();
+            let mut source_groups: Vec<Vec<usize>> = Vec::new();
             let mut labeled_groups: Vec<MpRouteGroup<rustbgpd_wire::LabeledNlriEntry>> = Vec::new();
-            for labeled_route in &update.labeled_announce {
+            for (source, labeled_route) in update.labeled_announce.iter().enumerate() {
                 let family = labeled_route.afi_safi();
                 if !self.negotiated_families().contains(&family) {
                     continue;
@@ -2177,20 +2934,40 @@ impl PeerSession {
                         continue;
                     }
                 };
-                index.push(&mut labeled_groups, family, prepared);
+                let group = index.push(&mut labeled_groups, family, prepared);
+                if group == source_groups.len() {
+                    source_groups.push(Vec::new());
+                }
+                source_groups[group].push(source);
             }
             let max_len = export.max_message_len();
-            for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in labeled_groups {
-                if !self.send_labeled_reach_chunked(
-                    afi,
-                    next_hop,
-                    link_local_next_hop,
-                    &attrs,
-                    &routes,
-                    export,
-                    max_len,
+            for (((afi, _), next_hop, link_local_next_hop, attrs, routes), sources) in
+                labeled_groups.into_iter().zip(source_groups)
+            {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi: Safi::LabeledUnicast,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((next_hop, link_local_next_hop)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_labeled_reach_chunked(
+                            afi,
+                            next_hop,
+                            link_local_next_hop,
+                            &attrs,
+                            &routes,
+                            export,
+                            max_len,
+                        )
+                    },
                 ) {
-                    return;
+                    return false;
                 }
             }
         }
@@ -2204,25 +2981,45 @@ impl PeerSession {
                 .negotiated_families()
                 .contains(&(Afi::Ipv4, Safi::RtConstrain))
         {
-            let mut rtc_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<rustbgpd_wire::RtcNlri>)> =
-                Vec::new();
-            for rtc_route in &update.rtc_announce {
+            type RtcGroup = (
+                IpAddr,
+                Vec<PathAttribute>,
+                Vec<rustbgpd_wire::RtcNlri>,
+                Vec<usize>,
+            );
+            let mut rtc_groups: Vec<RtcGroup> = Vec::new();
+            for (source, rtc_route) in update.rtc_announce.iter().enumerate() {
                 let prepared = export.prepare_rtc_candidate(rtc_route);
                 let attrs = prepared.attrs;
                 let nh = prepared.next_hop;
                 if let Some(group) = rtc_groups
                     .iter_mut()
-                    .find(|(g_nh, g_attrs, _)| *g_nh == nh && *g_attrs == attrs)
+                    .find(|(g_nh, g_attrs, _, _)| *g_nh == nh && *g_attrs == attrs)
                 {
                     group.2.push(prepared.nlri);
+                    group.3.push(source);
                 } else {
-                    rtc_groups.push((nh, attrs, vec![prepared.nlri]));
+                    rtc_groups.push((nh, attrs, vec![prepared.nlri], vec![source]));
                 }
             }
             let max_len = export.max_message_len();
-            for (next_hop, attrs, routes) in rtc_groups {
-                if !self.send_rtc_reach_chunked(export, next_hop, &attrs, &routes, max_len) {
-                    return;
+            for (next_hop, attrs, routes, sources) in rtc_groups {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi: Afi::Ipv4,
+                            safi: Safi::RtConstrain,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((next_hop, None)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_rtc_reach_chunked(export, next_hop, &attrs, &routes, max_len)
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -2230,57 +3027,106 @@ impl PeerSession {
         // attributes) in typed lists: one UPDATE never mixes SAFI 133 and 134.
         if !update.flowspec_announce.is_empty() {
             use super::export::FlowSpecNlri;
-            type Group<T> = (Afi, Vec<PathAttribute>, Vec<T>);
-            fn push<T>(groups: &mut Vec<Group<T>>, afi: Afi, attrs: Vec<PathAttribute>, nlri: T) {
+            type Group<T> = (Afi, Vec<PathAttribute>, Vec<T>, Vec<usize>);
+            fn push<T>(
+                groups: &mut Vec<Group<T>>,
+                afi: Afi,
+                attrs: Vec<PathAttribute>,
+                nlri: T,
+                source: usize,
+            ) {
                 if let Some(group) = groups
                     .iter_mut()
-                    .find(|(a, ga, _)| *a == afi && *ga == attrs)
+                    .find(|(a, ga, _, _)| *a == afi && *ga == attrs)
                 {
                     group.2.push(nlri);
+                    group.3.push(source);
                 } else {
-                    groups.push((afi, attrs, vec![nlri]));
+                    groups.push((afi, attrs, vec![nlri], vec![source]));
                 }
             }
             let mut global: Vec<Group<FlowSpecRule>> = Vec::new();
             let mut vpn: Vec<Group<VpnFlowSpecRule>> = Vec::new();
-            for fs_route in &update.flowspec_announce {
+            for (source, fs_route) in update.flowspec_announce.iter().enumerate() {
                 let prepared = export.prepare_flowspec_candidate(fs_route);
                 match prepared.nlri {
                     FlowSpecNlri::Global(rule) => {
-                        push(&mut global, prepared.afi, prepared.attrs, rule);
+                        push(&mut global, prepared.afi, prepared.attrs, rule, source);
                     }
-                    FlowSpecNlri::Vpn(rule) => push(&mut vpn, prepared.afi, prepared.attrs, rule),
+                    FlowSpecNlri::Vpn(rule) => {
+                        push(&mut vpn, prepared.afi, prepared.attrs, rule, source);
+                    }
                 }
             }
             let max_len = export.max_message_len();
-            for (afi, attrs, rules) in &global {
-                if !self.send_mp_chunked(rules, max_len, "FlowSpec", "announcement", |chunk| {
-                    export.build_mp_reach(
-                        *afi,
-                        Safi::FlowSpec,
-                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                        None,
-                        attrs,
-                        ReachNlri::FlowSpec(chunk),
-                        Ipv4UnicastMode::Body,
-                    )
-                }) {
-                    return;
+            for (afi, attrs, rules, sources) in global {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi: Safi::FlowSpec,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((IpAddr::V4(Ipv4Addr::UNSPECIFIED), None)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_mp_chunked(
+                            &rules,
+                            max_len,
+                            "FlowSpec",
+                            "announcement",
+                            |chunk| {
+                                export.build_mp_reach(
+                                    afi,
+                                    Safi::FlowSpec,
+                                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                                    None,
+                                    &attrs,
+                                    ReachNlri::FlowSpec(chunk),
+                                    Ipv4UnicastMode::Body,
+                                )
+                            },
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
-            for (afi, attrs, rules) in &vpn {
-                if !self.send_mp_chunked(rules, max_len, "VPN FlowSpec", "announcement", |chunk| {
-                    export.build_mp_reach(
-                        *afi,
-                        Safi::FlowSpecVpn,
-                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                        None,
-                        attrs,
-                        ReachNlri::VpnFlowSpec(chunk),
-                        Ipv4UnicastMode::Body,
-                    )
-                }) {
-                    return;
+            for (afi, attrs, rules, sources) in vpn {
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(
+                        GroupWire::Mp {
+                            afi,
+                            safi: Safi::FlowSpecVpn,
+                            mode: Ipv4UnicastMode::Body,
+                            next_hop: Some((IpAddr::V4(Ipv4Addr::UNSPECIFIED), None)),
+                        },
+                        sources,
+                    ),
+                    |session| {
+                        session.send_mp_chunked(
+                            &rules,
+                            max_len,
+                            "VPN FlowSpec",
+                            "announcement",
+                            |chunk| {
+                                export.build_mp_reach(
+                                    afi,
+                                    Safi::FlowSpecVpn,
+                                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                                    None,
+                                    &attrs,
+                                    ReachNlri::VpnFlowSpec(chunk),
+                                    Ipv4UnicastMode::Body,
+                                )
+                            },
+                        )
+                    },
+                ) {
+                    return false;
                 }
             }
         }
@@ -2291,19 +3137,15 @@ impl PeerSession {
                 .copied()
                 .filter(|(_, _, subtype)| matches!(subtype, RouteRefreshSubtype::EoRR))
             {
-                let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(
-                    afi, safi, subtype,
-                ));
-                if let Err(e) = self.enqueue_bulk(&msg) {
-                    warn!(
-                        peer = %self.peer_label,
-                        error = %e,
-                        "failed to send End-of-RIB-Refresh"
-                    );
-                    return;
+                if !self.send_or_defer(
+                    deferred,
+                    PendingGroup::new(GroupWire::Refresh(afi, safi, subtype), vec![0]),
+                    |session| {
+                        session.send_refresh_frame(afi, safi, subtype, export.max_message_len())
+                    },
+                ) {
+                    return false;
                 }
-                self.metrics
-                    .record_message_sent(&self.peer_label, "route_refresh");
             }
         }
         // Send End-of-RIB markers
@@ -2323,19 +3165,222 @@ impl PeerSession {
             {
                 continue;
             }
-            let msg = export
-                .build_end_of_rib(*afi, *safi)
-                .expect("empty End-of-RIB construction is infallible");
-            let wire_msg = Message::Update(msg);
-            if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                warn!(peer = %self.peer_label, error = %e, "failed to send End-of-RIB for {afi:?}/{safi:?}");
-                return;
+            if !self.send_or_defer(
+                deferred,
+                PendingGroup::new(GroupWire::Eor(*afi, *safi), vec![0]),
+                |session| session.send_eor_frame(export, *afi, *safi),
+            ) {
+                return false;
             }
-            info!(peer = %self.peer_label, afi = ?afi, safi = ?safi, "sent End-of-RIB");
+        }
+        true
+    }
+    fn send_refresh_frame(
+        &mut self,
+        afi: Afi,
+        safi: Safi,
+        subtype: RouteRefreshSubtype,
+        max_len: usize,
+    ) -> Result<usize, ()> {
+        if !self.writer_frame_room(max_len)? {
+            return Ok(0);
+        }
+        let message =
+            Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(afi, safi, subtype));
+        if let Err(error) = self.enqueue_bulk(&message) {
+            warn!(peer = %self.peer_label, %error, "failed to send ROUTE-REFRESH frame");
+            return Err(());
+        }
+        if subtype == RouteRefreshSubtype::Normal {
+            info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH request (RIB-manager initiated)");
+        }
+        self.metrics
+            .record_message_sent(&self.peer_label, "route_refresh");
+        Ok(1)
+    }
+
+    fn send_eor_frame(
+        &mut self,
+        export: &SessionExportProfile,
+        afi: Afi,
+        safi: Safi,
+    ) -> Result<usize, ()> {
+        if !self.writer_frame_room(export.max_message_len())? {
+            return Ok(0);
+        }
+        let message = export
+            .build_end_of_rib(afi, safi)
+            .expect("empty End-of-RIB construction is infallible");
+        if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
+            warn!(peer = %self.peer_label, %error, "failed to send End-of-RIB for {afi:?}/{safi:?}");
+            return Err(());
+        }
+        info!(peer = %self.peer_label, ?afi, ?safi, "sent End-of-RIB");
+        self.config.neighbor_counters.record_update_sent();
+        self.metrics.record_message_sent(&self.peer_label, "update");
+        Ok(1)
+    }
+
+    /// A blocked group and every following group keep only source indices.
+    fn send_or_defer(
+        &mut self,
+        deferred: &mut VecDeque<PendingGroup>,
+        mut group: PendingGroup,
+        send: impl FnOnce(&mut Self) -> Result<usize, ()>,
+    ) -> bool {
+        if deferred.is_empty() {
+            match send(self) {
+                Ok(count) if count == group.rows.len() => return true,
+                Ok(count) => group.next = count,
+                Err(()) => return false,
+            }
+        }
+        deferred.push_back(group);
+        true
+    }
+
+    /// Drain a parked slice before advancing its source cursor. The temporary
+    /// attributes and chunk copies are dropped before another actor turn.
+    fn resume_pending_slice(&mut self, pending: &mut PendingOutbound) -> Result<(), ()> {
+        let snapshot = self.outbound_snapshot(&pending.update).ok_or(())?;
+        let export = snapshot
+            .as_any()
+            .downcast_ref::<SessionExportProfile>()
+            .expect("validated session export snapshot");
+        let max_len = export.max_message_len();
+        let slice = pending.pending_slice.as_mut().expect("active slice");
+        while let Some(group) = slice.groups.front() {
+            if !self.writer_frame_room(max_len)? {
+                break;
+            }
+            let sent = match group.wire {
+                GroupWire::Refresh(afi, safi, subtype) => {
+                    self.send_refresh_frame(afi, safi, subtype, max_len)?
+                }
+                GroupWire::Eor(afi, safi) => self.send_eor_frame(export, afi, safi)?,
+                wire => {
+                    let (afi, safi) = match wire {
+                        GroupWire::Mp { afi, safi, .. } => (afi, safi),
+                        _ => (Afi::Ipv4, Safi::Unicast),
+                    };
+                    let (family, withdrawal) = resumed_log_names(slice.phase, afi, safi);
+                    let attrs = slice.attributes(group, &pending.update, export);
+                    let rows = &group.rows[group.next..];
+                    let build = |chunk: &[usize]| {
+                        slice.build_chunk(group, chunk, &pending.update, export, &attrs)
+                    };
+                    if matches!(wire, GroupWire::Ipv4Body)
+                        || matches!(
+                            (slice.phase, wire),
+                            (
+                                OutboundPhase::Announce,
+                                GroupWire::Mp {
+                                    afi: Afi::Ipv4,
+                                    safi: Safi::Unicast,
+                                    ..
+                                }
+                            )
+                        )
+                    {
+                        let kind = if withdrawal { "withdraw" } else { "announce" };
+                        self.send_v4_chunked(rows, max_len, kind, |chunk| {
+                            build(chunk).expect("validated unicast chunk")
+                        })?
+                    } else if matches!(
+                        slice.phase,
+                        OutboundPhase::Announce
+                            | OutboundPhase::Withdraw
+                            | OutboundPhase::FlowspecAnnounce
+                            | OutboundPhase::FlowspecWithdraw
+                    ) {
+                        let kind = if withdrawal {
+                            "withdrawal"
+                        } else {
+                            "announcement"
+                        };
+                        self.send_mp_chunked(rows, max_len, family, kind, build)?
+                    } else {
+                        let initial_chunk = if matches!(
+                            slice.phase,
+                            OutboundPhase::EvpnAnnounce | OutboundPhase::EvpnWithdraw
+                        ) {
+                            rows.len().clamp(1, 1000)
+                        } else {
+                            1000
+                        };
+                        self.send_resumed_family_chunked(
+                            rows,
+                            max_len,
+                            initial_chunk,
+                            (family, withdrawal),
+                            build,
+                        )?
+                    }
+                }
+            };
+            let group = slice.groups.front_mut().expect("current group remains");
+            group.next += sent;
+            if group.next < group.rows.len() {
+                break;
+            }
+            slice.groups.pop_front();
+        }
+        if slice.groups.is_empty() {
+            pending.pending_slice = None;
+        }
+        Ok(())
+    }
+
+    /// The existing 1,000-entry (or shorter EVPN) probe and halving used by
+    /// typed MP families, applied to source indices on cold resume.
+    fn send_resumed_family_chunked(
+        &mut self,
+        rows: &[usize],
+        max_len: usize,
+        mut chunk_size: usize,
+        (family, withdrawal): (&'static str, bool),
+        mut build: impl FnMut(&[usize]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
+    ) -> Result<usize, ()> {
+        let mut next = 0;
+        while next < rows.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(next);
+            }
+            let end = (next + chunk_size).min(rows.len());
+            let message = build(&rows[next..end]).expect("previously validated family chunk");
+            if message.encoded_len() > max_len {
+                if chunk_size == 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = message.encoded_len(),
+                        max = max_len,
+                        "single {family} {} exceeds maximum message length — sending Cease/Out-of-Resources and tearing down",
+                        if withdrawal { "withdrawal" } else { "route" }
+                    );
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
+                    return Err(());
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
+                warn!(
+                    peer = %self.peer_label,
+                    %error,
+                    "failed to send {family} {} UPDATE",
+                    if withdrawal { "withdrawal" } else { "announce" }
+                );
+                return Err(());
+            }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
+            next = end;
         }
+        Ok(next)
     }
+
     /// Split `entries` into as many wire UPDATEs as needed so each
     /// `build`-produced message fits `max_len`, enqueueing each in order.
     /// The exact profile builder emits one message regardless of size, so a large
@@ -2346,8 +3391,8 @@ impl PeerSession {
     /// RIB believes the whole group was advertised. Chunking keeps every prefix
     /// on the wire. On overflow the chunk halves down to one entry; a lone
     /// entry that still cannot fit tears the session down (see below). `kind`
-    /// names the traffic for the failure log. Returns false on a send failure
-    /// so the caller stops. Used by all four IPv4-unicast paths (body/MP
+    /// names the traffic for the failure log. Returns the successful entry
+    /// count, or an error so the caller stops. Used by all four IPv4-unicast paths (body/MP
     /// announce and withdrawal); the per-family helpers below follow the same
     /// shape.
     fn send_v4_chunked<E, F>(
@@ -2356,7 +3401,7 @@ impl PeerSession {
         max_len: usize,
         kind: &'static str,
         mut build: F,
-    ) -> bool
+    ) -> Result<usize, ()>
     where
         F: FnMut(&[E]) -> UpdateMessage,
     {
@@ -2368,6 +3413,9 @@ impl PeerSession {
         let mut chunk_size: usize = entries.len().min(max_len / 2).max(1);
         let mut idx: usize = 0;
         while idx < entries.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(entries.len());
             let msg = build(&entries[idx..end]);
             let encoded_len = msg.encoded_len();
@@ -2397,20 +3445,20 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
             }
             if let Err(e) = self.enqueue_bulk(&Message::Update(msg)) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send IPv4 {kind} UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
 
     /// Fallible size-aware sender for `MP_REACH/MP_UNREACH` families whose
@@ -2427,7 +3475,7 @@ impl PeerSession {
         family: &'static str,
         kind: &'static str,
         mut build: F,
-    ) -> bool
+    ) -> Result<usize, ()>
     where
         F: FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
     {
@@ -2447,6 +3495,9 @@ impl PeerSession {
         let mut failed_upper: Option<usize> = None;
         let mut idx = 0;
         while idx < entries.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(entries.len());
             let probe_size = end - idx;
             let candidate = build(&entries[idx..end]);
@@ -2486,12 +3537,12 @@ impl PeerSession {
                 self.trigger_outbound_out_of_resources_teardown(
                     crate::handle::SessionFailureCause::PostCommitInvariant,
                 );
-                return false;
+                return Err(());
             }
             let message = candidate.expect("successful MP build checked above");
             if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
                 warn!(peer = %self.peer_label, %error, "failed to send {family} {kind} UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
@@ -2512,7 +3563,7 @@ impl PeerSession {
                 };
             }
         }
-        true
+        Ok(idx)
     }
 
     /// Send a batch of EVPN announcements as one or more `MP_REACH_NLRI`
@@ -2527,13 +3578,16 @@ impl PeerSession {
         base_attrs: &[PathAttribute],
         routes: &[EvpnRoute],
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         // Initial chunk size: 1000 fits comfortably under the 65535-byte
         // Extended Messages limit even for Type 5/IPv6 routes (~60 B each)
         // and shrinks on overflow for the standard 4096-byte limit.
         let mut chunk_size = routes.len().clamp(1, 1000);
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_reach(
@@ -2567,7 +3621,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2575,13 +3629,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of EVPN withdrawals as one or more `MP_UNREACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
@@ -2593,10 +3647,13 @@ impl PeerSession {
         ipv4_mode: Ipv4UnicastMode,
         routes: &[EvpnRoute],
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size = routes.len().clamp(1, 1000);
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::Evpn(&routes[idx..end]), ipv4_mode)
@@ -2612,7 +3669,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2620,13 +3677,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of BGP-LS announcements as one or more `MP_REACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
@@ -2638,10 +3695,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
         profile: &SessionExportProfile,
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_reach(
@@ -2665,7 +3725,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2673,13 +3733,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS announce UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of BGP-LS withdrawals as one or more `MP_UNREACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
@@ -2691,10 +3751,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
         profile: &SessionExportProfile,
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::BgpLs(&routes[idx..end]), ipv4_mode)
@@ -2710,7 +3773,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2718,13 +3781,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS withdrawal UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of VPNv4/VPNv6 announcements as one or more
     /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
@@ -2749,10 +3812,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::VpnNlriEntry],
         profile: &SessionExportProfile,
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_reach(
@@ -2776,7 +3842,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2784,13 +3850,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN announce UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of VPNv4/VPNv6 withdrawals as one or more
     /// `MP_UNREACH_NLRI` UPDATEs, splitting so each encoded message fits
@@ -2803,10 +3869,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::VpnNlriEntry],
         profile: &SessionExportProfile,
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::Vpn(&routes[idx..end]), ipv4_mode)
@@ -2822,7 +3891,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2830,13 +3899,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN withdrawal UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of labeled-unicast announcements as one or more
     /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
@@ -2855,10 +3924,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::LabeledNlriEntry],
         profile: &SessionExportProfile,
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_reach(
@@ -2882,7 +3954,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2890,13 +3962,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send labeled announce UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of labeled-unicast withdrawals as one or more
     /// `MP_UNREACH_NLRI` UPDATEs, splitting so each encoded message fits
@@ -2910,10 +3982,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::LabeledNlriEntry],
         profile: &SessionExportProfile,
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_unreach(
@@ -2934,7 +4009,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2942,13 +4017,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send labeled withdrawal UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of RT-Constrain announcements as one or more
     /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
@@ -2960,10 +4035,13 @@ impl PeerSession {
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::RtcNlri],
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_reach(
@@ -2987,7 +4065,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -2995,13 +4073,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send RTC announce UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     /// Send a batch of RT-Constrain withdrawals as one or more
     /// `MP_UNREACH_NLRI` UPDATEs, splitting so each encoded message fits
@@ -3014,10 +4092,13 @@ impl PeerSession {
         ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::RtcNlri],
         max_len: usize,
-    ) -> bool {
+    ) -> Result<usize, ()> {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
+            if !self.writer_frame_room(max_len)? {
+                return Ok(idx);
+            }
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::Rtc(&routes[idx..end]), ipv4_mode)
@@ -3033,7 +4114,7 @@ impl PeerSession {
                     self.trigger_outbound_out_of_resources_teardown(
                         crate::handle::SessionFailureCause::PostCommitInvariant,
                     );
-                    return false;
+                    return Err(());
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -3041,13 +4122,13 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send RTC withdrawal UPDATE");
-                return false;
+                return Err(());
             }
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
-        true
+        Ok(idx)
     }
     // Test-facing compatibility helpers delegate to the same immutable
     // profile preparation used by live emission. They republish first because
@@ -3215,11 +4296,12 @@ mod tests {
             labeled_announce: Vec::new().into_iter(),
             announce: Vec::new().into_iter(),
             retiring_rest: RetiringRest::default(),
+            pending_slice: None,
             dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
             test_slice_cost: None,
         };
         let mut sliced = Vec::new();
-        while let Some(slice) = pending.next_slice(3) {
+        while let Some((_, slice)) = pending.next_slice(3) {
             if slice.announce.is_empty() {
                 continue;
             }
@@ -3359,7 +4441,7 @@ mod tests {
                     1,
                 )
             };
-            assert!(!sent, "overflowing EVPN send must fail closed");
+            assert!(sent.is_err(), "overflowing EVPN send must fail closed");
             assert!(session.read_half.is_none());
             assert!(session.writer_bulk_tx.is_none());
             assert!(session.writer_priority_tx.is_none());

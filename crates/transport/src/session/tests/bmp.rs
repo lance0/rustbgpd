@@ -716,8 +716,8 @@ async fn writer_saturation_orders_bmp_peer_down_after_last_mirrored_update() {
         BmpEvent::PeerUp { .. } => {}
         other => panic!("expected BMP PeerUp, got {other:?}"),
     }
-    // Swap in a capacity-1 bulk channel that is never drained: the
-    // first UPDATE enqueues (and is mirrored), the second hits Full.
+    // The first UPDATE fills this stand-in writer and is mirrored. The
+    // second waits for room, then the admission deadline tears it down.
     let (bulk_tx, _bulk_rx) = mpsc::channel(1);
     session.writer_bulk_tx = Some(bulk_tx);
     for lp in [100, 200] {
@@ -725,11 +725,14 @@ async fn writer_saturation_orders_bmp_peer_down_after_last_mirrored_update() {
         update.exact_export_snapshot = Some(session.publish_export_profile());
         update.announce = vec![make_route(lp)].into();
         update.next_hop_override = vec![None].into();
-        session.send_route_update(update);
+        session.handle_outbound_route_update(update).await;
     }
+    assert!(session.pending_outbound.is_some());
+    assert!(session.writer_bulk_tx.is_some(), "capacity pressure waits");
+    session.expire_outbound_admission();
     assert!(
         session.writer_bulk_tx.is_none(),
-        "bulk-channel Full must trigger the saturation teardown"
+        "the admission deadline must trigger the saturation teardown"
     );
     // Run-loop follow-through: the writer exit surfaces as a TCP
     // disconnect and drives the FSM out of Established.

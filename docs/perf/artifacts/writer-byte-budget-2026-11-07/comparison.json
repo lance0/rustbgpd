@@ -1,0 +1,1154 @@
+{
+  "campaign": "writer-byte-budget-2026-11-07",
+  "draft": true,
+  "sources": {
+    "control": "e17a00abf3f13a3e2dbe657021ad1597dd1cdf07",
+    "candidate": "1550b47f722a76a11a6e8d733625b531ff31ca76",
+    "common_harness": "Identical complete 30-cell definitions in both arms. The nine direct encoding cells disable only the mock completion watch outside the measured interval; admission and shared delivery retain it."
+  },
+  "environment": {
+    "system": "Linux 7.0.0-30-generic x86_64",
+    "cpu": "AMD Ryzen Threadripper 7970X",
+    "physical_cores": 32,
+    "logical_cpus": 64,
+    "visible_memory_kib": 131375844,
+    "swap_kib": 0,
+    "rustc": "1.99.1 (58cf8f9c3 2026-10-13)",
+    "llvm": "23.1.1",
+    "criterion": "0.8.2",
+    "benchmark_allocator": "jemalloc",
+    "allocation_diagnostic_allocator": "System wrapper; requested bytes only"
+  },
+  "method": {
+    "order": [
+      "aa1",
+      "aa2",
+      "abba1",
+      "abba2",
+      "abba3",
+      "abba4",
+      "confirmation1",
+      "confirmation2"
+    ],
+    "arms": [
+      "A",
+      "A",
+      "A",
+      "B",
+      "B",
+      "A",
+      "A",
+      "B"
+    ],
+    "outbound_cells": 30,
+    "inbound_cells": 0,
+    "sample_size": 30,
+    "warmup_seconds": 1,
+    "measurement_seconds": 2,
+    "cpu": 5,
+    "quiet_gate": "Before each leg: two accepted samples at least 30 seconds apart, load1 below 2, all governors performance, no competitors, no swap delta.",
+    "point_statistic": "Criterion median",
+    "aa_ratio": "max(A1,A2)/min(A1,A2)",
+    "abba_ratio": "mean(B_abba2/A_abba1,B_abba3/A_abba4)",
+    "threshold": "max(1.02,aa_ratio+0.01)",
+    "failure_rule": "FAIL only when ABBA and confirmation both exceed the threshold.",
+    "independent_replication_trigger": "A/A ratio above 1.02",
+    "independent_build": "Both timed arms were freshly rebuilt for the common harness correction; matching library feature/profile graphs and corresponding executable hashes were verified against independent builds.",
+    "adaptive_slice_target_ms": 4,
+    "adaptive_charging": "The 4 ms target and initial charging boundary are unchanged. Both begin charging after source-slice materialization; the candidate also charges partial-group resumption.",
+    "cell_identity": "cell is the Criterion benchmark id.",
+    "design": "Per-frame negotiated-maximum headroom; exact length for already encoded shared frames. No route-size estimator or RIB change.",
+    "arm_identity": {
+      "A": "parent (control)",
+      "B": "candidate"
+    }
+  },
+  "binaries_sha256": {
+    "parent": {
+      "outbound-encode": "d894c068bdb48dde2201ad082cf785f560b68bf46f2402111920d4eda15face4",
+      "writer-memory": "ae52254428fc24683ac9d7240b91c91c298819af1ef0d1d2fa2cca35c66f8dc4"
+    },
+    "candidate": {
+      "outbound-encode": "5cf1181a0392d4883ad92cb6bb8835d174b5d65e7cf5bf26f94cdbfafaf6dc77",
+      "writer-memory": "654dc1e01a160e796e68ff971749a323260f2cb362206c96596f4570ad283c36"
+    }
+  },
+  "final_timing": {
+    "verdict": "FAIL",
+    "groups": {
+      "outbound": {
+        "verdict": "FAIL",
+        "scope": "sum of synchronous session admission elapsed intervals from Instant; real cursor; controlled in-memory writer; excludes drain time; not thread CPU or TCP throughput",
+        "statistic": "Criterion median point estimates; symmetric A/A max/min; mean of counterbalanced ABBA pair ratios",
+        "legs": [
+          {
+            "label": "aa1",
+            "arm": "A",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "aa2",
+            "arm": "A",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "abba1",
+            "arm": "A",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "abba2",
+            "arm": "B",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "abba3",
+            "arm": "B",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "abba4",
+            "arm": "A",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "confirmation1",
+            "arm": "A",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          },
+          {
+            "label": "confirmation2",
+            "arm": "B",
+            "exit": 0,
+            "quiet_gate": "PASS"
+          }
+        ],
+        "cells": [
+          {
+            "cell": "failover_encode/announce_only/32",
+            "aa_ratio": 1.0557472816747606,
+            "requires_independent_replication": true,
+            "abba_pair_ratios": [
+              0.9926116578536762,
+              0.9991198008993506
+            ],
+            "abba_ratio": 0.9958657293765134,
+            "confirmation_ratio": 0.9850455751701882,
+            "threshold": 1.0657472816747606,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 184200.5353174603,
+              "aa2": 194469.21444444446,
+              "abba1": 183580.8208791209,
+              "abba2": 182224.46296296298,
+              "abba3": 182980.5984375,
+              "abba4": 183141.79968487396,
+              "confirmation1": 182836.21842105262,
+              "confirmation2": 180102.00793650793
+            }
+          },
+          {
+            "cell": "failover_encode/announce_only/8",
+            "aa_ratio": 1.0024568793597184,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0307336671112095,
+              0.9986861592654616
+            ],
+            "abba_ratio": 1.0147099131883355,
+            "confirmation_ratio": 0.9892994786253168,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 122014.86804812835,
+              "aa2": 122314.64385901456,
+              "abba1": 122153.38068181818,
+              "abba2": 125907.60202020203,
+              "abba3": 121305.48871212121,
+              "abba4": 121465.07447478993,
+              "confirmation1": 121535.5172413793,
+              "confirmation2": 120235.02384135473
+            }
+          },
+          {
+            "cell": "failover_encode/mixed/32",
+            "aa_ratio": 1.0043682158078615,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0104838160947214,
+              1.018131528376069
+            ],
+            "abba_ratio": 1.0143076722353952,
+            "confirmation_ratio": 1.0006662489345899,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 671941.9444444445,
+              "aa2": 674877.1318681319,
+              "abba1": 675214.1145833334,
+              "abba2": 682292.9351851852,
+              "abba3": 682029.5238095238,
+              "abba4": 669883.5119047619,
+              "confirmation1": 675339.8333333333,
+              "confirmation2": 675789.7777777778
+            }
+          },
+          {
+            "cell": "failover_encode/mixed/8",
+            "aa_ratio": 1.009495770224274,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0025199460469694,
+              1.0034321235803052
+            ],
+            "abba_ratio": 1.0029760348136372,
+            "confirmation_ratio": 0.989932486852919,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 247462.93907563025,
+              "aa2": 245135.1916221034,
+              "abba1": 245209.081442577,
+              "abba2": 245826.99509803922,
+              "abba3": 246450.4742647059,
+              "abba4": 245607.518907563,
+              "confirmation1": 246890.88655462186,
+              "confirmation2": 244405.30930833874
+            }
+          },
+          {
+            "cell": "outbound_admission/distinct_values",
+            "aa_ratio": 1.0005935982592953,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.029401236776243,
+              1.0320017882310581
+            ],
+            "abba_ratio": 1.0307015125036507,
+            "confirmation_ratio": 1.031608198607889,
+            "threshold": 1.02,
+            "verdict": "FAIL",
+            "medians_ns": {
+              "aa1": 5379955.053571429,
+              "aa2": 5383148.5855263155,
+              "abba1": 5379900.666666666,
+              "abba2": 5538076.4,
+              "abba3": 5587720.964285715,
+              "abba4": 5414448.916666666,
+              "confirmation1": 5382688.546666667,
+              "confirmation2": 5552825.635294117
+            }
+          },
+          {
+            "cell": "outbound_admission/equal_values",
+            "aa_ratio": 1.003464073523531,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              0.9975016762066198,
+              1.0039355396033702
+            ],
+            "abba_ratio": 1.000718607904995,
+            "confirmation_ratio": 1.0036153594880257,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 2664320.3899456523,
+              "aa2": 2673549.791666667,
+              "abba1": 2655670.5142857144,
+              "abba2": 2649035.789452496,
+              "abba3": 2664234.3350694445,
+              "abba4": 2653790.2384868423,
+              "confirmation1": 2648153.4035947714,
+              "confirmation2": 2657727.430128205
+            }
+          },
+          {
+            "cell": "outbound_admission/evpn_distinct_values",
+            "aa_ratio": 1.0017943871732824,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0179170202798808,
+              1.021442445256306
+            ],
+            "abba_ratio": 1.0196797327680933,
+            "confirmation_ratio": 1.0001426004254217,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 4413126.916666666,
+              "aa2": 4421045.775,
+              "abba1": 4407475.703076923,
+              "abba2": 4486444.534632035,
+              "abba3": 4510218.246753247,
+              "abba4": 4415538.308300395,
+              "confirmation1": 4465291.126373626,
+              "confirmation2": 4465927.878787879
+            }
+          },
+          {
+            "cell": "outbound_admission/evpn_shared_arc",
+            "aa_ratio": 1.0006304699780506,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0067675135541176,
+              1.0062422075991015
+            ],
+            "abba_ratio": 1.0065048605766096,
+            "confirmation_ratio": 1.015490830630243,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 474970.237654321,
+              "aa2": 475269.69212962966,
+              "abba1": 477107.15236111113,
+              "abba2": 480335.98148148146,
+              "abba3": 481065.9479166666,
+              "abba4": 478081.6629273504,
+              "confirmation1": 473482.2053140097,
+              "confirmation2": 480816.837962963
+            }
+          },
+          {
+            "cell": "outbound_admission/evpn_withdraw",
+            "aa_ratio": 1.0017932967718275,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.032327238351151,
+              0.9969404861785862
+            ],
+            "abba_ratio": 1.0146338622648687,
+            "confirmation_ratio": 1.0402178831918203,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 407996.01988636365,
+              "aa2": 407265.67167207797,
+              "abba1": 407264.6711229946,
+              "abba2": 420430.4132183908,
+              "abba3": 425770.4138095238,
+              "abba4": 427077.06198347104,
+              "confirmation1": 406688.91676767677,
+              "confirmation2": 423045.0841176471
+            }
+          },
+          {
+            "cell": "outbound_admission/flowspec_v4_distinct_values",
+            "aa_ratio": 1.0621192115167952,
+            "requires_independent_replication": true,
+            "abba_pair_ratios": [
+              1.0356365158534624,
+              1.125931776194372
+            ],
+            "abba_ratio": 1.0807841460239171,
+            "confirmation_ratio": 0.8868988818795399,
+            "threshold": 1.0721192115167952,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 44316720.75,
+              "aa2": 47069640.5,
+              "abba1": 46324983.25,
+              "abba2": 47975844.25,
+              "abba3": 48021513.25,
+              "abba4": 42650464.5,
+              "confirmation1": 49506539.75,
+              "confirmation2": 43907294.75
+            }
+          },
+          {
+            "cell": "outbound_admission/flowspec_v4_equal_values",
+            "aa_ratio": 1.0150794826927823,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.00347549319845,
+              1.0023713683765973
+            ],
+            "abba_ratio": 1.0029234307875237,
+            "confirmation_ratio": 0.9990392190924406,
+            "threshold": 1.0250794826927823,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 3848114.0,
+              "aa2": 3790948.458333333,
+              "abba1": 3813686.8928571427,
+              "abba2": 3826941.3357142857,
+              "abba3": 3804078.3062678063,
+              "abba4": 3795078.7764705885,
+              "confirmation1": 3805228.045,
+              "confirmation2": 3801572.0545454547
+            }
+          },
+          {
+            "cell": "outbound_admission/flowspec_v4_withdraw",
+            "aa_ratio": 1.0042081724975058,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              0.9961083221637583,
+              1.013616326214838
+            ],
+            "abba_ratio": 1.0048623241892982,
+            "confirmation_ratio": 1.0104796252744541,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 2226280.3726086956,
+              "aa2": 2235648.9444444445,
+              "abba1": 2250623.4886363633,
+              "abba2": 2241864.787087912,
+              "abba3": 2250376.6696428573,
+              "abba4": 2220146.431585678,
+              "confirmation1": 2221209.314285714,
+              "confirmation2": 2244486.7555555557
+            }
+          },
+          {
+            "cell": "outbound_admission/large_extended",
+            "aa_ratio": 1.0536525793933655,
+            "requires_independent_replication": true,
+            "abba_pair_ratios": [
+              0.6333847114755157,
+              0.6053469501189876
+            ],
+            "abba_ratio": 0.6193658307972516,
+            "confirmation_ratio": 0.6035070467533759,
+            "threshold": 1.0636525793933655,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 109801316.0,
+              "aa2": 104210171.5,
+              "abba1": 109100221.0,
+              "abba2": 69102412.0,
+              "abba3": 64977033.0,
+              "abba4": 107338499.0,
+              "confirmation1": 108313355.0,
+              "confirmation2": 65367873.0
+            }
+          },
+          {
+            "cell": "outbound_admission/large_standard",
+            "aa_ratio": 1.0043254929392467,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0360356816996894,
+              1.0056222311235898
+            ],
+            "abba_ratio": 1.0208289564116395,
+            "confirmation_ratio": 1.136512552862817,
+            "threshold": 1.02,
+            "verdict": "FAIL",
+            "medians_ns": {
+              "aa1": 5370137.525,
+              "aa2": 5347009.075,
+              "abba1": 5298327.851724138,
+              "abba2": 5489256.707729468,
+              "abba3": 5456621.826923077,
+              "abba4": 5426114.954545455,
+              "confirmation1": 5354455.157289002,
+              "confirmation2": 6085405.5
+            }
+          },
+          {
+            "cell": "outbound_admission/shared_arc",
+            "aa_ratio": 1.0003673209676978,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0148727159615611,
+              0.9556066451892231
+            ],
+            "abba_ratio": 0.9852396805753921,
+            "confirmation_ratio": 1.021214393644262,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 391647.2392376142,
+              "aa2": 391503.43181818177,
+              "abba1": 391714.79085729085,
+              "abba2": 397540.65367965365,
+              "abba3": 398729.87080039526,
+              "abba4": 417253.1373737374,
+              "confirmation1": 392080.5444444445,
+              "confirmation2": 400398.29545454547
+            }
+          },
+          {
+            "cell": "outbound_admission/vpn_distinct_values",
+            "aa_ratio": 1.0016838454180428,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0753095850714736,
+              1.0741453658999014
+            ],
+            "abba_ratio": 1.0747274754856875,
+            "confirmation_ratio": 1.0646631875648205,
+            "threshold": 1.02,
+            "verdict": "FAIL",
+            "medians_ns": {
+              "aa1": 5112645.24789916,
+              "aa2": 5121254.152173913,
+              "abba1": 5101067.395833334,
+              "abba2": 5485226.664835164,
+              "abba3": 5480910.505681818,
+              "abba4": 5102577.993333334,
+              "confirmation1": 5164296.853896104,
+              "confirmation2": 5498236.75
+            }
+          },
+          {
+            "cell": "outbound_admission/vpn_flowspec_v6_distinct_values",
+            "aa_ratio": 1.0723492103840475,
+            "requires_independent_replication": true,
+            "abba_pair_ratios": [
+              1.0891875604502725,
+              1.0498185830838995
+            ],
+            "abba_ratio": 1.0695030717670861,
+            "confirmation_ratio": 0.9360343298204121,
+            "threshold": 1.0823492103840475,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 45020557.0,
+              "aa2": 48277758.75,
+              "abba1": 41692843.5,
+              "abba2": 45411326.5,
+              "abba3": 47727860.25,
+              "abba4": 45462960.0,
+              "confirmation1": 46732024.25,
+              "confirmation2": 43742779.0
+            }
+          },
+          {
+            "cell": "outbound_admission/vpn_flowspec_v6_equal_values",
+            "aa_ratio": 1.0082043386073924,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              0.999909482905354,
+              0.9975291404263157
+            ],
+            "abba_ratio": 0.9987193116658348,
+            "confirmation_ratio": 0.9699000087885087,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 7910882.513736264,
+              "aa2": 7846507.1125,
+              "abba1": 7887691.744444445,
+              "abba2": 7886977.773504274,
+              "abba3": 7882881.216666667,
+              "abba4": 7902406.954545455,
+              "confirmation1": 8120607.416666666,
+              "confirmation2": 7876177.2047930285
+            }
+          },
+          {
+            "cell": "outbound_admission/vpn_flowspec_v6_withdraw",
+            "aa_ratio": 1.0028082081903558,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              0.9975781220541478,
+              0.9942690257058711
+            ],
+            "abba_ratio": 0.9959235738800094,
+            "confirmation_ratio": 0.9981106737196378,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 6547635.3,
+              "aa2": 6566022.423076923,
+              "abba1": 6575820.572916666,
+              "abba2": 6559894.738095238,
+              "abba3": 6541490.25,
+              "abba4": 6579195.45,
+              "confirmation1": 6551113.611111111,
+              "confirmation2": 6538736.42
+            }
+          },
+          {
+            "cell": "outbound_admission/vpn_shared_arc",
+            "aa_ratio": 1.0080108945198203,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              0.9472406900202768,
+              0.9127640419926879
+            ],
+            "abba_ratio": 0.9300023660064823,
+            "confirmation_ratio": 0.9654316691486439,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 905755.5166666666,
+              "aa2": 913011.4285714286,
+              "abba1": 909706.6,
+              "abba2": 861711.1074999999,
+              "abba3": 859986.4453007518,
+              "abba4": 942178.2692307692,
+              "confirmation1": 910867.8833333333,
+              "confirmation2": 879380.7009803922
+            }
+          },
+          {
+            "cell": "outbound_admission/vpn_withdraw",
+            "aa_ratio": 1.0138855137165041,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              0.9527607633107075,
+              0.9449724411561886
+            ],
+            "abba_ratio": 0.948866602233448,
+            "confirmation_ratio": 0.9557672751944695,
+            "threshold": 1.0238855137165042,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 375556.1709307992,
+              "aa2": 370412.7989304813,
+              "abba1": 371285.0603448276,
+              "abba2": 353745.8375,
+              "abba3": 356254.9166666666,
+              "abba4": 377000.3241901776,
+              "confirmation1": 376110.81666666665,
+              "confirmation2": 359474.41041666665
+            }
+          },
+          {
+            "cell": "outbound_encode/distinct_values/100",
+            "aa_ratio": 1.0100888676899669,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0268127373099367,
+              1.0259791886966378
+            ],
+            "abba_ratio": 1.0263959630032873,
+            "confirmation_ratio": 1.0321858888722935,
+            "threshold": 1.0200888676899669,
+            "verdict": "FAIL",
+            "medians_ns": {
+              "aa1": 46042.074515132146,
+              "aa2": 46506.58691308691,
+              "abba1": 46131.07111801242,
+              "abba2": 47367.971409725695,
+              "abba3": 47479.788241671595,
+              "abba4": 46277.535416666666,
+              "confirmation1": 46201.81318681319,
+              "confirmation2": 47688.859611742424
+            }
+          },
+          {
+            "cell": "outbound_encode/distinct_values/1000",
+            "aa_ratio": 1.0086424268171814,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0152961147484276,
+              1.0234948913570778
+            ],
+            "abba_ratio": 1.0193955030527526,
+            "confirmation_ratio": 1.0318785990841732,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 508912.26851851854,
+              "aa2": 513310.5055555556,
+              "abba1": 517722.6812570146,
+              "abba2": 525641.8267973856,
+              "abba3": 522973.01358695654,
+              "abba4": 510967.8787878788,
+              "confirmation1": 508167.74603174604,
+              "confirmation2": 524367.421875
+            }
+          },
+          {
+            "cell": "outbound_encode/distinct_values/10000",
+            "aa_ratio": 1.004539908826487,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.028745105604809,
+              1.0282962646582705
+            ],
+            "abba_ratio": 1.0285206851315398,
+            "confirmation_ratio": 1.0380854016398893,
+            "threshold": 1.02,
+            "verdict": "FAIL",
+            "medians_ns": {
+              "aa1": 5553472.0,
+              "aa2": 5528373.6875,
+              "abba1": 5553447.728571428,
+              "abba2": 5713082.17,
+              "abba3": 5690653.1,
+              "abba4": 5534059.877083333,
+              "confirmation1": 5500553.507002801,
+              "confirmation2": 5710044.296558704
+            }
+          },
+          {
+            "cell": "outbound_encode/equal_values/100",
+            "aa_ratio": 1.0045352788814546,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0104568798422418,
+              1.008601427300584
+            ],
+            "abba_ratio": 1.009529153571413,
+            "confirmation_ratio": 1.0086053910077586,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 21168.80136138614,
+              "aa2": 21264.80777914614,
+              "abba1": 21008.15049261084,
+              "abba2": 21227.8301980198,
+              "abba3": 21115.770011424218,
+              "abba4": 20935.69316864677,
+              "confirmation1": 21004.22990851513,
+              "confirmation2": 21184.97951969476
+            }
+          },
+          {
+            "cell": "outbound_encode/equal_values/1000",
+            "aa_ratio": 1.0062112113064154,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0224606545151225,
+              0.9886684440954693
+            ],
+            "abba_ratio": 1.0055645493052958,
+            "confirmation_ratio": 0.9995306485261046,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 236232.32514619885,
+              "aa2": 237699.61403508772,
+              "abba1": 234995.1982228298,
+              "abba2": 240273.34418282547,
+              "abba3": 234720.32312753037,
+              "abba4": 237410.55409356725,
+              "confirmation1": 235630.65204678365,
+              "confirmation2": 235520.05845295056
+            }
+          },
+          {
+            "cell": "outbound_encode/equal_values/10000",
+            "aa_ratio": 1.0044799615771012,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0131373875618421,
+              1.0031276971365055
+            ],
+            "abba_ratio": 1.0081325423491738,
+            "confirmation_ratio": 1.0141937929373006,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 2683723.8446969697,
+              "aa2": 2695746.824404762,
+              "abba1": 2665585.79137931,
+              "abba2": 2700604.625,
+              "abba3": 2687084.3928571427,
+              "abba4": 2678706.211111111,
+              "confirmation1": 2666603.939473684,
+              "confirmation2": 2704453.1636363636
+            }
+          },
+          {
+            "cell": "outbound_encode/shared_arc/100",
+            "aa_ratio": 1.0004290888617307,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0408987022193281,
+              1.0992870640572614
+            ],
+            "abba_ratio": 1.0700928831382948,
+            "confirmation_ratio": 1.0181878906429205,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 3468.1529973585875,
+              "aa2": 3469.641143180532,
+              "abba1": 3435.5792833751393,
+              "abba2": 3576.0900174367916,
+              "abba3": 3744.723552123552,
+              "abba4": 3406.501972562547,
+              "confirmation1": 3565.418496052378,
+              "confirmation2": 3630.2659377548243
+            }
+          },
+          {
+            "cell": "outbound_encode/shared_arc/1000",
+            "aa_ratio": 1.009673380672723,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.0111978382912017,
+              1.0245136094869138
+            ],
+            "abba_ratio": 1.0178557238890578,
+            "confirmation_ratio": 1.038439614279144,
+            "threshold": 1.02,
+            "verdict": "PASS",
+            "medians_ns": {
+              "aa1": 27638.12003576134,
+              "aa2": 27373.32741935484,
+              "abba1": 27397.197022332508,
+              "abba2": 27703.986404220777,
+              "abba3": 27627.30034226063,
+              "abba4": 26966.25997588909,
+              "confirmation1": 27282.847222222223,
+              "confirmation2": 28331.58934588126
+            }
+          },
+          {
+            "cell": "outbound_encode/shared_arc/10000",
+            "aa_ratio": 1.0001852727514162,
+            "requires_independent_replication": false,
+            "abba_pair_ratios": [
+              1.027169320657915,
+              1.0364603102072205
+            ],
+            "abba_ratio": 1.031814815432568,
+            "confirmation_ratio": 1.0268067141192934,
+            "threshold": 1.02,
+            "verdict": "FAIL",
+            "medians_ns": {
+              "aa1": 276064.3621710526,
+              "aa2": 276115.509375,
+              "abba1": 276407.973046875,
+              "abba2": 283917.7898989899,
+              "abba3": 284501.86802083335,
+              "abba4": 274493.7410714286,
+              "confirmation1": 275647.61850961536,
+              "confirmation2": 283036.8254166667
+            }
+          }
+        ]
+      }
+    },
+    "independent_replication": {
+      "verdict": null,
+      "reason": "Not run: the full campaign has six confirmed failures; none of those six is A/A-noisy. The single-campaign stop rule applies."
+    }
+  },
+  "final_timing_reason": "Historical timing rule FAIL: 24 PASS and six confirmed regressions. The measured cost is accepted for this correctness fix; no further timing campaign is required.",
+  "memory": {
+    "verdict": "PASS",
+    "writer_cap_bytes": 655358,
+    "routes_per_case": {
+      "standard": 2049,
+      "extended": 2049,
+      "flowspec_v4_distinct": 10000,
+      "vpn_flowspec_v6_distinct": 10000
+    },
+    "blocked_advances": 1024,
+    "frames_per_complete_drain": {
+      "standard": 2050,
+      "extended": 2050,
+      "flowspec_v4_distinct": 10001,
+      "vpn_flowspec_v6_distinct": 10001
+    },
+    "input_fixture": "Held throughout and excluded from requested-allocation deltas.",
+    "bars": [
+      "candidate first, held, plateau and peak held writer bytes <= 655358",
+      "no requested-allocation growth during 1024 blocked advances",
+      "drained and dropped requested allocations <= pre-admission baseline",
+      "ordinary complete drains match control frame count and wire bytes",
+      "FlowSpec complete ordered frame streams match control byte for byte",
+      "each fixed FlowSpec shape peak requested delta <= parent delta + 1048576",
+      "AttrSet size 56, alignment 8 and Arc requested size 72 unchanged"
+    ],
+    "rows": {
+      "parent": [
+        {
+          "extended": false,
+          "routes": 2049,
+          "baseline": 9879737,
+          "first_step_bytes": 8321024,
+          "held_bytes": 8321024,
+          "held_frames": 2048,
+          "held_allocated": 18267797,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 18267797,
+          "plateau_bytes": 8321024,
+          "held_peak_allocated": 37115837,
+          "peak_held_bytes": 8321024,
+          "drained_allocated": 9848344,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 9494775,
+          "wire_bytes": 8325110,
+          "wire_frames": 2050,
+          "bar_writer_cap": false,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 8388060,
+          "paused_growth": 0,
+          "peak_delta": 27236100
+        },
+        {
+          "extended": true,
+          "routes": 2049,
+          "baseline": 135688377,
+          "first_step_bytes": 134068224,
+          "held_bytes": 134068224,
+          "held_frames": 2048,
+          "held_allocated": 269823637,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 269823637,
+          "plateau_bytes": 134068224,
+          "held_peak_allocated": 540227517,
+          "peak_held_bytes": 134068224,
+          "drained_allocated": 135656984,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 135303375,
+          "wire_bytes": 134133710,
+          "wire_frames": 2050,
+          "bar_writer_cap": false,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 134135260,
+          "paused_growth": 0,
+          "peak_delta": 404539140
+        },
+        {
+          "shape": "flowspec_v4_distinct",
+          "routes": 10000,
+          "baseline": 8828271,
+          "first_step_bytes": 157696,
+          "held_bytes": 315392,
+          "held_frames": 4096,
+          "remaining_rows": 5904,
+          "blocked_on": "slots",
+          "remaining_slots": 0,
+          "held_allocated": 9278395,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 9278395,
+          "plateau_bytes": 315392,
+          "peak_allocated": 10867990,
+          "peak_held_bytes": 315392,
+          "drained_allocated": 4631671,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 4277646,
+          "wire_bytes": 770029,
+          "wire_frames": 10001,
+          "ordered_rules": 10000,
+          "eors": 1,
+          "bar_writer_cap": true,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 450124,
+          "paused_growth": 0,
+          "peak_delta": 2039719
+        },
+        {
+          "shape": "vpn_flowspec_v6_distinct",
+          "routes": 10000,
+          "baseline": 8828271,
+          "first_step_bytes": 200704,
+          "held_bytes": 401408,
+          "held_frames": 4096,
+          "remaining_rows": 5904,
+          "blocked_on": "slots",
+          "remaining_slots": 0,
+          "held_allocated": 9364411,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 9364411,
+          "plateau_bytes": 401408,
+          "peak_allocated": 10970466,
+          "peak_held_bytes": 401408,
+          "drained_allocated": 4631671,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 4277646,
+          "wire_bytes": 980029,
+          "wire_frames": 10001,
+          "ordered_rules": 10000,
+          "eors": 1,
+          "bar_writer_cap": true,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 536140,
+          "paused_growth": 0,
+          "peak_delta": 2142195
+        }
+      ],
+      "candidate": [
+        {
+          "extended": false,
+          "routes": 2049,
+          "baseline": 9879740,
+          "first_step_bytes": 654143,
+          "held_bytes": 654143,
+          "held_frames": 161,
+          "held_allocated": 10702223,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 10702223,
+          "plateau_bytes": 654143,
+          "held_peak_allocated": 29597511,
+          "peak_held_bytes": 654143,
+          "drained_allocated": 9848347,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 9494778,
+          "wire_bytes": 8325110,
+          "wire_frames": 2050,
+          "bar_writer_cap": true,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 822483,
+          "paused_growth": 0,
+          "peak_delta": 19717771
+        },
+        {
+          "extended": true,
+          "routes": 2049,
+          "baseline": 135688380,
+          "first_step_bytes": 654630,
+          "held_bytes": 654630,
+          "held_frames": 10,
+          "held_allocated": 136507278,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 136507278,
+          "plateau_bytes": 654630,
+          "held_peak_allocated": 406898778,
+          "peak_held_bytes": 654630,
+          "drained_allocated": 135654875,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 135303378,
+          "wire_bytes": 134133710,
+          "wire_frames": 2050,
+          "bar_writer_cap": true,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 818898,
+          "paused_growth": 0,
+          "peak_delta": 271210398
+        },
+        {
+          "shape": "flowspec_v4_distinct",
+          "routes": 10000,
+          "baseline": 8828277,
+          "first_step_bytes": 157696,
+          "held_bytes": 315392,
+          "held_frames": 4096,
+          "remaining_rows": 5904,
+          "blocked_on": "slots",
+          "remaining_slots": 0,
+          "held_allocated": 9278401,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 9278401,
+          "plateau_bytes": 315392,
+          "peak_allocated": 10709174,
+          "peak_held_bytes": 315392,
+          "drained_allocated": 4631677,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 4277652,
+          "wire_bytes": 770029,
+          "wire_frames": 10001,
+          "ordered_rules": 10000,
+          "eors": 1,
+          "bar_writer_cap": true,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 450124,
+          "paused_growth": 0,
+          "peak_delta": 1880897
+        },
+        {
+          "shape": "vpn_flowspec_v6_distinct",
+          "routes": 10000,
+          "baseline": 8828277,
+          "first_step_bytes": 200704,
+          "held_bytes": 401408,
+          "held_frames": 4096,
+          "remaining_rows": 5904,
+          "blocked_on": "slots",
+          "remaining_slots": 0,
+          "held_allocated": 9364417,
+          "blocked_advances": 1024,
+          "after_blocked_allocated": 9364417,
+          "plateau_bytes": 401408,
+          "peak_allocated": 10768667,
+          "peak_held_bytes": 401408,
+          "drained_allocated": 4631677,
+          "drained_held_bytes": 0,
+          "dropped_allocated": 4277652,
+          "wire_bytes": 980029,
+          "wire_frames": 10001,
+          "ordered_rules": 10000,
+          "eors": 1,
+          "bar_writer_cap": true,
+          "bar_paused_allocations": true,
+          "bar_plateau_bytes": true,
+          "bar_drained": true,
+          "bar_drop": true,
+          "retained_delta": 536140,
+          "paused_growth": 0,
+          "peak_delta": 1940390
+        }
+      ]
+    },
+    "layout": {
+      "parent": {
+        "size": 56,
+        "align": 8,
+        "arc_requested": 72
+      },
+      "candidate": {
+        "size": 56,
+        "align": 8,
+        "arc_requested": 72
+      }
+    },
+    "frame_streams": {
+      "flowspec_v4_distinct": {
+        "parent": {
+          "frames": 10001,
+          "wire_bytes": 770029,
+          "sha256": "220b2f5426a99ab4484cb7866afaf08aac6a4e99aa69826154e0be26588cf60e"
+        },
+        "candidate": {
+          "frames": 10001,
+          "wire_bytes": 770029,
+          "sha256": "220b2f5426a99ab4484cb7866afaf08aac6a4e99aa69826154e0be26588cf60e"
+        }
+      },
+      "vpn_flowspec_v6_distinct": {
+        "parent": {
+          "frames": 10001,
+          "wire_bytes": 980029,
+          "sha256": "dc80a7416b4bfddc03680b8a35a65bd1a7b11482f15b9c6088337ecf852cf6e3"
+        },
+        "candidate": {
+          "frames": 10001,
+          "wire_bytes": 980029,
+          "sha256": "dc80a7416b4bfddc03680b8a35a65bd1a7b11482f15b9c6088337ecf852cf6e3"
+        }
+      }
+    },
+    "fixture": "Established-session fixture with negotiated capability state: OPEN/KEEPALIVE are injected through drive_fsm, the writer task is aborted, and its 4096-slot channel is replaced with a controlled channel writer. Unsent FlowSpec work is counted from queued output and checked by complete decoded ordered drain.",
+    "flowspec_peak_bar_scope": "Prospective fixed-shape transient scratch bar, separate from the writer byte cap; does not assert a general memory bound.",
+    "preparation_lifetime": "Transient per active peer slice: local prepared attribute forms and grouping storage are released before writer backpressure parks the session. Extended peak 271210398 requested bytes; additional paused plateau 818898 bytes including 654630 queued bytes. Concurrent active preparation may compound peaks. The unchanged source fixture is excluded."
+  },
+  "scope": [
+    "Outbound timing sums synchronous session admission elapsed intervals; writer draining is excluded.",
+    "The final source restores the RIB attribute code to the parent; no inbound timing scope applies.",
+    "Neither timing metric is thread CPU time or TCP throughput.",
+    "Allocation numbers are requested bytes, not RSS or whole-daemon capacity.",
+    "No private or non-unicast TCP throughput, fleet scale, sustained memory soak, forwarding or release-wide qualification is established."
+  ],
+  "tcp_comparison": {
+    "verdict": "INVALID",
+    "reason": "Parent Linux peak-memory accounting integrity failure stopped comparison before any candidate repetition. Separately tracked measurement-tool defect; excluded from correctness gate."
+  }
+}

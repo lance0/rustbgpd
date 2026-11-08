@@ -146,8 +146,8 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// seen written: admitted minus completed, the watermarks the session and
 /// the writer already keep. At or above it the session takes no further
 /// outbound work (no slice, shared chunk, marker or RIB envelope); its
-/// pending envelope keeps its cursor and resumes when a completed write
-/// brings the backlog back under the budget. Waiting is not a failure: a
+/// pending envelope keeps its cursor and resumes when completed writes leave
+/// room for its next complete frame. Waiting is not a failure: a
 /// peer that keeps completing writes is never torn down for it. One that
 /// stops reading altogether is ended by the RFC 9687 send hold timer in the
 /// writer or, with send hold disabled, by the admission deadline, which
@@ -163,13 +163,12 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// RFC 8654 extended message): 2 × (256 KiB + 65,535 B) = 655,358 B. A
 /// larger budget adds memory per paused peer and no throughput.
 ///
+/// Every ordinary frame requires room for the negotiated maximum message
+/// length before it is built and admitted. A paused group retains source
+/// indices and resumes its first unsent row. Shared chunks require room for
+/// their actual length. Neither admission path crosses this byte budget.
+///
 /// Separate allowance, not counted against the budget:
-/// - the admission step that crosses it: admission is checked before each
-///   step, so the backlog can exceed the budget by one step, at most
-///   `PROGRESSIVE_SLICE_ROUTES` (2,048) frames of at most the peer's
-///   maximum message size each (a few KiB for small EVPN frames, several
-///   MiB for large unicast attribute sets); shared group chunks are checked
-///   one at a time;
 /// - coalescing: the writer copies a batch into one buffer whose growth can
 ///   leave up to one more batch of unused capacity while it is in flight;
 /// - allocation: the writer channel's fixed slot storage

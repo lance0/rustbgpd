@@ -238,11 +238,19 @@ impl PeerSession {
         })
     }
 
-    /// Whether the writer holds its whole byte budget
-    /// ([`super::writer::WRITER_BYTE_BUDGET`]), so no further outbound
-    /// work is admitted until a completed write frees some.
-    pub(super) fn writer_bytes_exhausted(&self) -> bool {
-        self.writer_bytes_held() >= super::writer::WRITER_BYTE_BUDGET
+    pub(super) fn writer_bytes_available(&self) -> usize {
+        usize::try_from(super::writer::WRITER_BYTE_BUDGET.saturating_sub(self.writer_bytes_held()))
+            .unwrap_or(usize::MAX)
+    }
+
+    pub(super) fn writer_frame_room(&self, max_len: usize) -> Result<bool, ()> {
+        let Some(writer) = &self.writer_bulk_tx else {
+            return Err(());
+        };
+        if writer.is_closed() {
+            return Err(());
+        }
+        Ok(writer.capacity() > 0 && max_len <= self.writer_bytes_available())
     }
 
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
@@ -379,7 +387,8 @@ impl PeerSession {
     /// Semantics: the peer is flagged slow once its buffered outbound
     /// bulk frames, or its unwritten bytes, have stayed at or above
     /// `slow_peer_threshold_pct`% of the writer's bulk-buffer capacity or of
-    /// its byte budget for `slow_peer_duration` seconds, and the flag clears
+    /// its byte admission ceiling (the budget less one maximum-size frame,
+    /// plus one byte) for `slow_peer_duration` seconds, and the flag clears
     /// at the first evaluation that sees the backlog below both thresholds.
     /// The byte budget usually holds admission long before the frame queue
     /// fills, so a lagging peer is seen by its bytes.
@@ -404,7 +413,11 @@ impl PeerSession {
         let depth = capacity.saturating_sub(tx.capacity());
         let pct = self.config.slow_peer_threshold_pct;
         let threshold = (capacity * usize::from(pct)).div_ceil(100);
-        let byte_threshold = (super::writer::WRITER_BYTE_BUDGET * u64::from(pct)).div_ceil(100);
+        // Admission stops once the next maximum-size frame cannot fit, so
+        // held bytes reach this ceiling, not the budget: 100% means blocked.
+        let byte_ceiling =
+            super::writer::WRITER_BYTE_BUDGET + 1 - u64::from(self.outbound_max_message_len());
+        let byte_threshold = (byte_ceiling * u64::from(pct)).div_ceil(100);
         if depth >= threshold.max(1) || held >= byte_threshold.max(1) {
             let since = *self
                 .slow_peer_backlog_since
