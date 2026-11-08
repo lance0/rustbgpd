@@ -22,7 +22,7 @@
 //!
 //! Both gate on `EVPN_LINUX_NETNS=1` and require `CAP_NET_ADMIN`
 //! (for `bridge link set`), `CAP_SYS_ADMIN` (for `ip netns add`),
-//! and kernel >= 4.18 (per-port `bcast_flood`).
+//! and kernel >= 4.12 (per-port `bcast_flood`).
 //!
 //! Run locally on a host that already has iproute2 + iputils-ping
 //! + sudo:
@@ -104,7 +104,7 @@ fn bum_filter_spike_validates_kernel_primitive() {
     if !netns_gate() {
         eprintln!(
             "skipping: set EVPN_LINUX_NETNS=1 to run privileged BUM-filter spike (requires \
-             CAP_NET_ADMIN + kernel >= 4.18)"
+             CAP_NET_ADMIN + kernel >= 4.12)"
         );
         return;
     }

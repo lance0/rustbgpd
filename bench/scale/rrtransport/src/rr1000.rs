@@ -1,7 +1,7 @@
 use super::{
     rr1000_support::{
-        assert_established, checkpoint, is_eor, send_before, shutdown, start_after_keepalives,
-        Checkpoint,
+        assert_established, checkpoint, is_eor, next_task, send_before, start_after_keepalives,
+        Checkpoint, HarnessTasks,
     },
     transport_config,
 };
@@ -313,16 +313,46 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         metrics.clone(),
     );
     let manager_task = tokio::spawn(manager.run());
+    let mut tasks = HarnessTasks::new(manager_task);
+    let result = run_owned(
+        output,
+        shape,
+        run_deadline,
+        &metrics,
+        &rib_tx,
+        &query_tx,
+        &mut tasks,
+    )
+    .await;
+    drop(rib_tx);
+    drop(query_tx);
+    let cleanup = tasks.settle(run_deadline).await;
+    if let Err(error) = &cleanup {
+        eprintln!("{error:#}");
+    }
+    result?;
+    cleanup
+}
+
+async fn run_owned(
+    output: &Path,
+    shape: Shape,
+    run_deadline: tokio::time::Instant,
+    metrics: &BgpMetrics,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    query_tx: &mpsc::Sender<RibUpdate>,
+    tasks: &mut HarnessTasks<WireRow>,
+) -> Result<()> {
     for source_index in 0..SOURCES {
         send_before(
-            &rib_tx,
+            rib_tx,
             super::source_peer_up(source(source_index)),
             run_deadline,
         )
         .await?;
     }
     let (reply, registered) = oneshot::channel();
-    send_before(&rib_tx, RibUpdate::QueryLocRibCount { reply }, run_deadline).await?;
+    send_before(rib_tx, RibUpdate::QueryLocRibCount { reply }, run_deadline).await?;
     ensure!(tokio::time::timeout_at(run_deadline, registered).await?? == 0);
     let mut listeners = Vec::with_capacity(shape.peers);
     for index in 0..shape.peers {
@@ -334,10 +364,10 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         .iter()
         .map(TcpListener::local_addr)
         .collect::<std::io::Result<Vec<_>>>()?;
-    let mut handshakes = Vec::with_capacity(shape.peers);
-    let mut sessions = Vec::with_capacity(shape.peers);
+    tasks.handshakes.reserve(shape.peers);
+    tasks.sessions.reserve(shape.peers);
     for (index, (listener, address)) in listeners.into_iter().zip(&addresses).enumerate() {
-        handshakes.push(tokio::spawn(establish_on(
+        tasks.handshakes.push_back(tokio::spawn(establish_on(
             listener,
             StubConfig {
                 listen: SocketAddr::new(address.ip(), 0),
@@ -347,7 +377,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             },
         )));
-        let session = PeerHandle::spawn(
+        tasks.sessions.push(PeerHandle::spawn(
             transport_config(*address),
             metrics.clone(),
             rib_tx.clone(),
@@ -357,16 +387,17 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
             None,
             None,
             false,
-        );
-        tokio::time::timeout_at(run_deadline, session.start()).await??;
-        sessions.push(session);
+        ));
+        tokio::time::timeout_at(run_deadline, tasks.sessions.last().unwrap().start()).await??;
     }
     let mut stubs = Vec::with_capacity(shape.peers);
-    for task in handshakes {
-        stubs.push(tokio::time::timeout_at(run_deadline, task).await???);
+    while !tasks.handshakes.is_empty() {
+        let stub = next_task(&mut tasks.handshakes, run_deadline).await??;
+        tasks.background.extend(stub.tasks);
+        stubs.push((stub.tx, stub.rx));
     }
-    assert_established(&sessions, run_deadline).await?;
-    let established_resources = checkpoint(&metrics)?;
+    assert_established(&tasks.sessions, run_deadline).await?;
+    let established_resources = checkpoint(metrics)?;
     let peers = addresses
         .iter()
         .map(|address| address.ip())
@@ -375,12 +406,12 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
     let mut arms = Vec::new();
     let mut armed = Vec::new();
     let mut starts = Vec::new();
-    let mut stub_senders = Vec::with_capacity(shape.peers);
-    let collectors = stubs
+    tasks.stub_senders.reserve(shape.peers);
+    tasks.collectors = stubs
         .into_iter()
         .zip(&peers)
-        .map(|(stub, peer)| {
-            stub_senders.push(stub.tx);
+        .map(|((sender, receiver), peer)| {
+            tasks.stub_senders.push(sender);
             let (ready_tx, ready_rx) = oneshot::channel();
             let (arm_tx, arm_rx) = oneshot::channel();
             let (armed_tx, armed_rx) = oneshot::channel();
@@ -391,7 +422,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
             starts.push(start_tx);
             tokio::spawn(collect(
                 *peer,
-                stub.rx,
+                receiver,
                 CollectorGates {
                     ready: ready_tx,
                     arm: arm_rx,
@@ -402,13 +433,13 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
                 run_deadline,
             ))
         })
-        .collect::<Vec<_>>();
+        .collect();
     for drained in ready {
         tokio::time::timeout_at(run_deadline, drained).await??;
     }
     let mut groups = HashSet::new();
     for peer in &peers {
-        groups.insert(tokio::time::timeout_at(run_deadline, group(&query_tx, *peer)).await??);
+        groups.insert(tokio::time::timeout_at(run_deadline, group(query_tx, *peer)).await??);
     }
     ensure!(groups.len() == 1 && groups.iter().all(|item| item.starts_with("group:")));
     arm_collectors(arms, armed, run_deadline).await?;
@@ -425,7 +456,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
             .map(|index| route(value(index), peer))
             .collect();
         send_before(
-            &rib_tx,
+            rib_tx,
             RibUpdate::RoutesReceived {
                 peer: PeerId::from_addr(IpAddr::V4(peer)),
                 session_id: 0,
@@ -443,7 +474,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
     }
     let injection_ms = t0.elapsed().as_millis();
     let staged = loop {
-        let current = tokio::time::timeout_at(run_deadline, counts(&query_tx)).await??;
+        let current = tokio::time::timeout_at(run_deadline, counts(query_tx)).await??;
         ensure!(current
             .values()
             .all(|count| *count <= shape.prefixes as u64));
@@ -456,10 +487,10 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     let staged_ms = t0.elapsed().as_millis();
-    let staged_resources = checkpoint(&metrics)?;
+    let staged_resources = checkpoint(metrics)?;
     let mut rows = Vec::with_capacity(shape.peers);
-    for collector in collectors {
-        rows.push(tokio::time::timeout_at(run_deadline, collector).await???);
+    while !tasks.collectors.is_empty() {
+        rows.push(next_task(&mut tasks.collectors, run_deadline).await??);
     }
     ensure!(
         rows.len() == shape.peers
@@ -468,8 +499,8 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
                 .all(|row| format!("{:016x}", row.bitmap.digest()) == shape.bitmap_digest)
     );
     let wire_ms = rows.iter().map(|row| row.wire_ms).max().unwrap_or_default();
-    let wire_resources = checkpoint(&metrics)?;
-    assert_established(&sessions, run_deadline).await?;
+    let wire_resources = checkpoint(metrics)?;
+    assert_established(&tasks.sessions, run_deadline).await?;
     let mut file = BufWriter::new(File::create(output.join("per-peer.tsv"))?);
     writeln!(file, "peer\tstaged\tnlri\tmessages\twithdrawals\tduplicates\toutside\tdecode_failures\tcoverage\tbitmap_digest\tinitial_eor\twire_ms")?;
     for row in &rows {
@@ -495,11 +526,6 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         checkpoint_json("established", established_resources),
         checkpoint_json("staged", staged_resources),
         checkpoint_json("wire", wire_resources)))?;
-    shutdown(sessions, run_deadline).await?;
-    drop(rib_tx);
-    drop(query_tx);
-    manager_task.abort();
-    let _ = manager_task.await;
     Ok(())
 }
 

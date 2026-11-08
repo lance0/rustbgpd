@@ -32,11 +32,11 @@ pub enum DataplaneError {
         name: String,
     },
 
-    /// A kernel feature the operation depends on is not supported
-    /// (the netlink call returned `EOPNOTSUPP`). The `feature`
-    /// string identifies what's missing — e.g. `"NTF_EXT_LEARNED
-    /// (Linux ≥4.18)"` for FDB programming, `"IFLA_BRPORT_BCAST_FLOOD
-    /// (Linux ≥4.18)"` for the Gate 8b BUM-suppression triplet.
+    /// The netlink call returned `EOPNOTSUPP`. The `feature` string
+    /// names an expected feature, such as bridge/VXLAN externally learned
+    /// FDB programming (`NTF_EXT_LEARNED`, upstream Linux 4.12) or
+    /// `IFLA_BRPORT_BCAST_FLOOD` (upstream Linux 4.12). This is not a
+    /// kernel-version probe or proof of which feature was unsupported.
     /// Permanent class — the affected op is suppressed until either
     /// the op shape changes or the operator upgrades the kernel.
     #[error("kernel too old: {feature} not supported")]

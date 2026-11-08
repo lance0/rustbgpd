@@ -28,8 +28,9 @@
 //!
 //! ## Failure surface
 //!
-//! - `EOPNOTSUPP` (kernel < 4.18, no `bcast_flood`) →
-//!   [`DataplaneError::KernelTooOld`].
+//! - `EOPNOTSUPP` → [`DataplaneError::KernelTooOld`], naming the
+//!   required `bcast_flood` feature (upstream Linux 4.12). The errno
+//!   does not establish the kernel version or exact unsupported feature.
 //! - `EPERM` / `EACCES` → [`DataplaneError::PermissionDenied`].
 //! - `ENODEV` (ifindex stale) → [`DataplaneError::LinkNotFound`].
 //! - Other → [`DataplaneError::Other`] for the actor's backoff.
@@ -76,19 +77,14 @@ pub(crate) async fn apply_bum_port_flags(
 }
 
 fn classify_set_port_error(e: &rtnetlink::Error, ifindex: u32) -> DataplaneError {
-    // The rtnetlink Error type stringifies the underlying errno; we
-    // match on a small set of well-known phrases mirroring the
-    // existing FDB-side `errno_to_dataplane_error`. Future cleanup:
-    // unify on a numeric errno once rtnetlink exposes it directly.
+    // Preserve the existing classification of rtnetlink's errno text.
     let msg = e.to_string();
     let lower = msg.to_lowercase();
     if lower.contains("operation not supported") || lower.contains("eopnotsupp") {
-        // Most likely cause on this code path: kernel < 4.18 lacks
-        // `IFLA_BRPORT_BCAST_FLOOD`. The unicast/multicast flags
-        // predate that; broadcast is the load-bearing one for the
-        // Gate 8b primitive.
+        // Broadcast flood control arrived in upstream Linux 4.12;
+        // EOPNOTSUPP alone does not identify the unsupported feature.
         DataplaneError::KernelTooOld {
-            feature: "IFLA_BRPORT_BCAST_FLOOD (Linux ≥4.18)".to_string(),
+            feature: "IFLA_BRPORT_BCAST_FLOOD (Linux ≥4.12)".to_string(),
         }
     } else if lower.contains("permission denied")
         || lower.contains("operation not permitted")
@@ -118,53 +114,18 @@ mod tests {
     // error → `DataplaneError` classification, which is what
     // operators see when something goes wrong.
 
-    // Test the classification logic by dispatching on the
-    // stringified message — same approach the production
-    // `classify_set_port_error` uses. Constructing a real
-    // `rtnetlink::Error` is awkward (`NetlinkError` requires an
-    // `ErrorMessage` and `RequestFailed` is unit), so the unit
-    // test peels back to the lowercase-substring matcher and
-    // exercises it directly. The full netlink round-trip is
-    // covered by the privileged netns spike.
-
-    // Mirror the production classifier byte-for-byte so tests don't
-    // drift from the implementation. Constructing a real
-    // `rtnetlink::Error` is awkward (`NetlinkError` requires an
-    // `ErrorMessage` and `RequestFailed` is unit), so the tests
-    // peel back to the lowercase-substring matcher and exercise it
-    // directly. The full netlink round-trip is covered by the
-    // privileged netns spike.
-    fn classify_msg(msg: &str, ifindex: u32) -> DataplaneError {
-        let lower = msg.to_lowercase();
-        if lower.contains("operation not supported") || lower.contains("eopnotsupp") {
-            DataplaneError::KernelTooOld {
-                feature: "IFLA_BRPORT_BCAST_FLOOD (Linux ≥4.18)".to_string(),
-            }
-        } else if lower.contains("permission denied")
-            || lower.contains("operation not permitted")
-            || lower.contains("eperm")
-            || lower.contains("eacces")
-        {
-            DataplaneError::PermissionDenied(msg.to_string())
-        } else if lower.contains("no such device") || lower.contains("enodev") {
-            DataplaneError::LinkNotFound {
-                name: format!("bridge port ifindex {ifindex} ({msg})"),
-            }
-        } else {
-            DataplaneError::Other(msg.to_string())
-        }
+    fn netlink_error(errno: i32) -> rtnetlink::Error {
+        let mut message = netlink_packet_core::ErrorMessage::default();
+        message.code = std::num::NonZeroI32::new(-errno);
+        rtnetlink::Error::NetlinkError(message)
     }
 
     #[test]
     fn classifies_eopnotsupp_as_kernel_too_old_with_bcast_flood_feature() {
-        let err = classify_msg("Operation not supported (EOPNOTSUPP)", 10);
+        let err = classify_set_port_error(&netlink_error(libc::EOPNOTSUPP), 10);
         match err {
             DataplaneError::KernelTooOld { feature } => {
-                assert!(
-                    feature.contains("IFLA_BRPORT_BCAST_FLOOD"),
-                    "EOPNOTSUPP on the bum_filter path must surface the BCAST_FLOOD feature, \
-                     got {feature}"
-                );
+                assert_eq!(feature, "IFLA_BRPORT_BCAST_FLOOD (Linux ≥4.12)");
             }
             other => panic!("expected KernelTooOld, got {other:?}"),
         }
@@ -172,13 +133,13 @@ mod tests {
 
     #[test]
     fn classifies_eperm_as_permission_denied() {
-        let err = classify_msg("Operation not permitted (EPERM)", 10);
+        let err = classify_set_port_error(&netlink_error(libc::EPERM), 10);
         assert!(matches!(err, DataplaneError::PermissionDenied(_)));
     }
 
     #[test]
     fn classifies_enodev_as_link_not_found_with_ifindex_in_name() {
-        let err = classify_msg("No such device (ENODEV)", 42);
+        let err = classify_set_port_error(&netlink_error(libc::ENODEV), 42);
         match err {
             DataplaneError::LinkNotFound { name } => {
                 assert!(
@@ -192,7 +153,7 @@ mod tests {
 
     #[test]
     fn classifies_other_as_other() {
-        let err = classify_msg("some unfamiliar error", 10);
+        let err = classify_set_port_error(&rtnetlink::Error::RequestFailed, 10);
         assert!(matches!(err, DataplaneError::Other(_)));
     }
 }

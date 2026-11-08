@@ -889,9 +889,7 @@ fn errno_to_remove_apply_result(errno: i32, detail: &str) -> Result<(), Dataplan
 
 /// Pure-function map from a positive errno to a [`DataplaneError`].
 ///
-/// Split out from [`classify_apply_error`] so unit tests can exercise
-/// the per-errno mapping without forging an `ErrorMessage`
-/// (`#[non_exhaustive]`, no public constructor).
+/// Shared by add/remove error handling and the per-errno regression tests.
 ///
 /// - `EPERM` / `EACCES` → [`DataplaneError::PermissionDenied`]
 ///   (Permanent — retrying without privilege change can't help).
@@ -906,7 +904,9 @@ fn errno_to_dataplane_error(errno: i32, detail: &str) -> DataplaneError {
     match errno {
         libc::EPERM | libc::EACCES => DataplaneError::PermissionDenied(detail.to_owned()),
         libc::EOPNOTSUPP => DataplaneError::KernelTooOld {
-            feature: "NTF_EXT_LEARNED (Linux ≥4.18)".to_string(),
+            feature:
+                "bridge/VXLAN externally learned FDB programming (NTF_EXT_LEARNED, Linux ≥4.12)"
+                    .to_string(),
         },
         libc::EINVAL => DataplaneError::InvalidArgument(detail.to_owned()),
         _ => DataplaneError::Other(format!("netlink errno {errno}: {detail}")),
@@ -1740,9 +1740,9 @@ mod tests {
         let dp_err = errno_to_dataplane_error(libc::EOPNOTSUPP, "Operation not supported");
         assert!(matches!(dp_err, DataplaneError::KernelTooOld { .. }));
         if let DataplaneError::KernelTooOld { ref feature } = dp_err {
-            assert!(
-                feature.contains("NTF_EXT_LEARNED"),
-                "FDB-side EOPNOTSUPP must surface the NTF_EXT_LEARNED feature label, got {feature}"
+            assert_eq!(
+                feature,
+                "bridge/VXLAN externally learned FDB programming (NTF_EXT_LEARNED, Linux ≥4.12)"
             );
         }
         assert_eq!(dp_err.class(), FailureClass::Permanent);

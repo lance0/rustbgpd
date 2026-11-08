@@ -115,6 +115,8 @@ pub struct PeerHandle {
     pub rx: mpsc::Receiver<Message>,
     /// Time the session reached Established.
     pub established_at: Instant,
+    /// Reader and writer tasks. Abort and join both before dropping their runtime.
+    pub tasks: [tokio::task::JoinHandle<()>; 2],
 }
 
 /// Listen on `cfg.listen`, accept the first inbound TCP, exchange OPEN,
@@ -202,7 +204,7 @@ pub async fn establish_stream(
     let ka_interval = keepalive_interval(hold);
 
     // Writer task: pulls from tx, writes to socket, injects periodic KEEPALIVE.
-    tokio::spawn(async move {
+    let writer_task = tokio::spawn(async move {
         if let Some(interval) = ka_interval {
             let mut ka_tick = tokio::time::interval(interval);
             ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -261,7 +263,7 @@ pub async fn establish_stream(
     // progress." We implement it by selecting between socket read
     // and a deadline timer that gets reset on every byte received.
     let hold_secs = u64::from(hold);
-    tokio::spawn(async move {
+    let reader_task = tokio::spawn(async move {
         let mut frame_buf = BytesMut::with_capacity(65536);
         let mut tmp = [0u8; 8192];
         let hold_dur = Duration::from_secs(hold_secs);
@@ -330,6 +332,7 @@ pub async fn establish_stream(
         tx: tx_out,
         rx: rx_out,
         established_at,
+        tasks: [writer_task, reader_task],
     })
 }
 
