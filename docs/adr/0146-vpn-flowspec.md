@@ -2,6 +2,9 @@
 
 **Status:** Accepted (2026-11-03); implementation follows the slices below.
 **Date:** 2026-11-03
+**Update (2026-11-08):** v0.82.0 is the release floor named in the
+[API reference](../reference/api.md#vpn-flowspec-controller-api); it carries
+IPv4 and IPv6 VPN FlowSpec origination. The decision text below is unchanged.
 **Amends:** The "No VPN FlowSpec (SAFI 134)" decision in
 [ADR-0035](0035-flowspec.md), for local origination only. ADR-0035's other
 decisions, [ADR-0135](0135-flowspec-feasibility.md),

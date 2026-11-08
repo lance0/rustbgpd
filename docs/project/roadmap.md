@@ -254,7 +254,12 @@ FSM 0.14.0 and RPKI 0.9.0. It ships on its per-change regression tests and
 main CI. The [2026-11-01 run](../soaks/soak-rs-flagship-24h-2026-11-01.md) on
 the v0.81.0 tag passes every route-server flagship gate on its on-host
 verdict; it does not exercise the release's FlowSpec, graceful-restart or
-LLGR changes. Under the
+LLGR changes. v0.82.0 (2026-11-08) is a minor release that adds explicit
+resource limits on Add-Path receive paths, RPKI records and BFD detection,
+callable and typed `.rpol` policies, and IPv4 and IPv6 VPN FlowSpec controller
+origination outside the v1 inventory. It publishes wire 0.28.0, FSM 0.15.0
+and RPKI 0.10.0. It ships on its per-change regression tests and main CI; no
+flagship receipt covers it. Under the
 [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this

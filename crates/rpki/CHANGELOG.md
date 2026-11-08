@@ -3,7 +3,7 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.10.0 - Unreleased
+## 0.10.0 - 2026-11-08
 
 - Recheck the held data expiry while applying buffered RTR PDUs. An End of
   Data processed at or after the captured expiry ends the transaction and
@@ -74,10 +74,9 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   Prefix PDU, shows the cache speaks that version: it ends the session under
   its own §12 handling, flushing the held data where that applies, before or
   after the Cache Response.
-- Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
-  new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
-  or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These
-  crate versions are not published by this change.
+- Move to wire `0.28.0` for IPv4/IPv6 VPN FlowSpec (`Safi::FlowSpecVpn` and
+  the new `MpReachNlri`/`MpUnreachNlri` fields). Upgrade wire 0.28, FSM 0.15
+  and RPKI 0.10 together.
 
 ## 0.9.0 - 2026-11-01
 

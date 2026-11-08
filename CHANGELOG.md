@@ -11,6 +11,1636 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.82.0] — 2026-11-08
+
+> **Release framing — hardening and composable policy.** This release hardens
+> the daemon against peers, RTR caches and API clients: explicit resource
+> limits on Add-Path paths, RPKI records, BFD timers and outbound queues,
+> fail-closed handling of runtime state, and refusal of malformed or
+> out-of-state input. `.rpol` becomes composable, with callable policies and
+> typed parameters, and several policy semantics change; read the upgrade
+> notes before reloading existing policy files. The daemon also originates
+> IPv4 and IPv6 VPN FlowSpec through the controller API, outside the v1
+> inventory. `rustbgpd-wire` 0.28.0, `rustbgpd-fsm` 0.15.0 and
+> `rustbgpd-rpki` 0.10.0 move to a new wire line together.
+
+### Security
+
+- BFD local discriminators are now drawn at random from the operating
+  system's CSPRNG instead of counting up from 1. A control packet selects its
+  session by Your Discriminator alone (RFC 5880 §6.8.6), so with sequential
+  values a configured peer could derive another session's discriminator from
+  its own and send packets that moved that session's state. Random values
+  stop that guessing. They do not authenticate the sender: a host that can
+  observe a session's packets on the same segment can still forge its state
+  (RFC 5880 §9). See [BFD configuration](docs/reference/configuration.md).
+- An Init or Up BFD session now discards a packet with Your Discriminator
+  zero unless its My Discriminator matches the peer's learned discriminator.
+  Previously an on-link sender spoofing the peer's address with TTL 255 could
+  force an Up session Down with one forged packet, and the session then
+  echoed the sender's discriminator. Down sessions still accept the
+  zero-discriminator bootstrap, and the real peer can still signal Down
+  after its own detection timeout. See
+  [BFD configuration](docs/reference/configuration.md).
+- Bound Birdwatcher route requests to four concurrent workers and a ten-second
+  HTTP deadline. Empty and oversized peer views now avoid the global primary
+  route scan; other adapter scans refuse incomplete results above the new
+  `--max-scan-routes` matching/returned-row limit (10,000 rows by default).
+  This bounds adapter transfer and retention, not native RIB query CPU work.
+  Operators serving larger nonempty views may need to raise this limit.
+- Prepare FIB status rows and their unfiltered order before publication, and
+  build each filter's order on first use within that publication, so paged
+  `ListFibRoutes` requests copy only their returned rows instead of converting
+  and sorting the complete FIB on every page. Retired publications are released
+  by the blocking publisher rather than by an API reader.
+- A candidate config sent over the API could make the daemon read any file
+  it can read, even from an observer (`sensitive_read`) principal through
+  `DiffRuntimeConfig`, `PlanConfigTransaction` or
+  `StreamPlanConfigTransaction` (`rbgp config diff` and `rbgp config plan`).
+  The candidate named the file as an `.rpol` file, policy root, dataset, or
+  gRPC TLS or token file. Three effects followed: a compile error echoed the
+  first lines of that file, a device such as `/dev/zero` was read without a
+  size limit, and a FIFO blocked the peer-manager actor until a writer
+  appeared. Below `operator_only`, `.rpol`, root and dataset paths must now
+  resolve under the running config's policy directories: its
+  `[policy] rpol_roots` and the directories of its `.rpol` and dataset
+  files. gRPC credential paths must be ones the running config already
+  uses. The running config file and its credential files are never sources,
+  not even through an `.rpol` import, and stay protected after a config
+  transaction or an EVPN apply installs a candidate. A candidate cannot
+  raise `rpol_max_graph_bytes` above the running value, and every refusal is
+  the same message, so it reveals nothing about what a path names.
+  `ApplyEvpnRuntime` candidates are held to the same limits, taken from the
+  on-disk config, and at most four load at once. Operator
+  callers can still stage candidate sources elsewhere, as `rs-config-render`
+  does. For every API caller, errors for those files give the path, line
+  and column and the compiler stage, without file text. Every `.rpol`,
+  dataset and gRPC credential read during a config load, including on-disk
+  loads, now refuses anything but a regular file without waiting on it and
+  stops at a size bound. Diff and plan load the candidate on the blocking
+  pool, so the peer-manager actor keeps serving other requests while it
+  loads.
+- Pin external workflow actions to full commit SHAs and container base images
+  to digests, with checks that reject mutable references. Dependabot tracks
+  action pins and Dockerfile base-image digests.
+- CLI unicast, BGP-LS and topology listings stop with an error when a
+  daemon repeats a continuation token, including multi-page cycles.
+  The repeated page is rejected before its rows are consumed.
+- `rbgp doctor`'s `daemon.config_freshness` check now compares the config
+  file's mtime with the daemon's last config-file marker at full filesystem
+  timestamp resolution. The daemon records the marker as seconds and
+  nanoseconds; before this, both sides were whole seconds, so an edit saved
+  in the same second as the daemon's own read or write was reported as
+  current. Any difference from the marker now warns, including a file
+  replaced with an older timestamp. A whole-second marker from an older
+  daemon keeps the previous comparison. Two saves within one filesystem
+  timestamp tick still cannot be told apart.
+- Bound the work and log volume of an UPDATE that repeats a path attribute.
+  RFC 7606 §3 (g) dispositions are unchanged: a duplicate `MP_REACH_NLRI` or
+  `MP_UNREACH_NLRI` still resets the session, and other duplicates are still
+  discarded after the first occurrence. Previously each repeated occurrence
+  produced its own decode record and WARN line, so a single UPDATE could emit
+  thousands of log lines while the session stayed up. Repeats of one type now
+  share one record per cause. The malformed-attribute WARN is now one summary
+  line per UPDATE, logged with the action finally applied and the decoder
+  cause behind it, and is
+  emitted at power-of-two counts per TCP connection; every cause is still
+  logged at DEBUG. `bgp_update_malformed_total` still counts
+  every malformed UPDATE.
+- EVPN duplicate-MAC detection now counts only MAC moves detected by local
+  learning (RFC 7432 §15.1). Remote Type 2 announcements and withdrawals
+  also counted. A BGP peer that repeatedly advertised a MAC learned on
+  this VTEP could reach the threshold with no local activity. With
+  `action = "suppress_local"`, that withdrew the local Type 2 and filtered
+  remote FDB programming for the MAC for `recovery_seconds`. A local learn
+  against a remote advertisement still counts, so a genuine duplicate MAC
+  is still detected. See
+  [`evpn_duplicate_mac_moves_total`](docs/reference/operations.md).
+- `rbgp diff snapshot from-bmp` no longer copies an UPDATE's path attributes
+  once per NLRI. The routes of one UPDATE now share one attribute set, the
+  capture is read one BMP message at a time, and the snapshot is streamed
+  to stdout after validation. Previously a 64 KiB capture could grow past
+  600 MiB of memory and abort under a memory limit instead of exiting 2. The
+  snapshot is measured before the first byte is written: past the new 4 GiB
+  output limit the conversion exits 2 with nothing on stdout. Input that
+  continues past the 1 GiB input limit, as a pipe or a growing file can, is
+  refused rather than converted from its first 1 GiB. Output bytes are
+  unchanged. See
+  [`from-bmp` bounds](docs/how-to/ribdiff.md#rbgp-diff-snapshot-from-bmp--rfc-8671-post-policy-bmp-captures).
+- `rbgp diff snapshot from-mrt` now reads the dump once, one record at a
+  time, into a private temporary file that is copied to stdout only after the
+  whole dump converted, instead of loading the whole file and every decoded
+  route. Memory stays near one record; previously a
+  21 MB dump could request a single 768 MiB allocation and abort instead of
+  exiting 2. A record longer than 16 MiB, or a snapshot longer than 4 GiB,
+  refuses the dump with exit 2 and nothing on stdout. Output bytes are
+  unchanged. See
+  [the MRT view contract](docs/how-to/ribdiff.md#rbgp-diff-snapshot-from-mrt-and-the---view-contract).
+- FSM Error NOTIFICATIONs for unexpected messages identify OpenSent,
+  OpenConfirm or Established with RFC 6608 subcodes 1, 2 or 3 and carry
+  the unexpected message type. Malformed UPDATEs before Established
+  now receive the same FSM Error; malformed headers and OPENs keep
+  their existing error codes. Session teardown and route cleanup are
+  unchanged.
+- Native gRPC mTLS listeners accept an optional `tls_client_crl_file`: PEM
+  certificate revocation lists checked against every client certificate
+  chain at the TLS handshake. A revoked operator certificate was previously
+  accepted until it expired. The CRL reloads with the other credentials on
+  SIGHUP. Once configured it fails closed: a missing, empty, or unparsable
+  file fails startup, `--check`, and the credential reload, and a CRL past
+  its `nextUpdate` refuses every client until a fresh one is reloaded. A
+  listener with a CRL offers no TLS session resumption, so a client cannot
+  reuse a session from before an expiry or revocation.
+  Listeners without the field are unchanged. See
+  [client certificate revocation](docs/reference/configuration.md#grpc-client-certificate-revocation).
+- gRPC credential files are now checked before they are read, at config
+  load, startup, every SIGHUP credential reload, `--check`, and in
+  `rbgp doctor`. A `token_file`, `tls_cert_file`, `tls_key_file`, or
+  `tls_client_ca_file` whose target is not a regular file is refused, as is
+  a world-writable token or private key; previously a FIFO at one of these
+  paths could stall startup. A token or private key readable by every local
+  user, owned by someone other than the daemon user or root, or open to a
+  group other than the daemon's is still accepted, with one warning per load
+  or reload that names the file, its mode and owner, and the remedy. The
+  warning counts toward `--check --strict`, and doctor reports it as
+  `credentials.<listener>.<field>`. Mode `0600`, or `0640 root:<daemon group>`,
+  passes silently. See
+  [credential file permissions](docs/reference/configuration.md#grpc-credential-file-permissions).
+- `bgp_inbound_connections_dropped_total` HELP text names all six
+  canonical drop reasons, including `rib_cleanup_pending` and
+  `bfd_unavailable`. Metric names and label values are unchanged.
+- Bound repeated inbound warnings for non-negotiated MP_REACH families,
+  scoped link-local IPv4 body NLRI, strict-peer next-hop rejection (per
+  reason), and policy OTC rejection. Each class logs independently at its
+  first and power-of-two occurrences per connection; metrics and route
+  handling remain unchanged.
+- Bound the per-UPDATE warnings that RFC 7606 error handling logs for a
+  malformed UPDATE. The treat-as-withdraw, `UPDATE validation error`, ASPA
+  first-AS, and malformed-OTC warnings now share the malformed-attribute
+  summary's gate: they are logged for the 1st, 2nd, 4th, 8th, … such UPDATE
+  per TCP connection, and a new connection re-arms the gate.
+  Attribute-discard UPDATEs and treat-as-withdraw UPDATEs count
+  separately, so a stream of discards does not delay the warnings for a
+  withdrawal. Previously a peer repeating one malformed UPDATE produced at
+  least one WARN line per UPDATE while the session stayed up. Each of these
+  warnings now carries the `malformed_updates` count. An UPDATE that resets
+  the session still logs its cause. `bgp_update_malformed_total` and
+  `bgp_update_malformed_causes_total` still count every malformed UPDATE,
+  and `bgp_otc_routes_blocked_total` every rejected announcement.
+- MRT `file_prefix` must be a nonempty filename component without path
+  separators, NUL, `.` or `..`. Configuration validation and the dump
+  writer reject invalid prefixes before creating the output directory,
+  preventing a prefix from publishing a dump outside `output_dir`.
+- An UPDATE received before the session is Established is no longer imported.
+  A peer that completed TCP and sent an UPDATE before its KEEPALIVE, in
+  OpenSent or OpenConfirm, had its routes imported under the configured
+  neighbor before the OPEN was validated (peer ASN, role, hold time and
+  capabilities). With no negotiated peer ASN the route was evaluated as
+  internal, so an import policy that denies by remote ASN or external route
+  type did not apply. The session then closed with an FSM Error NOTIFICATION
+  but no peer-down, so the routes stayed selected and exported until the
+  neighbor later completed a session and went down. A pre-Established
+  End-of-RIB reached the RIB the same way, and a pre-Established UPDATE was
+  mirrored to BMP collectors as Route Monitoring for a peer that never sent
+  Peer Up. UPDATE, End-of-RIB and ROUTE-REFRESH received before Established
+  now reach neither BMP nor the RIB: the session answers them with
+  NOTIFICATION FSM Error (code 5) carrying the RFC 6608 subcode for its state
+  (1 in OpenSent, 2 in OpenConfirm) and the message type, and closes.
+- Update the protobuf build tooling's `pulldown-cmark` dependency to 0.13.6
+  for RUSTSEC-2026-0433.
+- Name the exact occupied `.unconfirmed-<id>` backup suffix when boot recovery
+  refuses a collision, while keeping recorded configuration and state paths
+  redacted.
+- The RIB now discards End-of-RIB, Beginning- and End-of-RIB-Refresh and
+  refresh-window timeouts from a session that has no registration for the
+  peer. A peer whose routes were retained under Graceful Restart could
+  otherwise reconnect and send an End-of-RIB before its KEEPALIVE. That
+  marker completed the stale-route sweep, and the retained routes were
+  removed before the restarted session re-advertised them. The transport no
+  longer forwards such a marker before Established; this closes the same
+  path in the RIB. The discards are counted in
+  `bgp_rib_stale_session_message_ignored_total{kind="eor"|"refresh"}`.
+- Bound the RPKI data an RTR cache can make the daemon hold. Previously the
+  per-transaction record budget reset with every serial update, so a cache could
+  keep growing its VRP set through successive updates until memory ran out.
+  Records (VRPs plus ASPA provider ASNs) are now counted as each transfer is
+  received, against a per-cache limit (`max_records_per_cache`, default
+  4000000) and a limit across all caches (`max_records_total`, default
+  10000000). A transfer that would exceed either limit is refused before it is
+  stored or published. The cache keeps its last accepted data and reconnects to
+  request a full table; data that never fits is discarded when it expires. See
+  [record limits](docs/reference/configuration.md#record-limits).
+- Bound the merged RPKI validation tables waiting for route selection. Every
+  change to the VRP or ASPA data builds a new merged table, a complete copy of
+  all caches' data that `max_records_total` does not count. Previously, while
+  route selection was busy, each new table waited in its queue, so a cache
+  sending distinct full tables in quick succession could make the daemon keep
+  many complete copies in memory at once. Now one table of each kind is queued
+  for route selection at a time, and tables that arrive meanwhile are combined
+  into one waiting behind it: the newest table, with every change since the
+  queued one, so no change is skipped. That path holds at most five tables of
+  each kind at once, each no larger than `max_records_total`. A list of
+  changed entries larger than its table becomes a full revalidation. See
+  [record limits](docs/reference/configuration.md#record-limits).
+- A `TestPolicy` or `ComparePolicy` candidate with many compile errors took
+  time quadratic in its size to render. Each diagnostic re-indexed every
+  source, and the work ran inline on a gRPC worker. One request near the
+  4 MiB cap could hold a runtime worker for hours, so health, RIB and
+  neighbor RPCs timed out. Rendering now indexes the sources once and shows
+  at most 50 diagnostics and 256 KiB of text, then a count of what it left
+  out. The same limits apply to `rbgp policy check` output and to config
+  load errors. Typechecking was quadratic too: every unknown name ran a
+  did-you-mean search against every candidate. It now keeps at most 256
+  diagnostics and searches only for those, and only for names up to 64
+  characters against at most 1024 candidates. A 4 MiB source dense with
+  unknown references compiles in well under a second in a release build.
+  These RPCs now compile and render on the blocking pool under
+  a 30-second deadline. Each policy service runs at most two such compiles
+  at once and answers further requests with `RESOURCE_EXHAUSTED`.
+- Neighbor, policy, peer-group, and FIB-table mutations no longer reopen
+  unchanged gRPC credential files on the peer-manager actor. Startup, checks,
+  reloads, and full configuration candidates retain credential validation.
+- Keep config history, persistence markers, FIB ownership state, pending
+  commit-confirm files, and panic reports under the runtime directory opened
+  at startup when an ancestor symlink changes. Confirmed apply refuses an
+  unsafe pending directory or a recovery pathname that no longer names that
+  directory. Staged configuration writes still refuse replaced config paths.
+- `runtime_state_dir` validation now fails closed. The daemon refuses to
+  start unless the directory is a real directory (not a symlink) owned by the
+  daemon user and not group- or world-writable, reached through directories
+  that only root or the daemon user can rewrite; previously it logged a warning
+  and continued, and some state files were still written through the
+  unvalidated path. The config last-persist marker, the general FIB
+  ownership receipt and its `.stale` evidence copy, and panic reports are now
+  published by renaming a fresh owner-only file into place, so a symlink at
+  one of those paths is replaced instead of followed. `fib-owned.json`, which
+  decides which kernel routes the daemon may replace or delete, is loaded only
+  when it is a regular file owned by the daemon user and not group- or
+  world-writable; anything else is ignored with a warning and the daemon owns
+  no routes from it. See
+  [`runtime_state_dir`](docs/reference/configuration.md#global).
+- Avoid retaining shared outbound UPDATE buffers solely because a completed
+  announcement batch is waiting to send End-of-RIB or release its route inventory.
+- Keep outbound writer admission within its byte budget even when a route
+  requires a large UPDATE. Paused peers retain their delivery cursor and resume
+  in order when space becomes available, including shared update-group frames.
+
+### Added
+
+- `[[dynamic_neighbors]]` ranges take a `bfd = { profile = "..." }` block:
+  every session accepted through the range runs single-hop, non-strict BFD
+  (RFC 5880/5881) to its source address, for IPv4 and IPv6 global sessions.
+  The session registers its BFD session when it is accepted and removes it
+  when the session ends, and a genuine BFD Down tears the session down with
+  Cease/10 as it does for a static neighbor. A SIGHUP that adds, edits or
+  removes a range's `bfd` applies to the running sessions through the reload
+  generation without resetting BGP, and a range that runs BFD is added or
+  removed in one SIGHUP. A connection whose BFD session cannot be registered is
+  counted as `bgp_inbound_connections_dropped_total{reason="bfd_unavailable"}`.
+  Strict and multihop range BFD are rejected, a range still never
+  inherits `bfd` from its peer group, and runtime range CRUD and config
+  transactions cannot change it. The setting is outside the v1 inventory.
+  See [Dynamic-range BFD](docs/reference/configuration.md#dynamic-range-bfd).
+- `rbgp doctor` lists the idle dynamic neighbors that keep a
+  `dynamic_neighbor_limit` slot for graceful restart retention, as the
+  `dynamic_neighbors.retained` check: each neighbor's address, range, reason
+  (`its_routes`, `our_routes` or `both`) and deadlines. It is informational,
+  and yellow while the limit is full, no retained neighbor can give way, and
+  inbound dynamic connections have been refused at it. The daemon publishes
+  the same facts as the new
+  `bgp_dynamic_neighbor_retained_until_timestamp_seconds{peer,range,retention}`
+  gauge. See
+  [Support bundles with `rbgp doctor`](docs/reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor).
+- `.rpol` asn-sets, ASN dataset files and test-block dataset overrides
+  accept inclusive ranges (`64496..64511`) and `PRIVATE_AS`, the RFC 6996
+  private-use ASNs (64512–65534 and 4200000000–4294967294). Exact members
+  stay one hash probe; ranges add a binary search. A set that holds a range
+  cannot be iterated with `for` and is a compile error there; probe it with
+  `in`. See [ASN ranges](docs/reference/rpol-language.md#asn-ranges).
+  rs-config-render now emits the invalid-ASN hygiene check as a loop over
+  `route.as-path` probing the range set `rs-invalid-asns`, in place of an
+  AS-path regex. It rejects the same ASNs in paths up to `max_as_path_len`;
+  a longer path is rejected by `reject-long-as-path` alone, which is now its
+  recorded reject cause even when it also holds an invalid ASN. Existing
+  sources and dataset files are unchanged.
+- `.rpol` policies can call other policies: `apply NAME` or
+  `apply NAME(args)` as a statement runs the called policy's terms in
+  place, the IOS-XR RPL policy-library idiom. Its `reject` denies the
+  route; its `accept`, or falling off its end, returns to the caller,
+  unless it declares `default-action reject`. Its writes stage into the
+  caller while every condition reads the route as received. Calls work
+  in term, `if` and `for` bodies, may nest, and share the `apply` cycle,
+  depth and size limits. Inlined terms appear in explain, test hits and
+  `rbgp policy stats` as `<term>.<n>/<call>:<called-term>`. `apply(NAME)`
+  stays the predicate, and a policy that holds an `apply` statement cannot
+  be one. A `let` that shadows a parameter can no longer be passed as an
+  argument to either form; it used to pass the parameter's value. See
+  [`apply` as a statement](docs/reference/rpol-language.md#apply-as-a-statement--calling-a-policy).
+- `.rpol` community sets and community datasets accept patterns: a field
+  may be `*`, an inclusive range `a..b`, or `PRIVATE_AS` (RFC 6996), as in
+  `65000:*`, `*:666`, `65000:100..199`, `PRIVATE_AS:*`, `65000:1..9:*` and
+  `RT:65000:*`, for standard, large and extended communities. Patterns
+  match through `in`, including `<binding> in <set>`, and are rejected as
+  `add`/`remove`/`has` values. Exact-only sets evaluate as before; a set
+  whose patterns could cost more than 64 comparisons per route community
+  is a load error. See
+  [Community patterns](docs/reference/rpol-language.md#community-patterns).
+- `.rpol` adds `else if` chains and nested `if` statements, which were
+  previously excluded. `if a { ... } else if b { ... } else { ... }` runs
+  exactly one branch, and a branch that only modifies continues with the
+  rest of the policy. That is the IOS-XR RPL `elseif` behavior a term per
+  branch could not express without hand-written negations. An `if` body
+  may hold nested `if` statements up to four levels deep, like loops; an
+  `else if` chain of any length counts as one level. Branches lower to the
+  existing first-match terms, each guarded by its path condition, so
+  explain names (`term.n`), hit counters and coverage are unchanged in
+  kind. Existing files parse, format and compile exactly as before. See
+  [Policies, terms, and evaluation order](docs/reference/rpol-language.md#policies-terms-and-evaluation-order).
+- `.rpol` `exists <field>` tests whether a route carries an optional value:
+  `route.origin-as`, `peer.asn`, `route.med`, `route.local-pref` or
+  `route.next-hop`. Use `if !exists route.origin-as { reject }` to reject a
+  route whose value cannot be told; `exists route.med` and
+  `exists route.local-pref` are the only way to tell an absent attribute from
+  its default. `exists` is contextual, so a binding or parameter named
+  `exists` keeps working.
+- `.rpol` `remove <kind> in D` and `remove <kind> not in D` accept a
+  community dataset as well as a community-set, directly or through a
+  `community-set` parameter. The scan reads the snapshot pinned at walk
+  start and filters it by kind at runtime, so it follows the current
+  contents literally: an empty snapshot, or one with no member of the
+  action's kind, makes `not in` remove every value of the kind, apart from
+  the well-known standard communities and, for `ext-community not in`, the
+  extended communities that are not route targets or route origins.
+  Dataset refresh validation is the guard, as a missing, unreadable or
+  malformed file keeps the prior snapshot. A content swap reaches installed
+  chains without recompiling them and refreshes the peers whose chains
+  remove by the dataset. See
+  [Removing by set membership](docs/reference/rpol-language.md#removing-by-set-membership).
+- `.rpol` `remove <kind> in SET` and `remove <kind> not in SET` remove every
+  arrived standard, large or extended community that is, or is not, a member
+  of a community-set, patterns included: the RPL `delete community in` /
+  `not in` forms. A well-known standard community is removed only by `in` and
+  only when the set names it as an exact member, so an allow-list scrub keeps
+  `NO_EXPORT`; likewise `remove ext-community not in` acts on route targets
+  and route origins only, keeping encapsulation, color, EVPN and other
+  extended communities. See
+  [Removing by set membership](docs/reference/rpol-language.md#removing-by-set-membership).
+- `.rpol` policy parameters now have types beyond `u32`: `prefix-set`,
+  `community-set` and `asn-set` (a set or dataset name), `community` (a
+  standard community) and `ip` (an address), as in
+  `policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip)`.
+  A `prepend` count may also be a `u32` parameter. Arguments are checked
+  against the parameter types wherever a policy is instantiated:
+  `apply(p(...))`, a test `expect`, and a configured chain reference such
+  as
+  `import_policy_chain = ["customer-in(200, cust-65001, 65000:100, 192.0.2.1)"]`.
+  That includes the set's existence and kind, and the range of a parameterized
+  `prepend` count or `set next-hop` address. Policies still compile to
+  constants and interned sets, so there is no per-route cost. See
+  [Parameters](docs/reference/rpol-language.md#parameters).
+  `rbgp policy test --policy` and the policy dry-run RPCs accept the same
+  call forms.
+- The `l3vpn_ipv4_flowspec` family (IPv4 VPN FlowSpec, AFI 1 / SAFI 134,
+  RFC 8955 §8) can be listed in `families` and `required_families`. It is
+  advertised in OPEN only when configured and never with Add-Path. Under
+  [ADR-0146](docs/adr/0146-vpn-flowspec.md), received VPN FlowSpec rules are
+  decoded, then
+  discarded before the Adj-RIB-In and counted in
+  `bgp_vpn_flowspec_nlri_discarded_total{peer}` once the UPDATE passes
+  validation. They are never stored, reflected or validated, and the daemon
+  never sends a ROUTE-REFRESH for the family, so an inbound soft reset of it
+  succeeds without the Route Refresh capability.
+- The `vpnv4-flowspec` policy family matches local IPv4 VPN FlowSpec rules
+  separately from global `ipv4-flowspec` and `ipv6-flowspec` rules. Existing
+  extended-community actions can add and strip route targets, and
+  `NO_ADVERTISE` is honored before and after export policy evaluation.
+  The new family remains outside the v1 inventory under
+  [ADR-0146](docs/adr/0146-vpn-flowspec.md).
+- `bgp_rib_prefixes{peer="0.0.0.0",family="l3vpn_ipv4_flowspec"}` reports
+  locally injected VPN FlowSpec rules separately from global rules, including
+  deletion and lease expiry. `bgp_rib_loc_prefixes` retains its separate VPN
+  family count. Received VPN FlowSpec remains decoded and discarded.
+- Opt-in `l3vpn_ipv6_flowspec` negotiation, `vpnv6-flowspec` policy matching
+  and per-family telemetry. Received VPN FlowSpec is decoded and discarded.
+  `rbgp doctor` excludes both VPN families from inbound prefix-bound warnings.
+  This adds no VRF import, reflection or forwarding guarantee. See the
+  [controller API](docs/reference/api.md#vpn-flowspec-controller-api).
+- IPv4 and IPv6 VPN FlowSpec controller origination with explicit Route
+  Distinguisher identity and Route Target attributes. Plain, leased and
+  guarded mutations, list views, lease pagination and export dispositions
+  preserve the scope; unspecified listings still select global FlowSpec only.
+  `rbgp flowspec` accepts VPN families, `--rd` and typed `--route-target` values.
+  It rejects VPN scope on non-VPN mutations before sending an RPC, preventing
+  older daemons from silently treating those requests as global rules.
+  The new API fields and families remain outside the v1 inventory.
+- `rustbgpd-wire` 0.28.0 adds `Safi::FlowSpecVpn`, the `VpnFlowSpecRule`
+  NLRI type with `decode_vpn_flowspec_nlri` and
+  `try_encode_vpn_flowspec_nlri`, and the `vpn_flowspec_announced` and
+  `vpn_flowspec_withdrawn` fields on `MpReachNlri` and `MpUnreachNlri`, a
+  breaking change for code that builds those structs. `rustbgpd-fsm` 0.15.0
+  and `rustbgpd-rpki` 0.10.0 move to the new wire line.
+
+### Changed
+
+- Write the BLACKHOLE ownership receipt once per reconcile pass instead of once
+  per installed or removed prefix. Each write re-encoded the whole receipt and
+  ran two fsyncs on the actor, so a burst of host routes cost quadratic bytes and
+  delayed withdrawals and the shutdown drain. A pass now writes the receipt at
+  most once ahead of its installs, once after each batch of deletions, and once
+  to drop candidates that were not installed; a crash at any point still leaves
+  every daemon route receipted for adoption on restart. See
+  [the BLACKHOLE discard reference](docs/reference/configuration.md).
+- EVPN routes whose attributes an export policy modifies now share one stored
+  attribute set across receivers and routes with equal policy outcomes,
+  instead of keeping a separate copy per receiver and route. With many
+  receivers on a community-tagging export policy, Adj-RIB-Out memory drops
+  accordingly; other address families are unchanged.
+- `rbgp gshut` and `SetGracefulShutdown` now return once the live sessions
+  have accepted the toggle, instead of after every acknowledging peer's
+  outbound routes were re-advertised. The re-advertisement follows in the
+  background, one peer at a time, so the peers' own route updates, including
+  withdrawals, are no longer held behind every replay; a slow or failed
+  refresh is logged (`graceful-shutdown outbound refreshes complete` with
+  its counts, and a warning per failed peer) instead of failing the command.
+- An OPEN whose Add-Path, Multiprotocol, Graceful Restart, Long-Lived
+  Graceful Restart, Extended Next Hop or Paths-Limit capability value is not
+  a whole number of its tuples (for example an Add-Path length of 3), or
+  whose Four-Octet AS capability is not 4 octets, is now refused with OPEN
+  Message Error / Unspecific (2/0), as RFC 4271 §6.2 prescribes. Before, the
+  capability was ignored, so an Add-Path peer could send path IDs that were
+  read as prefixes, and a Four-Octet AS peer's `AS_PATH` was parsed as
+  two-octet. See
+  [RFC notes](docs/reference/rfc-notes.md).
+- The Linux dataplanes now resolve the netlink stack as one coherent family:
+  `rtnetlink 0.24`, `netlink-packet-route 0.34`, transitive
+  `netlink-proto 0.14`, with `netlink-packet-core 0.9` and `netlink-sys 0.9`
+  unchanged. The upstream parser now accepts an `RTA_MULTIPATH` attribute
+  with no next hops and zero-pads a short `IFLA_STATS` payload instead of
+  failing the whole message. No rustbgpd code or raw-netlink escape hatch
+  changed.
+- Reduce outbound distribution work by counting EVPN replacements without a
+  second advertised-route lookup and keeping shared withdrawal and encoding
+  handles on each update group's staged output. Outbound memory limits and
+  attribute reclamation thresholds are unchanged.
+- `.rpol` rejects well-known community names in every binding form: policy
+  and function parameters, `let` bindings (including function bodies), and
+  `for` variables. Sets and datasets use the same reservation. RFC-assigned
+  future aliases `NOPEER`, `ACCEPT_OWN`, `LLGR_STALE`, `NO_LLGR` and
+  `STANDBY_PE` are reserved without adding literal support. See
+  [Reserved names](docs/reference/rpol-language.md#parameters).
+- Retire the unreachable `.rpol` evaluation-error kinds `overflow`,
+  `underflow` and `clamp-inverted` from the Rust `EvalErrorKind` enum,
+  in-language `expect` vocabulary and `bgp_policy_eval_errors_total{kind}`
+  vocabulary. The metric-consumer check now requires each remaining kind
+  to have a runtime emitter; compile-time diagnostics and synthetic test
+  values do not count.
+- **Breaking:** an `.rpol` community-set probe reads only the kind of its
+  field. `route.communities in S` matches standard communities against the
+  set's standard members, and `route.large-communities` /
+  `route.ext-communities` likewise; before, `route.large-communities in tags`
+  with `tags { 65000:1 }` matched a route carrying the standard community
+  65000:1. A named set member of another kind is now a compile error for that
+  probe, and for `remove <kind> in S` / `not in S`. Sets that mix kinds, such
+  as the standard and large twins of a route-server action community, use
+  the new kind-agnostic forms `route.any-community in S` and
+  `remove any-community in S`. Datasets and set parameters filter by kind at
+  runtime. Each probe still makes one pass over the route's communities of
+  its kind. Policy explain output renders a kind-agnostic probe of a set that
+  mixes kinds, including a TOML community list that mixes kinds, as
+  `route.any-community in S` instead of `route.communities in S`, and a
+  community compared or bound in a value position as `65000:1` instead of
+  its integer value.
+- **Breaking:** `.rpol` values carry a type. `route.origin-as`, `peer.asn`
+  and loop variables over `route.as-path` or an asn-set are ASNs: they
+  compare with `==`, `!=`, `>=` and `<=` against an integer literal or u32
+  parameter, so `route.origin-as >= 64512 && route.origin-as <= 65534` checks
+  a private range, compare with another ASN by `==`/`!=`, probe asn-sets and
+  can be set as a whole value, but take no arithmetic. A standard community
+  literal such as `65000:1`, a `community` parameter and a loop variable over
+  `route.communities` are communities: they compare with another community
+  by `==`/`!=`, probe community-sets whose members are standard and are added
+  or removed, but take no arithmetic, probe no asn-set and never equal an
+  ASN or an integer. A `let` takes its initializer's type. Before,
+  `for a in route.as-path { if a in tags ... }` matched ASN 64500 against the
+  community 0:64500, and so did `if a == 0:64500`.
+- **Breaking:** `.rpol` community actions apply in statement order, within a
+  term, across terms and across chain members, and the later operation on a
+  value wins: `add community X; remove community X` now leaves X absent, where
+  both orders used to keep it. `remove community *`, the other strip-all forms,
+  `remove large-community <asn>:*:*` and `remove <kind> in / not in` now also
+  cancel matching additions that earlier statements or chain members staged,
+  where they used to read only the arrived route; `remove community *` still
+  keeps well-known communities, even ones the policy just added. Conditions
+  still read the route as received. See
+  [Actions](docs/reference/rpol-language.md#actions).
+- `.rpol` conditions never fail. A comparison or probe whose operand is
+  missing or cannot be computed is false, so `&&`, `||` and `!` combine plain
+  true and false values and an operand's evaluation order never changes a
+  verdict. Before, `if route.as-path matches "^65000" && route.origin-as + 0
+  == 1 { reject }` denied an `AS_SET`-only route with `absent-operand` even
+  though the regex was false (arithmetic on an ASN is now a compile error), and `route.origin-as == (64500)` denied where
+  `route.origin-as == 64500` did not match. A `let` that cannot be computed
+  now binds that state: conditions on it are false, and only an action that
+  needs the value denies the route. Computed `set` values, computed prepend
+  operands and community bindings still fail closed. The
+  `optional-field-negation` lint now also flags a negated binding, binding
+  probe or computed comparison over `route.origin-as` or `peer.asn`, which
+  matches a route without the value. See
+  [Conditions never fail](docs/reference/rpol-language.md#conditions-never-fail).
+- Compile large valid `.rpol` sources using indexed dataset, policy, function
+  and community-member lookups, preserving name resolution and diagnostics.
+- **Breaking:** `.rpol` sets of every kind share one namespace, as datasets
+  already did. A prefix-set, community-set and asn-set can no longer share a
+  name; the collision is a compile error naming both definitions. Before,
+  `x in shared` with an asn-set and a community-set both named `shared`
+  probed the asn-set, so `for c in route.communities { if c in shared { reject } }`
+  let a route carrying the community pass and rejected one carrying its
+  digits as an ASN.
+- **Breaking:** `.rpol` prepends accumulate in statement order, across terms
+  and chain members, each later prepend to the left of the earlier ones, as
+  IOS-XR RPL `prepend as-path` does: `prepend as 131077 3` then
+  `prepend as 43646981 2` places `666.5 666.5 2.5 2.5 2.5` in front of the
+  path. A later prepend used to replace an earlier one. A computed operand
+  reads the path as it stands when its prepend runs, so
+  `prepend as 65000 2; prepend as path-first 1` places `65000 65000 65000`.
+  TOML `set_as_path_prepend` statements in different chain members
+  accumulate the same way. One evaluation prepends at most 255 ASNs: the
+  compiler adds up the prepends along every path to an `accept`, counting
+  `if` branches that fall through together and a prepend inside a loop once
+  per iteration, and
+  rejects a policy, or a chain when it is attached, that could exceed that,
+  so a prepend inside a loop over a route attribute is a compile error; a
+  chain composed without the check fails the route closed with the new
+  `prepend-limit-exceeded` evaluation error. The in-language test assertion
+  `with prepend "666.5 666.5 2.5 2.5 2.5"` pins the whole prepended
+  sequence, leftmost first, in asplain or asdot, and `with prepend as ASN
+  COUNT` now also pins the whole sequence. See
+  [Actions](docs/reference/rpol-language.md#actions).
+- **Breaking:** `ExplainModifications.as_path_prepend` (field 12, repeated)
+  carries the prepended ASNs, leftmost first, in `ExplainImportPolicy`,
+  `ExplainAdvertisedRoute` and `TestPolicy` responses. It replaces
+  `as_path_prepend_asn` and `as_path_prepend_count`, whose field numbers and
+  names are reserved. The `rbgp` JSON output's `as_path_prepend` is the same
+  array, replacing the two keys, and the text output prints the sequence.
+- `.rpol` arithmetic saturates. `+`, `-` and `*` stop at 0 and 4294967295 in
+  every value position instead of failing, so `set med route.med - 10` on a
+  route with MED 4 sets 0, as in IOS-XR RPL, Junos and FRR, rather than
+  denying the route. `clamp(x, lo, hi)` is `min(max(x, lo), hi)` and never
+  fails. The divisor of `/` or `%` must be a non-zero constant or
+  `max(e, k)` with a constant `k >= 1`, so division never fails at runtime.
+  A literal-only expression that leaves u32 (`4294967295 + 1`) is still a
+  compile error; an expression with a parameter folds with saturation, so an
+  argument value never decides whether a policy loads. See
+  [Saturating u32 value expressions](docs/reference/rpol-language.md#saturating-u32-value-expressions).
+- **Breaking:** `.rpol` explain traces, `rbgp policy test` term hits and
+  `rbgp policy stats` rows name each lowered term after the source statement
+  it executes. One row of the term's final statement keeps the bare term
+  name: the last row holding its own `accept` or `reject`, else its last
+  row. Every other row is `<term>.<statement>`, with `.<k>` only when that
+  one statement lowers to several terms. Names used to number every lowered
+  term of a source term in order, so a compiler change to how one statement
+  lowered renamed the rows of every later statement; now a lowering change
+  that keeps the source term and its final statement never renames the
+  bare row. A term name cannot contain `.`, so no source term can take a
+  generated name. The decision corpus now pins every row's name, position
+  and action. See
+  [Term-name rulings](docs/reference/rpol-language.md#term-name-rulings).
+- Keep grouped unicast withdrawals shared through outbound commit, copying them
+  only when a receiver's export gates change the payload.
+- Represent empty shared withdrawal payloads without retaining an allocation.
+- Reduce unicast fanout work by skipping unrelated EVPN bookkeeping and
+  local-source metadata writes when no old or new local provenance exists.
+- The RIB now keys FlowSpec rules by family and Route Distinguisher, so an
+  IPv4 VPN FlowSpec rule (`l3vpn_ipv4_flowspec`, SAFI 134) and a global rule
+  with the same components are distinct, and each RD is its own rule. VPN
+  rules are distributed only to peers that negotiated the family, as SAFI 134
+  with their RD, and are never mixed into a SAFI 133 UPDATE, checked by RFC
+  9117 validation or gated by RT-Constrain. A neighbor configured with
+  `l3vpn_ipv4_flowspec` now lists it in its Graceful Restart and LLGR
+  capabilities when those are enabled, as for `ipv4_flowspec`, so a planned
+  restart's selection deferral now also waits for such peers'
+  `l3vpn_ipv4_flowspec` End-of-RIB, within the deferral timeout.
+  Collision failback does not wait for a refresh that the family's handling
+  or the peer's negotiated capabilities prevent the daemon from requesting.
+  `bgp_rib_loc_prefixes` and `bgp_rib_adj_out_prefixes` report the family
+  apart from `ipv4_flowspec`. See
+  [ADR-0146](docs/adr/0146-vpn-flowspec.md).
+
+### Fixed
+
+- A session ended by a transport-safety abort or by the expiry of its
+  shutdown deadline now hands its unsent outbound routes to the same paced
+  release as an ordinary teardown, instead of freeing the whole inventory in
+  one turn of the worker thread.
+- The per-prefix Add-Path receive cap now also covers VPNv4/VPNv6 (SAFI 128,
+  per RD + prefix) and IPv4/IPv6 labeled unicast (SAFI 4), the other families
+  `add_path.receive` advertises. Before, a peer could send any number of path
+  IDs for one VPN or labeled NLRI: 32,000 IDs cost the RIB about 4.7 s of CPU,
+  and the per-family `max_prefixes_*` bounds could not stop it because the
+  paths collapse to one prefix. Past the cap the excess is withheld and
+  counted in `bgp_add_path_receive_limit_attempts_total`, with the family
+  label naming the VPN or labeled family. See
+  [Add-Path configuration](docs/reference/configuration.md).
+- IPv4/IPv6-unicast Add-Path receive now caps each prefix at 1024 retained
+  path IDs when `add_path.receive_max` is unset or zero. Before, such a peer
+  could announce any number of path IDs for one prefix, and each insert and
+  withdrawal in the RIB scanned that prefix's whole path list, so 100,000 IDs
+  for one prefix cost about two seconds of RIB work. Past the default cap the
+  excess is withheld as `max_prefix_action = "block"` does, independent of
+  the configured action, and counted in
+  `bgp_add_path_receive_limit_attempts_total` with `action="block"`. No
+  Paths-Limit capability is advertised for the default. See
+  [Add-Path configuration](docs/reference/configuration.md).
+- Report AS 0 in an `AS_PATH` (RFC 7607) when an earlier `AS_PATH` copy in
+  the same UPDATE was rejected for its attribute flags. The earlier copy
+  suppressed the AS 0 cause although it never recorded one, so
+  `bgp_update_malformed_causes_total` and the warning omitted it.
+- An operator drain on an `esi = "auto-lacp"` Ethernet Segment now survives
+  its bond losing and regaining the LACP partner, for example across a
+  carrier flap. The segment leaves the runtime while the bond is not ready,
+  but the `operator` drain reason stays on its last derived ESI, so the
+  segment returns drained instead of re-originating at once. A different
+  partner is still a new segment and starts undrained, and removing the
+  segment from the config still drops the drain
+  ([ADR-0085](docs/adr/0085-evpn-es-interface-binding.md)).
+- An `esi = "auto-lacp"` Ethernet Segment whose bond regains the same LACP
+  partner now waits `recovery_delay_seconds` before it originates again, as
+  after a carrier return. Before, the link coordinator treated the returning
+  segment as a new binding and released it at once, so it attracted traffic
+  before the segment had re-converged. That included an operator undrain
+  made just after the partner returned. A different partner is still a new
+  segment and originates without the wait. See the
+  [ADR-0085 amendment](docs/adr/0085-evpn-es-interface-binding.md).
+- A received OPEN, UPDATE or NOTIFICATION shorter than its RFC 4271 §6.1
+  minimum, or a KEEPALIVE that is not exactly 19 octets, now gets
+  NOTIFICATION Message Header Error / Bad Message Length (1/2) carrying the
+  erroneous length. Before, a short OPEN or NOTIFICATION got OPEN Message
+  Error 2/0 with empty data, a short UPDATE got 3/1, and a bad KEEPALIVE
+  length got 1/2 without the length.
+- The BFD runtime no longer keeps one timer entry per received control
+  packet. Each packet re-armed the detection timer and left the superseded
+  deadline queued until it was due, so a peer or on-link sender flooding
+  packets with a long advertised interval grew memory by one entry per packet
+  for up to about 71.6 minutes. Superseded deadlines are now dropped once they
+  could outnumber the live ones, which bounds the queue by the session count.
+- The peer's advertised Desired Min TX can no longer stretch BFD detection
+  past five minutes. Before, one packet advertising the largest interval and
+  multiplier set the detection time to about 71.6 minutes, so a peer that then
+  failed went undetected for that long. The window is now at most the larger
+  of five minutes and our `min_rx_interval` times the peer's multiplier. See
+  [BFD configuration](docs/reference/configuration.md).
+- A foreign kernel route at another metric for the same prefix no longer
+  strands a daemon-owned RFC 7999 BLACKHOLE discard route. The reconciler
+  used to drop ownership of its row as soon as a foreign row appeared, so the
+  discard outlived the withdrawal and every restart until it was deleted by
+  hand. The row now stays owned, an adopted row beside a foreign route is
+  still reaped, and withdrawal removes only the daemon's row. IPv6 removal now
+  names the discard route's metric, because the kernel's IPv6 delete ignores
+  the route type and could otherwise remove a co-resident daemon's
+  `proto bgp` unicast route for the same prefix.
+- A failed BLACKHOLE ownership receipt write no longer strands the kernel
+  discard route. Previously one write error (for example a full disk) after a
+  successful install disabled every later kernel mutation: the route stayed in
+  the main table after withdrawal, shutdown and restart, and a re-announcement
+  reported `foreign_route_exists`. The receipt is now written before a route is
+  installed and after it is deleted, so it always names every daemon route, and
+  a write failure no longer stops withdrawal or shutdown from removing owned
+  routes. A receipt that is unreadable or changed outside the daemon still
+  fail-stops as `ownership_state_unavailable`. See
+  [the BLACKHOLE discard reference](docs/reference/configuration.md).
+- BLACKHOLE discard-route installs and withdrawals no longer stop until
+  restart when an adopted route from a previous daemon lifetime disappears,
+  or is replaced by a foreign route, between a failed startup receipt write
+  and its retry. The adoption is now dropped together with the prefix's
+  ownership, so the later reap no longer finds a pending route that the
+  receipt does not name.
+- Record boot config history on the blocking pool after preparing its private
+  directory, allowing gRPC to bind while history storage is slow. Persisted
+  config mutations and SIGHUP remain serialized behind the recording attempt,
+  including when its async waiter is canceled. History remains best-effort.
+- Startup no longer fsyncs the config last-persist marker before it binds
+  gRPC. The marker is a hint for `rbgp doctor`'s freshness check, but since
+  the runtime-state hardening it was written durably, with three fsyncs on
+  the boot path. On a slow disk that delayed the gRPC listener by seconds,
+  long enough for activation tooling such as `rs-config-render activate` to
+  give up. The marker is still replaced without following a symlink at its
+  name or at its stage. A refused `runtime_state_dir` now also prints the
+  directory and the reason on stderr before the daemon exits, not only in
+  the structured log.
+- A second commit-confirm boot revert lost its unconfirmed candidate. Every
+  revert saved the candidate as `<config>.unconfirmed`. When that file was
+  left over from an earlier revert, the save was skipped and the restore
+  overwrote the new candidate, while the boot banner pointed at the old copy.
+  Each revert now saves its candidate as `<config>.unconfirmed-<id>`, with
+  16 hex digits derived from that transaction, and the banner names the
+  suffix. A restart that interrupted the same revert still finds its own
+  save. If a different file already holds the name, boot is refused and the
+  candidate, the file and the pending authority are left untouched. The
+  daemon never deletes these copies; remove them after recovery.
+  **Upgrade note:** scripts that look for `<config>.unconfirmed` must match
+  `<config>.unconfirmed-*` instead.
+- One Add-Path tuple for an address family rustbgpd does not model (for
+  example AFI 1 / SAFI 200) no longer discards the peer's whole Add-Path
+  capability. Before, the session negotiated no Add-Path at all while the
+  peer still sent path IDs for the families it had listed, so those UPDATEs
+  were misread as prefixes, giving bogus announcements or a session reset.
+  Only the unmodeled tuple is now ignored (RFC 5492 §4, RFC 7911). Extended
+  Next Hop, Long-Lived Graceful Restart, Paths-Limit and Outbound Route
+  Filtering capabilities get the same per-tuple handling.
+- A persisted runtime mutation (`rbgp config apply`, neighbor, policy,
+  peer-group or FIB-table changes) could overwrite an operator's edit to the
+  config file. The edit was lost if it was saved while the mutation applied,
+  or at any point after the daemon's last read or write and before a SIGHUP.
+  The daemon now checks the file's bytes before it publishes. A pending edit
+  refuses the mutation with `FAILED_PRECONDITION` before anything changes.
+  An edit that lands while a config transaction applies makes the
+  transaction compensate and fail. The other mutations cannot undo their
+  runtime change, so they fence the daemon (exit 70), and it restarts from
+  the edited file. In every case the edit stays on disk; SIGHUP adopts it.
+  The check is active from boot, also after a commit-confirm boot revert,
+  and through a symlinked config path it reads the file the write replaces.
+  A save in the brief interval between the last check and the rename can
+  still be replaced.
+  See [runtime changes rewrite the config file](docs/reference/operations.md#runtime-changes-rewrite-the-config-file).
+- A TCP failure in OpenConfirm or Established no longer leaves the
+  ConnectRetry timer running into Idle (RFC 4271 §8.2.2 sets it to zero).
+  Its later expiry counted in `bgp_fsm_stale_timer_events_total`, whose
+  help text treats a non-zero value as a daemon bug. Reconnects are
+  unaffected; they use the session's own reconnect timer.
+- An update-group member's exact-export rejection of a unicast or VPN route
+  now outlives the route's last source while RFC 4724 selection deferral
+  holds the Loc-RIB best. Previously the rejection retired when the source
+  withdrew, or when any End-of-RIB inside the hold pruned rejections. If the
+  source then re-announced the route unchanged, the member's advertised
+  count, advertised-route listing and BMP Adj-RIB-Out statistics included a
+  route it was never sent once the hold released. Ungrouped peers were not
+  affected. The same applies to labeled unicast, where
+  `rbgp rib --prefix P advertised PEER --explain` reported a rejected route
+  as advertised; labeled routes on the wire were not affected. When the
+  release removes a held unicast, VPN, labeled unicast or EVPN row, the
+  release now retires that row's rejections in the same pass, instead of
+  leaving them until the next bulk prune.
+- `rbgp --help` and `rbgp doctor --help` now describe exit code `0` as "no
+  red checks": a run with yellow warnings but no red check also exits `0`, as
+  the [operations reference](docs/reference/operations.md) already stated.
+  The exit codes themselves are unchanged.
+- `rbgp doctor` now warns about a config file saved again while a SIGHUP
+  reload was still applying. The daemon's last-persist marker records the
+  file's mtime when the reload read it, not when the reload finished, so a
+  second save in that window no longer reads as already applied.
+- Removing a dynamic-neighbor range now releases its admin-disabled
+  members, as its enabled members are released when their sessions next go
+  Idle. Before, a disabled member kept its dynamic-neighbor slot, refused
+  delete, dropped its inbound connections, and `enable` restarted it
+  although no range covered its address. `enable` on a dynamic peer that no
+  configured range admits now fails with `FAILED_PRECONDITION` and changes
+  nothing. See the
+  [ADR-0086 amendment](docs/adr/0086-dynamic-peer-group-reconfigure.md).
+- A peer that fell behind on outbound updates while every route toward it
+  went away now still receives its pending End-of-RIB and the answer to a
+  ROUTE-REFRESH it sent meanwhile. Before, that refresh was dropped, and a
+  Graceful Restart helper whose ORF-gated initial End-of-RIB waited for it
+  never received the marker in that session, so it kept our withdrawn routes
+  stale until its own timer expired.
+- `EnableNeighbor` (`rbgp neighbor <addr> enable`) on a peer whose session was
+  already connecting or up tore the session down. The session sent
+  NOTIFICATION FSM Error (code 5, subcode 0), restarted and lost its
+  NOTIFICATION backoff streak, so a repeated or scripted enable flapped a
+  healthy peer. As RFC 4271 §8.2.2 specifies, a start event outside Idle is now
+  ignored: the RPC still succeeds, and the session, its counters and its backoff
+  streak are left unchanged. On an idle peer, `enable` still starts the session
+  and clears the backoff.
+- The EVPN dataplane now re-reads the target VXLAN device from the kernel
+  before it writes a remote-MAC, flood or FDB nexthop-group row. Before,
+  it took the device's ifindex from the link inventory dumped at the start
+  of the reconcile pass. If that VXLAN was deleted during the pass and
+  another device was created with the same ifindex, the row for one VNI
+  could be written to the other device. Such a write now fails and is
+  retried after the next link dump.
+- An EVPN Type 3 (IMET) inject whose RIB acknowledgement timed out is now
+  tracked as possibly installed, so the rollback of a failed L2VNI converge
+  and the shutdown withdraw sweep withdraw it. Previously a backlogged RIB
+  could apply the inject after the timeout and leave the Type 3 route
+  advertised after its VNI was rolled back or the daemon stopped, so remote
+  VTEPs kept sending BUM traffic toward it. A withdraw of a route the RIB
+  never installed still counts as withdrawn.
+- Correct EVPN Linux kernel feature labels and maintained test guidance:
+  externally learned bridge/VXLAN FDB programming and broadcast flood control
+  arrived in upstream Linux 4.12; per-port VLAN database dumps in 5.6 and
+  their tunnel options in 5.7. Error classification and dataplane behavior
+  are unchanged; these feature floors do not qualify older kernel releases.
+- An EVPN VTEP now withdraws its Type 2 route when another segment
+  advertises the same MAC with a higher MAC Mobility sequence, or with an
+  equal sequence from a lower PE IP (RFC 7432 §15). It used to raise its
+  own sequence above every such route, so two VTEPs advertising one MAC
+  raised each other's sequence on every UPDATE exchange and peers
+  reinstalled the MAC on each one. The sequence now rises only when the
+  MAC is learned on a local port. A withdrawn MAC that is still local is
+  advertised again once the contender is gone. See
+  [operations](docs/reference/operations.md).
+- Creating a managed EVPN netdev no longer leaves an unstamped link behind
+  when another link already holds its ownership altname. The kernel
+  rejects the stamp with `EEXIST`, which rustbgpd treated as
+  already-stamped. The new link then stayed unstamped, was reported as
+  `foreign-present` and was never reaped. rustbgpd now rolls the create
+  back and retries it on backoff. The create succeeds once the other
+  link's altname is removed.
+- A managed fixed-VNI VXLAN under `[managed_netdevs]` is now created
+  administratively up. It was created down, so the kernel dropped every frame
+  for its remote FDB rows while the instance reported `Ready` and the link
+  `owned-safe`. L2VNI readiness now requires the bridge and the selected VXLAN
+  member to be administratively up, and a down managed link reports
+  `owned-unsafe`. The next reconcile pass raises a down managed bridge,
+  fixed-VNI or SVD VXLAN, VLAN upper, VRF, or L3VXLAN that carries exactly its
+  stamp and matching protected attributes. See
+  [managed netdevs](docs/reference/configuration.md#managed_netdevs).
+- When a Non-DF segment or a single-active AC binding leaves the
+  configuration, the EVPN dataplane restores the bridge ports it had
+  suppressed or blocked, as before. It now restores a port only while
+  the port still has the name it had when it was managed. Previously the
+  restore targeted the remembered ifindex alone. If the port had been
+  deleted and an unrelated bridge port had taken that ifindex, the
+  restore rewrote the unrelated port's flood flags or set it forwarding.
+- EVPN export attribute sharing now distinguishes unnumbered receivers that
+  use the same link-local address on different interfaces. Equal policy
+  outcomes from single-route updates share one allocation across those peers;
+  repeated processing of one receiver still leaves its unique outcome uninterned.
+- An EVPN Type 5 route whose ESI or Gateway Address is an overlay index is
+  now imported when its label is 0. RFC 9136 §3.1 lets the sender zero the
+  label of an overlay-index route and requires the receiver to resolve it
+  recursively. rustbgpd dropped such routes as `l3vni_mismatch`, so the
+  remote tenant subnet was never installed. The route now resolves through
+  its overlay index under the IP-VRF's L3VNI. A label-0 route with neither
+  overlay index, and a non-zero label that differs from the IP-VRF's L3VNI,
+  are still dropped. See
+  [EVPN VTEP troubleshooting](docs/how-to/evpn-vtep-troubleshooting.md).
+- A peer-scoped `ExplainBestPath` (`rbgp rib --prefix P --explain
+  --explain-peer PEER` on an Add-Path peer) now applies the same route-server
+  control community, LLGR-stale and conditional-advertisement gates as live
+  staging. A candidate one of those gates kept off the wire used to be
+  reported with a non-zero `advertised_path_id`, as if the peer received it.
+- A peer-scoped `ExplainBestPath` (`rbgp rib --prefix P --explain
+  --explain-peer PEER` on an Add-Path peer) now applies the peer's
+  Address-Prefix ORF filter, the RFC 5291 §6 initial refresh gate, RFC 9234
+  OTC egress and the outbound prefix limit, as live staging does. Candidates
+  those gates withhold used to be reported with non-zero
+  `advertised_path_id`s. The IDs are the next staging decision: an ORF filter
+  pushed with DEFER takes effect at the prefix's next change or the next
+  ROUTE-REFRESH.
+- FIB peer filters match both the retained address and interface, keeping
+  same-address link-local neighbors separate in paged and unpaged responses.
+  A scoped peer selector such as `fe80::1%eth0` now excludes rows with no
+  recorded interface, including rows restored from owned-state files written
+  before the peer interface was persisted; those rows match again once they
+  are re-projected.
+- FIB status publication prepares only the unfiltered order eagerly. Filter
+  indexes are built on first use and reused within that publication, reducing
+  publication latency and memory for unused filter combinations. The first
+  filtered read after each publication sorts the full publication to build
+  that filter's order; later reads of the same publication reuse it. If index
+  preparation fails, the read returns `INTERNAL`.
+- IPv6 FlowSpec prefix offsets encode only the matching bits, with RFC 8956
+  bounds and padding handling for global and VPN rules. Injection rejects an
+  IPv6 fragment value with DF (`0x01`, IPv4-only) or reserved bits set instead
+  of accepting a value that matches every packet; received IPv6 rules ignore
+  those bits. Injection rejects prefix lengths above the address-family limit
+  instead of clamping them. Mixed IPv4/IPv6 VPN withdrawals keep separate wire groups.
+- A forced outbound resync that was still waiting on a full outbound channel
+  (for example after a graceful-shutdown toggle or an ORF IMMEDIATE) now ends
+  with the session that owed it. Before this fix, if that session ended through
+  graceful restart, a replacement session, or a collision failback, the new
+  session received its full initial table and then the whole table again on
+  the next distribution pass.
+- A SIGHUP reload on the default generation route no longer holds the peer
+  manager for one 500 ms command deadline per removed neighbor whose session
+  has stopped reading commands, as a session waiting on a full RIB mailbox
+  does. The removed neighbors' sessions now stop together, 64 peers at a
+  time, so stuck sessions cost one delete deadline per 64 of them. If one
+  removal fails, the neighbors already removed are still re-added when the
+  reload rolls back. Replaced neighbors are still reshaped one at a time, so
+  a failed replacement leaves every later neighbor untouched.
+- After a planned Graceful Restart, interface-only (unnumbered) neighbors now
+  take part in RFC 4724 selection deferral. Before, they received the Restart
+  State bit and End-of-RIB grace but were never deferral waiters, so a spine
+  whose Graceful Restart neighbors were all interface-only sent End-of-RIB to
+  the first leaf before the other leaves' routes arrived, and that leaf
+  removed the stale routes it held from us. Each one waits by interface and
+  binds to the first session learned on it. An interface-only neighbor added
+  at runtime now advertises Restart State 0, as a static neighbor added at
+  runtime already did.
+- The Graceful Restart marker written at shutdown with
+  `warm_cache_checkpoint_on_shutdown = false` now takes its window from the
+  committed runtime configuration. Before, it used the configuration loaded
+  at boot or by the last SIGHUP, so a Graceful Restart neighbor added through
+  gRPC or a config transaction left no marker (the next start was cold), and
+  a `gr_restart_time` raised at runtime kept the shorter window.
+- A static Graceful Restart neighbor rebuilt inside a planned restart's
+  window, by a SIGHUP or a peer-group change, now keeps advertising the RFC
+  4724 Restart State bit. Before, the rebuilt session sent Restart State 0
+  while the neighbor stayed a selection-deferral waiter, so the peer could
+  wait for our End-of-RIB while we waited for its, and deferral held until
+  the selection-deferral timer. A static neighbor deleted and re-added inside
+  the window still sends Restart State 0.
+- A route-server client with `per_client_best` and RFC 7947 control
+  communities now receives its own best eligible route when the best path is
+  suppressed toward it. Before, a client sharing an update group got nothing
+  for the prefix when the best path carried `0:PEER` / `RS:0:PEER` for its
+  ASN, or `0:RS` / `RS:0:0` without an override. An ungrouped client got the
+  runner-up. A grouped client now gets the same route an ungrouped client
+  gets: the runner-up, a later path when the runner-up is the client's own or
+  is also suppressed toward it, or a withdrawal when no eligible path
+  remains. Per-target prepend and the control-community scrub apply to that
+  route. The same applies on join, route refresh and resync, and when a tag
+  arrives on an already advertised best path. When the route a client gets
+  this way is a local RTBH route, removing it during a graceful-restart
+  selection hold withdraws it at once, also from a client that reconnects
+  as a GR helper. RFC 9234 OTC rejection reports, on join and route refresh
+  too, name the route the client would have received.
+- Route-server clients that share an update group no longer receive a few
+  UPDATEs the per-session path never sends. A batched export-policy
+  replacement that drops a route no longer withdraws it from the client that
+  announced it, or from a client that RFC 7947 control communities had kept
+  it from. A client no longer gets its runner-up re-announced when only
+  control communities that are scrubbed toward it changed, or a
+  `per_client_best` fallback re-announced for a next-hop action change that
+  produces identical wire bytes. Routes received were already correct; only
+  the redundant UPDATEs are gone.
+- For a route-server client that enforces RFC 7947 control communities and
+  shares an update group, the advertised-route listing, the advertised count,
+  the per-family `bgp_rib_adj_out_prefixes` gauge and BMP stat 17 now report
+  what the client was actually sent. They used to count and list a best path
+  the control communities suppress toward the client and show shared rows
+  without its prepends and community scrub, and a filtered listing tested
+  the filter on those shared rows. With `per_client_best` they now
+  show the client's fallback route. Ungrouped clients already reported this.
+- Clearing graceful shutdown on all peers (`rbgp gshut --all --clear`) now
+  also clears the intent held for a dynamic neighbor between sessions and for
+  an unbound interface-only neighbor. Before, such a neighbor came back still
+  advertising GRACEFUL_SHUTDOWN, with no peer left to clear it by name.
+- Setting graceful shutdown on all peers (`rbgp gshut --all`) now also sets
+  the intent held for a dynamic neighbor between sessions and for an
+  interface-only neighbor with no bound endpoint, including one that has
+  never bound. The all-peers clear reaches the same neighbors. Before, such a
+  neighbor connected during the maintenance window without
+  GRACEFUL_SHUTDOWN, and its routes were preferred again. A dynamic neighbor
+  with no dead-letter entry still starts its next session without the intent.
+- An all-peers RFC 8326 graceful-shutdown set no longer reaches an
+  interface-only neighbor that configuration has deleted while its BFD
+  cleanup is still pending. Before, a neighbor re-added on that interface
+  before the cleanup finished started in graceful shutdown although it was
+  not configured when the set ran.
+- An iBGP UPDATE received over IPv6 transport with IPv4 body NLRI and no
+  NEXT_HOP attribute is now treated as withdrawn (missing well-known
+  attribute, RFC 4271 §5.1.3 and RFC 7606) instead of installing the routes
+  with next hop 0.0.0.0. Over IPv4 transport an iBGP peer may still omit
+  NEXT_HOP, and the session address is used.
+- Received IPv4 FlowSpec that carries component type 13 (Flow Label) is now
+  a malformed NLRI, as RFC 8955 §4.2 requires for an unknown component type:
+  RFC 8956 defines the Flow Label for IPv6 only. Earlier releases accepted
+  it in IPv4 (SAFI 133) rules; IPv4 VPN FlowSpec (SAFI 134) refuses it too.
+- A session that rustbgpd closes with Cease / Out of Resources (subcode 8)
+  now purges the peer's routes when the peer supports graceful restart but
+  did not negotiate Notification GR (the RFC 8538 N bit). Before, these
+  closes kept the routes as graceful-restart stale for the restart time. The
+  closes covered are writer-queue saturation, an expired writer admission
+  deadline, an outbound route that cannot be encoded, an export-snapshot
+  invariant breach, and a Cease/8 raised while draining before a shutdown or
+  reset. With the N bit negotiated, the routes are still retained, as RFC
+  8538 specifies for Cease/8.
+- A session closed by a locally sent Cease/Out of Resources (an outbound
+  writer saturation, an exact-export invariant failure or a RIB admission
+  stall) now escalates the reconnect backoff as every other sent
+  NOTIFICATION does. Before, it reconnected after the base
+  `connect_retry_secs` wait without advancing the streak, so a peer whose
+  sessions kept ending this way re-sent its table at the shortest interval.
+  From the second consecutive Cease/8, the neighbor's inbound connections
+  are also held for the wait, so `BgpInboundNotificationBackoffDrops` can
+  fire for a Cease/8 loop. An administrative reset whose close drain raises
+  the Cease/8 now clears the streak, as an administrative reset does;
+  before, it left the streak unchanged.
+- Close two gaps in the coalescing of max-prefix warnings. While the peer
+  manager resolved a collision and set other peers' notifications aside,
+  each later crossing of a scope's warning threshold added another warning
+  to that backlog. The backlog now holds one warning per session scope,
+  counting every crossing. After the peer manager stopped, a crossing could
+  also be added to a warning that would never be delivered, with no log
+  line. It is now reported as a failed max-prefix warning notification.
+- Outbound UPDATEs now encode MP_REACH_NLRI as the first path attribute, as
+  RFC 7606 §5.1 requires, instead of the last. A receiver that finds a later
+  attribute malformed can then still locate the NLRI to treat as withdrawn.
+  Receivers accept any attribute order, so this changes only byte layout.
+- Outbound distribution to a peer with a prefix-ORF list (RFC 5292,
+  `prefix_orf_receive = true`) no longer scans every installed entry for
+  each prefix. With the 4,096-entry cap installed, distribution to that peer
+  ran about 12 times slower than to a peer without ORF in the benchmark
+  shape; it is now no slower. The filter is indexed by entry
+  prefix, with the same first-match result. A DEFER ORF message no longer
+  copies the installed list; the index is rebuilt on the first lookup after
+  a change.
+- A receiver whose outbound row credit is spent no longer falls back to a
+  whole-peer resync for the families it holds in its own Adj-RIB-Out
+  (ungrouped unicast, labeled unicast, private VPN and EVPN). The RIB records
+  which routes it owes, keeps one entry per route however often the route
+  changes, and drains older owed keys first from current state once the
+  receiver drains, checking returned credit every 10 ms. A full outbound
+  channel retains the debt without repeatedly staging it. Local host and
+  BLACKHOLE route withdrawals and local FlowSpec revocations continue to
+  drain during graceful-restart selection deferral. A route-reflector client
+  with grouped unicast and private EVPN therefore keeps its grouped unicast
+  on the shared path while its EVPN backs up. End-of-RIB, route-refresh markers and an
+  operator replay's terminal are sent only after the routes the receiver was
+  owed in their family, including after a failed absorption falls back to
+  resync. Owed-set capacity is capped using a quarter-table byte estimate
+  with a 64-key floor; above it, the family is sent by one diff instead.
+  Queue and membership-map allocations shrink independently as keys drain.
+  FlowSpec, BGP-LS and RT-Constrain always take that path. Global and VPN
+  FlowSpec and the two BGP-LS families keep separate debt and refresh ordering.
+  Mixed-family updates record debt only for negotiated families. Canceling
+  superseded debt no longer rescans every rejection or pending OTC record for
+  each key. Shutdown makes a
+  best-effort flush of owed withdrawals ahead of the Cease. A graceful-restart
+  helper's carried withdrawals are sent in chunks admitted one at a time
+  against the receiver's credit.
+- Receivers that stop reading while sources churn no longer hold an unbounded
+  backlog of superseded route versions. Updates for a peer's private families
+  (those it holds in its own Adj-RIB-Out, such as EVPN and ungrouped unicast)
+  are admitted against a per-peer row credit sized from the number of
+  registered peers; a peer that stays stalled past it is marked dirty and
+  later resynchronizes from current state. With every peer private that is
+  about 10 s of RIB work at 16–2,048 peers; in a fleet of mostly grouped
+  peers a private peer tolerates proportionally less. A peer holds at most one whole-table update at a time (initial dump,
+  refresh or replay answer, resync, complete EVPN feed); a refresh request
+  that arrives meanwhile is answered once it has been sent. An operator
+  replay is accepted for all its families and its terminal or refused with
+  nothing sent. At shutdown, withdrawals no longer wait on spent credit, and
+  shutdown waits at most 5 s to tell the RIB it has begun.
+  Update-group members share one copy of the group's withdrawals.
+- A peer that stops reading no longer lets its session's outbound writer
+  queue gigabytes of encoded UPDATEs. Each session caps its writer's
+  unwritten bytes at 655,358 B (just under 640 KiB). Before building each
+  frame it requires room for the negotiated maximum message size, or a
+  shared frame's exact size, so admission pauses below the cap and resumes
+  as the peer reads, and the RIB's outbound row credit bounds what waits
+  behind it. A peer whose writes keep completing is not
+  torn down; one that stops reading altogether is still closed by the
+  RFC 9687 send hold timer or, with `send_hold_time = 0`, by the admission
+  deadline (Cease/8). Slow-peer detection also counts the writer's unwritten
+  bytes, since the byte budget now holds a lagging peer's queue well below
+  its frame threshold.
+- Preserve withdrawals when a receiver with deferred private routes leaves an
+  update group after an export-policy change, including when recovery capture
+  reaches its limit.
+- Defer private route updates before staging when grouped updates fill a
+  receiver's outbound channel, avoiding unnecessary whole-peer recovery.
+- Compile ordinary fanout separately from owed-route drains to avoid adding
+  drain-path overhead to healthy grouped receivers.
+- Deleting a neighbor no longer stops the peer manager while the RIB mailbox
+  is full. Operator deletes, reconcile, dynamic-neighbor auto-removal and
+  retained-identity expiry used to wait for mailbox room before handling
+  anything else, so a RIB that stopped draining also stopped inbound accepts,
+  session notifications and neighbor commands while readiness stayed green.
+  The deletion's RIB cleanup now waits in order behind the full mailbox while
+  the peer manager keeps working, including the removal of an interface-only
+  neighbor. Every later RIB update sent through the peer manager's ordered
+  path still goes after that cleanup. Re-adding the deleted neighbor waits
+  until its cleanup is admitted, so a static re-add still waits for mailbox
+  room. An interface-only neighbor's binding never waits for mailbox room: a
+  binding learned from Router Advertisements is retried on the reconcile
+  timer while its own cleanup is queued or the mailbox has no room for its
+  move to the new address, and the unbound neighbor reports
+  `rib_cleanup_pending` as its last error meanwhile.
+- A neighbor's metric series no longer disappear or drop to zero when the
+  previous identity at the same address is cleaned up late. When the RIB was
+  behind, a deleted neighbor's RIB cleanup could run after a new neighbor at
+  that address had started: a static neighbor re-added at once, a static
+  neighbor replacing a dynamic neighbor kept for graceful restart, or a
+  dynamic neighbor reconnecting. The cleanup then removed the new neighbor's
+  `peer`-labelled series, such as `bgp_peer_admin_enabled`, `bgp_peer_info`
+  and its session state. It now removes only the series the RIB itself
+  writes, and the new neighbor's zero `bgp_exact_export_rejections_total`
+  series are seeded again, for every family it is configured for, when its
+  session is registered. A dynamic neighbor
+  kept for graceful restart that reconnected from another AS had a related
+  problem: tearing down the kept identity, or its restart timer expiring
+  first, set `bgp_rib_prefixes`, `bgp_rib_adj_out_prefixes` and the
+  graceful-restart gauges for the address to the kept identity's values or to
+  zero, and removed its outbound prefix-capacity and `bgp_peer_update_group`
+  series, while the new session was up or itself restarting. The address's
+  series now stay the new session's. A static neighbor that replaces a kept
+  dynamic neighbor also keeps the series it seeds at start, and the kept
+  neighbor is deleted only once the new session has started, before the add
+  completes, so none of its RIB counts carry over to the new neighbor. A
+  static add whose session fails to start leaves the kept neighbor, its
+  retained routes and its RIB gauges in place.
+- Sweeps over many peers no longer hold the peer manager for one command
+  deadline per peer whose session has stopped reading commands, as a session
+  waiting on a full RIB mailbox does, and they keep answering readiness
+  probes while they wait. Dynamic-peer resets after a peer-group change and
+  the all-peers graceful-shutdown toggle send their command to every peer at
+  once and take one 500 ms window however many sessions are stuck; a reset
+  that purges routes sends two commands per peer and takes up to two
+  windows (1 s). On a
+  SIGHUP reload that takes the sequential route (one that also changes
+  TCP-AO keys or listener MD5/GTSM settings), the route purges for changed
+  neighbors whose discard list changes are likewise all sent at once. The
+  rollback reap of dynamic peers, RPKI/ASPA revalidation, and that reload's
+  neighbor removals and replacements run each peer's chain of commands 64
+  peers at a time, so stuck sessions cost one chain's deadlines per 64 of
+  them. A SIGHUP reload on the default generation route still replaces
+  neighbors one at a time.
+- The VRP and ASPA forwarders no longer hold the next cache delta's RIB
+  update until the previous delta's revalidation pass ends. Each keeps one
+  pass in flight and merges the deltas that arrive meanwhile into the next
+  one.
+- A connection that ended before Established no longer affects the next
+  session on the same neighbor. A Cease/Hard Reset NOTIFICATION received or
+  sent before Established, or another NOTIFICATION teardown there, disabled
+  Graceful Restart retention when the next Established session later went
+  down. The previous connection's NOTIFICATION also became the next session's
+  BMP Peer Down reason, reported as a local NOTIFICATION instead of, for
+  example, a remote close without one.
+- BGP message length diagnostics now identify the violated per-type bound,
+  including KEEPALIVE's exact 19 octets and the minimum OPEN, UPDATE,
+  NOTIFICATION and ROUTE-REFRESH lengths. Enhanced Route Refresh markers
+  report their exact 23-octet bound. Wire error responses are unchanged.
+- Buffered RTR responses cannot renew data at or after its expiry. The client
+  discards the response and flushes that cache's VRPs and ASPAs.
+- `bgp_unnumbered_ra_conflicts_total` no longer depends on how far the peer
+  manager falls behind Router Advertisement discovery. A foreign router's
+  first binding beside an Established peer learned from an inbound
+  connection was counted by the peer manager from the binding change, which
+  the coalesced discovery queue could replace before delivery. Discovery now
+  learns the Established peer's address and counts each router once: when a
+  conflict first names it, or, for one whose RA arrived before discovery
+  learned of the peer, when it does. Only a foreign router that was
+  discovery's first binding can go uncounted: one that expired before
+  discovery learned of the peer with no conflict naming it, or one named
+  only beside another foreign router, which that conflict counted instead.
+  Once discovery knows the peer, an RA from the peer's own address is not a
+  conflict. Before that, the peer's RA beside a foreign binding still
+  raises one, and that conflict counts the foreign router. Before discovery
+  knows the peer, an address whose RAs lapse and return beside an address a
+  conflict already named it with is not counted at once. Each such return
+  is counted when discovery learns of the peer, unless the address is the
+  peer, provided one of the two addresses is still advertising then; a
+  return is never counted if no session reaches Established. A foreign
+  router that stays live is no longer counted a second time when the peer's
+  RAs lapse and return first. Conflicts queued together reach the peer
+  manager as one `multiple_routers_on_link` log record, whose `conflicts`
+  field gives how many it stands for, and are added to the counter in one
+  step.
+- A ROUTE-REFRESH answer to a peer that fell behind on outbound updates now
+  includes the withdrawals it still owed that peer for the refreshed family.
+  Before, an enhanced route refresh (RFC 7313) purged those routes at the
+  peer, and a later catch-up update withdrew them again.
+- Replace linear per-key Add-Path index searches with logarithmic lookups
+  for IPv4/IPv6 unicast, VPN and labeled unicast. A single path stays
+  inline, and keys with up to 16 paths use a binary-searched sorted vector
+  with the same per-key memory as before. A key above 16 paths moves to an
+  ordered tree, which uses up to about three times that key's previous
+  heap, and returns to a vector at 8 paths. LLGR session cycling can still
+  retain IDs beyond the current session's receive cap until End-of-RIB or
+  the original stale deadline; this change bounds index work without
+  changing retention or adding a cap.
+- Keep retirement checkpoints and covered-prefix validation continuation
+  bounded when a prefix holds many Add-Path IDs.
+- Avoid excess iterator copying during single-path unicast best-path selection.
+- Discard and count RIB route messages from sessions that never registered,
+  protecting retained Graceful Restart routes from late announcements or
+  withdrawals. Deferred session registration continues to accept ingress.
+- A gNMI `CommitSetRollbackDuration` after a failed automatic rollback now
+  reports the transaction as pending at the new deadline. Status previously
+  kept reporting `AUTO_REVERT_FAILED` and asking for manual action while the
+  reset had already re-armed the automatic retry. A retry that fails again
+  reports the failure again, and a restart before the retry still notes the
+  earlier failed rollback in the boot-revert banner.
+- An RTR v1 cache that announces a VRP with host bits set and later withdraws
+  the same prefix in canonical form no longer leaves the VRP authorizing that
+  prefix. Each cache's VRPs are now keyed by the canonical prefix, as validation
+  reads them, so `bgp_rpki_vrp_count` also no longer counts one VRP twice.
+- Settle the RIB actor, synthetic peers, handshakes, collectors and transport
+  sessions before the rrtransport smoke harness exits, including failed runs.
+  Unexpected task panics and shutdown errors now fail the run; ordinary smoke
+  reports success only after cleanup completes. Wire checks, deadlines and
+  resource thresholds are unchanged.
+- A v1-only RTR cache that answers rustbgpd's v2 query with a v1 response no
+  longer receives a fatal "Unexpected Protocol Version" Error Report. The client
+  closes the connection and reconnects at v1 without the report.
+- RTR cache data now expires on time while a query is in flight or a reconnect
+  is still connecting. Previously a cache that accepted a query and then stalled
+  kept its expired VRPs and ASPAs in use until the 5-minute transaction deadline,
+  and a connection attempt that never completed kept them indefinitely. A query
+  write is bounded the same way, so a cache that stops reading cannot hold it
+  past the expire interval.
+- An RTR cache that serves BGPsec router keys no longer breaks RPKI validation.
+  The client rejected the RTR Router Key PDU (type 9) as an unsupported PDU type,
+  which failed every transaction that carried one. StayRTR sends router keys by
+  default whenever its input holds them, so rustbgpd accepted none of that
+  cache's VRPs or ASPAs. Router Key PDUs are now decoded with their framing
+  checked and then ignored, because BGPsec path validation is not implemented.
+- An RTR cache that fell back to protocol v1 now returns to v2 when it supports
+  it. Previously any failure before the first End of Data, such as one connection
+  reset at startup, kept that cache at v1, without ASPA, until the daemon
+  restarted. A v1 session entered by fallback now reconnects to probe v2 at its
+  first refresh at least an hour later. A cache that refuses v2 is resumed at v1
+  at once, with its held data and serial. See
+  [ASPA conformance](docs/reference/aspa-conformance.md).
+- A neighbor created at runtime in a peer group that runs BFD now gets its BFD
+  session, and a strict member is withheld until that session is Up; before,
+  it ran without BFD until a restart. Deleting a strict-BFD neighbor and
+  re-adding it without BFD, for example to change its ASN at runtime, no longer
+  leaves BGP held behind the old strict session. The first BFD session in a
+  socket family opens that family before the peer is added; if the BFD actor
+  does not acknowledge it, the create reports an ambiguous outcome and BFD is
+  fenced as after an uncertain reload. Config transactions that change BFD
+  membership are still rejected. See
+  [the reload matrix](docs/reference/reload-matrix.md).
+- A session whose inbound UPDATEs are held by a full RIB ingest channel
+  keeps draining routes to its peer, enforces its hold timer and acts on
+  shutdown at once. Before, the whole session task waited for the RIB, so a
+  saturated RIB stopped outbound delivery for every peer, filling each
+  per-peer outbound queue, and delayed a closing session's Cease. Inbound
+  backpressure is unchanged: the session still stops reading its socket
+  until the RIB accepts the held batch, and delivers its messages in order
+  ([ADR-0078](docs/adr/0078-inbound-rib-backpressure.md)).
+- `slow_peer_threshold_pct` now measures writer bytes against the level at
+  which outbound admission waits: the writer byte budget less one
+  maximum-size UPDATE. Because admission stops before the full budget, a
+  value above about 90 with Extended Messages, or about 99 without, could
+  never start a slow-peer episode or isolation. A value of 100 now means the
+  writer is byte-blocked. See the
+  [neighbor reference](docs/reference/configuration.md#neighbors).
+- Use existing prefix lookups and family indexes for exact-prefix and
+  family-only route pages, preserving filtered totals, row ordering, and
+  continuation tokens. Family totals come from maintained counters, except
+  that an update-group member's Advertised total still visits that member's
+  export rejections. High-exclusion views, cold Best indexes, and dirty
+  Advertised baselines can still require table-sized work.
+
+### Documentation
+
+- Document upstream Linux feature floors for fixed-VNI and SVD EVPN L2,
+  optional neighbour suppression and FDB nexthop groups, and the distinction
+  between topology readiness and kernel write support. Include SVD iproute2
+  requirements and distribution-backport caveats in the
+  [VTEP setup guide](docs/how-to/evpn-vtep-setup.md#linux-kernel-feature-floors).
+- The v1 stable-surface inventory classifies every `.rpol` construct the
+  decision corpus names, `v1` or `outside_v1` with a reason, and the
+  [`.rpol` reference](docs/reference/rpol-language.md#v1-construct-inventory)
+  mirrors it as a table. The stable-surface check fails when a new construct
+  is unclassified, when an entry names a construct that no longer exists, or
+  when the table differs from the inventory.
+- The `.rpol` reference gains
+  [Migrating from IOS-XR RPL](docs/reference/rpol-language.md#migrating-from-ios-xr-rpl):
+  a construct mapping, the three places where a line-by-line RPL port
+  behaves differently (default disposition, saturating `set med +N/-N`,
+  the static prepend bound), and compiled, tested forms
+  for RPL constructs that have no direct `.rpol` spelling yet.
+
+### Upgrade notes
+
+- An Add-Path receive peer without `add_path.receive_max`, or with
+  `receive_max = 0`, no longer has unlimited IPv4/IPv6-unicast paths per
+  prefix. Path IDs beyond 1024 for one prefix are withheld and counted; the
+  session stays up. A peer that legitimately sends more paths per prefix
+  needs an explicit `receive_max` (up to 65535), which also advertises the
+  experimental Paths-Limit capability and follows `max_prefix_action`.
+  `"block"` withholds and `"shutdown"` sends Cease/1 at the cap.
+  `max_prefix_action = "warning"` has a hard ceiling of
+  `max(receive_max, 1024)` path IDs per prefix, past which IDs are now
+  withheld instead of accepted. So it warns only for IDs between
+  `receive_max` and 1024; with `receive_max` of 1024 or more it blocks at the
+  cap without warning, and `receive_max = 65535` admits up to 65,535 paths
+  per prefix.
+  Watch
+  `bgp_add_path_receive_limit_attempts_total{action="block"}` after the
+  upgrade to find such peers.
+- An Add-Path receive peer for VPNv4/VPNv6 or labeled unicast now has the
+  same per-prefix path cap as unicast: 1024 path IDs per RD + prefix or
+  labeled prefix by default, or `add_path.receive_max` when set. Past the
+  default cap the excess is withheld and counted; past an explicit
+  `receive_max`, `max_prefix_action` applies as it does for unicast. Raise
+  `receive_max` for a peer that legitimately sends more paths per prefix in
+  those families.
+- The "Add-Path receive limit exceeded" WARN log now names the NLRI in a
+  `key` field instead of `prefix`, for every family (unicast included), and
+  adds a `family` field. A VPN key prints as `RD prefix`, with the RD in its
+  `ASN:nn` or `IP:nn` form. Update log queries that match the `prefix`
+  field.
+- RPKI caches are now limited to 4000000 records each and 10000000 across all
+  caches, counting VRPs plus ASPA provider ASNs. A cache that exceeds a limit is
+  refused, and its last accepted data is kept until it expires. The global RPKI
+  publishes about 1.03 million VRPs, so a complete cache is far below either
+  limit. If you run private or test caches with larger sets, raise
+  `max_records_per_cache` and `max_records_total` in `[rpki]` before
+  upgrading. See [record limits](docs/reference/configuration.md#record-limits).
+- A BFD peer whose advertised Desired Min TX times its multiplier exceeds
+  both five minutes and our `min_rx_interval` times its multiplier now has
+  its detection window clamped to the larger of those two. If the peer really
+  transmits that slowly, its regular packets keep the session up only while
+  the gap between them fits inside the clamped window, and then fewer missed
+  packets are tolerated. A peer whose transmit interval itself exceeds the
+  window times out even with no loss: for example, a 600 s Desired Min TX
+  against a 300 ms local `min_rx_interval` and multiplier 3 expires at the
+  five-minute clamp. Lower the peer's transmit interval, or raise the local
+  profile's `min_rx_interval` so the window covers the peer's multiplier.
+- `rustbgpd --check --strict` now exits 1 when a gRPC `token_file` or TLS
+  private key is readable by every local user, owned by someone other than
+  the daemon user or root, or open to a group other than the daemon's. A
+  pipeline that ran the strict check cleanly on such a file now fails, and
+  the daemon logs the same warning at startup and on each credential reload
+  while still loading the file. To restore a clean check, run `chmod 600` on
+  the file and make the daemon user its owner, or use mode `0640` owned by
+  `root:<daemon group>`. A token bind-mounted into a container keeps its
+  host owner and mode, so stage a copy with those permissions inside the
+  container. See
+  [credential file permissions](docs/reference/configuration.md#grpc-credential-file-permissions).
+- Nonzero IPv6 FlowSpec prefix offsets now use RFC 8956 pattern framing in
+  both global and VPN rules. A peer still using the former full-prefix
+  framing, including pinned GoBGP 4.11.0 and a rustbgpd that has not been
+  upgraded yet, sends a different pattern octet count for a nonzero offset
+  unless both framings round to the same number of octets. When the counts
+  differ, the receiver misreads the next component, the MP_REACH_NLRI or
+  MP_UNREACH_NLRI attribute fails to decode, and the session resets with
+  NOTIFICATION 3/9. The reset drops every family on that session, not only
+  FlowSpec, and repeats each time the rule is sent again. When the counts
+  match (for example length 32, offset 1), the rule decodes cleanly but
+  matches a different, bit-shifted pattern. An established session therefore
+  does not prove compatibility. Before upgrading, withdraw every IPv6
+  FlowSpec rule with a nonzero prefix offset, global or VPN, on both sides,
+  and keep such rules off until every peer uses RFC 8956 framing.
+  Offset-zero IPv6 and IPv4 rules are unaffected.
+- **Rename bindings that use well-known community names.** A policy or
+  function parameter, `let` or `for` variable, set or dataset named
+  `NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`, `BLACKHOLE`,
+  `GRACEFUL_SHUTDOWN`, `OV_VALID`, `OV_NOT_FOUND`, `OV_INVALID`, `NOPEER`,
+  `ACCEPT_OWN`, `LLGR_STALE`, `NO_LLGR` or `STANDBY_PE` now causes a compile
+  error. Previously, a local name such as `NO_EXPORT` could mean its bound
+  value in `set med NO_EXPORT` but the community literal in
+  `add community NO_EXPORT`. Rename the binding and its intended references,
+  for example to `tag`, while retaining `NO_EXPORT` where the literal is
+  intended. No runnable repository example needs migration.
+- `.rpol` reserves some names that a policy parameter or set could
+  previously take. A file that uses one now fails `rbgp policy check`,
+  `rustbgpd --check` and a reload, with a diagnostic naming the
+  collision. Rename the parameter or set. The reserved names are:
+  - for parameters, an enum value of `route.rpki`, `route.aspa`,
+    `route.route-type` or `route.family` (such as `valid`, `internal`,
+    `ipv4-unicast`);
+  - for parameters, the `prepend as` operands `origin` and `path-first`.
+    A `u32` parameter of either name used to mean its argument in
+    `prepend as origin`; the name now always means the operand;
+  - for parameters and for prefix-sets, community-sets, asn-sets and
+    datasets, a well-known community name, as listed in the previous note.
+
+  With every name read one way, an argument can no longer reach a
+  position that reads it as something else. No `.rpol` file in this
+  repository or its documentation used a reserved name. See
+  [Parameters](docs/reference/rpol-language.md#parameters).
+- A `runtime_state_dir` that the daemon cannot create or open, that is not
+  owned by the daemon user, or that is group- or world-writable now stops
+  startup with exit code 1 and the log line `refusing to start:
+  runtime_state_dir must be a directory owned by the daemon user and not
+  group- or world-writable`. Earlier releases logged `runtime-state
+  marker/checkpoint storage unavailable` and ran without the graceful-restart
+  marker, warm checkpoint, and BLACKHOLE receipt. Before upgrading, check the
+  directory (default `/var/lib/rustbgpd`) with `stat`, then `chown` it to the
+  daemon user and `chmod 0700` it. Container deployments that override the
+  image user need a host bind mount owned by that user. Every directory above
+  it must also be owned by root or the daemon user and not writable by other
+  users unless sticky; the startup error names the first one that is not.
+- **Remove retired arithmetic error expectations and dashboard selectors.**
+  `expect p == error overflow`, `error underflow` and `error clamp-inverted`
+  now cause compile errors with a migration hint. Expect the verdict and
+  saturated modifications instead, for example `accept with med 4294967295`.
+  Remove `kind="overflow"`, `kind="underflow"` and `kind="clamp-inverted"`
+  selectors for `bgp_policy_eval_errors_total` from alerts and dashboards;
+  there is no replacement error series for saturated arithmetic. Rust
+  consumers must remove the corresponding `EvalErrorKind` match arms.
+  Invalid literal-only arithmetic remains a compile error. A file with a
+  reserved binding or retired expectation is rejected by `rbgp policy
+  check`, `rustbgpd --check`, startup and reload, regardless of
+  `require_passing_tests`; a rejected reload keeps the running policy.
+- **`.rpol` community-set probes and removals are per kind.** A policy that
+  probes a set mixing kinds with `route.communities in S` (or the large or
+  extended list), or removes from it with `remove community in S` or
+  `remove community not in S` (or the large or extended form), no longer
+  loads; the error names the member of the other kind.
+  - A probe that should match every kind becomes `route.any-community in S`.
+  - A removal keeps its behaviour when the set is split by kind and each
+    removal keeps its kind and its `in` or `not in` over its own part.
+    `remove any-community in S` also replaces an `in` removal that should
+    take the listed values of every kind; there is no `not in` form,
+    because a `not in` allow-list is per kind and `any-community` would
+    remove the allowed values instead.
+
+  Datasets and set parameters filter by kind at runtime instead:
+  `route.large-communities in D` used to ignore its field and match a route
+  whose standard communities were in `D`; it now reads only large
+  communities.
+- **`.rpol` ASNs and communities are typed values.** These forms no longer
+  load:
+  - arithmetic on `route.origin-as`, `peer.asn`, an AS-path or asn-set loop
+    variable or a `let` of one (`route.origin-as + 0 == 64500`,
+    `route.origin-as % 2`), or one of them passed to a builtin or function;
+  - two ASNs ordered against each other (`>=`, `<=`), or an ASN compared
+    with a runtime u32 value (`let m = route.med; if route.origin-as >= m`);
+  - an ASN or community probing a set of the other kind, any u32 probing a
+    community-set (a `u32` parameter, or `let x = 4259840001; if x in tags`),
+    and a runtime u32 probing an asn-set;
+  - an ASN in `add`/`remove community`;
+  - a community compared with an integer or u32 parameter
+    (`c == 4259840001`), ordered with `>=`/`<=`, or set with `set med` or
+    `set local-pref`;
+  - a community literal in arithmetic, compared with an ASN, probing an
+    asn-set or returned by a function (`set med 65000:1 + 1`,
+    `if a == 0:64500`).
+
+  Compare an ASN directly (`route.origin-as == 64500`, or `>=`/`<=` against
+  a constant for a range) and probe an asn-set; write a community as a
+  literal (`c == 65000:1`, `let x = 65000:1`) or declare its parameter
+  `community` instead of `u32`.
+- `.rpol` policies that add a community and later remove it, or the reverse,
+  in the same term change outcome: the later statement now wins. A scan run
+  after additions, in the same policy or in a later chain member, now cancels
+  the additions it selects: a strip-all form cancels every earlier addition of
+  its kind except well-known standard communities, which `remove community *`
+  keeps, and `remove … in` / `not in` cancels only the additions its set
+  selects. Move an addition after the scan to keep it. For example, a chain
+  whose first member adds `65000:1` and whose second member runs
+  `remove community *; add community 65000:100` now ends with only
+  `65000:100` and the well-known communities, as IOS-XR RPL
+  `set community` does. Run `rbgp policy check` on the policy files:
+  in-language tests that pinned the old outcome fail.
+- **`.rpol` guards no longer deny a route through an evaluation error.** In
+  v0.81.0 a condition whose operand was missing (`route.origin-as` on an
+  empty or `AS_SET`-only path, an unknown `peer.asn`), or whose arithmetic
+  overflowed or underflowed, denied the route with an evaluation error. Now a
+  missing operand makes the condition false, and `+ - *` saturate at 0 and
+  4294967295, so the guard evaluates:
+  - on MED 4, `route.med - 100 <= 5` used to deny with `underflow`; it now
+    matches, as it does for every MED below 100;
+  - on MED 4294967295, `route.med + 50 <= 1000` used to deny with
+    `overflow`; it is now false, and the route falls through to the next
+    term;
+  - on an origin-less route, `route.origin-as + 0 == 64500` used to deny
+    with `absent-operand`. Arithmetic on an ASN is now a compile error (see
+    the typed-value note above), so a file with that guard fails
+    `rbgp policy check`, `rustbgpd --check` and reload until it is rewritten
+    as `route.origin-as == 64500`, which is false on such a route.
+
+  Review guards that compare a computed expression. To keep only the values
+  the old guard could match, give the range both bounds:
+  `route.med - 100 <= 5` becomes `route.med >= 100 && route.med <= 105`. To
+  keep v0.81.0's deny for the rest, reject them ahead of it:
+  `if route.med <= 99 { reject }`. Where a route without the value must still
+  be rejected, add a presence test: `if !exists route.origin-as { reject }`.
+- **`let` bindings and actions.** A `let` that cannot be computed no longer
+  denies the route unless an action uses it. An action that needs a missing
+  value (`set med route.origin-as`, a computed prepend operand, a community
+  binding) still denies the route. A `set` or `let` that used to fail on
+  overflow or underflow now applies the saturated value, so a route it used
+  to deny is accepted with MED or local-pref 0 or 4294967295. Where a peer
+  must not see 4294967295, which RFC 4451 notes some implementations treat as
+  "infinity", cap it: `set med min(route.med + 50, 4294967294)`.
+- **Conditional advertisement.** A guard that used to fail in a
+  `condition_policy` or `advertise_policy` now decides like any other guard,
+  and the policy's final verdict decides the outcome. A missing operand makes
+  the condition false, so the policy moves on to its next term. Saturated
+  arithmetic gives a value, and the guard decides on that value: on MED 4,
+  `if route.med - 100 <= 5 { accept }` now accepts. A candidate that used to
+  make the condition `unknown`, which held the applied state, can therefore
+  match or miss, and a route that an `advertise_policy` error used to
+  suppress fail-closed is now suppressed when the policy permits it and
+  passes when the policy rejects it.
+- **Division needs a divisor that cannot be zero.** `route.med / x` with a
+  field, binding or parameter divisor is now a compile error, so the config
+  load is refused whatever `require_passing_tests` says: the daemon does not
+  start, and a SIGHUP reload is rejected and keeps the running policy. This
+  includes a policy that only a `test` block exercises. Rewrite the divisor,
+  for example `route.med / max(x, 1)`. A test that expected
+  `error divide-by-zero` or `error remainder-by-zero` needs its policy
+  rewritten this way; changing the expectation is not enough.
+- **In-language tests that expect a missing-operand guard error now fail.**
+  `error absent-operand` from a guard no longer matches: a missing operand
+  makes the guard false, so the policy returns a verdict. `rustbgpd --check`
+  reports the failure, and with `require_passing_tests = true` the config
+  load is refused, as above, until the test is updated. The arithmetic
+  error kinds are retired entirely; their separate upgrade note covers the
+  resulting compile errors.
+- **`optional-field-negation` flags more forms.** A negated binding, binding
+  probe or computed comparison over `route.origin-as` or `peer.asn` is now
+  flagged with a new message, so `rbgp policy check --deny-lints
+  optional-field-negation` can fail on a policy that passed before.
+- **`.rpol` set names must be unique across kinds.** A policy file that
+  defines, for example, an `asn-set customers` and a `community-set
+  customers` no longer loads, and with `rbgp policy check` or
+  `rustbgpd --check` the error names both definitions. Rename one of them
+  and update its `in` references.
+- **Prepends now add up.** A chain, or a policy, that prepends more than once
+  on a path now places every prepend, where only the last used to take
+  effect. A "default 1× prepend, then a per-peer 3× override" chain, with
+  `prepend as 65000 1` in one member and
+  `if peer.asn == 64500 { prepend as 65000 3 }` in the next, now prepends 4
+  ASNs for AS 64500 instead of 3. Make the two exclusive in one policy so
+  exactly one applies:
+  `if peer.asn == 64500 { prepend as 65000 3 } else { prepend as 65000 1 }`.
+  Two TOML policies with `set_as_path_prepend` in one chain add up the same
+  way. A policy or chain whose prepends could exceed 255 ASNs, including any
+  prepend inside a loop over `route.communities` or `route.as-path`, no longer
+  loads. `rbgp policy check` names a policy over the limit on its own; a
+  chain that goes over only once its members' prepends add up, or a policy
+  whose parameter argument takes it over, is reported by `rustbgpd --check`
+  and refused at config load or reload. In-language tests
+  that pinned the replaced prepend with `with prepend as ASN COUNT` fail and
+  need the whole sequence, for example `with prepend "65000 65000 65000 65000"`.
+- **gRPC and `rbgp` JSON clients** reading `as_path_prepend_asn` and
+  `as_path_prepend_count` from explain and test results read the
+  `as_path_prepend` ASN list instead: `{asn: 65000, count: 2}` is now
+  `[65000, 65000]`.
+- **Some `.rpol` term rows are renamed.** A term whose only row comes from
+  its final statement keeps its name, and so does the common
+  modify-then-accept term `term tag { add community 65000:1; accept }`.
+  The renamed rows fall into four groups:
+  - A final statement after earlier statements that lower to rows of their
+    own takes the bare name:
+    `term t { set med 10; if A { accept } }` gave `t.1` and `t.2` and now
+    gives `t.1` and `t`.
+  - A final statement that lowers to several rows gives the bare name to
+    its last `accept` or `reject`, else its last row:
+    `term t { if A { accept } else { reject } }` gave `t.1` and `t.2` and
+    now gives `t.1` and `t`, and the last branch of a four-branch
+    `else if` chain changes from `t.4` to `t`.
+  - An earlier statement that lowers to several rows numbers them under
+    the statement:
+    `term pad { set med padded(route.as-path.len); accept }`, whose
+    function call lowers to six rows, gives `pad.1.1` to `pad.1.6` and
+    `pad` instead of `pad.1` to `pad.7`.
+  - A final statement that lowers to no row, such as an `if` with an empty
+    body and no `else`, leaves no bare row even when the term has one row:
+    `term x { set med 5; if route.med >= 9 { } }` gave `x` and now gives
+    `x.1`.
+- **A name that still exists can now name a different row.** `.<n>` is now
+  a statement number, not a row position. In
+  `term t { set local-pref 500; let x = route.med - 100; set med x; accept }`
+  the `let` was `t.1` and the `accept` was `t.2`; now the `let` is `t.2`,
+  its statement number, and the `accept` is `t`. A dashboard or alert
+  keyed on `t.2` keeps resolving but reads another row, so check every
+  selected name against `rbgp policy stats` after the upgrade, not only
+  the missing ones.
+- The new names appear wherever a lowered term is named: explain traces,
+  `rbgp policy test` term hits, `rbgp policy stats` and `GetPolicyStats`
+  rows, the evaluation-error text `... in policy P term T`, and the
+  config-reload reason `import|export rpol policy P term T changed`.
+- A session whose RIB admission stays blocked for about three hold times
+  since its last processed peer message is now closed with Cease/Out of
+  Resources (6/8) as a local overload. Within one wait the first hold expiry
+  is deferred, and the second only for newly read bytes, so
+  `bgp_hold_timer_rearmed_pending_input_total` can rise while the RIB is
+  saturated. `bgp_inbound_rib_backpressure_total` now counts park episodes:
+  a route batch held behind a full channel, not every batch that queues
+  behind it.
+- While a deleted neighbor's RIB cleanup waits for mailbox room, inbound
+  connections that would create a new RIB identity are refused: a new
+  dynamic neighbor (also when it evicted a dynamic neighbor kept for graceful
+  restart), or a collision candidate beside one. A connection that would
+  start a session under a deleted neighbor's `peer` label is refused until
+  that neighbor's cleanup is admitted. A connection that would bind an
+  interface-only neighbor is refused under that label, or while the mailbox
+  has no room for a neighbor that keeps its RIB identity across addresses. A
+  dynamic neighbor kept for graceful restart can still reconnect. Refusals
+  are counted as
+  `bgp_inbound_connections_dropped_total{reason="rib_cleanup_pending"}`, a
+  new series exported at 0 from startup, and the neighbor reconnects on its
+  own timer.
+- A route-server client with `per_client_best` and RFC 7947 control
+  communities now receives routes for prefixes whose best path is suppressed
+  toward it, where a client sharing an update group used to receive nothing.
+  Prefixes whose paths carry no suppression community keep the existing
+  shared update-group emission.
+- `bgp_update_malformed_causes_total` now reports a duplicated attribute
+  type, and a prohibited AS-set in repeated `AS_PATH` or `AS4_PATH` copies,
+  once per UPDATE rather than once per occurrence.
+- `rbgp rib blackholes` keeps reporting a BLACKHOLE discard prefix that also
+  has a foreign kernel route at another metric as `installed/owned` instead
+  of `failed/foreign_route_exists`. While the ownership receipt cannot be
+  written, new discard installs report `failed/receipt_write_failed` and are
+  retried on the next pass.
+- New outbound backpressure series: an `owing` outcome on
+  `bgp_rib_dirty_resync_total`; counters `bgp_rib_outbound_owing_flips_total`
+  and `bgp_rib_outbound_owing_fallback_total`; an `outbound_credit` reason on
+  `bgp_outbound_commit_refusals_total`, which is now exported at zero for
+  every registered peer; and gauges `bgp_peer_outbound_writer_bytes{peer}`,
+  `bgp_outbound_writer_bytes`, `bgp_rib_outbound_credit_rows` and
+  `bgp_rib_outbound_operations_live` (see the
+  [operations reference](docs/reference/operations.md)).
+- `rbgp policy check` gains the `unreachable-branch` lint for a branch whose
+  constant-folded guard can never match, or that follows a branch whose
+  guard is always true. A bare `--deny-lints`, which denies every lint, now
+  includes it.
+- A configured `.rpol` chain reference with a bad argument for a typed
+  policy parameter fails `rustbgpd --check` and is rejected at reload.
+
 ## [0.81.0] — 2026-11-01
 
 ### Security

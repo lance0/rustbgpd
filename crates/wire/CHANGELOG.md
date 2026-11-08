@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.28.0 - Unreleased
+## 0.28.0 - 2026-11-08
 
 - Add `notification::fsm_subcode` constants for the RFC 6608 FSM Error
   subcodes. NOTIFICATION decoding and encoding are unchanged.
@@ -71,7 +71,7 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   Dispositions are unchanged. The new public fields break struct literals
   and exhaustive struct patterns.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
-  types. These crate versions are not published by this change.
+  types.
 
 ## 0.27.0 - 2026-11-01
 
