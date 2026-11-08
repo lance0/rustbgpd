@@ -36,6 +36,7 @@ use rustbgpd_wire::{
     Afi, EvpnRouteKey, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, RpkiValidation, Safi,
 };
 use smallvec::SmallVec;
+use std::collections::BTreeMap;
 
 use crate::attr_set::AttrSet;
 use crate::fast_hash::ShardedMap;
@@ -48,6 +49,209 @@ use crate::route::{
 use crate::slab::RouteSlab;
 use crate::update::RpkiValidationCounts;
 use crate::update::{RouteQueryKey, route_query_key};
+
+#[cfg(not(test))]
+type IndexedPathId = u32;
+#[cfg(test)]
+type IndexedPathId = tests::CountedPathId;
+
+/// Path count above which a key's sorted vector becomes an ordered tree.
+const PATH_INDEX_PROMOTE_ABOVE: usize = 16;
+/// Path count at which an ordered tree returns to a sorted vector. The gap to
+/// [`PATH_INDEX_PROMOTE_ABOVE`] keeps a path flapping at the boundary from
+/// rebuilding the index on every flap.
+const PATH_INDEX_DEMOTE_AT: usize = 8;
+
+/// One inline path for ordinary BGP; a sorted vector for ordinary Add-Path
+/// keys; an ordered tree for retained siblings, whose count can span several
+/// LLGR sessions. The vector grows and keeps capacity like the `SmallVec` it
+/// replaced, so heap per key at up to 16 paths does not grow.
+#[derive(Debug, Default)]
+enum PathIndex<V> {
+    #[default]
+    Empty,
+    One(u32, V),
+    Small(Vec<(IndexedPathId, V)>),
+    #[expect(
+        clippy::box_collection,
+        reason = "Boxing keeps the rare crowded variant from widening every entry."
+    )]
+    Many(Box<BTreeMap<IndexedPathId, V>>),
+}
+
+// Keep only the active iterator: chained optional ranges inflate every
+// single-path selection iterator and force large copies in best-path selection.
+enum PathIndexIter<'a, V> {
+    One(Option<(u32, V)>),
+    Small(std::slice::Iter<'a, (IndexedPathId, V)>),
+    Many(std::collections::btree_map::Range<'a, IndexedPathId, V>),
+}
+
+impl<V: Copy> Iterator for PathIndexIter<'_, V> {
+    type Item = (u32, V);
+
+    #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::useless_conversion,
+            reason = "Tests substitute a comparison-counting key; production keys remain u32."
+        )
+    )]
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = match self {
+            Self::One(path) => path.take(),
+            Self::Small(paths) => paths.next().map(|&(id, value)| (id.into(), value)),
+            Self::Many(paths) => paths.next().map(|(&id, &value)| (id.into(), value)),
+        };
+        #[cfg(test)]
+        if next.is_some() {
+            tests::record_path_visit();
+        }
+        next
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::One(path) => {
+                let len = usize::from(path.is_some());
+                (len, Some(len))
+            }
+            Self::Small(paths) => paths.size_hint(),
+            Self::Many(paths) => paths.size_hint(),
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::useless_conversion,
+        reason = "Tests substitute a comparison-counting key; production keys remain u32."
+    )
+)]
+impl<V: Copy> PathIndex<V> {
+    fn get(&self, path_id: u32) -> Option<V> {
+        match self {
+            Self::Empty => None,
+            Self::One(id, value) => (*id == path_id).then_some(*value),
+            Self::Small(paths) => paths
+                .binary_search_by(|(id, _)| id.cmp(&path_id.into()))
+                .ok()
+                .map(|pos| paths[pos].1),
+            Self::Many(paths) => paths.get(&path_id.into()).copied(),
+        }
+    }
+
+    fn insert(&mut self, path_id: u32, value: V) -> Option<V> {
+        match self {
+            Self::Empty => {
+                *self = Self::One(path_id, value);
+                None
+            }
+            Self::One(id, old) if *id == path_id => Some(std::mem::replace(old, value)),
+            Self::One(id, old) => {
+                let (old, new) = (((*id).into(), *old), (path_id.into(), value));
+                let mut paths = Vec::with_capacity(2);
+                if *id < path_id {
+                    paths.extend([old, new]);
+                } else {
+                    paths.extend([new, old]);
+                }
+                *self = Self::Small(paths);
+                None
+            }
+            Self::Small(paths) => match paths.binary_search_by(|(id, _)| id.cmp(&path_id.into())) {
+                Ok(pos) => Some(std::mem::replace(&mut paths[pos].1, value)),
+                Err(_) if paths.len() >= PATH_INDEX_PROMOTE_ABOVE => {
+                    let mut tree: BTreeMap<_, _> = std::mem::take(paths).into_iter().collect();
+                    tree.insert(path_id.into(), value);
+                    *self = Self::Many(Box::new(tree));
+                    None
+                }
+                Err(pos) => {
+                    paths.insert(pos, (path_id.into(), value));
+                    None
+                }
+            },
+            Self::Many(paths) => paths.insert(path_id.into(), value),
+        }
+    }
+
+    /// Remove one path. A vector keeps its capacity, as the `SmallVec` did,
+    /// so a second path flapping on a key does not reallocate.
+    fn remove(&mut self, path_id: u32) -> Option<V> {
+        match self {
+            Self::One(id, value) if *id == path_id => {
+                let removed = *value;
+                *self = Self::Empty;
+                Some(removed)
+            }
+            Self::Empty | Self::One(..) => None,
+            Self::Small(paths) => {
+                let pos = paths
+                    .binary_search_by(|(id, _)| id.cmp(&path_id.into()))
+                    .ok()?;
+                let (_, removed) = paths.remove(pos);
+                if paths.is_empty() {
+                    *self = Self::Empty;
+                }
+                Some(removed)
+            }
+            Self::Many(paths) => {
+                let removed = paths.remove(&path_id.into());
+                if paths.len() <= PATH_INDEX_DEMOTE_AT {
+                    *self = Self::Small(std::mem::take(&mut **paths).into_iter().collect());
+                }
+                removed
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn iter(&self) -> PathIndexIter<'_, V> {
+        self.iter_after(None)
+    }
+
+    fn iter_after(&self, after: Option<u32>) -> PathIndexIter<'_, V> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        match self {
+            Self::Empty => PathIndexIter::One(None),
+            Self::One(id, value) => PathIndexIter::One(
+                after
+                    .is_none_or(|after| *id > after)
+                    .then_some((*id, *value)),
+            ),
+            Self::Small(paths) => {
+                let start = after.map_or(0, |after| {
+                    let after = IndexedPathId::from(after);
+                    paths.partition_point(|(id, _)| *id <= after)
+                });
+                PathIndexIter::Small(paths[start..].iter())
+            }
+            Self::Many(paths) => {
+                let start: std::ops::Bound<IndexedPathId> =
+                    after.map_or(Unbounded, |id| Excluded(id.into()));
+                PathIndexIter::Many(paths.range((start, Unbounded)))
+            }
+        }
+    }
+
+    /// Release a retired entry. Inline and vector entries free in one step;
+    /// consuming a tree releases its nodes incrementally instead of leaving a
+    /// crowded key's whole tree to one destructor.
+    fn retire_with(self, checkpoint: &mut impl RetirementCheckpoint) {
+        if let Self::Many(paths) = self {
+            for _ in *paths {
+                checkpoint.checkpoint(RetirementProgress::Progress);
+            }
+        }
+    }
+}
 
 /// Routes of one family of one peer held for GR or LLGR retention. A route is
 /// counted once: as `stale` when its GR-stale flag is set, otherwise as
@@ -327,11 +531,9 @@ pub struct AdjRibIn {
     /// their own in [`StaleTracked`].
     unicast_stale: StaleCounters,
     /// Primary index: prefix → `(path_id, slab handle)` pairs stored for that
-    /// prefix, backed by a family-split prefix trie. `SmallVec<[(u32, u32); 1]>`
-    /// inlines the single-path case (`path_id=0`, no Add-Path) without a
-    /// per-prefix heap allocation; Add-Path multi-path spills to the heap
-    /// transparently. Mirrors `AdjRibOut::prefix_path_ids`.
-    prefix_index: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
+    /// prefix, backed by a family-split prefix trie. The single-path case
+    /// stays inline; Add-Path siblings use an ordered tree.
+    prefix_index: FamilyPrefixMap<PathIndex<u32>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: ShardedMap<(Prefix, u32), ()>,
     /// Exact `(prefix, path_id)` counts by RPKI state for IPv4 unicast.
@@ -349,15 +551,14 @@ pub struct AdjRibIn {
     /// VPNv4/VPNv6 routes keyed by RFC 4364 RD + prefix identity.
     vpn_routes: StaleTracked<VpnRibRouteKey, VpnRibRoute>,
     /// Secondary index: VPN RD+prefix identity → Add-Path path IDs stored for
-    /// it (the SAFI 128 analog of `prefix_index`). `SmallVec<[u32; 1]>`
-    /// inlines the non-Add-Path case (`path_id=0`) without heap allocation.
-    vpn_key_index: ShardedMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
+    /// it (the SAFI 128 analog of `prefix_index`). The single-path case is inline.
+    vpn_key_index: ShardedMap<rustbgpd_wire::VpnRouteKey, PathIndex<()>>,
     /// Labeled-unicast routes keyed by RFC 8277 prefix + path-id identity.
     /// Deliberately separate from the unicast `routes` map (ADR-0077 §2).
     labeled_routes: StaleTracked<LabeledRibRouteKey, LabeledRibRoute>,
     /// Secondary index: labeled prefix → Add-Path path IDs stored for it
     /// (the SAFI 4 analog of `vpn_key_index`).
-    labeled_key_index: ShardedMap<Prefix, SmallVec<[u32; 1]>>,
+    labeled_key_index: ShardedMap<Prefix, PathIndex<()>>,
     /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
     rtc_routes: StaleTracked<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
@@ -383,14 +584,23 @@ impl AdjRibIn {
     /// Retire a detached table after selection and withdrawal consumers finish.
     pub(crate) fn retire_with(mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.release_with(checkpoint);
-        self.prefix_index.release_with(checkpoint);
+        self.prefix_index
+            .release_values_with(checkpoint, PathIndex::retire_with);
         crate::adj_rib_out::release_sharded_map(&mut self.flowspec_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.evpn_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_routes.map, checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.vpn_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map_values(
+            &mut self.vpn_key_index,
+            checkpoint,
+            |(_, paths), checkpoint| paths.retire_with(checkpoint),
+        );
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.labeled_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map_values(
+            &mut self.labeled_key_index,
+            checkpoint,
+            |(_, paths), checkpoint| paths.retire_with(checkpoint),
+        );
         crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.llgr_stale_local_tags, checkpoint);
         crate::adj_rib_out::release_sharded_map(
@@ -559,10 +769,10 @@ impl AdjRibIn {
         let prefix = route.prefix;
         let path_id = route.path_id;
         let ids = self.prefix_index.entry_or_default(prefix);
-        if let Some((_, handle)) = ids.iter().find(|(id, _)| *id == path_id) {
+        if let Some(handle) = ids.get(path_id) {
             let previous = self
                 .routes
-                .get(*handle)
+                .get(handle)
                 .expect("Adj-RIB-In prefix index references a live route");
             let previous_state = previous.validation_state;
             // A re-advertisement replaces a stale path with a fresh one.
@@ -576,7 +786,7 @@ impl AdjRibIn {
                 counts.decrement(previous_state);
                 counts.increment(route.validation_state);
             }
-            self.routes.set(*handle, route);
+            self.routes.set(handle, route);
             true
         } else {
             match prefix {
@@ -585,7 +795,7 @@ impl AdjRibIn {
             }
             self.unicast_stale.shift(None, route.retention());
             let handle = self.routes.insert(route);
-            ids.push((path_id, handle));
+            ids.insert(path_id, handle);
             false
         }
     }
@@ -606,11 +816,7 @@ impl AdjRibIn {
 
     /// Slab handle for the route stored at `(prefix, path_id)`, if any.
     fn route_handle(&self, prefix: &Prefix, path_id: u32) -> Option<u32> {
-        self.prefix_index
-            .get(prefix)?
-            .iter()
-            .find(|(id, _)| *id == path_id)
-            .map(|&(_, handle)| handle)
+        self.prefix_index.get(prefix)?.get(path_id)
     }
 
     /// Remove a route from both the prefix index and the slab, freeing its
@@ -620,8 +826,8 @@ impl AdjRibIn {
         self.remove_route_entry_with_checkpoint(prefix, path_id, &mut || {})
     }
 
-    /// [`Self::remove_route_entry`] with a checkpoint per Add-Path entry the
-    /// prefix's path-list scan visits.
+    /// [`Self::remove_route_entry`] with checkpoints around the logarithmic
+    /// path-index removal.
     fn remove_route_entry_with_checkpoint(
         &mut self,
         prefix: &Prefix,
@@ -629,11 +835,9 @@ impl AdjRibIn {
         checkpoint: &mut impl FnMut(),
     ) -> Option<Route> {
         let ids = self.prefix_index.get_mut(prefix)?;
-        let pos = ids
-            .iter()
-            .inspect(|_| checkpoint())
-            .position(|(id, _)| *id == path_id)?;
-        let (_, handle) = ids.swap_remove(pos);
+        checkpoint();
+        let handle = ids.remove(path_id)?;
+        checkpoint();
         if ids.is_empty() {
             self.prefix_index.remove(prefix);
         }
@@ -735,16 +939,15 @@ impl AdjRibIn {
     /// Iterate unicast routes in route-query identity order, beginning at
     /// the cursor prefix and excluding identities at or before `after`.
     ///
-    /// The existing compact prefix trie supplies the ordered continuation;
-    /// path handles are copied into a `SmallVec` and sorted per prefix so
-    /// Add-Path insertion order cannot leak into API ordering. The normal
-    /// single-path case stays inline and allocation-free.
+    /// The prefix trie supplies prefix ordering; sorting each prefix's paths
+    /// preserves full query identity order even for caller-supplied routes with
+    /// a source peer different from this table's owner.
     pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
         let routes = &self.routes;
         self.prefix_index
             .iter_from(after.map(|cursor| cursor.0))
             .flat_map(move |(_, ids)| {
-                let mut ordered = ids.clone();
+                let mut ordered: SmallVec<[(u32, u32); 1]> = ids.iter().collect();
                 ordered
                     .sort_unstable_by_key(|(_, handle)| routes.get(*handle).map(route_query_key));
                 ordered
@@ -756,13 +959,13 @@ impl AdjRibIn {
 
     /// Resume a received-candidate scan inside one covering prefix, including
     /// losing Add-Path paths. The trie seeks directly to the relevant subtree.
-    /// The cursor is a prefix plus the next native path index, not API order.
+    /// The cursor is the last prefix and path ID visited, not API order.
     /// Its owner must invalidate it on any relevant candidate mutation.
     pub(crate) fn iter_covered_from(
         &self,
         covering: Prefix,
-        after: Option<(Prefix, usize)>,
-    ) -> impl Iterator<Item = ((Prefix, usize), &Route)> {
+        after: Option<(Prefix, u32)>,
+    ) -> impl Iterator<Item = ((Prefix, u32), &Route)> {
         let routes = &self.routes;
         self.prefix_index
             .iter_from(Some(after.map_or(covering, |cursor| cursor.0)))
@@ -776,16 +979,12 @@ impl AdjRibIn {
                 _ => false,
             })
             .flat_map(move |(prefix, ids)| {
-                let start = after
+                let after_id = after
                     .filter(|cursor| cursor.0 == prefix)
-                    .map_or(0, |cursor| cursor.1);
-                ids.iter()
-                    .enumerate()
-                    .skip(start)
-                    .filter_map(move |(index, (_, handle))| {
-                        routes
-                            .get(*handle)
-                            .map(|route| ((prefix, index + 1), route))
+                    .map(|cursor| cursor.1);
+                ids.iter_after(after_id)
+                    .filter_map(move |(path_id, handle)| {
+                        routes.get(handle).map(|route| ((prefix, path_id), route))
                     })
             })
     }
@@ -857,7 +1056,7 @@ impl AdjRibIn {
         } = self;
         let mut visited = 0_u64;
         for (_, ids) in prefix_index.children(covering) {
-            for &(_, handle) in ids {
+            for (_, handle) in ids.iter() {
                 let Some(route) = routes.get_mut(handle) else {
                     continue;
                 };
@@ -980,11 +1179,8 @@ impl AdjRibIn {
         let routes = &self.routes;
         self.prefix_index
             .get(prefix)
-            .into_iter()
-            .flat_map(move |ids| {
-                ids.iter()
-                    .filter_map(move |&(_, handle)| routes.get(handle))
-            })
+            .map_or(PathIndexIter::One(None), PathIndex::iter)
+            .filter_map(move |(_, handle)| routes.get(handle))
     }
 
     /// Mark all routes matching the given address family as stale
@@ -2052,9 +2248,7 @@ impl AdjRibIn {
             self.vpn_llgr_stale_local_tags.remove(&key);
         }
         let ids = self.vpn_key_index.get_or_default(key.nlri_key);
-        if !ids.contains(&key.path_id) {
-            ids.push(key.path_id);
-        }
+        ids.insert(key.path_id, ());
         self.vpn_routes.insert(key, route).is_some()
     }
 
@@ -2071,8 +2265,7 @@ impl AdjRibIn {
         self.remove_vpn_entry_with_checkpoint(key, &mut || {})
     }
 
-    /// [`Self::remove_vpn_entry`] with a checkpoint per Add-Path id the
-    /// index scan visits.
+    /// [`Self::remove_vpn_entry`] with checkpoints around path-index removal.
     fn remove_vpn_entry_with_checkpoint(
         &mut self,
         key: &VpnRibRouteKey,
@@ -2084,10 +2277,9 @@ impl AdjRibIn {
         }
         let removed = self.vpn_routes.remove(key).is_some();
         if removed && let Some(ids) = self.vpn_key_index.get_mut(&key.nlri_key) {
-            ids.retain(|id| {
-                checkpoint();
-                *id != key.path_id
-            });
+            checkpoint();
+            ids.remove(key.path_id);
+            checkpoint();
             if ids.is_empty() {
                 self.vpn_key_index.remove(&key.nlri_key);
             }
@@ -2105,10 +2297,10 @@ impl AdjRibIn {
             .get(nlri_key)
             .into_iter()
             .flat_map(move |ids| {
-                ids.iter().filter_map(move |path_id| {
+                ids.iter().filter_map(move |(path_id, ())| {
                     self.vpn_routes.get(&VpnRibRouteKey {
                         nlri_key: *nlri_key,
-                        path_id: *path_id,
+                        path_id,
                     })
                 })
             })
@@ -2424,9 +2616,7 @@ impl AdjRibIn {
             self.labeled_llgr_stale_local_tags.remove(&key);
         }
         let ids = self.labeled_key_index.get_or_default(key.prefix);
-        if !ids.contains(&key.path_id) {
-            ids.push(key.path_id);
-        }
+        ids.insert(key.path_id, ());
         self.labeled_routes.insert(key, route).is_some()
     }
 
@@ -2443,8 +2633,7 @@ impl AdjRibIn {
         self.remove_labeled_entry_with_checkpoint(key, &mut || {})
     }
 
-    /// [`Self::remove_labeled_entry`] with a checkpoint per Add-Path id the
-    /// index scan visits.
+    /// [`Self::remove_labeled_entry`] with checkpoints around path-index removal.
     fn remove_labeled_entry_with_checkpoint(
         &mut self,
         key: &LabeledRibRouteKey,
@@ -2456,10 +2645,9 @@ impl AdjRibIn {
         }
         let removed = self.labeled_routes.remove(key).is_some();
         if removed && let Some(ids) = self.labeled_key_index.get_mut(&key.prefix) {
-            ids.retain(|id| {
-                checkpoint();
-                *id != key.path_id
-            });
+            checkpoint();
+            ids.remove(key.path_id);
+            checkpoint();
             if ids.is_empty() {
                 self.labeled_key_index.remove(&key.prefix);
             }
@@ -2477,10 +2665,10 @@ impl AdjRibIn {
             .get(prefix)
             .into_iter()
             .flat_map(move |ids| {
-                ids.iter().filter_map(move |path_id| {
+                ids.iter().filter_map(move |(path_id, ())| {
                     self.labeled_routes.get(&LabeledRibRouteKey {
                         prefix: *prefix,
-                        path_id: *path_id,
+                        path_id,
                     })
                 })
             })
@@ -3545,6 +3733,397 @@ mod tests {
     use crate::route::BgpLsFamily;
     use crate::test_support::{make_flowspec_route, make_route, make_v6_route};
 
+    thread_local! {
+        static PATH_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static PATH_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, Eq)]
+    pub(super) struct CountedPathId(u32);
+
+    // Counted by hand: a derived `eq` would let a linear `==` scan score zero.
+    impl PartialEq for CountedPathId {
+        fn eq(&self, other: &Self) -> bool {
+            PATH_COMPARISONS.with(|count| count.set(count.get() + 1));
+            self.0 == other.0
+        }
+    }
+
+    impl Ord for CountedPathId {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            PATH_COMPARISONS.with(|count| count.set(count.get() + 1));
+            self.0.cmp(&other.0)
+        }
+    }
+
+    impl PartialOrd for CountedPathId {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl From<u32> for CountedPathId {
+        fn from(value: u32) -> Self {
+            Self(value)
+        }
+    }
+
+    impl From<CountedPathId> for u32 {
+        fn from(value: CountedPathId) -> Self {
+            value.0
+        }
+    }
+
+    fn path_comparisons() -> usize {
+        PATH_COMPARISONS.with(|count| count.replace(0))
+    }
+
+    pub(super) fn record_path_visit() {
+        PATH_VISITS.with(|count| count.set(count.get() + 1));
+    }
+
+    #[test]
+    fn covered_cursor_seeks_without_revisiting_prior_paths() {
+        let (base, _, _) = crowded_path_routes(0);
+        let prefix = base.prefix;
+        let mut rib = AdjRibIn::new(base.peer);
+        for id in (0..4096).map(|id| id * 10).chain([u32::MAX]) {
+            let mut route = base.clone();
+            route.path_id = id;
+            rib.insert(route);
+        }
+        PATH_VISITS.with(|count| count.set(0));
+        path_comparisons();
+        let page: Vec<_> = rib
+            .iter_covered_from(prefix, Some((prefix, 38390)))
+            .take(256)
+            .collect();
+        assert_eq!(page.len(), 256);
+        assert_eq!(page[0].1.path_id, 38400);
+        assert_eq!(page[255].1.path_id, 40950);
+        assert_eq!(
+            PATH_VISITS.with(std::cell::Cell::get),
+            256,
+            "continuation must not walk discarded siblings"
+        );
+        assert!(
+            path_comparisons() <= 8 * 12,
+            "continuation must seek in logarithmic work"
+        );
+        let last = rib
+            .iter_covered_from(prefix, Some(page[255].0))
+            .next()
+            .unwrap();
+        assert_eq!(last.1.path_id, u32::MAX);
+        assert!(rib.iter_covered_from(prefix, Some(last.0)).next().is_none());
+    }
+
+    #[test]
+    fn path_index_promotes_replaces_and_collapses() {
+        let mut paths = PathIndex::default();
+        assert_eq!(paths.get(7), None);
+        assert_eq!(paths.remove(7), None);
+        for id in [7, 1, 9] {
+            assert_eq!(paths.insert(id, id + 100), None);
+        }
+        assert_eq!(
+            paths.iter().collect::<Vec<_>>(),
+            vec![(1, 101), (7, 107), (9, 109)]
+        );
+        assert_eq!(paths.insert(7, 700), Some(107));
+        assert_eq!(paths.get(7), Some(700));
+        assert_eq!(paths.remove(8), None);
+        assert_eq!(paths.remove(1), Some(101));
+        assert_eq!(paths.remove(9), Some(109));
+        // Like the `SmallVec` it replaced, a vector keeps its capacity, so a
+        // flapping second path does not reallocate.
+        assert!(matches!(&paths, PathIndex::Small(v) if v.len() == 1 && v.capacity() == 4));
+        assert_eq!(paths.insert(7, 701), Some(700));
+        assert_eq!(paths.remove(7), Some(701));
+        assert!(paths.is_empty());
+        assert_eq!(paths.insert(7, 702), None);
+        assert!(matches!(paths, PathIndex::One(7, 702)));
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(std::mem::size_of::<PathIndex<u32>>(), 24);
+            assert_eq!(std::mem::size_of::<PathIndex<()>>(), 24);
+            assert_eq!(std::mem::size_of::<SmallVec<[(u32, u32); 1]>>(), 24);
+            assert_eq!(std::mem::size_of::<SmallVec<[u32; 1]>>(), 24);
+        }
+    }
+
+    #[test]
+    fn path_index_iteration_seeks_and_stays_exhausted_in_each_tier() {
+        for count in [0_u32, 1, 2, 16, 17, 4096] {
+            let mut paths = PathIndex::default();
+            for id in (0..count).rev() {
+                paths.insert(id * 2, id);
+            }
+            for after in [None, Some(0), Some(15), Some(32), Some(u32::MAX)] {
+                let expected: Vec<_> = (0..count)
+                    .filter(|id| after.is_none_or(|after| id * 2 > after))
+                    .map(|id| (id * 2, id))
+                    .collect();
+                let mut iter = paths.iter_after(after);
+                if count <= 16 {
+                    // Paging uses this lower bound to reserve once.
+                    assert_eq!(iter.size_hint(), (expected.len(), Some(expected.len())));
+                }
+                for path in expected {
+                    assert_eq!(iter.next(), Some(path));
+                }
+                assert_eq!(iter.next(), None);
+                assert_eq!(iter.next(), None);
+                assert_eq!(iter.size_hint().0, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn path_index_tiers_grow_like_smallvec_and_switch_with_hysteresis() {
+        let mut paths = PathIndex::default();
+        let mut capacities = Vec::new();
+        for id in (0..16).rev() {
+            paths.insert(id * 2, id);
+            if let PathIndex::Small(v) = &paths {
+                capacities.push(v.capacity());
+            }
+        }
+        // The parent `SmallVec<[_; 1]>` spilled to 2, then doubled.
+        assert_eq!(
+            capacities,
+            [2, 4, 4, 8, 8, 8, 8, 16, 16, 16, 16, 16, 16, 16, 16]
+        );
+        assert_eq!(
+            paths.iter_after(Some(25)).collect::<Vec<_>>(),
+            [(26, 13), (28, 14), (30, 15)]
+        );
+        assert_eq!(paths.insert(1, 99), None);
+        assert!(matches!(&paths, PathIndex::Many(tree) if tree.len() == 17));
+        for _ in 0..4 {
+            assert_eq!(paths.remove(1), Some(99));
+            assert!(matches!(&paths, PathIndex::Many(tree) if tree.len() == 16));
+            assert_eq!(paths.insert(1, 99), None);
+        }
+        let ids: Vec<u32> = paths.iter().map(|(id, _)| id).collect();
+        for &id in &ids[..8] {
+            assert!(paths.remove(id).is_some());
+        }
+        assert!(matches!(&paths, PathIndex::Many(tree) if tree.len() == 9));
+        assert!(paths.remove(ids[8]).is_some());
+        assert!(matches!(&paths, PathIndex::Small(v) if v.len() == 8 && v.capacity() == 8));
+        assert_eq!(paths.iter().map(|(id, _)| id).collect::<Vec<_>>(), ids[9..]);
+        for &id in &ids[..8] {
+            assert_eq!(paths.insert(id, 0), None);
+        }
+        assert!(matches!(&paths, PathIndex::Small(v) if v.len() == 16));
+        assert_eq!(paths.get(ids[0]), Some(0));
+        assert_eq!(paths.get(3), None);
+    }
+
+    fn crowded_path_routes(path_id: u32) -> (Route, VpnRibRoute, LabeledRibRoute) {
+        let mut unicast = make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        let mut vpn = make_vpn_route(vpn_nlri([192, 0, 2, 0], 24, 100), 1);
+        let mut labeled = make_labeled_route(labeled_nlri([192, 0, 2, 0], 24, 100), 1);
+        unicast.path_id = path_id;
+        vpn.path_id = path_id;
+        labeled.path_id = path_id;
+        (unicast, vpn, labeled)
+    }
+
+    #[test]
+    fn crowded_path_indexes_bound_actual_comparisons() {
+        for n in [1024_u32, 2048, 4096] {
+            let mut rib = AdjRibIn::new(PeerId::from_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+            // Fixed before execution: eight comparisons per binary-tree level,
+            // per operation, across three indexes. Wall time is not a gate.
+            let budget = 24 * n as usize * (u32::BITS - (n - 1).leading_zeros()) as usize;
+            path_comparisons();
+            for id in 0..n {
+                let (unicast, vpn, labeled) = crowded_path_routes(id);
+                assert!(!rib.insert(unicast));
+                assert!(!rib.insert_vpn(vpn));
+                assert!(!rib.insert_labeled(labeled));
+            }
+            let insert = path_comparisons();
+            assert!(insert <= budget, "insert N={n}: {insert} > {budget}");
+            for id in 0..n {
+                let (unicast, vpn, labeled) = crowded_path_routes(id);
+                assert!(rib.insert(unicast));
+                assert!(rib.insert_vpn(vpn));
+                assert!(rib.insert_labeled(labeled));
+            }
+            let replace = path_comparisons();
+            assert!(replace <= budget, "replace N={n}: {replace} > {budget}");
+            let (unicast, vpn, labeled) = crowded_path_routes(0);
+            for id in 0..n {
+                assert!(rib.get(&unicast.prefix, id).is_some());
+                assert_eq!(
+                    rib.vpn_key_index.get(&vpn.nlri.key()).unwrap().get(id),
+                    Some(())
+                );
+                assert_eq!(
+                    rib.labeled_key_index
+                        .get(&labeled.nlri.key())
+                        .unwrap()
+                        .get(id),
+                    Some(())
+                );
+            }
+            let lookup = path_comparisons();
+            assert!(lookup <= budget, "lookup N={n}: {lookup} > {budget}");
+            for _ in 0..n {
+                assert!(rib.get(&unicast.prefix, n).is_none());
+                assert_eq!(rib.vpn_key_index.get(&vpn.nlri.key()).unwrap().get(n), None);
+                assert_eq!(
+                    rib.labeled_key_index
+                        .get(&labeled.nlri.key())
+                        .unwrap()
+                        .get(n),
+                    None
+                );
+            }
+            let absent = path_comparisons();
+            assert!(absent <= budget, "absent N={n}: {absent} > {budget}");
+            for id in (0..n).rev() {
+                let (unicast, vpn, labeled) = crowded_path_routes(id);
+                assert!(rib.withdraw(&unicast.prefix, id));
+                assert!(rib.withdraw_vpn(&vpn.key()));
+                assert!(rib.withdraw_labeled(&labeled.key()));
+            }
+            let remove = path_comparisons();
+            assert!(remove <= budget, "remove N={n}: {remove} > {budget}");
+            assert!(rib.prefix_index.get(&unicast.prefix).is_none());
+            assert!(rib.vpn_key_index.is_empty());
+            assert!(rib.labeled_key_index.is_empty());
+            eprintln!(
+                "PATH_INDEX N={n} budget={budget} insert={insert} replace={replace} lookup={lookup} absent={absent} remove={remove}"
+            );
+        }
+    }
+
+    #[test]
+    fn crowded_path_index_retirement_checkpoints_each_entry() {
+        for count in [1, 16] {
+            let mut paths = PathIndex::default();
+            for id in 0..count {
+                paths.insert(id, ());
+            }
+            let mut visits = 0;
+            paths.retire_with(&mut || visits += 1);
+            assert_eq!(visits, 0, "a {count}-path entry frees in one step");
+        }
+        let mut paths = PathIndex::default();
+        for id in 0..4096 {
+            paths.insert(id, ());
+        }
+        let mut visits = 0;
+        paths.retire_with(&mut || visits += 1);
+        assert_eq!(visits, 4096);
+
+        let mut rib = AdjRibIn::new(PeerId::from_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        for id in 0..4096 {
+            let (unicast, vpn, labeled) = crowded_path_routes(id);
+            rib.insert(unicast);
+            rib.insert_vpn(vpn);
+            rib.insert_labeled(labeled);
+        }
+        let mut visits = 0;
+        rib.retire_with(&mut || visits += 1);
+        assert!(
+            visits >= 9 * 4096,
+            "route and crowded index entries must both checkpoint: {visits}"
+        );
+    }
+
+    #[test]
+    fn crowded_path_indexes_clear_after_gr_llgr_and_full_clear() {
+        for llgr in [false, true] {
+            let mut rib = AdjRibIn::new(PeerId::from_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+            for id in 0..16 {
+                let (mut unicast, mut vpn, mut labeled) = crowded_path_routes(id);
+                unicast.is_stale = !llgr;
+                unicast.is_llgr_stale = llgr;
+                vpn.is_stale = !llgr;
+                vpn.is_llgr_stale = llgr;
+                labeled.is_stale = !llgr;
+                labeled.is_llgr_stale = llgr;
+                rib.insert(unicast);
+                rib.insert_vpn(vpn);
+                rib.insert_labeled(labeled);
+            }
+            rib.sweep_stale_family_with_checkpoint((Afi::Ipv4, Safi::Unicast), llgr, &mut || {});
+            rib.sweep_stale_family_vpn_with_checkpoint(
+                (Afi::Ipv4, Safi::MplsVpn),
+                llgr,
+                &mut || {},
+            );
+            rib.sweep_stale_family_labeled_with_checkpoint(
+                (Afi::Ipv4, Safi::LabeledUnicast),
+                llgr,
+                &mut || {},
+            );
+            assert!(rib.prefix_index.iter_from(None).next().is_none());
+            assert!(rib.vpn_key_index.is_empty());
+            assert!(rib.labeled_key_index.is_empty());
+            for id in 0..16 {
+                let (unicast, vpn, labeled) = crowded_path_routes(id);
+                rib.insert(unicast);
+                rib.insert_vpn(vpn);
+                rib.insert_labeled(labeled);
+            }
+            rib.clear();
+            assert!(rib.prefix_index.iter_from(None).next().is_none());
+            assert!(rib.vpn_key_index.is_empty());
+            assert!(rib.labeled_key_index.is_empty());
+        }
+    }
+
+    #[test]
+    fn ordered_paths_preserve_source_and_path_ties_after_replacement() {
+        let (base, _, _) = crowded_path_routes(0);
+        let mut rib = AdjRibIn::new(base.peer);
+        for (id, peer) in [(9, 2), (7, 1), (1, 2), (3, 1)] {
+            let mut route = base.clone();
+            route.path_id = id;
+            route.peer = PeerId::from_ipv4(Ipv4Addr::new(10, 0, 0, peer));
+            rib.insert(route);
+        }
+        let mut expected: Vec<_> = rib.iter().map(route_query_key).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            rib.iter_ordered_from(None)
+                .map(route_query_key)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            rib.iter_ordered_from(Some(expected[1]))
+                .map(route_query_key)
+                .collect::<Vec<_>>(),
+            expected[2..]
+        );
+        let best = rib
+            .iter_prefix(&base.prefix)
+            .min_by(|a, b| crate::best_path::best_path_cmp(a, b))
+            .unwrap();
+        assert_eq!(best.path_id, 3);
+        let mut replacement = base;
+        replacement.path_id = 3;
+        rib.insert(replacement);
+        assert_eq!(
+            rib.iter_prefix(&expected[0].0)
+                .min_by(|a, b| crate::best_path::best_path_cmp(a, b))
+                .unwrap()
+                .path_id,
+            3
+        );
+    }
+
     fn insert_llgr_bound_routes(
         rib: &mut AdjRibIn,
         index: u32,
@@ -3732,9 +4311,9 @@ mod tests {
             // The unicast slab's second scan also visits the slot vacated
             // by the removed NO_LLGR row.
             let vacated = usize::from(index == 0);
-            // Unicast, VPN and labeled removals also visit the one Add-Path
-            // index entry of the removed NO_LLGR row.
-            let indexed = usize::from(matches!(index, 0 | 4 | 5));
+            // Unicast, VPN and labeled removals checkpoint before and after
+            // the logarithmic Add-Path index operation.
+            let indexed = 2 * usize::from(matches!(index, 0 | 4 | 5));
             observed.push((index, visits));
             expected.push((
                 index,

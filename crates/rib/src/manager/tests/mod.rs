@@ -1755,3 +1755,5 @@ mod update_groups_recovery;
 mod vpn;
 mod vpn_flowspec;
 mod work_scaling;
+
+mod llgr_add_path_retention;

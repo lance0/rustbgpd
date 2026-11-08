@@ -39,7 +39,7 @@ struct Job {
     check: MoreSpecificCheck,
     peers: Vec<PeerId>,
     peer_index: usize,
-    after: Option<(Prefix, usize)>,
+    after: Option<(Prefix, u32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1303,8 +1303,8 @@ mod tests {
         }
         assert!(manager.process_flowspec_validation_chunk());
         let job = manager.flowspec_validation.active.as_ref().unwrap();
-        let (_, index) = job.after.unwrap();
-        assert!(index <= VALIDATION_VISITS_PER_TURN);
+        let (_, path_id) = job.after.unwrap();
+        assert!(path_id <= u32::try_from(VALIDATION_VISITS_PER_TURN).unwrap());
         assert!(!selected(&manager, &flow));
         drain(&mut manager);
         assert!(selected(&manager, &flow));

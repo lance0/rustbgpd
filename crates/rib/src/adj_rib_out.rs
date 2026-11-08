@@ -222,11 +222,27 @@ pub(crate) fn retire_sharded_map<K, V, const SPLIT: usize, const N: usize, const
     map: &mut ShardedMap<K, V, SPLIT, N, PRESIZE>,
     checkpoint: &mut impl RetirementCheckpoint,
 ) {
+    retire_sharded_map_values(map, checkpoint, |entry, _| drop(entry));
+}
+
+/// [`retire_sharded_map`], handing each drained entry to `retire`.
+fn retire_sharded_map_values<
+    K,
+    V,
+    C: RetirementCheckpoint,
+    const SPLIT: usize,
+    const N: usize,
+    const PRESIZE: usize,
+>(
+    map: &mut ShardedMap<K, V, SPLIT, N, PRESIZE>,
+    checkpoint: &mut C,
+    mut retire: impl FnMut((K, V), &mut C),
+) {
     for shard in map.shards_mut() {
         let mut entries = shard.drain();
         for entry in entries.by_ref() {
             checkpoint.checkpoint(RetirementProgress::Progress);
-            drop(entry);
+            retire(entry, checkpoint);
             checkpoint.checkpoint(RetirementProgress::Progress);
         }
         checkpoint.checkpoint(RetirementProgress::Boundary);
@@ -247,7 +263,23 @@ pub(crate) fn release_sharded_map<
     map: &mut ShardedMap<K, V, SPLIT, N, PRESIZE>,
     checkpoint: &mut impl RetirementCheckpoint,
 ) {
-    retire_sharded_map(map, checkpoint);
+    release_sharded_map_values(map, checkpoint, |entry, _| drop(entry));
+}
+
+/// [`release_sharded_map`], handing each drained entry to `retire`.
+pub(crate) fn release_sharded_map_values<
+    K,
+    V,
+    C: RetirementCheckpoint,
+    const SPLIT: usize,
+    const N: usize,
+    const PRESIZE: usize,
+>(
+    map: &mut ShardedMap<K, V, SPLIT, N, PRESIZE>,
+    checkpoint: &mut C,
+    retire: impl FnMut((K, V), &mut C),
+) {
+    retire_sharded_map_values(map, checkpoint, retire);
     let retired = std::mem::take(map);
     checkpoint.checkpoint(RetirementProgress::Boundary);
     drop(retired);

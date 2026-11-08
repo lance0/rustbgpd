@@ -2766,6 +2766,14 @@ unicast, rejected IDs also count when `max_prefixes_received_ipv4_unicast` or
 that family. A replacement of an existing ID needs no new slot, and a
 withdrawal releases one.
 
+These receive counters belong to the current session. With LLGR enabled,
+stale IDs from earlier sessions can remain alongside newly received IDs,
+so the retained RIB can exceed this per-session cap. Repeated reconnects do
+not restart the original LLGR stale deadline; End-of-RIB or that deadline
+removes unrefreshed stale paths. The RIB uses logarithmic per-key indexes
+for these accumulated IDs, but does not impose an additional retained-path
+memory cap. Account for this retention when enabling LLGR on Add-Path peers.
+
 Past the cap, `max_prefix_action = "block"` withholds a net-new ID and
 counts it as `"block"`. `"shutdown"` sends Cease/1, latches the peer and
 counts the attempt as `"shutdown"`, at any `receive_max`. `"warning"` admits

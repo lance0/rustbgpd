@@ -1668,12 +1668,11 @@ fn run_add_path_expiry_case(family: (Afi, Safi), paths: u8, one_nlri: bool) -> u
     answered.get("llgr_expiry_purge").copied().unwrap_or(0)
 }
 
-/// Many Add-Path paths on one NLRI: each removal scans the NLRI's path
-/// list, so the purge must answer readiness inside those scans. One NLRI
-/// with 64 paths answers at least `64 * 63 / 8` more queries than 64 NLRIs
-/// with one path each, for unicast, VPN and labeled.
+/// Indexed removals answer readiness at the route scan, before/after the
+/// outer removal and before/after the index operation: at least five answers
+/// per route. Crowding paths on one NLRI adds no linear path-list scan.
 #[test]
-fn llgr_expiry_add_path_removal_scans_answer_readiness() {
+fn llgr_expiry_add_path_removals_answer_readiness_without_path_scans() {
     let failures: Vec<_> = [
         (Afi::Ipv4, Safi::Unicast),
         (Afi::Ipv4, Safi::MplsVpn),
@@ -1687,12 +1686,12 @@ fn llgr_expiry_add_path_removal_scans_answer_readiness() {
             run_add_path_expiry_case(family, 64, true),
         )
     })
-    .filter(|&(_, spread, one)| one < spread + 64 * 63 / 8)
+    .filter(|&(_, spread, one)| one != spread || one < 5 * 64)
     .collect();
     assert!(
         failures.is_empty(),
-        "(family, 64 NLRIs, one NLRI with 64 paths) purge answers must cover the \
-         path-list scans: {failures:?}"
+        "(family, 64 NLRIs, one NLRI with 64 paths) purge answers must cover each \
+         indexed removal without path-list scans: {failures:?}"
     );
 }
 
@@ -1844,12 +1843,11 @@ fn llgr_expiry_rtc_restage_matching_answers_readiness() {
     );
 }
 
-/// GR-phase End-of-RIB removes every unrefreshed Add-Path path of an NLRI;
-/// each removal scans that NLRI's path list, so the sweep must answer
-/// readiness inside the scans: one prefix with 64 paths answers at least
-/// `64 * 63 / 8` more queries than 64 single-path prefixes.
+/// GR-phase End-of-RIB answers readiness at the route scan, before/after
+/// the outer removal and before/after the index operation. Crowded and
+/// single-path prefixes use the same checkpoints, at least five per route.
 #[test]
-fn eor_add_path_removal_scans_answer_readiness() {
+fn eor_add_path_removals_answer_readiness_without_path_scans() {
     let run = |one_prefix: bool| {
         let unicast = (Afi::Ipv4, Safi::Unicast);
         let (mut manager, readiness_tx) = readiness_manager();
@@ -1897,7 +1895,7 @@ fn eor_add_path_removal_scans_answer_readiness() {
     };
     let (spread, one) = (run(false), run(true));
     assert!(
-        one >= spread + 64 * 63 / 8,
+        one == spread && one >= 5 * 64,
         "eor_sweep answered {spread} for 64 prefixes and {one} for one prefix with 64 paths"
     );
 }
