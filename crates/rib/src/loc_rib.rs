@@ -308,9 +308,17 @@ impl LocRib {
         &mut self,
         after: Option<RouteQueryKey>,
     ) -> impl Iterator<Item = &Route> {
+        self.iter_ordered_family_from(after, None)
+    }
+
+    pub(crate) fn iter_ordered_family_from(
+        &mut self,
+        after: Option<RouteQueryKey>,
+        family: Option<Afi>,
+    ) -> impl Iterator<Item = &Route> {
         self.sync_ordered_index();
         self.ordered_prefixes
-            .iter_from(after.map(|cursor| cursor.0))
+            .iter_from(crate::update::route_query_start_prefix(after, family))
             .filter_map(|(prefix, ())| self.routes.get(&prefix).map(|(route, _)| route))
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }

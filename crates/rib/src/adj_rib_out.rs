@@ -633,9 +633,17 @@ impl AdjRibOut {
     /// carry Add-Path rows sourced by different peers; identity order is
     /// `(prefix, source peer, path_id)`, not insertion order.
     pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
+        self.iter_ordered_family_from(after, None)
+    }
+
+    pub(crate) fn iter_ordered_family_from(
+        &self,
+        after: Option<RouteQueryKey>,
+        family: Option<Afi>,
+    ) -> impl Iterator<Item = &Route> {
         let routes = &self.routes;
         self.prefix_path_ids
-            .iter_from(after.map(|cursor| cursor.0))
+            .iter_from(crate::update::route_query_start_prefix(after, family))
             .flat_map(move |(_, ids)| {
                 let mut ordered = ids.clone();
                 ordered
@@ -647,8 +655,19 @@ impl AdjRibOut {
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
+    /// Restrict a query's input before evaluating its residual row predicate.
+    pub(crate) fn iter_query_prefix(&self, prefix: Option<Prefix>) -> impl Iterator<Item = &Route> {
+        self.iter()
+            .take(if prefix.is_none() { usize::MAX } else { 0 })
+            .chain(
+                prefix
+                    .into_iter()
+                    .flat_map(|prefix| self.iter_prefix(&prefix)),
+            )
+    }
+
     /// Iterate over all routes for a given prefix (all path IDs).
-    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> + '_ {
+    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> + use<'_> {
         let routes = &self.routes;
         self.prefix_path_ids
             .get(prefix)

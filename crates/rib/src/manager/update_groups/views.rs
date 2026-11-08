@@ -474,6 +474,14 @@ impl RibManager {
         &self,
         peer: PeerId,
     ) -> Option<impl Iterator<Item = &Route>> {
+        self.grouped_advertised_routes_for_prefix(peer, None)
+    }
+
+    pub(in crate::manager) fn grouped_advertised_routes_for_prefix(
+        &self,
+        peer: PeerId,
+        prefix: Option<Prefix>,
+    ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
@@ -485,6 +493,12 @@ impl RibManager {
             group
                 .table
                 .iter()
+                .take(if prefix.is_none() { usize::MAX } else { 0 })
+                .chain(
+                    prefix
+                        .into_iter()
+                        .flat_map(|prefix| group.table.iter_prefix(&prefix)),
+                )
                 .inspect(move |_| self.replacement_checkpoint_at("grouped_advertised_input", false))
                 .filter_map(move |staged| {
                     // The substitution sits at the same (prefix, path_id 0)
@@ -564,10 +578,20 @@ impl RibManager {
     /// horizon and exact-export rejection remain streaming filters. A page
     /// clones only yielded rows, but a high-exclusion member may inspect more
     /// underlying group rows before filling that page.
+    #[cfg(test)]
     pub(in crate::manager) fn grouped_advertised_routes_ordered_iter(
         &self,
         peer: PeerId,
         after: Option<RouteQueryKey>,
+    ) -> Option<impl Iterator<Item = &Route>> {
+        self.grouped_advertised_routes_ordered_family_iter(peer, after, None)
+    }
+
+    pub(in crate::manager) fn grouped_advertised_routes_ordered_family_iter(
+        &self,
+        peer: PeerId,
+        after: Option<RouteQueryKey>,
+        family: Option<Afi>,
     ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
@@ -579,7 +603,7 @@ impl RibManager {
         Some(
             group
                 .table
-                .iter_ordered_from(after)
+                .iter_ordered_family_from(after, family)
                 .filter_map(move |staged| {
                     let route = group
                         .adv_entry_post_backstop_for(

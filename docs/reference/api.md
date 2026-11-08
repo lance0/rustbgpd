@@ -2239,6 +2239,18 @@ page and read only `total_count`. For an address that names no known peer the
 count fails with `NOT_FOUND` rather than reporting zero
 ([unknown peers](#unknown-peers-in-peer-scoped-views)).
 
+Exact-prefix filters use existing prefix lookups for Received, Best, and
+clean Advertised views; other predicates then examine only that prefix's
+candidate rows. Family-only first pages seek into the existing ordered
+indexes and use the available family counts. Ordering, filtered totals, and
+continuation-token rules are unchanged.
+
+This is not a complete bound on RIB actor work. Advertised counts and
+member-local exclusions can still require scans, a cold Best index can require
+rebuilding, and dirty grouped Advertised baselines still scan their admitted
+rows. Filters without an exact prefix can also scan the selected scope.
+Pagination bounds the returned rows, not the work of every query.
+
 The same contract backs `rbgp rib --limit N`,
 `rbgp rib received PEER --limit N`, and
 `rbgp rib advertised PEER --limit N` for `N` from 1 through 1000
