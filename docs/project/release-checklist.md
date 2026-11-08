@@ -1028,11 +1028,17 @@ After the tag publishes:
 
     The same commit also re-blesses the `.rpol` decision corpus, which pins
     every `.rpol` file in the repository, so the new `hygiene.rpol` copy
-    fails `corpus_decisions_are_pinned` until its golden records it:
+    fails `corpus_decisions_are_pinned` until its golden records it. The
+    corpus lists files with `git ls-files`, so stage the frozen fixture
+    directory first:
 
     ```sh
+    git add "tests/fixtures/v1-stable/${tag}/"
     RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
     ```
+
+    A golden that is unchanged after blessing means the fixture was not
+    staged.
 
     Review `crates/policy/src/rpol/decision_corpus.golden` before committing.
     The diff must be exactly the header's program count rising by one, with
