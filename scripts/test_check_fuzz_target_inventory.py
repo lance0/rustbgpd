@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import unittest
@@ -557,8 +558,8 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         dictionary = (inventory.ROOT / "crates/wire/fuzz/bgp.dict").read_bytes()
         mutations = (
             ("main guard", "github.ref == 'refs/heads/main'", "true"),
-            ("restore action", "actions/cache/restore@v6", "actions/cache/restore@v5"),
-            ("save action", "actions/cache/save@v6", "actions/cache/save@v5"),
+            ("restore action", "actions/cache/restore@", "actions/cache/wrong@"),
+            ("save action", "actions/cache/save@", "actions/cache/wrong@"),
             (
                 "cargo-fuzz version",
                 "cargo install cargo-fuzz --version 0.13.2 --locked",
@@ -586,11 +587,42 @@ class FuzzTargetInventoryTests(unittest.TestCase):
             ),
         )
         for name, old, new in mutations:
+            self.assertIn(old, workflow)
             with self.subTest(contract=name), self.assertRaisesRegex(
                 inventory.InventoryError, "wire corpus cache"
             ):
                 inventory.validate_wire_corpus_cache_contract(
                     workflow.replace(old, new, 1), helper, dictionary
+                )
+
+    def test_wire_cache_action_pins_allow_updates_and_reject_bad_refs(self) -> None:
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        helper = (inventory.ROOT / "scripts/fuzz_corpus_cache.py").read_text()
+        dictionary = (inventory.ROOT / "crates/wire/fuzz/bgp.dict").read_bytes()
+        for action in ("restore", "save"):
+            original = re.search(rf"actions/cache/{action}@[^\n]+", workflow)[0]
+            updated = f"actions/cache/{action}@{'a' * 40} # v6"
+            inventory.validate_wire_corpus_cache_contract(
+                workflow.replace(original, updated, 1), helper, dictionary
+            )
+            for ref in ("v6", "v5", "main", "a" * 39, "a" * 41):
+                with (
+                    self.subTest(action=action, ref=ref),
+                    self.assertRaisesRegex(inventory.InventoryError, "SHA-pinned"),
+                ):
+                    inventory.validate_wire_corpus_cache_contract(
+                        workflow.replace(original, f"actions/cache/{action}@{ref} # v6", 1),
+                        helper,
+                        dictionary,
+                    )
+            with (
+                self.subTest(action=action, version="v5"),
+                self.assertRaisesRegex(inventory.InventoryError, "SHA-pinned"),
+            ):
+                inventory.validate_wire_corpus_cache_contract(
+                    workflow.replace(original, updated.replace("# v6", "# v5"), 1),
+                    helper,
+                    dictionary,
                 )
 
     def test_wire_cache_outage_and_step_order_are_load_bearing(self) -> None:

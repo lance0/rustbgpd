@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM gcr.io/oss-fuzz-base/base-builder-rust:ubuntu-24-04
+FROM gcr.io/oss-fuzz-base/base-builder-rust:ubuntu-24-04@sha256:bceca1feaa6ee67cd11a4ac6104b754afb6da7f0a81d191212aff1d678c71f21
 # crates/cli's build script compiles the gRPC protos, so the rbgp fuzz crate
 # needs protoc. Same pinned archive and digest as the CI installer
 # (.github/pinned-archives.sha256).

@@ -787,7 +787,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     }
     let installer = "      - uses: ./.github/actions/install-protobuf";
     assert_eq!(workflow.matches(installer).count(), 1);
-    let checkout = workflow.find("actions/checkout@v7").unwrap();
+    let checkout = workflow.find("uses: actions/checkout@").unwrap();
     let installer = workflow.find(installer).unwrap();
     let oracle = workflow
         .find("tests/compat/ixp-manager-birdseye/run.sh")

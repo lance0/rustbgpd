@@ -8,7 +8,7 @@
 # file, explains how to run all of it.
 
 # Latest stable Rust; the workspace needs at least the rust-version in Cargo.toml.
-FROM rust:1-trixie
+FROM rust:1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
 ENV DEBIAN_FRONTEND=noninteractive
 # protoc compiles the gRPC API definitions in proto/. jq is used by the lab and bench scripts that some tests drive.
 # iproute2 lets tests and reproducers inspect sockets.

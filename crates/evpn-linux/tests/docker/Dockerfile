@@ -33,7 +33,7 @@
 # (bookworm's iproute2 6.1 rejects it). Same pinned Rust 1.95 toolchain, so the
 # only userland change is the newer iproute2 — exactly what the netns/tc tests
 # require, with no cross-release apt-pinning.
-FROM rust:1.95-trixie
+FROM rust:1.95-trixie@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3
 
 # Toolchain bits that the privileged tests shell out to:
 #   - iproute2 (>= 6.3): `ip netns`, `ip link`, `bridge link`, `bridge fdb`,
