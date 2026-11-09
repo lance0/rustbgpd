@@ -26,7 +26,7 @@ use crate::error::DataplaneError;
 use super::links::{self, BridgeLink};
 use crate::snapshot::{
     KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo, svd_tunnel_bindings,
-    vlan_rows_contain,
+    svd_vlan_bindings_present, vlan_rows_contain,
 };
 
 const ERRNO_EEXIST: i32 = libc::EEXIST;
@@ -1473,35 +1473,6 @@ fn ensure_exact_svd_vxlan_stamp(
     )))
 }
 
-fn svd_vlan_bindings_present(
-    bridge: &BridgeLink,
-    vxlan_ifindex: u32,
-    vxlan_name: &str,
-    bindings: &[ManagedSvdVxlanBinding],
-) -> bool {
-    let Some(port) = bridge.port_vlan_inventory.iter().find(|port| {
-        port.is_vxlan && (port.ifindex == vxlan_ifindex || port.name.as_deref() == Some(vxlan_name))
-    }) else {
-        return false;
-    };
-    let Some(observed) = crate::snapshot::svd_tunnel_bindings(&port.vlan_tunnels) else {
-        return false;
-    };
-    if observed.len() != bindings.len()
-        || (1..=4094).any(|vid| {
-            vlan_rows_contain(&port.vlans, vid)
-                != bindings.iter().any(|binding| binding.bridge_vlan == vid)
-        })
-    {
-        return false;
-    }
-    bindings.iter().all(|binding| {
-        vlan_rows_contain(&bridge.vlans, binding.bridge_vlan)
-            && vlan_rows_contain(&port.vlans, binding.bridge_vlan)
-            && observed.contains(binding)
-    })
-}
-
 fn ensure_svd_vlan_bindings_observed(
     name: &str,
     vxlan: &KernelVxlanLinkInfo,
@@ -1514,7 +1485,13 @@ fn ensure_svd_vlan_bindings_observed(
             spec.bridge
         )));
     };
-    if svd_vlan_bindings_present(bridge, vxlan.ifindex, &vxlan.name, &spec.bindings) {
+    if svd_vlan_bindings_present(
+        &bridge.vlans,
+        &bridge.port_vlan_inventory,
+        vxlan.ifindex,
+        &vxlan.name,
+        &spec.bindings,
+    ) {
         Ok(())
     } else {
         Err(unsafe_managed_svd_vxlan(format!(
