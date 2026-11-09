@@ -1298,14 +1298,19 @@ impl RibManager {
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
-            let mut evpn_keys: HashSet<EvpnRouteKey> = self
-                .loc_rib
-                .iter_evpn()
-                .inspect(|_| {
-                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
-                })
-                .map(crate::route::EvpnRibRoute::key)
-                .collect();
+            // Only private staging reads this inventory; an owned feed is
+            // already complete.
+            let mut evpn_keys: HashSet<EvpnRouteKey> = if owned_evpn_feed.is_some() {
+                HashSet::new()
+            } else {
+                self.loc_rib
+                    .iter_evpn()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
+                    .map(crate::route::EvpnRibRoute::key)
+                    .collect()
+            };
             if let Some(handle) = private_evpn_recovery
                 && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
             {
