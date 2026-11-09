@@ -2392,6 +2392,15 @@ impl PeerWarningFixture {
         self.runtime.block_on(async {
             if tcp_failure {
                 self.session.handle_tcp_disconnect();
+                // The FSM close below resets these again; check the disconnect
+                // reset on its own first.
+                assert!(
+                    self.session
+                        .inbound_warning_updates
+                        .iter()
+                        .all(|&count| count == 0),
+                    "handle_tcp_disconnect re-arms inbound warnings"
+                );
                 self.session.drive_fsm(Event::TcpConnectionFails).await;
             } else {
                 self.session
