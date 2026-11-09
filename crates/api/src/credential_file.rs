@@ -170,17 +170,40 @@ pub fn read_credential(
     bytes: &mut Vec<u8>,
 ) -> Result<Option<String>, String> {
     let (file, warning) = open_credential(path, label, kind, daemon)?;
-    // Size the buffer once from the judged descriptor: growing it while
-    // reading would free unscrubbed partial copies of a secret.
     let len = file
         .metadata()
         .map_err(|e| format!("failed to inspect {label} file {}: {e}", path.display()))?
-        .len()
-        .min(MAX_CREDENTIAL_FILE_BYTES);
-    bytes.reserve_exact(usize::try_from(len + 1).unwrap_or(usize::MAX));
-    read_bounded(file, MAX_CREDENTIAL_FILE_BYTES, bytes)
+        .len();
+    read_reserved(file, len, bytes)
         .map_err(|error| format!("failed to read {label} file {}: {error}", path.display()))?;
     Ok(warning)
+}
+
+/// Read a file whose descriptor reported `len` bytes into one allocation of
+/// `min(len, cap) + 1` bytes, never more: growing the buffer would free an
+/// unscrubbed partial copy of a secret. A file that grew after the length
+/// was taken is refused rather than read past the reservation.
+fn read_reserved(reader: impl std::io::Read, len: u64, bytes: &mut Vec<u8>) -> std::io::Result<()> {
+    let limit = len.min(MAX_CREDENTIAL_FILE_BYTES) + 1;
+    bytes.reserve_exact(usize::try_from(limit).unwrap_or(usize::MAX));
+    let start = bytes.len();
+    // Once the `Take` is exhausted it reads 0 bytes, so `read_to_end`
+    // stops at the reservation instead of probing for more room.
+    reader.take(limit).read_to_end(bytes)?;
+    let read = (bytes.len() - start) as u64;
+    if read > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("larger than {MAX_CREDENTIAL_FILE_BYTES} bytes"),
+        ));
+    }
+    if read > len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credential file changed while it was read; retry",
+        ));
+    }
+    Ok(())
 }
 
 /// Read at most `max_bytes + 1` bytes from an already admitted file.
@@ -259,6 +282,19 @@ mod tests {
         read_credential(file.path(), "key", CredentialKind::Secret, me(), &mut bytes).unwrap();
         assert_eq!(bytes.len(), 5000);
         assert_eq!(bytes.capacity(), 5001);
+    }
+
+    /// A file that grows after its length is taken is refused, and the read
+    /// stops at the reservation instead of reallocating.
+    #[test]
+    fn credential_growing_during_read_is_refused_within_reservation() {
+        let grown = vec![b'k'; 9000];
+        let mut bytes = Vec::new();
+        let error = read_reserved(&grown[..], 5000, &mut bytes).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("changed while it was read"));
+        assert_eq!(bytes.capacity(), 5001);
+        assert_eq!(bytes.len(), 5001);
     }
 
     fn me() -> DaemonIdentity {
