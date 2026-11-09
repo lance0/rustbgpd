@@ -293,69 +293,15 @@ impl SourceFileProtection {
         let mut self_ = self;
         #[cfg(unix)]
         if let Some(target) = target {
-            use nix::fcntl::OFlag;
-            use nix::sys::stat::Mode;
-            use std::os::unix::ffi::OsStrExt;
             count!(directory_checks);
             let stamp = DirectoryStamp::of(&target.parent.metadata()?);
-            count!(directory_opens);
-            let mut directory = nix::dir::Dir::openat(
-                &*target.parent,
-                ".",
-                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(errno)?;
-            let mut identities = HashSet::new();
-            let mut entries = directory.iter();
-            for index in 0..=MAX_BACKUP_DIRECTORY_ENTRIES {
-                count!(enumeration_probes);
-                let Some(entry) = entries.next() else {
-                    break;
-                };
-                let entry = entry.map_err(errno)?;
-                count!(entries);
-                if index == MAX_BACKUP_DIRECTORY_ENTRIES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "protected config directory exceeds 4096 entries",
-                    ));
+            let snapshot = self_.inventory(target, stamp).map_err(|error| {
+                // A refusal concurrent with a directory change is retryable.
+                match target.parent.metadata() {
+                    Ok(metadata) if DirectoryStamp::of(&metadata) == stamp => error,
+                    _ => changed(),
                 }
-                let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
-                let candidate = target.path.parent().ok_or_else(denied)?.join(name);
-                if !self_.is_backup_path(&candidate) {
-                    continue;
-                }
-                count!(backup_opens);
-                let fd = nix::fcntl::openat(
-                    &*target.parent,
-                    name,
-                    OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(errno)?;
-                let file = File::from(fd);
-                count!(backup_stats);
-                let metadata = file.metadata()?;
-                if !metadata.is_file() {
-                    return Err(denied());
-                }
-                if identities.insert(FileIdentity::of(&metadata)) {
-                    count!(retained_identities);
-                }
-            }
-            let snapshot = BackupSnapshot {
-                target: target.fork(),
-                directory: Arc::clone(&target.parent),
-                stamp,
-                accepted_file: target
-                    .accepted_file
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-                identities,
-            };
-            snapshot.check()?;
+            })?;
             self_.backups = Some(Arc::new(snapshot));
         }
         #[cfg(not(unix))]
@@ -373,6 +319,89 @@ impl SourceFileProtection {
         {
             Ok(self)
         }
+    }
+
+    #[cfg(unix)]
+    fn inventory(
+        &self,
+        target: &SourceFileTarget,
+        stamp: DirectoryStamp,
+    ) -> io::Result<BackupSnapshot> {
+        use nix::fcntl::OFlag;
+        use nix::sys::stat::Mode;
+        use std::os::unix::ffi::OsStrExt;
+        count!(directory_opens);
+        let mut directory = nix::dir::Dir::openat(
+            &*target.parent,
+            ".",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(errno)?;
+        let mut identities = HashSet::new();
+        let mut entries = directory.iter();
+        for index in 0..=MAX_BACKUP_DIRECTORY_ENTRIES {
+            count!(enumeration_probes);
+            let Some(entry) = entries.next() else {
+                break;
+            };
+            let entry = entry.map_err(errno)?;
+            count!(entries);
+            if index == MAX_BACKUP_DIRECTORY_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "protected config directory exceeds 4096 entries",
+                ));
+            }
+            let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+            let candidate = target.path.parent().ok_or_else(denied)?.join(name);
+            if !self.is_backup_path(&candidate) {
+                continue;
+            }
+            // Identity needs no read permission on the backup itself.
+            count!(backup_stats);
+            let stat = nix::sys::stat::fstatat(
+                &*target.parent,
+                name,
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            )
+            .map_err(errno)?;
+            if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+                return Err(denied());
+            }
+            #[allow(
+                clippy::unnecessary_cast,
+                reason = "dev_t and ino_t are narrower than u64 on some Unix targets"
+            )]
+            let identity = FileIdentity(stat.st_dev as u64, stat.st_ino as u64);
+            if identities.insert(identity) {
+                count!(retained_identities);
+            }
+        }
+        let snapshot = BackupSnapshot {
+            target: target.fork(),
+            directory: Arc::clone(&target.parent),
+            stamp,
+            accepted_file: target
+                .accepted_file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            identities,
+        };
+        snapshot.check()?;
+        Ok(snapshot)
+    }
+
+    /// Whether the protected config directory changed after the inventory, which
+    /// makes a refusal during the load retryable rather than final.
+    #[must_use]
+    pub fn inventory_changed(&self) -> bool {
+        self.backups.as_ref().is_some_and(|backups| {
+            backups.directory.metadata().map_or(true, |metadata| {
+                DirectoryStamp::of(&metadata) != backups.stamp
+            })
+        })
     }
 
     /// Whether descriptor-level protection is required.
@@ -455,6 +484,15 @@ impl SourceFileProtection {
     }
 }
 
+/// The protected config directory changed during a load; retrying can succeed.
+#[cfg(unix)]
+fn changed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ResourceBusy,
+        "protected config directory changed during the load",
+    )
+}
+
 fn denied() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -479,9 +517,21 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
     }
 }
 
+/// Walked directories only serve as `openat` bases and `fstat` targets, which
+/// need search permission; `O_PATH` does not also require read permission.
+#[cfg(unix)]
+fn directory_walk_flags() -> nix::fcntl::OFlag {
+    use nix::fcntl::OFlag;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = OFlag::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = OFlag::O_RDONLY;
+    access | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
+}
+
 #[cfg(unix)]
 fn open_directory(path: &Path) -> io::Result<File> {
-    use nix::fcntl::{OFlag, open, openat};
+    use nix::fcntl::{open, openat};
     use nix::sys::stat::Mode;
     let components: Vec<_> = path
         .components()
@@ -494,27 +544,16 @@ fn open_directory(path: &Path) -> io::Result<File> {
         return Err(denied());
     }
     count!(directory_opens);
-    let mut directory = File::from(
-        open(
-            "/",
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(errno)?,
-    );
+    let mut directory =
+        File::from(open("/", directory_walk_flags(), Mode::empty()).map_err(errno)?);
     for component in components {
         match component {
             Component::RootDir => {}
             Component::Normal(name) => {
                 count!(directory_opens);
                 directory = File::from(
-                    openat(
-                        &directory,
-                        name,
-                        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-                        Mode::empty(),
-                    )
-                    .map_err(errno)?,
+                    openat(&directory, name, directory_walk_flags(), Mode::empty())
+                        .map_err(errno)?,
                 );
             }
             _ => return Err(denied()),
@@ -555,7 +594,6 @@ fn open_canonical(path: &Path) -> io::Result<(File, File)> {
 pub(crate) struct Work {
     pub enumeration_probes: usize,
     pub entries: usize,
-    pub backup_opens: usize,
     pub backup_stats: usize,
     pub retained_identities: usize,
     pub component_inspections: usize,
@@ -603,6 +641,76 @@ mod tests {
             .snapshot(Some(&target))
             .unwrap();
         crate::rpol::RpolFile::load_protected(&link, &[base], 1024, &protection).unwrap();
+    }
+
+    /// Restores a directory's mode on drop so the tempdir can be removed.
+    struct ModeGuard(PathBuf, u32);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+        }
+    }
+
+    fn set_mode(path: &Path, mode: u32) -> ModeGuard {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        ModeGuard(path.to_path_buf(), 0o755)
+    }
+
+    #[test]
+    fn search_only_config_ancestor_needs_no_read_permission() {
+        let dir = tempfile::tempdir().unwrap();
+        let ancestor = dir.path().canonicalize().unwrap().join("search-only");
+        let parent = ancestor.join("etc");
+        std::fs::create_dir_all(&parent).unwrap();
+        let config = parent.join("config.toml");
+        std::fs::write(&config, "accepted").unwrap();
+        let _guard = set_mode(&ancestor, 0o311);
+        if std::fs::read_dir(&ancestor).is_ok() {
+            eprintln!("skipped: this process bypasses directory read permission");
+            return;
+        }
+        let (_, target) = SourceFileTarget::open(&config).unwrap();
+        target.verify_target().unwrap();
+        SourceFileTarget::resolve(&config).unwrap();
+        SourceFileProtection::new(vec![config.clone()], Some(config))
+            .snapshot(Some(&target))
+            .unwrap();
+    }
+
+    #[test]
+    fn backup_inventory_needs_no_read_permission_on_backups() {
+        let (dir, target, config) = fixture();
+        let backup = dir.path().join("config.toml.unconfirmed-root-only");
+        let alias = dir.path().join("alias.rpol");
+        std::fs::write(&backup, "secret").unwrap();
+        std::fs::hard_link(&backup, &alias).unwrap();
+        let _guard = set_mode(&backup, 0o000);
+        if File::open(&backup).is_ok() {
+            eprintln!("skipped: this process bypasses file read permission");
+            return;
+        }
+        let protection = SourceFileProtection::new(vec![config.clone()], Some(config))
+            .snapshot(Some(&target))
+            .unwrap();
+        assert!(
+            protection
+                .check_opened(&alias, &std::fs::metadata(&alias).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn inventory_reports_a_later_directory_change() {
+        let (dir, target, config) = fixture();
+        let protection = SourceFileProtection::new(vec![config.clone()], Some(config))
+            .snapshot(Some(&target))
+            .unwrap();
+        assert!(!protection.inventory_changed());
+        assert!(!SourceFileProtection::default().inventory_changed());
+        std::fs::write(dir.path().join("persister-stage"), "x").unwrap();
+        assert!(protection.inventory_changed());
     }
 
     #[test]
@@ -719,7 +827,6 @@ mod tests {
         let work = take_work();
         assert_eq!(work.enumeration_probes, 0);
         assert_eq!(work.entries, 0);
-        assert_eq!(work.backup_opens, 0);
         assert_eq!(work.backup_stats, 0);
         assert_eq!(work.retained_identities, 0);
         let components = parent.components().count();
@@ -747,7 +854,6 @@ mod tests {
         assert_eq!(work.source_stats, 0);
         assert_eq!(work.enumeration_probes, 0);
         assert_eq!(work.entries, 0);
-        assert_eq!(work.backup_opens, 0);
         assert_eq!(work.backup_stats, 0);
         assert_eq!(work.retained_identities, 0);
         assert_eq!(work.fixed_stats, 0);
@@ -773,7 +879,6 @@ mod tests {
         let work = take_work();
         assert_eq!(work.enumeration_probes, MAX_BACKUP_DIRECTORY_ENTRIES + 1);
         assert_eq!(work.entries, MAX_BACKUP_DIRECTORY_ENTRIES);
-        assert_eq!(work.backup_opens, MAX_BACKUP_DIRECTORY_ENTRIES - 3);
         assert_eq!(work.backup_stats, MAX_BACKUP_DIRECTORY_ENTRIES - 3);
         assert_eq!(work.retained_identities, MAX_BACKUP_DIRECTORY_ENTRIES - 3);
         assert_eq!(
@@ -799,9 +904,8 @@ mod tests {
         let work = take_work();
         assert_eq!(work.enumeration_probes, MAX_BACKUP_DIRECTORY_ENTRIES + 1);
         assert_eq!(work.entries, MAX_BACKUP_DIRECTORY_ENTRIES + 1);
-        assert!(work.backup_opens <= MAX_BACKUP_DIRECTORY_ENTRIES - 3);
-        assert_eq!(work.backup_stats, work.backup_opens);
-        assert_eq!(work.retained_identities, work.backup_opens);
+        assert!(work.backup_stats <= MAX_BACKUP_DIRECTORY_ENTRIES - 3);
+        assert_eq!(work.retained_identities, work.backup_stats);
         assert_eq!(work.component_inspections, 0);
         assert_eq!(work.directory_opens, 1);
         assert_eq!(work.source_opens, 0);

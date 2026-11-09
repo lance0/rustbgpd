@@ -731,7 +731,6 @@ mod tests {
             let work = crate::source_file::take_work();
             assert_eq!(work.enumeration_probes, 0);
             assert_eq!(work.entries, 0);
-            assert_eq!(work.backup_opens, 0);
             assert_eq!(work.backup_stats, 0);
             assert_eq!(work.retained_identities, 0);
             assert!(work.component_inspections <= source.components().count());
