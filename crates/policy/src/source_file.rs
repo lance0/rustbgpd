@@ -585,10 +585,24 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, SourceFileTarget, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("config.toml");
+        let config = dir.path().canonicalize().unwrap().join("config.toml");
         std::fs::write(&config, "accepted").unwrap();
         let (_, target) = SourceFileTarget::open(&config).unwrap();
         (dir, target, config)
+    }
+
+    #[test]
+    fn normal_loader_preserves_static_in_root_symlinks() {
+        let (dir, target, config) = fixture();
+        let base = dir.path().canonicalize().unwrap();
+        let source = base.join("safe.rpol");
+        let link = base.join("input.rpol");
+        std::fs::write(&source, "policy p { term t { accept } }\n").unwrap();
+        std::os::unix::fs::symlink("safe.rpol", &link).unwrap();
+        let protection = SourceFileProtection::new(vec![config.clone()], Some(config))
+            .snapshot(Some(&target))
+            .unwrap();
+        crate::rpol::RpolFile::load_protected(&link, &[base], 1024, &protection).unwrap();
     }
 
     #[test]
@@ -671,7 +685,7 @@ mod tests {
     #[test]
     fn protected_read_refuses_replaced_config_ancestor_without_rescanning() {
         let dir = tempfile::tempdir().unwrap();
-        let ancestor = dir.path().join("live");
+        let ancestor = dir.path().canonicalize().unwrap().join("live");
         let parent = ancestor.join("nested");
         std::fs::create_dir_all(&parent).unwrap();
         let config = parent.join("config.toml");

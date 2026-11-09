@@ -675,9 +675,10 @@ mod tests {
     #[test]
     fn protected_source_checks_the_opened_inode_after_a_path_swap() {
         let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source.rpol");
-        let credential = dir.path().join("credential.key");
-        let replacement = dir.path().join("replacement.rpol");
+        let base = dir.path().canonicalize().unwrap();
+        let source = base.join("source.rpol");
+        let credential = base.join("credential.key");
+        let replacement = base.join("replacement.rpol");
         std::fs::write(&source, "safe").unwrap();
         std::fs::write(&credential, "secret").unwrap();
         std::fs::hard_link(&credential, &replacement).unwrap();
@@ -697,16 +698,17 @@ mod tests {
     fn protected_source_refuses_backup_symlink_swaps_after_stat() {
         for ancestor in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let config = dir.path().join("config.toml");
+            let base = dir.path().canonicalize().unwrap();
+            let config = base.join("config.toml");
             std::fs::write(&config, "accepted").unwrap();
             let (_, target) = SourceFileTarget::open(&config).unwrap();
-            let safe_dir = dir.path().join("safe");
-            let secret_dir = dir.path().join("secrets");
+            let safe_dir = base.join("safe");
+            let secret_dir = base.join("secrets");
             std::fs::create_dir(&safe_dir).unwrap();
             std::fs::create_dir(&secret_dir).unwrap();
             let source = safe_dir.join("source.rpol");
             std::fs::write(&source, "safe").unwrap();
-            let backup = dir.path().join("config.toml.unconfirmed-old");
+            let backup = base.join("config.toml.unconfirmed-old");
             std::fs::write(&backup, "secret").unwrap();
             std::fs::hard_link(&backup, secret_dir.join("source.rpol")).unwrap();
             let protection = SourceFileProtection::new(vec![config.clone()], Some(config))

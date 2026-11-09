@@ -1865,15 +1865,16 @@ log_format = "json"
         };
         for staged in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("config.toml");
+            let base = dir.path().canonicalize().unwrap();
+            let path = base.join("config.toml");
             let raw = crate::test_support::tier_authorized_uds_test_config(
                 "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n",
             );
             std::fs::write(&path, raw).unwrap();
             let prior = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
-            let old_alias = dir.path().join("old-alias.rpol");
+            let old_alias = base.join("old-alias.rpol");
             std::fs::hard_link(&path, &old_alias).unwrap();
-            let allowed = dir.path().join("allowed.rpol");
+            let allowed = base.join("allowed.rpol");
             std::fs::write(&allowed, "allowed").unwrap();
             let protection = |snapshot: &Arc<AcceptedConfigSnapshot>| {
                 SourceFileProtection::new(vec![path.clone()], Some(path.clone()))
@@ -1901,7 +1902,7 @@ log_format = "json"
                 persister.replace_ack(candidate)
             };
             assert_eq!(outcome, ConfigPersistCommitOutcome::PublishedDurable);
-            let published_alias = dir.path().join("published-alias.rpol");
+            let published_alias = base.join("published-alias.rpol");
             std::fs::hard_link(&path, &published_alias).unwrap();
             assert_eq!(
                 std::fs::read(&published_alias).unwrap(),
@@ -1919,7 +1920,7 @@ log_format = "json"
                 read_regular_file_bounded_protected(&published_alias, 1024 * 1024, &published)
                     .is_err()
             );
-            let replacement = dir.path().join("replacement");
+            let replacement = base.join("replacement");
             std::fs::write(&replacement, "benign replacement").unwrap();
             std::fs::rename(&replacement, &path).unwrap();
             assert!(protection(&observer).is_err());
