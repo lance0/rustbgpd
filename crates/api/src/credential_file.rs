@@ -170,6 +170,14 @@ pub fn read_credential(
     bytes: &mut Vec<u8>,
 ) -> Result<Option<String>, String> {
     let (file, warning) = open_credential(path, label, kind, daemon)?;
+    // Size the buffer once from the judged descriptor: growing it while
+    // reading would free unscrubbed partial copies of a secret.
+    let len = file
+        .metadata()
+        .map_err(|e| format!("failed to inspect {label} file {}: {e}", path.display()))?
+        .len()
+        .min(MAX_CREDENTIAL_FILE_BYTES);
+    bytes.reserve_exact(usize::try_from(len + 1).unwrap_or(usize::MAX));
     read_bounded(file, MAX_CREDENTIAL_FILE_BYTES, bytes)
         .map_err(|error| format!("failed to read {label} file {}: {error}", path.display()))?;
     Ok(warning)
@@ -239,6 +247,18 @@ mod tests {
         bytes.clear();
         read_bounded(&b"abc"[..], 3, &mut bytes).unwrap();
         assert_eq!(bytes, b"abc");
+    }
+
+    /// A credential is read into one allocation sized from the file, so no
+    /// reallocation leaves a partial copy behind.
+    #[test]
+    fn credential_read_does_not_grow_its_buffer() {
+        let file = file_with_mode(0o600);
+        std::fs::write(file.path(), vec![b'k'; 5000]).unwrap();
+        let mut bytes = Vec::new();
+        read_credential(file.path(), "key", CredentialKind::Secret, me(), &mut bytes).unwrap();
+        assert_eq!(bytes.len(), 5000);
+        assert_eq!(bytes.capacity(), 5001);
     }
 
     fn me() -> DaemonIdentity {
