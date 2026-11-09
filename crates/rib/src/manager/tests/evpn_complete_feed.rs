@@ -1345,6 +1345,34 @@ fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
     }
 }
 
+/// An owned refresh replays the group's own table. Loc-RIB rows outside it
+/// add no per-row work: only private staging inventories Loc-RIB keys.
+#[test]
+fn owned_refresh_does_not_inventory_loc_rib_rows_outside_the_group_table() {
+    let replay = |outside: u8| {
+        let (mut manager, peer, gid, mut output) = fixture();
+        let route = received(100);
+        admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+        for suffix in 1..=outside {
+            let other = make_evpn_imet(Ipv4Addr::new(198, 51, 100, suffix), 2);
+            assert_ne!(other.key(), route.key());
+            assert!(
+                manager
+                    .loc_rib
+                    .recompute_evpn(other.key(), [&other].into_iter())
+            );
+        }
+        let work = super::work_scaling::checkpoints_in(|| {
+            manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+        });
+        let data = output.try_recv().map(delivered).unwrap();
+        assert_eq!(data.evpn_announce.len(), 1);
+        assert_eq!(data.evpn_announce[0].key(), route.key());
+        work
+    };
+    assert_eq!(replay(0), replay(64));
+}
+
 fn assert_dirty_owned_refresh_resync(common_delta: bool) {
     let (mut manager, peer, gid, mut output) = fixture();
     let old = received(100);
