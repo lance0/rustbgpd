@@ -849,7 +849,8 @@ modes, and in `rbgp doctor`. The same refusal checks and 4 MiB cap cover
 gNMI dial-out targets' `tls_ca_file`, `tls_cert_file`, and `tls_key_file`,
 including each reconnect. Config load and both `--check` modes enforce
 these refusals. Doctor reports nonfatal dial-out permission warnings, and
-connection attempts log them when reading the files.
+connection attempts log each one once per target until the target next
+connects or the file's mode or owner changes.
 Credential reads are capped at 4 MiB. The primary TOML file is capped at
 64 MiB and must be a regular file. Canonical persisted documents must also
 fit 64 MiB before a candidate is accepted or written. Restricted API
@@ -4882,6 +4883,13 @@ the file takes effect on the next (re)connect without a reload.
 checks a dial-in `Subscribe` request would get — an unsupported path,
 a mixed SAMPLE/ON_CHANGE list, or an ON_CHANGE-unsupported leaf is
 rejected before the daemon starts (or before a SIGHUP reload is applied).
+The same load, SIGHUP preflight, both `--check` modes, and API config
+candidates also read `tls_ca_file`, `tls_cert_file`, and `tls_key_file`: a
+file that is missing, empty, not UTF-8, without a PEM block of the expected
+kind, larger than 4 MiB, not a regular file, or world-writable is refused
+(see [credential file permissions](#grpc-credential-file-permissions)).
+A file that later disappears or fails these checks only fails that target's next
+connection attempt, which retries with backoff.
 
 **Robustness.** A collector that is down (at startup or any time later)
 never affects BGP operation: each target retries independently with capped
