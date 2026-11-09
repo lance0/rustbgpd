@@ -500,7 +500,7 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio_rustls::rustls::ClientConfig;
+    use tokio_rustls::rustls::{CertificateError, ClientConfig};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
     use tonic::metadata::MetadataMap;
     use tonic::transport::server::Connected;
@@ -1034,6 +1034,33 @@ mod tests {
         assert_eq!(store.load().sequence(), total + 1);
     }
 
+    /// A PEM CRL signed by `issuer` revoking `revoked`, valid until 2999
+    /// unless `edit` changes it.
+    fn crl_pem(
+        issuer: &Issuer<'static, KeyPair>,
+        revoked: &[u64],
+        edit: impl FnOnce(&mut rcgen::CertificateRevocationListParams),
+    ) -> String {
+        let mut params = rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2000, 1, 1),
+            next_update: rcgen::date_time_ymd(2999, 1, 1),
+            crl_number: 1_u64.into(),
+            issuing_distribution_point: None,
+            revoked_certs: revoked
+                .iter()
+                .map(|serial| rcgen::RevokedCertParams {
+                    serial_number: (*serial).into(),
+                    revocation_time: rcgen::date_time_ymd(2000, 1, 1),
+                    reason_code: Some(rcgen::RevocationReason::KeyCompromise),
+                    invalidity_date: None,
+                })
+                .collect(),
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        };
+        edit(&mut params);
+        params.signed_by(issuer).unwrap().pem().unwrap()
+    }
+
     /// A CA that signs a server leaf, a good client and a revoked client,
     /// plus CRLs for it.
     struct RevocationFixture {
@@ -1118,24 +1145,7 @@ mod tests {
             revoked: &[u64],
             edit: impl FnOnce(&mut rcgen::CertificateRevocationListParams),
         ) -> String {
-            let mut params = rcgen::CertificateRevocationListParams {
-                this_update: rcgen::date_time_ymd(2000, 1, 1),
-                next_update: rcgen::date_time_ymd(2999, 1, 1),
-                crl_number: 1_u64.into(),
-                issuing_distribution_point: None,
-                revoked_certs: revoked
-                    .iter()
-                    .map(|serial| rcgen::RevokedCertParams {
-                        serial_number: (*serial).into(),
-                        revocation_time: rcgen::date_time_ymd(2000, 1, 1),
-                        reason_code: Some(rcgen::RevocationReason::KeyCompromise),
-                        invalidity_date: None,
-                    })
-                    .collect(),
-                key_identifier_method: rcgen::KeyIdMethod::Sha256,
-            };
-            edit(&mut params);
-            params.signed_by(&self.issuer).unwrap().pem().unwrap()
+            crl_pem(&self.issuer, revoked, edit)
         }
 
         fn stage(&self, crl: Option<&NamedTempFile>) -> (CredentialStore, [NamedTempFile; 3]) {
@@ -1312,6 +1322,191 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(store.load().sequence(), sequence);
         assert!(mtls_handshake(&store, fixture.good.clone()).await);
+    }
+
+    /// A client chain under the fixture's root: root -> intermediate -> leaf.
+    /// Only the root is a trust anchor; the client presents leaf and
+    /// intermediate. Each CA issues its own CRL.
+    struct ChainFixture {
+        root: RevocationFixture,
+        intermediate: Issuer<'static, KeyPair>,
+        client: Arc<ClientConfig>,
+    }
+
+    impl ChainFixture {
+        const INTERMEDIATE_SERIAL: u64 = 0x2000;
+        const LEAF_SERIAL: u64 = 0x3000;
+
+        fn new() -> Self {
+            let root = RevocationFixture::new();
+            let mut params = CertificateParams::new(Vec::new()).unwrap();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "crl intermediate CA");
+            params.serial_number = Some(Self::INTERMEDIATE_SERIAL.into());
+            params
+                .key_usages
+                .extend([KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign]);
+            let key = KeyPair::generate().unwrap();
+            let intermediate_cert = params.signed_by(&key, &root.issuer).unwrap();
+            let intermediate = Issuer::new(params, key);
+
+            let mut params = CertificateParams::new(Vec::new()).unwrap();
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "chained");
+            params.serial_number = Some(Self::LEAF_SERIAL.into());
+            params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+            params
+                .extended_key_usages
+                .push(ExtendedKeyUsagePurpose::ClientAuth);
+            let key = KeyPair::generate().unwrap();
+            let leaf = params.signed_by(&key, &intermediate).unwrap();
+
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(root.ca_pem.as_bytes()).unwrap())
+                .unwrap();
+            let client = ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(
+                    vec![leaf.der().clone(), intermediate_cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+                )
+                .unwrap();
+            Self {
+                root,
+                intermediate,
+                client: Arc::new(client),
+            }
+        }
+
+        /// The CRL file: the root's CRL (which covers the intermediate) and
+        /// the intermediate's CRL (which covers the leaf), each revoking the
+        /// given serials, or left out when `None`.
+        fn crls(&self, root: Option<&[u64]>, intermediate: Option<&[u64]>) -> String {
+            let root = root.map(|revoked| self.root.crl(revoked, 2999));
+            let intermediate =
+                intermediate.map(|revoked| crl_pem(&self.intermediate, revoked, |_| {}));
+            [root, intermediate].into_iter().flatten().collect()
+        }
+
+        /// Stage a listener with those CRLs and handshake as the chained
+        /// client; see [`mtls_refusal`].
+        async fn refusal(
+            &self,
+            root: Option<&[u64]>,
+            intermediate: Option<&[u64]>,
+        ) -> Option<CertificateError> {
+            let crl = token_file(&self.crls(root, intermediate));
+            let (store, _files) = self.root.stage(Some(&crl));
+            mtls_refusal(&store, self.client.clone()).await
+        }
+    }
+
+    /// Run one real mTLS handshake against the store's current generation:
+    /// `None` when the server accepted the client certificate, otherwise the
+    /// certificate error its verifier raised. Any other handshake failure
+    /// panics, so a broken fixture cannot pass as a refusal.
+    async fn mtls_refusal(
+        store: &CredentialStore,
+        client: Arc<ClientConfig>,
+    ) -> Option<CertificateError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = store.load().listener(0).tls.clone().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            TlsAcceptor::from(config).accept(tcp).await.map(drop)
+        });
+        let _client = connect(client, addr).await;
+        let error = server.await.unwrap().err()?;
+        match error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<tokio_rustls::rustls::Error>())
+        {
+            Some(tokio_rustls::rustls::Error::InvalidCertificate(kind)) => Some(kind.clone()),
+            _ => panic!("handshake failed outside certificate verification: {error}"),
+        }
+    }
+
+    /// Load-bearing control for the chain refusals below: the same chain is
+    /// accepted when each issuer's CRL is present and revokes nothing.
+    #[tokio::test]
+    async fn crl_chain_accepts_a_fully_covered_unrevoked_chain() {
+        let chain = ChainFixture::new();
+        assert_eq!(chain.refusal(Some(&[]), Some(&[])).await, None);
+    }
+
+    /// Load-bearing: the intermediate's revocation status is unknown without
+    /// the root's CRL, even though the leaf is covered. A verifier that
+    /// checks only the leaf, or allows unknown status, accepts this chain.
+    #[tokio::test]
+    async fn crl_chain_refuses_an_intermediate_without_its_issuer_crl() {
+        let chain = ChainFixture::new();
+        assert_eq!(
+            chain.refusal(None, Some(&[])).await,
+            Some(CertificateError::UnknownRevocationStatus)
+        );
+    }
+
+    /// Load-bearing: the leaf's revocation status is unknown without the
+    /// intermediate's CRL. A verifier that allows unknown status accepts
+    /// this chain.
+    #[tokio::test]
+    async fn crl_chain_refuses_a_leaf_without_its_issuer_crl() {
+        let chain = ChainFixture::new();
+        assert_eq!(
+            chain.refusal(Some(&[]), None).await,
+            Some(CertificateError::UnknownRevocationStatus)
+        );
+    }
+
+    /// Load-bearing: a revoked intermediate refuses the chain although the
+    /// leaf is unrevoked. A verifier that checks only the leaf accepts it.
+    #[tokio::test]
+    async fn crl_chain_refuses_a_revoked_intermediate() {
+        let chain = ChainFixture::new();
+        assert_eq!(
+            chain
+                .refusal(Some(&[ChainFixture::INTERMEDIATE_SERIAL]), Some(&[]))
+                .await,
+            Some(CertificateError::Revoked)
+        );
+    }
+
+    #[tokio::test]
+    async fn crl_chain_refuses_a_revoked_leaf() {
+        let chain = ChainFixture::new();
+        assert_eq!(
+            chain
+                .refusal(Some(&[]), Some(&[ChainFixture::LEAF_SERIAL]))
+                .await,
+            Some(CertificateError::Revoked)
+        );
+    }
+
+    /// Load-bearing: a reload that brings in a root CRL revoking the
+    /// intermediate refuses the chain it accepted before, on new handshakes.
+    #[tokio::test]
+    async fn crl_chain_reload_applies_an_intermediate_revocation() {
+        let chain = ChainFixture::new();
+        let mut crl = token_file(&chain.crls(Some(&[]), Some(&[])));
+        let (store, _files) = chain.root.stage(Some(&crl));
+        assert_eq!(mtls_refusal(&store, chain.client.clone()).await, None);
+
+        overwrite(
+            &mut crl,
+            chain
+                .crls(Some(&[ChainFixture::INTERMEDIATE_SERIAL]), Some(&[]))
+                .as_bytes(),
+        );
+        store.reload().unwrap();
+        assert_eq!(
+            mtls_refusal(&store, chain.client.clone()).await,
+            Some(CertificateError::Revoked)
+        );
     }
 
     #[tokio::test]
