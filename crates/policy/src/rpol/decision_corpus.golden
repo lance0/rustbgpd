@@ -1,4 +1,4 @@
-# rpol decision corpus: 273 programs, 1929 cases. Regenerate with
+# rpol decision corpus: 273 programs, 2036 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -8,14 +8,14 @@ ast.stmt.if 632
 ast.stmt.else-if 31
 ast.stmt.else 76
 ast.stmt.nested-if 13
-ast.stmt.for 102
-ast.stmt.call 48
-ast.for.field 91
+ast.stmt.for 113
+ast.stmt.call 81
+ast.for.field 102
 ast.for.set 11
-ast.action.accept 1336
+ast.action.accept 1413
 ast.action.reject 485
-ast.action.set-local-pref 128
-ast.action.set-med 274
+ast.action.set-local-pref 213
+ast.action.set-med 370
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
@@ -58,18 +58,18 @@ ast.contains.parameter 1
 ast.expr.value-cmp 120
 ast.expr.apply 1
 ast.call-arg.integer 280
-ast.call-arg.name 180
-ast.call-arg.community 71
-ast.call-arg.ip 71
-ast.value.literal 403
+ast.call-arg.name 287
+ast.call-arg.community 178
+ast.call-arg.ip 178
+ast.value.literal 499
 ast.value.community 22
 ast.value.identifier 106
-ast.value.field 139
-ast.value.arithmetic 96
-ast.value.call 50
-ast.arith.add 52
+ast.value.field 214
+ast.value.arithmetic 160
+ast.value.call 72
+ast.arith.add 116
 ast.arith.sub 35
-ast.arith.mul 28
+ast.arith.mul 81
 ast.arith.div 11
 ast.arith.rem 11
 ast.cmp.eq 218
@@ -83,7 +83,7 @@ ast.rhs.prefix 57
 ast.rhs.string 9
 ast.rhs.field 9
 ast.field.route.prefix 148
-ast.field.route.communities 66
+ast.field.route.communities 77
 ast.field.route.large-communities 1
 ast.field.route.ext-communities 9
 ast.field.route.any-community 5
@@ -92,9 +92,9 @@ ast.field.route.as-path.len 68
 ast.field.route.communities.len 4
 ast.field.route.large-communities.len 3
 ast.field.route.ext-communities.len 2
-ast.field.route.origin-as 62
-ast.field.route.local-pref 35
-ast.field.route.med 229
+ast.field.route.origin-as 73
+ast.field.route.local-pref 99
+ast.field.route.med 293
 ast.field.route.next-hop 18
 ast.field.route.rpki 39
 ast.field.route.aspa 12
@@ -135,66 +135,66 @@ ast.param.ip 2
 ast.decl.import 20
 ast.decl.prefix-set 610
 ast.decl.prefix-set.ge-le 337
-ast.decl.community-set 625
+ast.decl.community-set 732
 ast.decl.asn-set 336
 ast.decl.dataset.prefix-set 4
 ast.decl.dataset.asn-set 5
 ast.decl.dataset.community-set 120
 ast.decl.fn 31
 ast.decl.fn.let 21
-ast.decl.test 1239
-ast.set.community.standard 625
+ast.decl.test 1346
+ast.set.community.standard 732
 ast.set.community.large 149
 ast.set.community.route-target 120
 ast.set.community.route-origin 120
 ast.set.community.well-known-ext 120
 ast.set.pattern.standard 11
-ast.set.pattern.large 191
-ast.set.pattern.route-target 180
+ast.set.pattern.large 298
+ast.set.pattern.route-target 287
 ast.set.pattern.route-origin 120
-ast.set.pattern-field.range 191
+ast.set.pattern-field.range 298
 ast.set.pattern-field.private-as 120
 ast.set.asn.range 27
 ast.set.asn.private-as 10
 ast.test.dataset-override 125
-ast.test.route.prefix 1149
-ast.test.route.communities 843
-ast.test.route.large-communities 471
-ast.test.route.ext-communities 194
-ast.test.route.as-path 832
+ast.test.route.prefix 1256
+ast.test.route.communities 950
+ast.test.route.large-communities 578
+ast.test.route.ext-communities 301
+ast.test.route.as-path 939
 ast.test.route.next-hop 257
-ast.test.route.local-pref 197
-ast.test.route.med 418
+ast.test.route.local-pref 304
+ast.test.route.med 525
 ast.test.route.rpki 108
 ast.test.route.aspa 144
 ast.test.route.route-type 137
 ast.test.route.evpn-route-type 257
 ast.test.route.family 345
 ast.test.peer.address 257
-ast.test.peer.asn 180
+ast.test.peer.asn 287
 ast.test.peer.local-as 120
 ast.test.peer.group 162
 ast.test.expect.chain 161
-ast.test.expect.with-only 516
-ast.test.expect.accept 1228
-ast.test.expect.reject 1014
+ast.test.expect.with-only 623
+ast.test.expect.accept 1335
+ast.test.expect.reject 1121
 ast.test.expect.error 23
-ast.test.with.local-pref 646
-ast.test.with.med 664
-ast.test.with.next-hop 180
-ast.test.with.community 617
-ast.test.with.prepend 180
+ast.test.with.local-pref 813
+ast.test.with.med 771
+ast.test.with.next-hop 287
+ast.test.with.community 724
+ast.test.with.prepend 287
 ast.test.with.prepend-path 152
-ast.test.with.removes 420
+ast.test.with.removes 527
 ast.test.with.removes-large-admin 120
 ast.test.with.removes-all 223
-ast.test.with.not-removed 320
+ast.test.with.not-removed 427
 ast.test.with.without-community 56
 ast.test.with.without.local-pref 232
 ast.test.with.without.med 120
 ast.test.with.without.next-hop 120
 ast.test.with.without.prepend 120
-ir.guard.true 1392
+ir.guard.true 1499
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -223,37 +223,37 @@ ir.guard.family-is 101
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
-ir.guard.value-cmp 204
+ir.guard.value-cmp 237
 ir.guard.exists 12
 ir.guard.local-in-asn-set 39
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 10
-ir.guard.and 217
+ir.guard.and 250
 ir.guard.or 15
 ir.guard.not 91
-ir.value.const 223
+ir.value.const 277
 ir.value.community 16
-ir.value.field 169
-ir.value.local 155
-ir.value.binary 137
-ir.value.min 40
+ir.value.field 212
+ir.value.local 188
+ir.value.binary 180
+ir.value.min 51
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1294
+ir.action.permit 1371
 ir.action.deny 429
-ir.action.continue 272
-ir.action.bind 132
-ir.action.for-each 102
+ir.action.continue 346
+ir.action.bind 165
+ir.action.for-each 113
 ir.action.break 50
 ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 22
 ir.action.remove-all-communities 77
 ir.action.remove-communities-in-set 47
-ir.mod.set-local-pref 121
-ir.mod.set-local-pref-computed 19
-ir.mod.set-med 151
-ir.mod.set-med-computed 87
+ir.mod.set-local-pref 196
+ir.mod.set-local-pref-computed 62
+ir.mod.set-med 237
+ir.mod.set-med-computed 130
 ir.mod.set-next-hop 24
 ir.mod.prepend 34
 ir.mod.prepend-computed 22
@@ -546,13 +546,31 @@ crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(300
 crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | edge-out | row edge-out no-leak => #1 reject
 crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | edge-out | row edge-out tag-and-med => #2 accept with set med 50; add community 65001:777
 crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | src-default | row src-default baseline => #1 continue with set local-pref 100
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | row applied-literal-after-computed t => #4 accept
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | row applied-literal-after-computed t.2 => #1 continue with set local-pref route.local-pref * 2; set med route.med + 5
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | row applied-literal-after-computed t.3.1/pin-med:#enter => #2 let #return = 0
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | row applied-literal-after-computed t.3.2/pin-med:t => #3 continue with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | row applies-literal-after-computed t => #3 accept
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | row applies-literal-after-computed t.1.1/child-literal-after-computed:#enter => #1 let #return = 0
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | row applies-literal-after-computed t.1.2/child-literal-after-computed:t => #2 continue with set local-pref 200; set med 10
 crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t => #4 accept
 crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t.1.1 => #1 continue with set med 1
 crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t.1.2 => #2 continue with set med 2
 crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t.1.3 => #3 continue with set med 3
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | row bump-med t => #1 continue with set local-pref route.local-pref * 2; set med route.med + 5
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | row child-literal-after-computed t => #1 continue with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | row computed-after-literal t => #1 accept with set local-pref min(route.local-pref * 2, 400); set med route.med + 5
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | row computed-prepend t => #1 accept with prepend as peer 2
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | row literal-after-applied-computed t => #3 accept with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | row literal-after-applied-computed t.1.1/bump-med:#enter => #1 let #return = 0
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | row literal-after-applied-computed t.1.2/bump-med:t => #2 continue with set local-pref route.local-pref * 2; set med route.med + 5
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | row literal-after-computed t => #1 accept with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | row literal-after-fail-closed t => #1 accept with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | row loop-literal-after-computed t => #2 accept
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | row loop-literal-after-computed t.1 => #1 for c in route.communities { continue with set local-pref 200; set med 10 }
 crates/policy/tests/decision_corpus/actions.rpol | next-hop-rewrite | row next-hop-rewrite fixed => #2 accept with set next-hop 198.51.100.254
 crates/policy/tests/decision_corpus/actions.rpol | next-hop-rewrite | row next-hop-rewrite own => #1 accept with set next-hop self
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | row pin-med t => #1 continue with set local-pref 200; set med 10
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | row scrub-by-set t => #3 accept
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | row scrub-by-set t.1 => #1 remove ext-community not in route-targets
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | row scrub-by-set t.2 => #2 remove large-community in own-large
@@ -1184,6 +1202,13 @@ crates/policy/tests/decision_corpus/actions.rpol | test tag-and-scrub | tag-and-
 crates/policy/tests/decision_corpus/actions.rpol | test scrub-by-set | scrub-by-set => permit with remove large-community 65000:1:1; remove ext-community RT:64496:1 (0x0002fbf000000001)
 crates/policy/tests/decision_corpus/actions.rpol | test tag-forward-hit | tag-forward(65000:7, 192.0.2.9, scrub-tags) => permit with set next-hop 192.0.2.9; remove community 65000:666
 crates/policy/tests/decision_corpus/actions.rpol | test tag-forward-miss | tag-forward(65000:7, 192.0.2.9, scrub-tags) => deny
+crates/policy/tests/decision_corpus/actions.rpol | test literal-set-replaces-computed-set | literal-after-computed => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | test computed-set-replaces-literal-set | computed-after-literal => permit with set local-pref 300; set med 105
+crates/policy/tests/decision_corpus/actions.rpol | test loop-literal-set-replaces-computed-set | loop-literal-after-computed => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | test literal-set-replaces-applied-computed-set | literal-after-applied-computed => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | test applied-literal-set-replaces-computed-set | applied-literal-after-computed => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | test applied-policy-literal-set-replaces-computed-set | applies-literal-after-computed => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | test literal-set-replaces-fail-closed-computed-set | literal-after-fail-closed => permit with set med 10
 crates/policy/tests/decision_corpus/actions.rpol | branches | m01-v4-transit => permit with set med 3
 crates/policy/tests/decision_corpus/actions.rpol | branches | m02-v4-invalid-long => permit with set med 2
 crates/policy/tests/decision_corpus/actions.rpol | branches | m03-v6-tagged => permit with set med 3
@@ -1234,6 +1259,106 @@ crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m07-default =>
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m08-host-routes => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m09-evpn => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m10-v6-bogon => permit
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m04-bare => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m07-default => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m09-evpn => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-computed | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m01-v4-transit => permit with set local-pref 200; set med 55
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m02-v4-invalid-long => permit with set local-pref 200; set med 1005
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m03-v6-tagged => permit with set local-pref 300; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m04-bare => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m05-internal => permit with set local-pref 400; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m06-local-as-set => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m07-default => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m08-host-routes => permit with set local-pref 400; set med 4294967295
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m09-evpn => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | computed-after-literal | m10-v6-bogon => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m04-bare => permit
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m07-default => permit
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m09-evpn => permit
+crates/policy/tests/decision_corpus/actions.rpol | loop-literal-after-computed | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m01-v4-transit => permit with set local-pref 200; set med 55
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m02-v4-invalid-long => permit with set local-pref 200; set med 1005
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m03-v6-tagged => permit with set local-pref 300; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m04-bare => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m05-internal => permit with set local-pref 600; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m06-local-as-set => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m07-default => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m08-host-routes => permit with set local-pref 4294967295; set med 4294967295
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m09-evpn => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | bump-med | m10-v6-bogon => permit with set local-pref 200; set med 5
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m04-bare => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m07-default => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m09-evpn => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | pin-med | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m04-bare => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m07-default => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m09-evpn => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-applied-computed | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m04-bare => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m07-default => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m09-evpn => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applied-literal-after-computed | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m04-bare => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m07-default => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m09-evpn => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | child-literal-after-computed | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m01-v4-transit => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m02-v4-invalid-long => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m03-v6-tagged => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m04-bare => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m05-internal => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m06-local-as-set => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m07-default => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m08-host-routes => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m09-evpn => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | applies-literal-after-computed | m10-v6-bogon => permit with set local-pref 200; set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m01-v4-transit => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m02-v4-invalid-long => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m03-v6-tagged => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m04-bare => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m05-internal => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m06-local-as-set => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m07-default => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m08-host-routes => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m09-evpn => permit with set med 10
+crates/policy/tests/decision_corpus/actions.rpol | literal-after-fail-closed | m10-v6-bogon => permit with set med 10
 crates/policy/tests/decision_corpus/control-flow.rpol | test loop-continue-and-break | scrub-loop => permit with remove community 65000:2; remove community 65000:3
 crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-first | tiers => permit with set local-pref 300; add community 65000:7
 crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-second | tiers => permit with set local-pref 200; add community 65000:7

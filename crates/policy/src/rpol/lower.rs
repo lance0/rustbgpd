@@ -2070,18 +2070,12 @@ impl Lowerer<'_> {
             // LAN-304) stay computed (resolved per route by the
             // evaluator).
             ActionStmt::SetLocalPref(expr, _) => {
-                match self.lower_value(expr, &Names::Policy(env), lets, binds) {
-                    ValueExpr::Const(value) => mods.set_local_pref = Some(value),
-                    computed => {
-                        mods.set_local_pref_computed = Some(std::sync::Arc::new(computed));
-                    }
-                }
+                let value = self.lower_value(expr, &Names::Policy(env), lets, binds);
+                (mods.set_local_pref, mods.set_local_pref_computed) = set_slots(value);
             }
             ActionStmt::SetMed(expr, _) => {
-                match self.lower_value(expr, &Names::Policy(env), lets, binds) {
-                    ValueExpr::Const(value) => mods.set_med = Some(value),
-                    computed => mods.set_med_computed = Some(std::sync::Arc::new(computed)),
-                }
+                let value = self.lower_value(expr, &Names::Policy(env), lets, binds);
+                (mods.set_med, mods.set_med_computed) = set_slots(value);
             }
             ActionStmt::SetNextHop(arg, _) => {
                 mods.set_next_hop = Some(self.next_hop_action(arg));
@@ -2171,6 +2165,15 @@ impl Lowerer<'_> {
                 mods.as_path_prepend.push(AsPathPrepend { asn, count });
             }
         }
+    }
+}
+
+/// The literal and computed slots of a `set` value. Both forms share the
+/// attribute, so staging one clears the other and the later `set` wins.
+fn set_slots(value: ValueExpr) -> (Option<u32>, Option<std::sync::Arc<ValueExpr>>) {
+    match value {
+        ValueExpr::Const(value) => (Some(value), None),
+        computed => (None, Some(std::sync::Arc::new(computed))),
     }
 }
 
