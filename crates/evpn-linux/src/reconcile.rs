@@ -41,9 +41,9 @@ use rustbgpd_evpn::{
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
     ForeignStateCounters, InstanceDataplaneStatus, InstanceState, L3AdoptionCounters,
     ManagedBridgeNetdev, ManagedL3VxlanNetdev, ManagedNetdevClass, ManagedNetdevState,
-    ManagedNetdevStatus, ManagedNetdevTable, ManagedSvdVxlanBinding, ManagedSvdVxlanNetdev,
-    ManagedVlanUpperNetdev, ManagedVrfNetdev, ManagedVxlanNetdev, RemoteMacTable,
-    SingleActiveCounters, parse_ownership_stamp,
+    ManagedNetdevStatus, ManagedNetdevTable, ManagedSvdVxlanNetdev, ManagedVlanUpperNetdev,
+    ManagedVrfNetdev, ManagedVxlanNetdev, RemoteMacTable, SingleActiveCounters,
+    parse_ownership_stamp,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -63,7 +63,7 @@ use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTar
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo,
     KernelVrfLinkInfo, KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
-    peer_sync_vlan_members, vlan_rows_contain,
+    peer_sync_vlan_members, svd_vlan_bindings_present,
 };
 use crate::worker_progress::{WorkerProgress, WorkerProgressState};
 
@@ -5666,7 +5666,8 @@ fn svd_stamped_ours_incomplete(
             .get(&svd_vxlan.spec.bridge)
             .is_some_and(|bridge| {
                 svd_vlan_bindings_present(
-                    bridge,
+                    &bridge.vlans,
+                    &bridge.port_vlan_inventory,
                     link.ifindex,
                     &link.name,
                     &svd_vxlan.spec.bindings,
@@ -6317,7 +6318,13 @@ fn classify_desired_managed_svd_vxlan(
             ),
         );
     };
-    if !svd_vlan_bindings_present(bridge, link.ifindex, &link.name, &svd_vxlan.spec.bindings) {
+    if !svd_vlan_bindings_present(
+        &bridge.vlans,
+        &bridge.port_vlan_inventory,
+        link.ifindex,
+        &link.name,
+        &svd_vxlan.spec.bindings,
+    ) {
         return (
             ManagedNetdevState::OwnedUnsafe,
             "bridge VLAN/tunnel mappings do not match desired SVD bindings".to_string(),
@@ -6436,26 +6443,6 @@ fn classify_svd_protected_attrs(
         ));
     }
     None
-}
-
-fn svd_vlan_bindings_present(
-    bridge: &KernelLinkInfo,
-    vxlan_ifindex: u32,
-    vxlan_name: &str,
-    bindings: &[ManagedSvdVxlanBinding],
-) -> bool {
-    let Some(port) = bridge.port_vlan_inventory.iter().find(|port| {
-        port.is_vxlan && (port.ifindex == vxlan_ifindex || port.name.as_deref() == Some(vxlan_name))
-    }) else {
-        return false;
-    };
-    bindings.iter().all(|binding| {
-        vlan_rows_contain(&bridge.vlans, binding.bridge_vlan)
-            && vlan_rows_contain(&port.vlans, binding.bridge_vlan)
-            && port.vlan_tunnels.iter().any(|row| {
-                row.vid == Some(binding.bridge_vlan) && row.tunnel_id == Some(binding.vni)
-            })
-    })
 }
 
 fn unconfigured_managed_svd_vxlan_status(
@@ -8700,6 +8687,62 @@ mod managed_netdev_tests {
     use crate::snapshot::{
         KernelLinkInfo, KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo,
     };
+    use rustbgpd_evpn::ManagedSvdVxlanBinding;
+
+    #[test]
+    fn svd_bindings_require_exact_port_inventory() {
+        use crate::snapshot::{
+            KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
+            KernelBridgeVlanTunnelInfo,
+        };
+        let vlan = |vid| KernelBridgeVlanInfo {
+            vid,
+            flags: KernelBridgeVlanFlags::default(),
+        };
+        let tunnel = |vid, vni| KernelBridgeVlanTunnelInfo {
+            vid: Some(vid),
+            tunnel_id: Some(vni),
+            flags: KernelBridgeVlanFlags::default(),
+        };
+        let bindings = [ManagedSvdVxlanBinding {
+            bridge_vlan: 10,
+            vni: 100,
+        }];
+        let mut bridge = KernelLinkInfo {
+            vlans: vec![vlan(10), vlan(30)],
+            port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                ifindex: 42,
+                name: Some("vxsvd".to_string()),
+                is_vxlan: true,
+                vlans: vec![vlan(10)],
+                vlan_tunnels: vec![tunnel(10, 100)],
+            }],
+            ..Default::default()
+        };
+        let present = |bridge: &KernelLinkInfo| {
+            svd_vlan_bindings_present(
+                &bridge.vlans,
+                &bridge.port_vlan_inventory,
+                42,
+                "vxsvd",
+                &bindings,
+            )
+        };
+        assert!(present(&bridge));
+        bridge.port_vlan_inventory[0]
+            .vlan_tunnels
+            .push(tunnel(20, 200));
+        assert!(!present(&bridge));
+        bridge.port_vlan_inventory[0].vlan_tunnels.pop();
+        bridge.port_vlan_inventory[0].vlans.push(vlan(20));
+        assert!(!present(&bridge));
+        bridge.port_vlan_inventory[0].vlans.pop();
+        bridge.port_vlan_inventory[0].vlan_tunnels[0] = tunnel(10, 200);
+        assert!(!present(&bridge));
+        bridge.port_vlan_inventory[0].vlan_tunnels[0] = tunnel(10, 100);
+        bridge.vlans.retain(|row| row.vid != 10);
+        assert!(!present(&bridge));
+    }
 
     fn link(name: &str, ifindex: u32, vlan_filtering: bool, altnames: Vec<&str>) -> KernelLinkInfo {
         KernelLinkInfo {

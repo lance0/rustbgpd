@@ -340,10 +340,13 @@ async fn forwarding_state_evpn_failure_preserves_model_and_possible_effects() {
         // Neither validation, no-op apply, nor an unrelated FIB publication
         // acknowledges a reconciliation of the possible EVPN effects.
         apply
-            .apply_request(&proto::ApplyEvpnRuntimeRequest {
-                candidate_toml: baseline_toml.into(),
-                validate_only: true,
-            })
+            .apply_request(
+                &proto::ApplyEvpnRuntimeRequest {
+                    candidate_toml: baseline_toml.into(),
+                    validate_only: true,
+                },
+                None,
+            )
             .await
             .unwrap();
         apply.apply_config(&baseline).await.unwrap();
@@ -4215,17 +4218,59 @@ async fn applied_api_candidate_does_not_become_the_source_authority() {
         validate_only,
     };
 
-    apply.apply_request(&request(&edge, false)).await.unwrap();
+    apply
+        .apply_request(&request(&edge, false), None)
+        .await
+        .unwrap();
     assert_eq!(apply.committed_config_locked().evpn_instances.len(), 1);
     assert_eq!(apply.committed_config_locked().file_path, None);
 
     let Err(GrpcEvpnRuntimeApplyError::InvalidArgument(error)) =
-        apply.apply_request(&request(&running, true)).await
+        apply.apply_request(&request(&running, true), None).await
     else {
         panic!("the running config file must stay refused");
     };
     assert!(!error.contains(SECRET), "{error}");
     assert!(error.contains("is not a file under"), "{error}");
+}
+
+#[tokio::test]
+async fn evpn_runtime_candidate_sources_follow_caller_tier() {
+    use rustbgpd_api::authz::{AuthTier, CallerTier, PrincipalRole};
+    let outside = tempfile::tempdir().unwrap();
+    let edge = outside.path().join("edge.rpol");
+    std::fs::write(&edge, "policy edge-in { term rest { accept } }\n").unwrap();
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+    let apply = EvpnRuntimeReloadApply::new(
+        empty_evpn_runtime_coordinator(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    );
+    let request = proto::ApplyEvpnRuntimeRequest {
+        candidate_toml: crate::test_support::tier_authorized_uds_test_config(&format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\n",
+            minimal_runtime_candidate_toml(),
+            edge.display().to_string()
+        )),
+        validate_only: true,
+    };
+    // Automation has a mutating ceiling; an operator capped by the listener
+    // to that tier must remain confined too. Missing authority also fails closed.
+    for tier in [
+        None,
+        Some(CallerTier(AuthTier::Mutating)),
+        Some(CallerTier(PrincipalRole::Automation.max_tier())),
+    ] {
+        assert!(matches!(
+            apply.apply_request(&request, tier).await,
+            Err(GrpcEvpnRuntimeApplyError::InvalidArgument(_))
+        ));
+    }
+    apply
+        .apply_request(&request, Some(CallerTier(AuthTier::OperatorOnly)))
+        .await
+        .unwrap();
 }
 
 /// A reload whose EVPN model is unchanged still moves the source authority
@@ -4270,7 +4315,7 @@ async fn unchanged_evpn_reload_still_refreshes_the_source_authority() {
         validate_only: true,
     };
     let Err(GrpcEvpnRuntimeApplyError::InvalidArgument(error)) =
-        apply.apply_request(&request).await
+        apply.apply_request(&request, None).await
     else {
         panic!("the reloaded running config file must be refused");
     };
@@ -4301,11 +4346,11 @@ async fn evpn_candidate_loads_are_admission_bounded() {
         .try_acquire_many_owned(u32::try_from(MAX_EVPN_CANDIDATE_LOADS).unwrap())
         .unwrap();
     assert!(matches!(
-        apply.apply_request(&request).await,
+        apply.apply_request(&request, None).await,
         Err(GrpcEvpnRuntimeApplyError::Unavailable(_))
     ));
     drop(held);
-    apply.apply_request(&request).await.unwrap();
+    apply.apply_request(&request, None).await.unwrap();
 }
 
 /// ADR-0080: dropping the request future mid-converge (a disconnected
@@ -4334,7 +4379,7 @@ async fn apply_request_dropped_mid_converge_still_commits_and_advances_baseline(
         ),
         validate_only: false,
     };
-    let mut caller = Box::pin(reload_apply.apply_request(&request));
+    let mut caller = Box::pin(reload_apply.apply_request(&request, None));
     tokio::select! {
         _ = &mut caller => panic!("apply must still be blocked in converge"),
         () = entered.notified() => {}
