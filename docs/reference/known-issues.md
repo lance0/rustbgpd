@@ -473,13 +473,13 @@ resolved.
 - **gRPC listener shape is restart-required; credential bytes rotate on
   SIGHUP.** The listener *shape* — `address`, `access_mode`, the auth mode,
   and the configured `token_file` / `tls_cert_file` / `tls_key_file` /
-  `tls_client_ca_file` **paths** — is fixed for the process. Adding, removing,
-  or repointing any of those on `[global.telemetry.grpc_tcp]` does **not** take
+  `tls_client_ca_file` / `tls_client_crl_file` **paths** — is fixed for the
+  process. Adding, removing, or repointing any of those on `[global.telemetry.grpc_tcp]` does **not** take
   effect on SIGHUP; the live listener keeps its prior shape until the daemon is
   restarted, and reload emits an explicit `error!` log so the drift is visible.
   The credential *material* behind those unchanged paths does rotate: SIGHUP
-  re-reads the bytes, validates the complete token / server identity / client CA
-  for every listener, and, once the runtime config reload is acknowledged,
+  re-reads the bytes, validates the complete token / server identity / client
+  CA / CRL for every listener, and, once the runtime config reload is acknowledged,
   atomically publishes one process-wide generation. A rejected or restored
   reload has no credential effect.
   Existing TLS connections and admitted streams continue; new TLS accepts and
