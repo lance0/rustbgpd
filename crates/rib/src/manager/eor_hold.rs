@@ -178,6 +178,9 @@ pub(super) struct EorObligations {
     /// selection was deferred: membership is rebuilt when that deferral is
     /// staged or released, and the hold ends there.
     rt_membership_complete: HashSet<PeerId>,
+    /// Markers the tick's fallback sent ([`RibManager::eor_unsettled_ready`]).
+    #[cfg(test)]
+    pub(super) unsettled_tick_sends: usize,
 }
 
 impl EorObligations {
@@ -611,10 +614,17 @@ impl RibManager {
             return;
         };
         let session_id = self.outbound_session_ids.get(&peer).copied();
+        let unsettled = if obligations {
+            self.eor_unsettled_ready(peer)
+        } else {
+            Vec::new()
+        };
         let mut families: Vec<(Afi, Safi)> = if obligations {
             self.eor
                 .families(peer)
-                .filter(|&family| self.eor_refused_retry_ready(peer, family))
+                .filter(|family| {
+                    unsettled.contains(family) || self.eor_refused_retry_ready(peer, *family)
+                })
                 .collect()
         } else {
             Vec::new()
@@ -633,8 +643,21 @@ impl RibManager {
             return;
         }
         let evpn_bits = Self::evpn_admitted_marker_bits(&families, &refresh_markers);
-        if self.send_eor_markers(peer, &tx, &families, refresh_markers, None)
-            && self.outbound_session_ids.get(&peer).copied() == session_id
+        if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {
+            return;
+        }
+        if !unsettled.is_empty() {
+            warn!(
+                %peer,
+                families = ?unsettled,
+                "End-of-RIB sent by the resync tick: the release of its last hold did not send it"
+            );
+            #[cfg(test)]
+            {
+                self.eor.unsettled_tick_sends += unsettled.len();
+            }
+        }
+        if self.outbound_session_ids.get(&peer).copied() == session_id
             && self
                 .outbound_peers
                 .get(&peer)
@@ -642,6 +665,25 @@ impl RibManager {
         {
             self.evpn_feed_markers_admitted(peer, &tx, evpn_bits);
         }
+    }
+
+    /// Production fallback of the tick's marker lane: the owed markers of
+    /// `peer` that nothing holds and that no refused send explains. Every
+    /// release sends the markers it frees, so this is empty unless one
+    /// missed a marker. The tick then sends it within one interval, where
+    /// it would otherwise stay owed until the session ended, and logs it.
+    /// A test build fails earlier, at the end of the turn that left the
+    /// marker (`assert_eor_settled`). The EVPN marker a current
+    /// complete feed still owes is that feed's own tick retry, not this.
+    fn eor_unsettled_ready(&self, peer: PeerId) -> Vec<(Afi, Safi)> {
+        self.eor
+            .families(peer)
+            .filter(|&family| {
+                !self.eor.stored(peer, family).contains(EorHold::Writer)
+                    && self.eor_retry_ready(peer, family)
+                    && !(family == EVPN && self.evpn_feed_owed_markers(peer).0)
+            })
+            .collect()
     }
 
     /// Whether a polling lane may retry `family`'s owed marker: a send of
@@ -656,6 +698,7 @@ impl RibManager {
         self.eor
             .families(peer)
             .any(|family| self.eor_refused_retry_ready(peer, family))
+            || !self.eor_unsettled_ready(peer).is_empty()
     }
 
     /// Whether a polling lane has a marker of `peer` to send now: a refused

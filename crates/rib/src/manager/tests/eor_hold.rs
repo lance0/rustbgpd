@@ -282,3 +282,36 @@ fn a_forced_resync_sends_the_marker_it_held() {
     assert!(!manager.eor.owes(TARGET, V4));
     assert!(!manager.resync_tick_pending());
 }
+
+/// The production fallback: a marker left owed with no hold and no refused
+/// send (a release that did not send it) still leaves on the next resync
+/// tick, and the tick reports it. Actor turns never reach this silently in
+/// a test build; the end-of-turn check above fires first.
+#[test]
+fn the_tick_sends_an_unsettled_marker_and_reports_it() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut output = connect(&mut manager, TARGET, 2, V4);
+    while output.try_recv().is_ok() {}
+    manager.owe_eor(TARGET, V4);
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(output.try_recv().unwrap().end_of_rib, [V4]);
+    assert_eq!(manager.eor.unsettled_tick_sends, 1);
+    assert!(!manager.eor.owes(TARGET, V4));
+    assert!(!manager.resync_tick_pending());
+}
+
+/// A refused marker is the tick's ordinary retry and is not reported.
+#[tokio::test(start_paused = true)]
+async fn the_tick_does_not_report_a_refused_marker() {
+    let (mut manager, mut output) = held_by(&[EorHold::RtMembership]);
+    let sender = manager.outbound_peers[&TARGET].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    release(&mut manager, EorHold::RtMembership);
+    manager.dirty_peers.remove(&TARGET);
+    assert_eq!(markers(&mut output), 0);
+    manager.retry_eor_markers_bounded();
+    assert_eq!(markers(&mut output), 1);
+    assert_eq!(manager.eor.unsettled_tick_sends, 0);
+}
