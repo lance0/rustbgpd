@@ -733,8 +733,16 @@ before sending the configuration to the daemon. Below `operator_only`, a
 candidate sent over the API (diff, plan, or EVPN apply) may name only `.rpol`
 files, `rpol_roots` and dataset files that resolve under the running config's
 policy directories: its `[policy] rpol_roots` and the directories of its
-`.rpol` and dataset files. Its gRPC TLS and token file paths must be ones the
-running config already uses. Operator callers may stage candidate sources
+`.rpol` and dataset files. The daemon resolves those directories when it
+accepts the config at boot or on SIGHUP and holds them until the next accepted
+reload, so a directory or symlink replaced in between does not move them; a
+config committed over the API keeps the directories already resolved. An
+`rpol_roots` entry that is a regular file admits only that file, not the
+directory around it, and its imports must resolve under another policy
+directory. The candidate's gRPC TLS and token file paths must be ones the
+running config already uses; the files those paths resolve to are never
+admitted as policy sources, including a new target a credential symlink was
+rotated to since the last reload. Operator callers may stage candidate sources
 elsewhere, including on `ApplyEvpnRuntime`. For every API caller, compile and
 dataset errors for those files report path, line and column without quoting file text; `rbgp policy check`
 on the host shows the full diagnostic.
