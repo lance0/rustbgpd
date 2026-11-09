@@ -291,19 +291,88 @@ async fn managed_svd_vxlan_create_adopt_and_reap_round_trip_inner() {
             .any(|row| row.vid == Some(20) && row.tunnel_id == Some(200))
     );
 
+    assert!(
+        port.vlan_tunnels
+            .iter()
+            .any(|row| row.vid == Some(10) && row.flags.range_begin)
+    );
+    assert!(
+        port.vlan_tunnels
+            .iter()
+            .any(|row| row.vid == Some(12) && row.flags.range_end)
+    );
+    assert!(
+        !port.vlan_tunnels.iter().any(|row| row.vid == Some(11)),
+        "fixture must contain a compressed interior"
+    );
+
     // LAN-2951: an operator `ip link set ... down` makes the SVD instance
     // NotReady, and the convergent Create the reconciler re-emits raises
     // the owned link back to Ready.
     run("ip", &["link", "set", "dev", "brsvd", "up"]);
     let vni = EvpnInstanceId::new(100).unwrap();
-    let instances = one_instance_table(
-        instance(100, Some("brsvd"), "10.0.0.1")
-            .with_bridge_vlan(Some(BridgeVlan::new(10).unwrap())),
+    let mut instances = EvpnInstanceTable::new();
+    for (raw_vni, vid) in [(100, 10), (101, 11), (102, 12)] {
+        instances
+            .insert(
+                instance(raw_vni, Some("brsvd"), "10.0.0.1")
+                    .with_bridge_vlan(Some(BridgeVlan::new(vid).unwrap())),
+            )
+            .unwrap();
+    }
+    let probes = dp.probe(&instances).await;
+    let test_mac = MacAddress::new([0x02, 0, 0, 0, 0, 0x42]);
+    for (raw_vni, vid) in [(100, 10), (101, 11), (102, 12)] {
+        let id = EvpnInstanceId::new(raw_vni).unwrap();
+        assert_eq!(
+            probes.get(id),
+            Some(&InstanceProbe::Ready),
+            "VNI {raw_vni} readiness"
+        );
+        dp.apply(&DataplaneOp::AddRemoteFdb {
+            vni: id,
+            mac: test_mac,
+            vlan: Some(vid),
+            dst: "127.0.0.20".parse().unwrap(),
+        })
+        .await
+        .expect("program FDB on compressed binding");
+    }
+    let programmed = dp
+        .dump_snapshot()
+        .await
+        .expect("dump compressed-binding FDB");
+    for (raw_vni, vid) in [(100, 10), (101, 11), (102, 12)] {
+        let entry = programmed
+            .find_fdb_in_vlan(EvpnInstanceId::new(raw_vni).unwrap(), test_mac, Some(vid))
+            .expect("VNI-scoped row for each endpoint/interior binding");
+        assert_eq!(entry.dst, Some("127.0.0.20".parse().unwrap()));
+        assert!(entry.flags.extern_learn);
+    }
+    dp.apply(&DataplaneOp::RemoveRemoteFdb {
+        vni: EvpnInstanceId::new(101).unwrap(),
+        mac: test_mac,
+        vlan: Some(11),
+    })
+    .await
+    .expect("withdraw compressed interior binding FDB");
+    let withdrawn = dp
+        .dump_snapshot()
+        .await
+        .expect("dump after interior withdrawal");
+    assert!(
+        withdrawn
+            .find_fdb_in_vlan(EvpnInstanceId::new(101).unwrap(), test_mac, Some(11))
+            .is_none()
     );
-    assert_eq!(
-        dp.probe(&instances).await.get(vni),
-        Some(&InstanceProbe::Ready)
-    );
+    for (raw_vni, vid) in [(100, 10), (102, 12)] {
+        assert!(
+            withdrawn
+                .find_fdb_in_vlan(EvpnInstanceId::new(raw_vni).unwrap(), test_mac, Some(vid))
+                .is_some(),
+            "endpoint FDB rows must survive interior withdrawal"
+        );
+    }
     run("ip", &["link", "set", "dev", "vxsvd", "down"]);
     let down = dp.probe(&instances).await;
     assert!(
