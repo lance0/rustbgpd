@@ -7,7 +7,8 @@
 v0.82.0, plus the existing
 [gNMI dial-out credentials](../reference/configuration.md#gnmi_dialout).
 The rows below describe their current boundaries; the original decision date
-is unchanged.
+is unchanged. See the [v0.82.0 release notes](../../CHANGELOG.md) for the shipped
+revocation and confinement changes.
 **Scope:** The production gRPC management plane: listener admission, method-tier
 authorization, principal-to-role authorization, and its audit and resource
 boundaries. BGP transport, the CLI, build/release systems, and non-gRPC APIs are
