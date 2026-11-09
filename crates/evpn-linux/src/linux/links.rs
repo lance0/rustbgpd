@@ -498,11 +498,7 @@ pub(crate) fn svd_inventory_matches(
     row.is_vxlan
         && row.ifindex == svd.ifindex
         && vlan_rows_contain(&row.vlans, bridge_vlan)
-        && crate::snapshot::svd_tunnel_bindings(&row.vlan_tunnels).is_some_and(|bindings| {
-            bindings
-                .iter()
-                .any(|binding| binding.bridge_vlan == bridge_vlan && binding.vni == want_vni)
-        })
+        && crate::snapshot::svd_tunnel_binding_matches(&row.vlan_tunnels, bridge_vlan, want_vni)
 }
 
 impl LinkCache {
@@ -2122,6 +2118,82 @@ mod tests {
         cache.bind_local_mac_vlan_attribution(&instances);
 
         assert!(cache.ip_neighbour_vlan_upper_to_vni.is_empty());
+    }
+
+    #[test]
+    fn svd_single_binding_lookup_work_is_bounded_by_raw_ranges() {
+        use crate::snapshot::{measure_svd_tunnel_work, svd_tunnel_bindings};
+        let svd = KernelSvdVxlanInfo {
+            ifindex: 40,
+            up: true,
+            vnifilter: true,
+            local_ip: None,
+            learning_disabled: Some(true),
+        };
+        let begin = KernelBridgeVlanFlags {
+            range_begin: true,
+            ..KernelBridgeVlanFlags::default()
+        };
+        let end = KernelBridgeVlanFlags {
+            range_end: true,
+            ..KernelBridgeVlanFlags::default()
+        };
+        let mut row = KernelBridgePortVlanInfo {
+            ifindex: 40,
+            name: Some("vxlan-svd".to_string()),
+            is_vxlan: true,
+            vlans: vec![
+                KernelBridgeVlanInfo {
+                    vid: 1,
+                    flags: begin,
+                },
+                KernelBridgeVlanInfo {
+                    vid: 4094,
+                    flags: end,
+                },
+            ],
+            vlan_tunnels: vec![
+                KernelBridgeVlanTunnelInfo {
+                    vid: Some(1),
+                    tunnel_id: Some(100),
+                    flags: begin,
+                },
+                KernelBridgeVlanTunnelInfo {
+                    vid: Some(4094),
+                    tunnel_id: Some(4193),
+                    flags: end,
+                },
+            ],
+        };
+        let (matched, work) =
+            measure_svd_tunnel_work(|| svd_inventory_matches(&row, &svd, 2000, 2099));
+        assert!(matched);
+        assert_eq!(work.raw_rows, 2, "{work:?}");
+        assert_eq!(work.ranges, 1, "{work:?}");
+        assert_eq!(work.expanded_bindings, 0, "{work:?}");
+        assert_eq!(work.allocation_growths, 0, "{work:?}");
+
+        // Calibrate both materialization counters against the real collecting path.
+        let (valid, work) =
+            measure_svd_tunnel_work(|| svd_tunnel_bindings(&row.vlan_tunnels).is_some());
+        assert!(valid);
+        assert_eq!(work.raw_rows, 2);
+        assert_eq!(work.ranges, 1);
+        assert_eq!(work.expanded_bindings, 4094);
+        assert!(work.allocation_growths > 0);
+
+        row.vlan_tunnels.push(KernelBridgeVlanTunnelInfo {
+            vid: Some(1),
+            tunnel_id: None,
+            flags: KernelBridgeVlanFlags::default(),
+        });
+        let (matched, work) =
+            measure_svd_tunnel_work(|| svd_inventory_matches(&row, &svd, 2000, 2099));
+        assert!(!matched, "a matched range must not hide a malformed tail");
+        assert_eq!(work.raw_rows, 3, "{work:?}");
+        assert_eq!(work.ranges, 1, "{work:?}");
+        assert_eq!(work.expanded_bindings, 0, "{work:?}");
+        assert_eq!(work.allocation_growths, 0, "{work:?}");
     }
 
     #[test]

@@ -213,8 +213,48 @@ pub(crate) fn svd_tunnel_bindings(
     rows: &[KernelBridgeVlanTunnelInfo],
 ) -> Option<Vec<ManagedSvdVxlanBinding>> {
     let mut bindings = Vec::new();
+    visit_svd_tunnel_ranges(rows, |first_vid, last_vid, first_vni| {
+        for bridge_vlan in first_vid..=last_vid {
+            #[cfg(test)]
+            let previous_capacity = bindings.capacity();
+            bindings.push(ManagedSvdVxlanBinding {
+                bridge_vlan,
+                vni: first_vni + u32::from(bridge_vlan - first_vid),
+            });
+            #[cfg(test)]
+            record_svd_tunnel_work(|work| {
+                work.expanded_bindings += 1;
+                work.allocation_growths += usize::from(bindings.capacity() != previous_capacity);
+            });
+        }
+    })?;
+    Some(bindings)
+}
+
+/// Match one binding without expanding ranges; malformed trailing rows still reject it.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn svd_tunnel_binding_matches(
+    rows: &[KernelBridgeVlanTunnelInfo],
+    bridge_vlan: u16,
+    want_vni: u32,
+) -> bool {
+    let mut matches = false;
+    let valid = visit_svd_tunnel_ranges(rows, |first_vid, last_vid, first_vni| {
+        if (first_vid..=last_vid).contains(&bridge_vlan) {
+            matches |= first_vni.checked_add(u32::from(bridge_vlan - first_vid)) == Some(want_vni);
+        }
+    });
+    valid.is_some() && matches
+}
+
+fn visit_svd_tunnel_ranges(
+    rows: &[KernelBridgeVlanTunnelInfo],
+    mut visit: impl FnMut(u16, u16, u32),
+) -> Option<()> {
     let mut start = None;
     for row in rows {
+        #[cfg(test)]
+        record_svd_tunnel_work(|work| work.raw_rows += 1);
         let (vid, vni) = (row.vid?, row.tunnel_id?);
         if !(1..=4094).contains(&vid) {
             return None;
@@ -228,23 +268,51 @@ pub(crate) fn svd_tunnel_bindings(
             if vid < first_vid || first_vni.checked_add(u32::from(vid - first_vid))? != vni {
                 return None;
             }
-            for bridge_vlan in first_vid..=vid {
-                bindings.push(ManagedSvdVxlanBinding {
-                    bridge_vlan,
-                    vni: first_vni + u32::from(bridge_vlan - first_vid),
-                });
-            }
+            #[cfg(test)]
+            record_svd_tunnel_work(|work| work.ranges += 1);
+            visit(first_vid, vid, first_vni);
         } else {
             if start.is_some() {
                 return None;
             }
-            bindings.push(ManagedSvdVxlanBinding {
-                bridge_vlan: vid,
-                vni,
-            });
+            #[cfg(test)]
+            record_svd_tunnel_work(|work| work.ranges += 1);
+            visit(vid, vid, vni);
         }
     }
-    start.is_none().then_some(bindings)
+    start.is_none().then_some(())
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SvdTunnelWork {
+    pub(crate) raw_rows: usize,
+    pub(crate) ranges: usize,
+    pub(crate) expanded_bindings: usize,
+    pub(crate) allocation_growths: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SVD_TUNNEL_WORK: std::cell::Cell<SvdTunnelWork> = const {
+        std::cell::Cell::new(SvdTunnelWork { raw_rows: 0, ranges: 0, expanded_bindings: 0, allocation_growths: 0 })
+    };
+}
+
+#[cfg(test)]
+fn record_svd_tunnel_work(update: impl FnOnce(&mut SvdTunnelWork)) {
+    SVD_TUNNEL_WORK.with(|cell| {
+        let mut work = cell.get();
+        update(&mut work);
+        cell.set(work);
+    });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn measure_svd_tunnel_work(f: impl FnOnce() -> bool) -> (bool, SvdTunnelWork) {
+    SVD_TUNNEL_WORK.with(|cell| cell.set(SvdTunnelWork::default()));
+    let result = f();
+    (result, SVD_TUNNEL_WORK.with(std::cell::Cell::get))
 }
 
 /// VLAN inventory observed on one bridge-member link.
@@ -1124,8 +1192,10 @@ mod tests {
         };
         let begin = row(10, 100, true, false);
         let end = row(12, 102, false, true);
+        let rows = [begin.clone(), end];
+        assert!(svd_tunnel_binding_matches(&rows, 11, 101));
         assert_eq!(
-            svd_tunnel_bindings(&[begin.clone(), end]),
+            svd_tunnel_bindings(&rows),
             Some(vec![
                 ManagedSvdVxlanBinding {
                     bridge_vlan: 10,

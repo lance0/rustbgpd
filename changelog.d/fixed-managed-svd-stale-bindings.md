@@ -5,3 +5,5 @@
   preserving foreign ports and unrelated bridge VLANs.
 - Recognize interior VLAN/VNI bindings in compressed kernel ranges when checking
   SVD readiness and selecting targets for FDB programming.
+  Match raw ranges without expanding every VLAN per lookup, and reject malformed
+  trailing inventory rows.
