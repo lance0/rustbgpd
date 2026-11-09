@@ -478,10 +478,16 @@ use the resolved config target's name, including for a terminal launch symlink,
 and also hold the full saved config, including inline secrets. Operator callers
 retain their exemption. The accepted target remains authoritative if
 the launch symlink is retargeted or removed. A missing or replaced physical
-accepted target refuses confined reads until a new generation is accepted.
-Each confined candidate load inventories the accepted target directory once, with
-a limit of 4096 total entries (including dot entries) and one overflow probe.
-An unavailable, changed, unsafe, or oversized directory refuses the load.
+accepted target refuses confined source reads until a reload (SIGHUP) or another
+accepted generation re-accepts the file; a candidate that names no `.rpol` or
+dataset file reads no source and is not refused.
+A confined candidate load that reads a source inventories the accepted target
+directory once, with a limit of 4096 total entries (including dot entries) and
+one overflow probe. The inventory needs read permission on that directory only;
+ancestors need search permission, and backups are identified without being
+opened. An unavailable, unsafe, or oversized directory refuses the load. A
+directory change during the load, such as a concurrent config save, returns
+`UNAVAILABLE`, and a retry can succeed.
 Each source read rechecks the accepted file and parent identity, including when
 an ancestor directory is replaced, without repeating the backup inventory.
 Candidate-source confinement below `operator_only` refuses these backups, their

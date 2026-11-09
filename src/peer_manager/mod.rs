@@ -620,7 +620,7 @@ enum PendingCandidate {
 }
 
 struct LoadedCandidate {
-    candidate: Result<Config, String>,
+    candidate: Result<Config, crate::config::CandidateLoadError>,
     pending: PendingCandidate,
 }
 

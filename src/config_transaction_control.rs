@@ -2640,7 +2640,14 @@ async fn apply_config_transaction_locked_with_preloaded(
                 "config candidate load failed: {error}; nothing was applied"
             ))
         })?
-        .map_err(ConfigTransactionApplyError::InvalidArgument)?;
+        .map_err(|error| match error {
+            crate::config::CandidateLoadError::Invalid(message) => {
+                ConfigTransactionApplyError::InvalidArgument(message)
+            }
+            crate::config::CandidateLoadError::Unavailable(message) => {
+                ConfigTransactionApplyError::Unavailable(message)
+            }
+        })?;
         let plan = before_pre_effect_deadline(
             progress.pre_effect_deadline(),
             plan_candidate(

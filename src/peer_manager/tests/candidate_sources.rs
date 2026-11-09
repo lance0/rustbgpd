@@ -770,8 +770,9 @@ fn candidate_sources_refuse_hardlinked_protected_files() {
     for capture in [false, true] {
         for source in [&linked, &importer] {
             let toml = candidate(&[source], "");
-            let error =
-                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).unwrap_err();
+            let error = Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits))
+                .unwrap_err()
+                .to_string();
             assert!(
                 error.contains("not an admissible policy source")
                     || error.contains("compile failed"),
@@ -907,8 +908,9 @@ fn candidate_backups_fail_closed_for_a_dangling_config_symlink() {
         for source in [&backup, &importer, &edge] {
             let toml = candidate(&[source], "");
             let error = Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits))
-                .expect_err("an unresolved terminal symlink must fail closed");
-            assert!(error.contains("symlink target is unavailable"), "{error}");
+                .expect_err("an unresolved terminal symlink must fail closed")
+                .to_string();
+            assert!(error.contains("replaced or removed on disk"), "{error}");
             assert!(!error.contains(dir.path().to_str().unwrap()), "{error}");
             assert!(!error.contains(POLICY), "{error}");
             Config::load_rpc_candidate(&toml, "operator", capture, None)
@@ -1098,9 +1100,124 @@ async fn candidate_admission_uses_the_accepted_watch_file_identity() {
         Some(&manager.candidate_source_limits()),
     )
     .unwrap();
+    // Any rename-replace of the config (an editor save, a ConfigMap swap).
     let unrelated = dir.path().join("unrelated");
     std::fs::write(&unrelated, "unrelated").unwrap();
     std::fs::rename(unrelated, &config_path).unwrap();
-    let error = diff_error(manager, candidate(&[&alias], "")).await;
-    assert!(error.contains("unavailable or changed"), "{error}");
+    let limits = manager.candidate_source_limits();
+    Config::load_rpc_candidate(&candidate(&[], ""), "source-free", false, Some(&limits))
+        .expect("a candidate naming no source file needs no backup inventory");
+    for source in [&edge, &alias] {
+        let error = Config::load_rpc_candidate(
+            &candidate(&[source], ""),
+            "names a source",
+            false,
+            Some(&limits),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, crate::config::CandidateLoadError::Invalid(message)
+                if message.contains("replaced or removed on disk")
+                    && message.contains("SIGHUP")),
+            "{error:?}"
+        );
+    }
+    let error = diff_error(manager, candidate(&[&edge], "")).await;
+    assert!(error.contains("replaced or removed on disk"), "{error}");
+}
+
+#[test]
+fn config_directory_change_during_a_candidate_load_is_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let limits = accepted.config_ref().candidate_source_limits();
+    let toml = candidate(&[&edge], "");
+    Config::load_rpc_candidate(&toml, "quiet directory", false, Some(&limits)).unwrap();
+    let stage = dir.path().join(".persister-stage");
+    crate::config::AFTER_INVENTORY.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || std::fs::write(stage, "x").unwrap()));
+    });
+    let error =
+        Config::load_rpc_candidate(&toml, "busy directory", false, Some(&limits)).unwrap_err();
+    assert!(
+        matches!(&error, crate::config::CandidateLoadError::Unavailable(message)
+            if message.contains("retry")),
+        "{error:?}"
+    );
+    // The next attempt sees a settled directory.
+    Config::load_rpc_candidate(&toml, "retry", false, Some(&limits)).unwrap();
+}
+
+#[test]
+fn candidate_load_errors_map_to_retryable_and_final_statuses() {
+    use crate::config::CandidateLoadError;
+    use rustbgpd_api::evpn_service::EvpnRuntimeApplyError;
+    use rustbgpd_api::peer_types::{RuntimeConfigDiffError, RuntimeConfigTransactionPlanError};
+    let busy = || CandidateLoadError::Unavailable("busy".to_string());
+    let refused = || CandidateLoadError::Invalid("refused".to_string());
+    assert!(matches!(
+        RuntimeConfigDiffError::from(busy()),
+        RuntimeConfigDiffError::Unavailable(message) if message == "busy"
+    ));
+    assert!(matches!(
+        RuntimeConfigDiffError::from(refused()),
+        RuntimeConfigDiffError::InvalidCandidate(message) if message == "refused"
+    ));
+    assert!(matches!(
+        RuntimeConfigTransactionPlanError::from(busy()),
+        RuntimeConfigTransactionPlanError::Unavailable(message) if message == "busy"
+    ));
+    assert!(matches!(
+        RuntimeConfigTransactionPlanError::from(refused()),
+        RuntimeConfigTransactionPlanError::InvalidCandidate(message) if message == "refused"
+    ));
+    assert!(matches!(
+        EvpnRuntimeApplyError::from(busy()),
+        EvpnRuntimeApplyError::Unavailable(message) if message == "busy"
+    ));
+    assert!(matches!(
+        EvpnRuntimeApplyError::from(refused()),
+        EvpnRuntimeApplyError::InvalidArgument(message) if message == "refused"
+    ));
+}
+
+/// Search permission on an ancestor is enough to load the config: boot,
+/// `--check` and SIGHUP never list the directories above it.
+#[test]
+fn config_under_a_search_only_ancestor_loads() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ancestor = dir.path().join("search-only");
+    let parent = ancestor.join("etc");
+    std::fs::create_dir_all(&parent).unwrap();
+    let edge = parent.join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = parent.join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let _restore = Restore(ancestor.clone());
+    if std::fs::read_dir(&ancestor).is_ok() {
+        eprintln!("skipped: this process bypasses directory read permission");
+        return;
+    }
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+    let limits = accepted.config_ref().candidate_source_limits();
+    Config::load_rpc_candidate(
+        &candidate(&[&edge], ""),
+        "below operator",
+        false,
+        Some(&limits),
+    )
+    .unwrap();
 }

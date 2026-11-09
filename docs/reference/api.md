@@ -4735,7 +4735,7 @@ A failed `ApplyEvpnRuntime` status states what the failure left behind:
 |--------|---------|
 | `FAILED_PRECONDITION` | No new divergence from the failing primitive step. Either the candidate was refused before any side effect, or every effect from the failing primitive converge was rolled back to its previously committed model. Earlier primitive commits in a decomposed apply remain committed. A rolled-back failure is not a no-effect refusal: earlier publishes, such as an acknowledged Type 3 IMET originate and its compensating withdraw, can be observed before the rollback, and a retry can repeat those transient changes. |
 | `INTERNAL` | Known divergence. A rollback step did not restore the committed model, or the failing step may have taken effect without an acknowledgement (for example, a Type 3 inject whose RIB acknowledgement timed out or whose reply was dropped). The message says the state was not restored; live EVPN state may need repair or a restart. |
-| `UNAVAILABLE` | Daemon shutdown cut the apply off after it published to the EVPN actors. Those publishes are not rolled back, because the same shutdown drains the actors next. |
+| `UNAVAILABLE` | Daemon shutdown cut the apply off after it published to the EVPN actors. Those publishes are not rolled back, because the same shutdown drains the actors next. Below `operator_only`, `UNAVAILABLE` also reports that the config directory changed while the candidate's policy sources were read; nothing was applied, and a retry can succeed. |
 
 The failing step does not advance the committed generation; earlier primitive
 commits in a decomposed apply remain committed and are named in the error.

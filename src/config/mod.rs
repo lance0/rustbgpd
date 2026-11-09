@@ -297,12 +297,76 @@ enum SourceRules<'a> {
 }
 
 impl SourceRules<'_> {
-    fn protection(self) -> rustbgpd_policy::datasets::SourceFileProtection {
+    /// Protection for a source about to be read. Below `operator_only` this
+    /// takes the backup inventory on the first read of the load.
+    fn protection(self) -> Result<rustbgpd_policy::datasets::SourceFileProtection, ConfigError> {
         match self {
-            Self::Api(Some(limits)) => limits.source_protection.clone(),
-            _ => rustbgpd_policy::datasets::SourceFileProtection::default(),
+            Self::Api(Some(limits)) => {
+                limits
+                    .protection()
+                    .map_err(|error| ConfigError::InvalidPolicyEntry {
+                        reason: error.to_string(),
+                    })
+            }
+            _ => Ok(rustbgpd_policy::datasets::SourceFileProtection::default()),
         }
     }
+}
+
+/// Why an API candidate failed to load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CandidateLoadError {
+    /// The candidate is refused as submitted.
+    Invalid(String),
+    /// The config directory changed during the load; retrying can succeed.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for CandidateLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Invalid(message) | Self::Unavailable(message)) = self;
+        f.write_str(message)
+    }
+}
+
+impl From<CandidateLoadError> for rustbgpd_api::peer_types::RuntimeConfigDiffError {
+    fn from(error: CandidateLoadError) -> Self {
+        match error {
+            CandidateLoadError::Invalid(message) => Self::InvalidCandidate(message),
+            CandidateLoadError::Unavailable(message) => Self::Unavailable(message),
+        }
+    }
+}
+
+impl From<CandidateLoadError> for rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError {
+    fn from(error: CandidateLoadError) -> Self {
+        match error {
+            CandidateLoadError::Invalid(message) => Self::InvalidCandidate(message),
+            CandidateLoadError::Unavailable(message) => Self::Unavailable(message),
+        }
+    }
+}
+
+impl From<CandidateLoadError> for rustbgpd_api::evpn_service::EvpnRuntimeApplyError {
+    fn from(error: CandidateLoadError) -> Self {
+        match error {
+            CandidateLoadError::Invalid(message) => Self::InvalidArgument(message),
+            CandidateLoadError::Unavailable(message) => Self::Unavailable(message),
+        }
+    }
+}
+
+const ACCEPTED_CONFIG_CHANGED: &str = "error: the accepted config file was replaced or removed \
+     on disk; reload the daemon (SIGHUP) to accept it before a candidate below operator_only \
+     names .rpol or dataset files";
+const CONFIG_DIRECTORY_CHANGED: &str =
+    "error: the config directory changed while the candidate's sources were read; retry";
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once the lazy backup inventory is taken, before any source read.
+    pub(crate) static AFTER_INVENTORY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 /// What an API candidate below `operator_only` may name, taken from the
@@ -322,10 +386,62 @@ pub(crate) struct CandidateSourceLimits {
     /// Running config path, used to refuse adjacent unconfirmed backups.
     config_file: Option<PathBuf>,
     source_file_target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
-    source_protection: rustbgpd_policy::datasets::SourceFileProtection,
+    /// Taken once per load, and only if the candidate reads a source file.
+    inventory: std::sync::OnceLock<
+        Result<rustbgpd_policy::datasets::SourceFileProtection, CandidateLoadError>,
+    >,
     /// The running config's `[policy] rpol_max_graph_bytes`; a candidate
     /// cannot raise its own read budget.
     max_graph_bytes: usize,
+}
+
+impl CandidateSourceLimits {
+    /// Verify the accepted config target and take the backup inventory, once
+    /// per load. A candidate that names no source file never gets here, so a
+    /// replaced config file does not block it.
+    fn protection(
+        &self,
+    ) -> Result<rustbgpd_policy::datasets::SourceFileProtection, CandidateLoadError> {
+        self.inventory
+            .get_or_init(|| {
+                let changed = || CandidateLoadError::Invalid(ACCEPTED_CONFIG_CHANGED.to_string());
+                let target = match (&self.config_file, &self.source_file_target) {
+                    (Some(_), Some(target)) => {
+                        target.verify_target().map_err(|_| changed())?;
+                        Some(target.clone())
+                    }
+                    (Some(launch), None) => Some(
+                        rustbgpd_policy::datasets::SourceFileTarget::resolve(launch)
+                            .map_err(|_| changed())?,
+                    ),
+                    (None, _) => None,
+                };
+                let config_file = target.as_ref().map(|target| target.path().to_path_buf());
+                let mut protected_files = self.protected_files.clone();
+                protected_files.extend(config_file.clone());
+                let protection = rustbgpd_policy::datasets::SourceFileProtection::new(
+                    protected_files,
+                    config_file,
+                )
+                .snapshot(target.as_ref())
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::ResourceBusy {
+                        CandidateLoadError::Unavailable(CONFIG_DIRECTORY_CHANGED.to_string())
+                    } else {
+                        CandidateLoadError::Invalid(
+                            "error: protected config source inventory is unavailable or changed"
+                                .to_string(),
+                        )
+                    }
+                })?;
+                #[cfg(test)]
+                if let Some(hook) = AFTER_INVENTORY.with(|hook| hook.borrow_mut().take()) {
+                    hook();
+                }
+                Ok(protection)
+            })
+            .clone()
+    }
 }
 
 /// Check that an external source named by an RPC candidate resolves under
@@ -667,7 +783,7 @@ impl Config {
             // (LAN-300) as one compilation unit — a missing or broken
             // import anywhere rejects the whole load.
             // Imports may not reach a protected file either.
-            let excluded = sources.protection();
+            let excluded = sources.protection()?;
             let file = match RpolFile::load_protected(&path, &roots, max_graph_bytes, &excluded) {
                 Ok(file) => file,
                 Err(LoadError::Io { path, reason }) => {
@@ -844,7 +960,7 @@ impl Config {
                     existing,
                     accepted,
                     prior_manifest,
-                    &sources.protection(),
+                    &sources.protection()?,
                 ) {
                     Ok(read) => {
                         summary.hashed += 1;
@@ -881,7 +997,7 @@ impl Config {
                 match rustbgpd_policy::datasets::load_dataset_file_protected(
                     &path,
                     kind,
-                    &sources.protection(),
+                    &sources.protection()?,
                 ) {
                     Ok(data) => {
                         summary.parsed += 1;
@@ -1061,7 +1177,7 @@ impl Config {
             roots,
             config_file: self.file_path.clone(),
             source_file_target: self.source_file_target.clone(),
-            source_protection: rustbgpd_policy::datasets::SourceFileProtection::default(),
+            inventory: std::sync::OnceLock::new(),
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
             // The gNMI dial-out TLS files are read only when a target
             // connects, so a candidate never names them, but they are the
@@ -1135,63 +1251,43 @@ impl Config {
         source_name: &str,
         capture_external_inputs: bool,
         limits: Option<&CandidateSourceLimits>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CandidateLoadError> {
         let canonicalize = |paths: &[PathBuf]| -> Vec<PathBuf> {
             paths
                 .iter()
                 .filter_map(|path| path.canonicalize().ok())
                 .collect()
         };
-        let canonical = limits
-            .map(|limits| -> Result<CandidateSourceLimits, String> {
-                let target = match (&limits.config_file, &limits.source_file_target) {
-                    (Some(_), Some(target)) => {
-                        target.verify_target().map_err(|_| {
-                            "error: accepted config symlink target is unavailable or changed"
-                                .to_string()
-                        })?;
-                        Some(target.clone())
-                    }
-                    (Some(launch), None) => Some(
-                        rustbgpd_policy::datasets::SourceFileTarget::resolve(launch).map_err(
-                            |_| {
-                                "error: accepted config symlink target is unavailable or changed"
-                                    .to_string()
-                            },
-                        )?,
-                    ),
-                    (None, _) => None,
-                };
-                let config_file = target.as_ref().map(|target| target.path().to_path_buf());
-                let mut protected_files = canonicalize(&limits.protected_files);
-                if let Some(path) = &config_file {
-                    protected_files.push(path.clone());
-                }
-                let source_protection = rustbgpd_policy::datasets::SourceFileProtection::new(
-                    protected_files.clone(),
-                    config_file.clone(),
-                )
-                .snapshot(target.as_ref())
-                .map_err(|_| {
-                    "error: protected config source inventory is unavailable or changed".to_string()
-                })?;
-                Ok(CandidateSourceLimits {
-                    roots: canonicalize(&limits.roots),
-                    credential_files: limits.credential_files.clone(),
-                    protected_files,
-                    config_file,
-                    source_file_target: target,
-                    source_protection,
-                    max_graph_bytes: limits.max_graph_bytes,
-                })
-            })
-            .transpose()?;
+        let canonical = limits.map(|limits| {
+            let mut protected_files = canonicalize(&limits.protected_files);
+            if let Some(target) = &limits.source_file_target {
+                protected_files.push(target.path().to_path_buf());
+            }
+            CandidateSourceLimits {
+                roots: canonicalize(&limits.roots),
+                credential_files: limits.credential_files.clone(),
+                protected_files,
+                config_file: limits.config_file.clone(),
+                source_file_target: limits.source_file_target.clone(),
+                inventory: std::sync::OnceLock::new(),
+                max_graph_bytes: limits.max_graph_bytes,
+            }
+        });
         Self::load_candidate(
             content,
             source_name,
             capture_external_inputs,
             SourceRules::Api(canonical.as_ref()),
         )
+        .map_err(|error| {
+            match canonical.as_ref().and_then(|limits| limits.inventory.get()) {
+                Some(Err(refusal)) => refusal.clone(),
+                Some(Ok(protection)) if protection.inventory_changed() => {
+                    CandidateLoadError::Unavailable(CONFIG_DIRECTORY_CHANGED.to_string())
+                }
+                _ => CandidateLoadError::Invalid(error),
+            }
+        })
     }
 
     fn load_candidate(

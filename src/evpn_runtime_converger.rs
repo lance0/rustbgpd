@@ -581,7 +581,7 @@ impl EvpnRuntimeReloadApply {
         .map_err(|error| {
             GrpcEvpnRuntimeApplyError::Internal(format!("EVPN candidate load failed: {error}"))
         })?
-        .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
+        .map_err(GrpcEvpnRuntimeApplyError::from)?;
         self.apply_candidate_config(&candidate, request.validate_only)
             .await
     }
