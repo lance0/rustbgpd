@@ -21,7 +21,7 @@
 
 use logos::Logos;
 
-use super::diag::{Diagnostic, DiagnosticCode, Span};
+use super::diag::{Diagnostic, DiagnosticCode, MAX_DIAGNOSTICS, Span};
 
 /// One `.rpol` token kind. Text is recovered by slicing the source
 /// with the token's span.
@@ -356,7 +356,8 @@ pub struct Token {
 /// (0 for a single-source compile). Unrecognized characters become
 /// diagnostics (one per contiguous bad region) and lexing continues,
 /// so the parser still sees — and can report on — the rest of the
-/// file.
+/// file. At [`MAX_DIAGNOSTICS`] bad regions lexing stops: the compile
+/// fails anyway, and the parser sees end of file there.
 #[must_use]
 pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
     let mut tokens = Vec::new();
@@ -378,6 +379,9 @@ pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
                 format!("unrecognized token `{}`", &source[span.range()]),
                 "not a valid `.rpol` token",
             ));
+            if diagnostics.len() == MAX_DIAGNOSTICS {
+                break;
+            }
             continue;
         };
         tokens.push(Token { kind, span });
@@ -393,6 +397,20 @@ mod tests {
         let (tokens, diags) = lex(src, 0);
         assert!(diags.is_empty(), "unexpected lex errors: {diags:?}");
         tokens.into_iter().map(|t| t.kind).collect()
+    }
+
+    /// Lexing stops at the diagnostic that reaches the cap, so a valid
+    /// suffix after it is never tokenized (or parsed).
+    #[test]
+    fn lexing_stops_at_the_capped_diagnostic() {
+        let source = format!(
+            "{}{}",
+            "@\n".repeat(MAX_DIAGNOSTICS),
+            "import \"x.rpol\"\n".repeat(10_000)
+        );
+        let (tokens, diags) = lex(&source, 0);
+        assert_eq!(diags.len(), MAX_DIAGNOSTICS);
+        assert!(tokens.is_empty(), "{} tokens after the cap", tokens.len());
     }
 
     #[test]

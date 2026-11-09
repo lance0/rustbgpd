@@ -240,17 +240,38 @@ impl Diagnostics {
         let truncated = out.full;
         let mut text = String::from_utf8_lossy(&out.bytes).into_owned();
         let omitted = self.0.len() - rendered;
+        // Past the cap the compile kept no count of what it dropped.
+        let capped = if self.0.len() >= MAX_DIAGNOSTICS {
+            format!("; a compile keeps at most {MAX_DIAGNOSTICS}")
+        } else {
+            String::new()
+        };
         if truncated {
             let _ = writeln!(
                 text,
                 "\n... output truncated at {MAX_RENDERED_BYTES} bytes; {omitted} more \
-                 diagnostic(s) not shown"
+                 diagnostic(s) not shown{capped}"
             );
         } else if omitted > 0 {
-            let _ = writeln!(text, "... {omitted} more diagnostic(s) not shown");
+            let _ = writeln!(text, "... {omitted} more diagnostic(s) not shown{capped}");
         }
         text
     }
+}
+
+/// Diagnostics one compile collects across lexing, parsing, import
+/// resolution and typechecking; later ones are dropped. A source dense
+/// with errors cannot make the compile, or its did-you-mean searches, grow
+/// with the error count.
+pub const MAX_DIAGNOSTICS: usize = 256;
+
+/// Append `more` to `diags`, keeping at most [`MAX_DIAGNOSTICS`] in all.
+pub(crate) fn extend_capped(
+    diags: &mut Vec<Diagnostic>,
+    more: impl IntoIterator<Item = Diagnostic>,
+) {
+    let room = MAX_DIAGNOSTICS.saturating_sub(diags.len());
+    diags.extend(more.into_iter().take(room));
 }
 
 /// Reports rendered by [`Diagnostics::render_sources`]; the rest are counted.
@@ -488,6 +509,73 @@ mod tests {
         let diagnostics = result.expect_err("every reference is unknown");
         assert!(diagnostics.len() <= 256, "{}", diagnostics.len());
         eprintln!("compiled {index} unknown references in {elapsed:?}");
+    }
+
+    /// A 4 MiB source dense with lex errors, parse errors or inline
+    /// imports stops collecting at the compile-wide cap, in bounded time
+    /// and without a diagnostic per bad region: uncapped, `@a` lines alone
+    /// produced 1.4 million diagnostics and about 400 MB. Release takes
+    /// well under a second per source; the debug bound is generous.
+    #[test]
+    fn a_source_dense_with_lex_and_parse_errors_keeps_the_diagnostic_cap() {
+        for line in ["@a\n", "policy\n", "import \"x.rpol\"\n"] {
+            let source = line.repeat(4 * 1024 * 1024 / line.len());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+                let _ = tx.send((result, started.elapsed()));
+            });
+            let (result, elapsed) = rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap_or_else(|_| panic!("4 MiB of {line:?} compiles within 30 s"));
+            let diagnostics = result.expect_err("every line is an error");
+            assert_eq!(diagnostics.len(), MAX_DIAGNOSTICS, "{line:?}");
+            assert!(
+                diagnostics.0.capacity() <= 2 * MAX_DIAGNOSTICS,
+                "{line:?}: {}",
+                diagnostics.0.capacity()
+            );
+            let rendered = diagnostics.render("candidate.rpol", "", false);
+            assert!(
+                rendered.contains(&format!(
+                    "{} more diagnostic(s) not shown; a compile keeps at most {MAX_DIAGNOSTICS}",
+                    MAX_DIAGNOSTICS - MAX_RENDERED_DIAGNOSTICS
+                )),
+                "{line:?}: {}",
+                &rendered[rendered.len().saturating_sub(300)..]
+            );
+            eprintln!(
+                "4 MiB of {line:?}: {} diagnostics in {elapsed:?}",
+                diagnostics.len()
+            );
+        }
+    }
+
+    /// The cap is shared across stages: lex diagnostics come first and
+    /// parse diagnostics fill only the room left.
+    #[test]
+    fn lex_and_parse_diagnostics_share_one_cap() {
+        let source = format!("{}{}", "@\n".repeat(200), "policy\n".repeat(200));
+        let diagnostics = crate::rpol::RpolFile::parse(&source).expect_err("errors");
+        assert_eq!(diagnostics.len(), MAX_DIAGNOSTICS);
+        assert!(
+            diagnostics.0[..200]
+                .iter()
+                .all(|d| d.code == DiagnosticCode::Lex)
+        );
+        assert!(
+            diagnostics.0[200..]
+                .iter()
+                .all(|d| d.code == DiagnosticCode::Parse)
+        );
+        let below = crate::rpol::RpolFile::parse(&"policy\n".repeat(10)).expect_err("errors");
+        assert_eq!(below.len(), 10);
+        assert!(
+            !below
+                .render("candidate.rpol", "", false)
+                .contains("a compile keeps")
+        );
     }
 
     /// Every typecheck diagnostic goes through the cap, including the

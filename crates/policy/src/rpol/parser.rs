@@ -28,13 +28,13 @@ use super::ast::{
     ScalarAttr, SourceFile, Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst,
     WithAssertion,
 };
-use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned};
+use super::diag::{Diagnostic, DiagnosticCode, MAX_DIAGNOSTICS, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
 
-/// Parse a source file, returning the AST and every diagnostic found
-/// (lex + parse). The AST contains every item that parsed cleanly even
-/// when diagnostics are present, so the typechecker can report further
-/// errors in the same run.
+/// Parse a source file, returning the AST and its diagnostics (lex +
+/// parse, at most [`MAX_DIAGNOSTICS`]). The AST contains every item that
+/// parsed cleanly even when diagnostics are present, so the typechecker
+/// can report further errors in the same run.
 #[must_use]
 pub fn parse(source: &str) -> (SourceFile, Vec<Diagnostic>) {
     parse_module(source, 0)
@@ -44,17 +44,16 @@ pub fn parse(source: &str) -> (SourceFile, Vec<Diagnostic>) {
 /// multi-module (LAN-300) entry point used by the import resolver.
 #[must_use]
 pub fn parse_module(source: &str, file: u32) -> (SourceFile, Vec<Diagnostic>) {
-    let (tokens, mut diags) = lex(source, file);
+    let (tokens, diags) = lex(source, file);
     let mut parser = Parser {
         src: source,
         tokens,
         pos: 0,
         file,
-        diags: Vec::new(),
+        diags,
     };
     let file = parser.source_file();
-    diags.append(&mut parser.diags);
-    (file, diags)
+    (file, parser.diags)
 }
 
 struct Parser<'src> {
@@ -122,12 +121,20 @@ impl Parser<'_> {
         self.peek().map_or_else(|| self.eof_span(), |t| t.span)
     }
 
+    /// Collect a diagnostic unless [`MAX_DIAGNOSTICS`] (lex diagnostics
+    /// included) are already held.
+    fn push_diag(&mut self, diag: Diagnostic) {
+        if self.diags.len() < MAX_DIAGNOSTICS {
+            self.diags.push(diag);
+        }
+    }
+
     fn error_expected(&mut self, what: &str) -> Fail {
         let (span, found) = match self.peek() {
             Some(token) => (token.span, token.kind.describe().to_string()),
             None => (self.eof_span(), "end of file".to_string()),
         };
-        self.diags.push(Diagnostic::coded(
+        self.push_diag(Diagnostic::coded(
             DiagnosticCode::Parse,
             span,
             format!("expected {what}, found {found}"),
@@ -155,7 +162,14 @@ impl Parser<'_> {
     /// error occurred in. `stop_at_fn` additionally stops at the
     /// top-level contextual `fn` identifier (LAN-304) — it is not a
     /// keyword token, so top-level recovery names it explicitly.
+    ///
+    /// At the diagnostic cap the compile fails anyway, so recovery skips
+    /// to EOF and parsing ends instead of visiting every later bad region.
     fn recover_to(&mut self, stops: &[Tok], stop_at_fn: bool) {
+        if self.diags.len() >= MAX_DIAGNOSTICS {
+            self.pos = self.tokens.len();
+            return;
+        }
         let mut depth: u32 = 0;
         while let Some(token) = self.peek() {
             if depth == 0
@@ -177,7 +191,7 @@ impl Parser<'_> {
 
     fn parse_u32_text(&mut self, text: &str, span: Span) -> PResult<u32> {
         text.parse::<u32>().map_err(|_| {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!("integer literal `{text}` does not fit in u32"),
@@ -214,7 +228,7 @@ impl Parser<'_> {
                     self.parse_u32_text(hi, token.span)?,
                 );
                 if lo > hi {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Parse,
                         token.span,
                         format!(
@@ -254,7 +268,7 @@ impl Parser<'_> {
 
     fn parse_prefix_text(&mut self, text: &str, span: Span) -> PResult<Prefix> {
         let fail = |parser: &mut Self, detail: &str| {
-            parser.diags.push(Diagnostic::coded(
+            parser.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!("invalid prefix `{text}`: {detail}"),
@@ -311,7 +325,7 @@ impl Parser<'_> {
         };
         let text = self.text(token).to_string();
         let Ok(addr) = text.parse::<IpAddr>() else {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 token.span,
                 format!("invalid IP address `{text}`"),
@@ -328,7 +342,7 @@ impl Parser<'_> {
         let (asn, _) = self.expect_u32("an ASN")?;
         let (count, span) = self.expect_u32("a prepend count")?;
         if count == 0 || count > 255 {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!("prepend count {count} out of range"),
@@ -345,7 +359,7 @@ impl Parser<'_> {
         match parse_prepend_path(&path.node) {
             Ok(asns) => Ok(WithAssertion::PrependPath(asns)),
             Err(reason) => {
-                self.diags.push(Diagnostic::coded(
+                self.push_diag(Diagnostic::coded(
                     DiagnosticCode::Parse,
                     path.span,
                     format!("invalid prepend sequence: {reason}"),
@@ -380,7 +394,7 @@ impl Parser<'_> {
                 let asn: u32 = self.parse_u32_text(asn, span)?;
                 let value: u32 = self.parse_u32_text(value, span)?;
                 if asn > u32::from(u16::MAX) || value > u32::from(u16::MAX) {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Parse,
                         span,
                         format!("invalid standard community `{text}`: both parts must fit in u16"),
@@ -431,7 +445,7 @@ impl Parser<'_> {
                 }
             }
             Tok::CommunityPattern => {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Parse,
                         span,
@@ -580,7 +594,7 @@ impl Parser<'_> {
             None
         };
         if let Some((label, reason)) = problem {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!("invalid community pattern `{text}`: {reason}"),
@@ -605,7 +619,7 @@ impl Parser<'_> {
     ) -> PResult<()> {
         let half = u32::from(u16::MAX);
         if (ipv4_admin || global.min() > half) && local.min() > half {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!(
@@ -630,7 +644,7 @@ impl Parser<'_> {
             return;
         }
         if let Err(reason) = CommunitySet::with_patterns([], patterns).check_pattern_scan() {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Parse,
                     name.span,
@@ -661,7 +675,7 @@ impl Parser<'_> {
         // RFC 4360 encodings: IPv4-admin and 4-octet-AS forms carry a
         // 2-octet local administrator.
         if (ipv4_admin || global > u32::from(u16::MAX)) && local > u32::from(u16::MAX) {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!(
@@ -783,7 +797,7 @@ impl Parser<'_> {
         }
         if let Err(reason) = check_length_bounds(prefix.prefix_len(), address_bits(prefix), ge, le)
         {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 reason,
@@ -888,7 +902,7 @@ impl Parser<'_> {
     fn prefix_len_bound(&mut self, prefix: Prefix, value: u32, span: Span) -> PResult<u8> {
         let max = u32::from(address_bits(prefix));
         if value > max {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 span,
                 format!("prefix length bound {value} exceeds {max}"),
@@ -990,7 +1004,7 @@ impl Parser<'_> {
                     | Tok::IfKw
             ) || (token.kind == Tok::Ident && self.text(token) == "for"))
         {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Parse,
                     token.span,
@@ -1064,7 +1078,7 @@ impl Parser<'_> {
                             "`{}` is an extended community; an argument takes a standard community",
                             self.text(token)
                         );
-                        self.diags.push(Diagnostic::coded(
+                        self.push_diag(Diagnostic::coded(
                             DiagnosticCode::Parse,
                             lit.span,
                             message,
@@ -1119,7 +1133,7 @@ impl Parser<'_> {
             {
                 let span = self.bump().expect("peeked").span;
                 if default_action.is_some() || !terms.is_empty() {
-                    self.diags.push(Diagnostic::coded(
+                    self.push_diag(Diagnostic::coded(
                         DiagnosticCode::Parse,
                         span,
                         "`default-action` is allowed at most once, before all terms",
@@ -1213,7 +1227,7 @@ impl Parser<'_> {
         let start = self.expect(Tok::ApplyKw, "`apply`")?.span;
         if self.at(Tok::LParen) {
             let span = self.here();
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Parse,
                     span,
@@ -1336,7 +1350,7 @@ impl Parser<'_> {
                 && token.kind == Tok::Ident
                 && self.text(token) == "for"
             {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Parse,
                         token.span,
@@ -1397,7 +1411,7 @@ impl Parser<'_> {
                         } else {
                             let (addr, span) = self.expect_ip("an IP address or `self`")?;
                             if let Err(why) = NextHopAction::check_specific(addr) {
-                                self.diags.push(Diagnostic::coded(
+                                self.push_diag(Diagnostic::coded(
                                     DiagnosticCode::Parse,
                                     span,
                                     format!("invalid `set next-hop {addr}`: {why}"),
@@ -1414,7 +1428,7 @@ impl Parser<'_> {
                         Ok(ActionStmt::SetNextHop(arg, token.span.to(end)))
                     }
                     other => {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Parse,
                                 target.span,
@@ -1439,7 +1453,7 @@ impl Parser<'_> {
                     "ext-community" => CommunityKind::Ext,
                     "any-community" => CommunityKind::Any,
                     other => {
-                        self.diags.push(Diagnostic::coded(
+                        self.push_diag(Diagnostic::coded(
                             DiagnosticCode::Parse,
                             kind_ident.span,
                             format!("unknown community kind `{other}`"),
@@ -1578,7 +1592,7 @@ impl Parser<'_> {
     /// [`MAX_EXPR_DEPTH`].
     fn check_expr_depth(&mut self, depth: u32) -> PResult<()> {
         if depth > MAX_EXPR_DEPTH {
-            self.diags.push(
+            self.push_diag(
                 Diagnostic::coded(
                     DiagnosticCode::Parse,
                     self.here(),
@@ -1862,7 +1876,7 @@ impl Parser<'_> {
             }
             Rhs::Field(path) => Ok(ValueExprAst::Field(path)),
             other => {
-                self.diags.push(Diagnostic::coded(
+                self.push_diag(Diagnostic::coded(
                     DiagnosticCode::Parse,
                     other.span(),
                     format!(
@@ -2108,7 +2122,7 @@ impl Parser<'_> {
             expects.push(self.expect_def()?);
         }
         if expects.is_empty() {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 self.here(),
                 "test has no `expect`",
@@ -2203,7 +2217,7 @@ impl Parser<'_> {
                 if let Some(suggestion) = super::diag::closest(other, known) {
                     diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                 }
-                self.diags.push(diag);
+                self.push_diag(diag);
                 Err(Fail)
             }
         }
@@ -2251,7 +2265,7 @@ impl Parser<'_> {
                 {
                     diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                 }
-                self.diags.push(diag);
+                self.push_diag(diag);
                 Err(Fail)
             }
         }
@@ -2283,7 +2297,7 @@ impl Parser<'_> {
                 .expect(Tok::RBracket, "`]` or `,` and another policy")?
                 .span;
             if calls.is_empty() {
-                self.diags.push(Diagnostic::coded(
+                self.push_diag(Diagnostic::coded(
                     DiagnosticCode::Parse,
                     open.to(close),
                     "empty chain",
@@ -2316,7 +2330,7 @@ impl Parser<'_> {
                         kind.node.as_str(),
                         "overflow" | "underflow" | "clamp-inverted"
                     ) {
-                        self.diags.push(
+                        self.push_diag(
                             Diagnostic::coded(
                                 DiagnosticCode::Parse,
                                 kind.span,
@@ -2343,7 +2357,7 @@ impl Parser<'_> {
                         ) {
                             diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                         }
-                        self.diags.push(diag);
+                        self.push_diag(diag);
                         return Err(Fail);
                     }
                     Some(kind)
@@ -2361,7 +2375,7 @@ impl Parser<'_> {
                 // An erroring evaluation discards every staged
                 // modification (ADR-0103 Decision 4), so there is
                 // nothing for a `with` assertion to check.
-                self.diags.push(Diagnostic::coded(
+                self.push_diag(Diagnostic::coded(
                     DiagnosticCode::Parse,
                     with_kw.span,
                     "`with` assertions cannot follow `== error`".to_string(),
@@ -2504,7 +2518,7 @@ impl Parser<'_> {
                 Ok(WithAssertion::Community(self.community_lit()?))
             }
             other => {
-                self.diags.push(
+                self.push_diag(
                     Diagnostic::coded(
                         DiagnosticCode::Parse,
                         field.span,
@@ -2569,7 +2583,7 @@ impl Parser<'_> {
             ),
         };
         if let Some(token) = self.peek().filter(|token| token.kind == wrong) {
-            self.diags.push(Diagnostic::coded(
+            self.push_diag(Diagnostic::coded(
                 DiagnosticCode::Parse,
                 token.span,
                 format!("wrong wildcard for `{}`", super::typeck::kind_keyword(kind)),
