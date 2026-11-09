@@ -609,6 +609,9 @@ impl PolicyService {
             ))
         };
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(expired(evaluated));
+            }
             let page_slot = std::sync::Arc::clone(slot);
             #[cfg(test)]
             let gate = self.page_gate.clone();
@@ -627,7 +630,11 @@ impl PolicyService {
                 });
                 ((state, evaluate), evaluated, next)
             });
-            let (returned, total, next) = match tokio::time::timeout_at(deadline, task).await {
+            let result = tokio::time::timeout_at(deadline, task).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(expired(evaluated));
+            }
+            let (returned, total, next) = match result {
                 Ok(Ok(done)) => done,
                 Ok(Err(error)) => {
                     return Err(Status::internal(format!(
@@ -643,12 +650,18 @@ impl PolicyService {
             let after = after.ok_or_else(|| {
                 Status::unavailable("route pagination returned an empty continuation page")
             })?;
-            page = tokio::time::timeout_at(
+            if tokio::time::Instant::now() >= deadline {
+                return Err(expired(evaluated));
+            }
+            let result = tokio::time::timeout_at(
                 deadline,
                 query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version)),
             )
-            .await
-            .map_err(|_| expired(evaluated))??;
+            .await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(expired(evaluated));
+            }
+            page = result.map_err(|_| expired(evaluated))??;
             require_row_scope(row_scope, &page.routes)?;
         }
     }
@@ -669,12 +682,22 @@ impl PolicyService {
         source: &str,
         read: impl std::future::Future<Output = Result<T, Status>>,
     ) -> Result<T, Status> {
-        tokio::time::timeout_at(deadline, read).await.map_err(|_| {
+        let expired = || {
             Status::deadline_exceeded(format!(
                 "policy dry run exceeded {} s waiting on the {source} before evaluating any routes",
                 self.dry_run_deadline.as_secs()
             ))
-        })?
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        let result = tokio::time::timeout_at(deadline, read)
+            .await
+            .map_err(|_| expired())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        result
     }
 
     /// Attach the daemon's local ASN, which `ComparePolicy` stamps into
@@ -5199,6 +5222,130 @@ policy customer-in(peer_lp: u32) {
         .expect("the slot frees when the late page returns");
         drop(all);
         assert!(!gate.timed_out.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A ready setup reply must not win over an expired deadline, and an
+    /// already expired read must never poll its backend.
+    #[tokio::test(start_paused = true)]
+    async fn dry_run_setup_ready_reply_obeys_deadline() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let (svc, _) = test_policy_service_with(Vec::new(), None);
+        for elapsed in [1, 2, 3] {
+            let polls = std::sync::atomic::AtomicUsize::new(0);
+            let (reply, result) = tokio::sync::oneshot::channel();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let read = svc.dry_run_setup_read(deadline, "RIB", async {
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                result.await.map_err(|_| Status::unavailable("closed"))
+            });
+            tokio::pin!(read);
+            assert!(
+                poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            tokio::time::advance(Duration::from_secs(elapsed)).await;
+            reply.send(()).unwrap();
+            let result = read.await;
+            if elapsed < 2 {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
+            }
+            assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let error = svc
+            .dry_run_setup_read(tokio::time::Instant::now(), "RIB", async {
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Keep the walk unpolled until its blocking result is ready and its
+    /// deadline has passed. Neither a final result nor another page may win.
+    #[tokio::test(start_paused = true)]
+    async fn dry_run_ready_page_obeys_deadline() {
+        use std::future::Future;
+        use std::task::{Context, Wake, Waker};
+
+        struct Ready(std::sync::mpsc::Sender<()>);
+        impl Wake for Ready {
+            fn wake(self: Arc<Self>) {
+                let _ = self.0.send(());
+            }
+        }
+        for (has_more, expired_before_start) in [(false, false), (true, false), (true, true)] {
+            let (svc, _) = test_policy_service_with(Vec::new(), None);
+            let slot = svc.admit_dry_run().unwrap();
+            let (rib_tx, mut rib_rx) = mpsc::channel(8);
+            let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let routes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let evaluated_pages = Arc::clone(&pages);
+            let evaluated_routes = Arc::clone(&routes);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            if expired_before_start {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            let walk = svc.walk_dry_run_pages(
+                &slot,
+                &rib_tx,
+                rustbgpd_rib::RouteQueryScope::Best,
+                None,
+                deadline,
+                rustbgpd_rib::RoutePage {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
+                    routes: vec![customer_route(0)],
+                    total: 2,
+                    has_more,
+                    version: rustbgpd_rib::RoutePageVersion {
+                        epoch: 7,
+                        generation: 11,
+                    },
+                    injection: Vec::new(),
+                },
+                0,
+                (),
+                move |page, ()| {
+                    evaluated_pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    evaluated_routes
+                        .fetch_add(page.routes.len(), std::sync::atomic::Ordering::SeqCst);
+                    1
+                },
+            );
+            tokio::pin!(walk);
+            if !expired_before_start {
+                let (finished, completion) = std::sync::mpsc::channel();
+                let ready = Arc::new(Ready(finished));
+                let waker = Waker::from(Arc::clone(&ready));
+                assert!(
+                    walk.as_mut()
+                        .poll(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
+                // Keep paused time and the walk stopped until JoinHandle
+                // publishes its result and wakes this waiter.
+                completion.recv_timeout(Duration::from_secs(20)).unwrap();
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            assert_eq!(
+                walk.await.unwrap_err().code(),
+                tonic::Code::DeadlineExceeded
+            );
+            let expected = usize::from(!expired_before_start);
+            assert_eq!(pages.load(std::sync::atomic::Ordering::SeqCst), expected);
+            assert_eq!(routes.load(std::sync::atomic::Ordering::SeqCst), expected);
+            assert!(
+                rib_rx.try_recv().is_err(),
+                "no further RIB page is requested"
+            );
+        }
     }
 
     /// The reads that set up a walk share the dry run's deadline: a RIB that
