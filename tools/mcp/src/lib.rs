@@ -1389,7 +1389,9 @@ impl RustbgpdMcp {
                         |kind| strip_enum_prefix(kind.as_str_name(), "ROUTE_EVENT_TYPE_"),
                     ),
                     event_id: event.event_id,
-                    timestamp: event.timestamp,
+                    timestamp: rustbgpd_api::json_format::unix_seconds_string(
+                        event.timestamp_unix_ms,
+                    ),
                     prefix: format!("{}/{}", event.prefix, event.prefix_length),
                     peer_address: event.peer_address,
                     previous_peer_address: event.previous_peer_address,

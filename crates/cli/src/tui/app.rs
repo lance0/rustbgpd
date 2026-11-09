@@ -1227,7 +1227,7 @@ mod tests {
         for index in 0..=MAX_EVENTS {
             app.on_route_event(RouteEventUpdate::Event(RouteEventEntry {
                 kind: crate::tui::data::RouteEventKind::Route,
-                timestamp: index.to_string(),
+                timestamp_unix_ms: i64::try_from(index).unwrap(),
                 event_type: "added".into(),
                 prefix: "203.0.113.0/24".into(),
                 peer_address: "192.0.2.1".into(),

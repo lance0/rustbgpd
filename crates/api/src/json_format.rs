@@ -34,7 +34,10 @@ use crate::proto;
 pub fn bgp_event_to_json_line(event: &proto::BgpEvent) -> String {
     let mut obj = Map::new();
 
-    obj.insert("timestamp".into(), json!(event.timestamp));
+    obj.insert(
+        "timestamp".into(),
+        json!(unix_seconds_string(event.timestamp_unix_ms)),
+    );
     obj.insert("category".into(), json!(category_name(event.category)));
     obj.insert(
         "event_type".into(),
@@ -54,6 +57,13 @@ pub fn bgp_event_to_json_line(event: &proto::BgpEvent) -> String {
     }
 
     Value::Object(obj).to_string()
+}
+
+/// Renders an event's `timestamp_unix_ms` as the decimal-string whole Unix
+/// seconds (truncated) that JSON event views keep in their `timestamp` key.
+#[must_use]
+pub fn unix_seconds_string(timestamp_unix_ms: i64) -> String {
+    timestamp_unix_ms.div_euclid(1000).to_string()
 }
 
 fn category_name(v: i32) -> String {
@@ -191,9 +201,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unix_seconds_string_truncates_milliseconds() {
+        assert_eq!(unix_seconds_string(1_783_915_200_999), "1783915200");
+        assert_eq!(unix_seconds_string(1_783_915_201_000), "1783915201");
+        assert_eq!(unix_seconds_string(0), "0");
+        assert_eq!(unix_seconds_string(-1), "-1");
+    }
+
+    #[test]
     fn renders_operator_friendly_envelope_labels() {
         let event = proto::BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1_999,
             category: proto::EventCategory::Route as i32,
             event_type: proto::BgpEventType::RouteAdded as i32,
             severity: proto::EventSeverity::Info as i32,
@@ -206,6 +224,7 @@ mod tests {
         };
 
         let value: Value = serde_json::from_str(&bgp_event_to_json_line(&event)).unwrap();
+        assert_eq!(value["timestamp"], "1");
         assert_eq!(value["category"], "route");
         assert_eq!(value["event_type"], "BGP_EVENT_TYPE_ROUTE_ADDED");
         assert_eq!(value["severity"], "info");

@@ -110,27 +110,33 @@ fn json_event(event: &RouteEvent) -> JsonRouteEvent {
         previous_peer_address: event.previous_peer_address.clone(),
         target_peer_address: event.target_peer_address.clone(),
         afi_safi: output::format_family(event.afi_safi).to_string(),
-        timestamp: event.timestamp.clone(),
-        timestamp_unix_seconds: timestamp_unix_seconds(&event.timestamp),
+        timestamp: unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_seconds: timestamp_unix_seconds(event.timestamp_unix_ms),
         path_id: event.path_id,
         missed_count: 0,
         reason: event.reason.clone(),
     }
 }
 
-/// Event timestamps travel as decimal Unix seconds in a string field. JSON
-/// keeps that string and adds this numeric form; `None` (JSON `null`) means
-/// the daemon sent something other than integer seconds.
-pub(crate) fn timestamp_unix_seconds(raw: &str) -> Option<u64> {
-    raw.parse().ok()
+/// Event JSON keeps the decimal-string `timestamp`: whole Unix seconds of the
+/// event's `timestamp_unix_ms`, truncated, as the daemon used to send it.
+pub(crate) fn unix_seconds_string(timestamp_unix_ms: i64) -> String {
+    timestamp_unix_ms.div_euclid(1000).to_string()
+}
+
+/// The numeric form of [`unix_seconds_string`]; `None` (JSON `null`) before
+/// the Unix epoch.
+pub(crate) fn timestamp_unix_seconds(timestamp_unix_ms: i64) -> Option<u64> {
+    u64::try_from(timestamp_unix_ms.div_euclid(1000)).ok()
 }
 
 /// Human event lines use the same RFC 3339 UTC rendering as
-/// `config history`; a non-numeric value is shown as received.
-fn human_timestamp(raw: &str) -> String {
-    timestamp_unix_seconds(raw)
+/// `config history`; a time that rendering cannot cover is shown as whole
+/// seconds.
+fn human_timestamp(timestamp_unix_ms: i64) -> String {
+    timestamp_unix_seconds(timestamp_unix_ms)
         .and_then(super::config::format_unix_utc)
-        .unwrap_or_else(|| raw.to_string())
+        .unwrap_or_else(|| unix_seconds_string(timestamp_unix_ms))
 }
 
 fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
@@ -171,7 +177,7 @@ fn format_route_event_line(event: &RouteEvent) -> String {
     };
     format!(
         "[{}] {} {} from {}{}{}{}{}{}",
-        human_timestamp(&event.timestamp),
+        human_timestamp(event.timestamp_unix_ms),
         output::colored_event_type(format_event_type(event.event_type)),
         prefix,
         event.peer_address,
@@ -715,10 +721,10 @@ impl Serialize for JsonBgpEvent<'_> {
         if let Some(Payload::Policy(policy)) = payload {
             map.serialize_entry("target_type", &policy.target_type)?;
         }
-        map.serialize_entry("timestamp", &event.timestamp)?;
+        map.serialize_entry("timestamp", &unix_seconds_string(event.timestamp_unix_ms))?;
         map.serialize_entry(
             "timestamp_unix_seconds",
-            &timestamp_unix_seconds(&event.timestamp),
+            &timestamp_unix_seconds(event.timestamp_unix_ms),
         )?;
         map.end()
     }
@@ -746,7 +752,7 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
         .map_or_else(String::new, |id| format!(" id={id}"));
     let mut line = format!(
         "[{}] {} {}{}",
-        human_timestamp(&event.timestamp),
+        human_timestamp(event.timestamp_unix_ms),
         output::colored_event_type(bgp_event_type_display_label(event.event_type)),
         event.summary,
         event_id
@@ -783,8 +789,8 @@ fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRo
         previous_peer_address: String::new(),
         target_peer_address: String::new(),
         afi_safi: output::format_family(event.afi_safi).to_string(),
-        timestamp: event.timestamp.clone(),
-        timestamp_unix_seconds: timestamp_unix_seconds(&event.timestamp),
+        timestamp: unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_seconds: timestamp_unix_seconds(event.timestamp_unix_ms),
         path_id: 0,
         missed_count: lag.missed_count,
         reason: lag.reason.clone(),
@@ -874,7 +880,6 @@ fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
     };
 
     BgpEvent {
-        timestamp: event.timestamp.clone(),
         timestamp_unix_ms: event.timestamp_unix_ms,
         category: EventCategory::Route as i32,
         event_type,
@@ -1441,7 +1446,7 @@ mod tests {
     )]
     fn legacy_json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         let mut value = serde_json::json!({
-            "timestamp": event.timestamp,
+            "timestamp": unix_seconds_string(event.timestamp_unix_ms),
             "category": match EventCategory::try_from(event.category) {
                 Ok(EventCategory::Route) => "route",
                 Ok(EventCategory::Session) => "session",
@@ -1759,8 +1764,7 @@ mod tests {
         use crate::proto::bgp_event::Payload;
         fn envelope(category: EventCategory, afi_safi: i32) -> BgpEvent {
             BgpEvent {
-                timestamp: "2026-06-15T00:00:00Z".to_string(),
-                timestamp_unix_ms: 0,
+                timestamp_unix_ms: 1_781_481_600_123,
                 category: category as i32,
                 event_type: BgpEventType::PolicyChanged as i32,
                 severity: crate::proto::EventSeverity::Warning as i32,
@@ -1905,7 +1909,8 @@ mod tests {
             // The numeric timestamp is the one field added since the
             // snapshot; everything else must still byte-match it.
             let mut legacy = legacy_json_bgp_event(&event);
-            legacy["timestamp_unix_seconds"] = timestamp_unix_seconds(&event.timestamp).into();
+            legacy["timestamp_unix_seconds"] =
+                timestamp_unix_seconds(event.timestamp_unix_ms).into();
             let legacy = serde_json::to_string(&legacy).expect("legacy serialize should succeed");
             assert_eq!(
                 direct, legacy,
@@ -1925,7 +1930,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "1".to_string(),
             timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
@@ -1966,7 +1970,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "1".to_string(),
             timestamp_unix_ms: 1000,
             previous_peer_address: "10.0.0.2".to_string(),
             target_peer_address: String::new(),
@@ -1996,7 +1999,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "1".to_string(),
             timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
@@ -2024,7 +2026,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "1".to_string(),
             timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: "10.0.0.2".to_string(),
@@ -2075,7 +2076,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "1".to_string(),
             timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
@@ -2333,7 +2333,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "192.0.2.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "123".to_string(),
             timestamp_unix_ms: 123_000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
@@ -2364,7 +2363,6 @@ mod tests {
             prefix_length: 64,
             peer_address: "2001:db8::1".to_string(),
             afi_safi: AddressFamily::Ipv6Unicast as i32,
-            timestamp: "123".to_string(),
             timestamp_unix_ms: 123_000,
             previous_peer_address: "2001:db8::2".to_string(),
             target_peer_address: String::new(),
@@ -2382,7 +2380,7 @@ mod tests {
     #[test]
     fn json_bgp_event_route_includes_common_route_fields() {
         let event = BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Route as i32,
             event_type: BgpEventType::RouteBestChanged as i32,
             severity: 1,
@@ -2525,7 +2523,7 @@ mod tests {
     #[test]
     fn json_bgp_event_session_uses_null_family() {
         let event = BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Session as i32,
             event_type: BgpEventType::SessionEstablished as i32,
             severity: 1,
@@ -2536,7 +2534,7 @@ mod tests {
                 crate::proto::SessionEvent {
                     event_type: BgpEventType::SessionEstablished as i32,
                     peer_address: "10.0.0.1".to_string(),
-                    timestamp: "1".to_string(),
+                    timestamp_unix_ms: 1000,
                     old_state: "OpenConfirm".to_string(),
                     new_state: "Established".to_string(),
                     session_role: "primary".to_string(),
@@ -2554,7 +2552,7 @@ mod tests {
     #[test]
     fn json_bgp_event_stream_lag_includes_missed_count() {
         let event = BgpEvent {
-            timestamp: "2".to_string(),
+            timestamp_unix_ms: 2000,
             category: EventCategory::Route as i32,
             event_type: BgpEventType::StreamLagged as i32,
             severity: 2,
@@ -2581,7 +2579,7 @@ mod tests {
     #[test]
     fn json_route_watch_stream_lag_uses_route_event_shape() {
         let event = BgpEvent {
-            timestamp: "2".to_string(),
+            timestamp_unix_ms: 2000,
             category: EventCategory::Route as i32,
             event_type: BgpEventType::StreamLagged as i32,
             severity: 2,
@@ -2611,7 +2609,7 @@ mod tests {
     #[test]
     fn json_bgp_event_notification_includes_code_and_direction() {
         let event = BgpEvent {
-            timestamp: "2".to_string(),
+            timestamp_unix_ms: 2000,
             category: EventCategory::Session as i32,
             event_type: BgpEventType::NotificationSent as i32,
             severity: 2,
@@ -2622,7 +2620,7 @@ mod tests {
                 crate::proto::NotificationEvent {
                     event_type: BgpEventType::NotificationSent as i32,
                     peer_address: "10.0.0.1".to_string(),
-                    timestamp: "2".to_string(),
+                    timestamp_unix_ms: 2000,
                     direction: "sent".to_string(),
                     code: 6,
                     subcode: 7,
@@ -2648,7 +2646,7 @@ mod tests {
     #[test]
     fn json_bgp_event_policy_includes_mutation_fields() {
         let event = BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Policy as i32,
             event_type: BgpEventType::PolicyChanged as i32,
             severity: 1,
@@ -2660,7 +2658,7 @@ mod tests {
                     target_type: "policy".to_string(),
                     target: "audit-policy".to_string(),
                     affected_peer_count: 2,
-                    timestamp: "1".to_string(),
+                    timestamp_unix_ms: 1000,
                     reason: "policy set policy audit-policy".to_string(),
                     ..Default::default()
                 },
@@ -2726,7 +2724,7 @@ mod tests {
     #[test]
     fn json_bgp_event_dataplane_includes_summary_counts() {
         let event = BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Dataplane as i32,
             event_type: BgpEventType::DataplaneStatusChanged as i32,
             severity: 2,
@@ -2756,7 +2754,7 @@ mod tests {
     #[test]
     fn json_bgp_event_dataplane_route_includes_route_fields() {
         let event = BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Dataplane as i32,
             event_type: BgpEventType::DataplaneRouteFailed as i32,
             severity: 2,
@@ -2777,7 +2775,7 @@ mod tests {
                     next_hop: "192.0.2.1".to_string(),
                     peer_address: "10.0.0.1".to_string(),
                     peer_interface: String::new(),
-                    timestamp: "1".to_string(),
+                    timestamp_unix_ms: 1000,
                     reason: "install_failed:permission denied".to_string(),
                 },
             )),
@@ -2801,7 +2799,7 @@ mod tests {
     #[test]
     fn json_bgp_event_evpn_includes_route_key_and_payloads() {
         let event = BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Evpn as i32,
             event_type: BgpEventType::EvpnRouteBestChanged as i32,
             severity: 1,
@@ -2814,7 +2812,7 @@ mod tests {
                     event_type: BgpEventType::EvpnRouteBestChanged as i32,
                     peer_address: "10.0.0.2".to_string(),
                     previous_peer_address: "10.0.0.3".to_string(),
-                    timestamp: "1".to_string(),
+                    timestamp_unix_ms: 1000,
                     route_type: 2,
                     rd: "65000:100".to_string(),
                     route_key: "type=2 rd=65000:100 mac=aa:bb:cc:dd:ee:ff".to_string(),
@@ -2915,7 +2913,6 @@ mod tests {
             peer_address: "10.0.0.2".to_string(),
             previous_peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "123".to_string(),
             timestamp_unix_ms: 123_000,
             path_id: 7,
             event_id: 0,
@@ -2937,7 +2934,7 @@ mod tests {
     #[test]
     fn json_bgp_event_route_shape_is_stable() {
         let event = BgpEvent {
-            timestamp: "123".to_string(),
+            timestamp_unix_ms: 123_000,
             category: EventCategory::Route as i32,
             event_type: BgpEventType::RouteWithdrawn as i32,
             severity: crate::proto::EventSeverity::Warning as i32,
@@ -2972,7 +2969,7 @@ mod tests {
     #[test]
     fn bfd_event_line_renders_the_scoped_peer() {
         let event = BgpEvent {
-            timestamp: "1790132714".to_string(),
+            timestamp_unix_ms: 1_790_132_714_000,
             category: EventCategory::Bfd as i32,
             event_type: BgpEventType::BfdSessionUp as i32,
             peer_address: "fe80::1".to_string(),
@@ -2994,8 +2991,9 @@ mod tests {
 
     #[test]
     fn event_timestamps_render_rfc3339_in_text_and_epoch_in_json() {
+        // Text and JSON truncate the millisecond time to whole seconds.
         let session = BgpEvent {
-            timestamp: "1790132714".to_string(),
+            timestamp_unix_ms: 1_790_132_714_999,
             category: EventCategory::Session as i32,
             event_type: BgpEventType::SessionStateChanged as i32,
             summary: "session state changed for peer 198.51.100.2: connect -> active".to_string(),
@@ -3019,7 +3017,6 @@ mod tests {
             prefix_length: 24,
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
-            timestamp: "0".to_string(),
             timestamp_unix_ms: 0,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
@@ -3035,31 +3032,38 @@ mod tests {
         assert_eq!(json["timestamp"], "0");
         assert_eq!(json["timestamp_unix_seconds"], 0);
 
-        let odd = BgpEvent {
-            timestamp: "not-a-number".to_string(),
+        // Before the epoch the text shows whole seconds and the numeric JSON
+        // form is null.
+        let early = BgpEvent {
+            timestamp_unix_ms: -1,
             event_type: BgpEventType::PeerAdded as i32,
             summary: "peer 198.51.100.2 added".to_string(),
             ..Default::default()
         };
         assert_eq!(
-            format_bgp_event_line(&odd),
-            "[not-a-number] peer_added peer 198.51.100.2 added"
+            format_bgp_event_line(&early),
+            "[-1] peer_added peer 198.51.100.2 added"
         );
-        assert!(json_bgp_event(&odd)["timestamp_unix_seconds"].is_null());
+        let json = json_bgp_event(&early);
+        assert_eq!(json["timestamp"], "-1");
+        assert!(json["timestamp_unix_seconds"].is_null());
 
-        // Past year 9999 the text falls back to the value as received, while
-        // JSON still carries the exact number.
+        // Past year 9999 the text falls back to whole seconds, while JSON
+        // still carries the exact number.
         let far = BgpEvent {
-            timestamp: u64::MAX.to_string(),
+            timestamp_unix_ms: i64::MAX,
             event_type: BgpEventType::PeerAdded as i32,
             summary: "peer 198.51.100.2 added".to_string(),
             ..Default::default()
         };
         assert_eq!(
             format_bgp_event_line(&far),
-            "[18446744073709551615] peer_added peer 198.51.100.2 added"
+            "[9223372036854775] peer_added peer 198.51.100.2 added"
         );
-        assert_eq!(json_bgp_event(&far)["timestamp_unix_seconds"], u64::MAX);
+        assert_eq!(
+            json_bgp_event(&far)["timestamp_unix_seconds"],
+            9_223_372_036_854_775_u64
+        );
     }
 
     #[test]

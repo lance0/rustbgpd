@@ -1009,7 +1009,7 @@ fn fib_runtime_event_to_bgp_event(
         prefix_length,
         next_hop,
         peer_address: peer_address.clone(),
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         reason: event.reason.clone(),
         peer_interface: event
             .peer_scope
@@ -1020,7 +1020,6 @@ fn fib_runtime_event_to_bgp_event(
     };
 
     rustbgpd_api::proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         timestamp_unix_ms: event.timestamp_unix_ms,
         category: rustbgpd_api::proto::EventCategory::Dataplane as i32,
         event_type: event_type as i32,
@@ -1085,7 +1084,6 @@ fn bfd_runtime_event_to_bgp_event(
             proto::EventSeverity::Info,
         ),
     };
-    let timestamp = rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms);
     let peer_address = event.peer.to_string();
     let old_state = bfd_session_state_to_proto(event.old_state);
     let new_state = bfd_session_state_to_proto(event.new_state);
@@ -1099,7 +1097,6 @@ fn bfd_runtime_event_to_bgp_event(
     let summary = format!("bfd {peer_label} {old_state:?} → {new_state:?} ({diagnostic})");
     proto::BgpEvent {
         timestamp_unix_ms: event.timestamp_unix_ms,
-        timestamp: timestamp.clone(),
         category: proto::EventCategory::Bfd as i32,
         event_type: event_type as i32,
         severity: severity as i32,
@@ -1113,7 +1110,7 @@ fn bfd_runtime_event_to_bgp_event(
         payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
             event_type: event_type as i32,
             peer_address,
-            timestamp,
+            timestamp_unix_ms: event.timestamp_unix_ms,
             old_state: old_state as i32,
             new_state: new_state as i32,
             diagnostic,

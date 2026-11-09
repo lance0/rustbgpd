@@ -3064,6 +3064,14 @@ ADR-0061 per-route FIB apply outcomes, and BFD session state changes.
 | `ListPolicyEvents` | Unary: recent policy / neighbor-set / peer-group / chain mutation events from the peer manager's bounded in-memory history |
 | `ListEvpnEvents` | Unary: recent EVPN route add / withdraw / best-change events from the RIB's bounded in-memory history |
 
+Every event carries its time as `int64 timestamp_unix_ms`, Unix epoch
+milliseconds captured when the event is recorded: the `BgpEvent` envelope and
+each payload (`RouteEvent`, `SessionEvent`, `NotificationEvent`,
+`PolicyEvent`, `DataplaneRouteEvent`, `EvpnRouteEvent` and
+`BfdSessionEvent`) carry the same value. `ListRouteEvents` returns
+`RouteEvent` with the same field. The former decimal-string `timestamp`
+fields are removed, and their numbers and names are reserved.
+
 ### Watch unified events
 
 ```bash

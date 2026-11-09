@@ -473,7 +473,6 @@ pub(crate) fn dataplane_route_event(
         _ => "unknown",
     };
     proto::BgpEvent {
-        timestamp: "123".to_string(),
         timestamp_unix_ms: 123_000,
         category: proto::EventCategory::Dataplane as i32,
         event_type: event_type as i32,
@@ -501,7 +500,7 @@ pub(crate) fn dataplane_route_event(
                 next_hop: "192.0.2.1".to_string(),
                 peer_address: peer_address.to_string(),
                 peer_interface: String::new(),
-                timestamp: "123".to_string(),
+                timestamp_unix_ms: 123_000,
                 reason: action.to_string(),
             },
         )),

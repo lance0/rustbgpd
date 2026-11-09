@@ -772,9 +772,10 @@ The CLI prints nothing when its stream is established, so a backgrounded
 gNMI `Subscribe` does both in order, sending a full snapshot before changes.
 
 Human event lines print timestamps as RFC 3339 UTC, the format `config history`
-uses. JSON event records keep `timestamp`, the daemon's decimal Unix-seconds
-string, and add the same instant as the number `timestamp_unix_seconds`
-(`null` when the daemon sent something other than integer seconds). Session
+uses. JSON event records carry `timestamp`, decimal Unix seconds as a string,
+and the same instant as the number `timestamp_unix_seconds`; both are the
+event's millisecond API time truncated to whole seconds, and
+`timestamp_unix_seconds` is `null` for a time before the Unix epoch. Session
 events report `old_state` and `new_state` in the FSM's snake_case vocabulary
 (`idle`, `connect`, `active`, `open_sent`, `open_confirm`, `established`),
 while `rbgp neighbor` reports `state` in display form (`Idle`, `Connect`,
