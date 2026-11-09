@@ -1648,15 +1648,16 @@ async fn drain_envelope(
     if update.end_of_rib.is_empty() {
         update.end_of_rib = families.to_vec();
     }
-    wire_items(drain_frames(&mut session, update, pressured).await)
+    wire_items(drain_frames(&mut session, update, pressured).await.0)
 }
 
-/// [`drain_envelope`] on a prepared session, returning the frames as sent.
+/// [`drain_envelope`] on a prepared session, returning the frames as sent
+/// and, for each, whether the resume of a parked slice sent it.
 async fn drain_frames(
     session: &mut PeerSession,
     mut update: OutboundRouteUpdate,
     pressured: bool,
-) -> Vec<Bytes> {
+) -> (Vec<Bytes>, Vec<bool>) {
     let (mut frames, completed) = hand_writer(session);
     // One maximum frame plus two markers' worth: a full frame or two
     // markers per step.
@@ -1667,16 +1668,20 @@ async fn drain_frames(
     }
     session.handle_outbound_route_update(update).await;
     let mut sink = Vec::new();
-    let mut parked = false;
+    let mut resumed = Vec::new();
+    let (mut parked, mut resuming) = (false, false);
     for _ in 0..10_000 {
-        parked |= session
-            .pending_outbound
-            .as_ref()
-            .is_some_and(super::outbound::PendingOutbound::slice_parked);
         assert!(session.writer_bytes_held() <= BYTE_BUDGET);
         while let Ok(frame) = frames.try_recv() {
             sink.push(frame);
+            resumed.push(resuming);
         }
+        // An admission step that starts with a parked slice only resumes it.
+        resuming = session
+            .pending_outbound
+            .as_ref()
+            .is_some_and(super::outbound::PendingOutbound::slice_parked);
+        parked |= resuming;
         if session.pending_outbound.is_none() {
             break;
         }
@@ -1691,7 +1696,7 @@ async fn drain_frames(
     assert!(session.pending_outbound.is_none(), "envelope completed");
     assert!(session.writer_priority_tx.is_some(), "session remains up");
     assert_eq!(parked, pressured, "only the pressured drain parks a slice");
-    sink
+    (sink, resumed)
 }
 
 /// A slice parked mid-group and resumed in one-frame steps delivers exactly
@@ -3429,43 +3434,113 @@ fn unicast_form_frame(
         .freeze()
 }
 
+/// A table row: the route, its next-hop action, then the form (`None` is
+/// body NLRI) and the attributes it must send.
+type UnicastFormRow = (
+    Route,
+    Option<rustbgpd_policy::NextHopAction>,
+    Option<(Afi, IpAddr)>,
+    Vec<PathAttribute>,
+);
+
+/// Sent attributes: ORIGIN, `AS_PATH`, `NEXT_HOP` if any, MED. `LOCAL_PREF`
+/// never reaches these eBGP peers.
+fn unicast_form_attrs(as_path: &[u32], next_hop: Option<Ipv4Addr>, med: u32) -> Vec<PathAttribute> {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(as_path.to_vec())],
+        }),
+    ];
+    attrs.extend(next_hop.map(PathAttribute::NextHop));
+    attrs.push(PathAttribute::Med(med));
+    attrs
+}
+
+/// Source attributes learned from AS 65002, with `LOCAL_PREF` before MED.
+fn unicast_form_source(next_hop: Option<Ipv4Addr>, med: u32) -> Arc<AttrSet> {
+    let mut attrs = unicast_form_attrs(&[65002], next_hop, med);
+    attrs.insert(attrs.len() - 1, PathAttribute::LocalPref(100));
+    AttrSet::new(attrs)
+}
+
+/// One frame per group of table rows, in the first row's form and attributes.
+fn unicast_form_frames(table: &[UnicastFormRow], groups: &[&[usize]]) -> Vec<Bytes> {
+    groups
+        .iter()
+        .map(|rows| {
+            let prefixes: Vec<_> = rows.iter().map(|&row| table[row].0.prefix).collect();
+            let (_, _, mp, attrs) = &table[rows[0]];
+            unicast_form_frame(*mp, &prefixes, attrs.clone())
+        })
+        .collect()
+}
+
+/// Send the table as one envelope and return the frames.
+async fn send_unicast_forms(session: &mut PeerSession, table: &[UnicastFormRow]) -> Vec<Bytes> {
+    let routes: Vec<_> = table.iter().map(|row| row.0.clone()).collect();
+    let actions: Vec<_> = table.iter().map(|row| row.1.clone()).collect();
+    let update = OutboundRouteUpdate {
+        announce: routes.into(),
+        next_hop_override: actions.into(),
+        ..OutboundRouteUpdate::default()
+    };
+    drain_frames(session, update, false).await.0
+}
+
+/// The batched exact-export probe agrees with the scalar probe, and each
+/// probed length is the length that route is sent at on its own.
+fn assert_unicast_form_probes(profile: &export::SessionExportProfile, table: &[UnicastFormRow]) {
+    use rustbgpd_rib::{ExactExportCandidate, ExactExportSnapshot};
+    let candidates: Vec<_> = table
+        .iter()
+        .map(|(route, action, ..)| ExactExportCandidate::Unicast {
+            route,
+            next_hop_override: action.as_ref(),
+        })
+        .collect();
+    let batched = profile.probe_announcements(&candidates);
+    for (row, (candidate, result)) in candidates.iter().zip(&batched).enumerate() {
+        let alone = <export::SessionExportProfile as ExactExportSnapshot>::probe_announcement(
+            profile, *candidate,
+        );
+        assert_eq!(*result, alone, "route {row}: batched probe");
+        assert_eq!(
+            result.as_ref().unwrap().encoded_len,
+            unicast_form_frames(table, &[&[row]])[0].len(),
+            "route {row}: probed length is the sent length"
+        );
+    }
+}
+
+/// The shared update-group encoder's frames for one slice of `rows`.
+fn shared_unicast_form_frames<'r>(
+    profile: &export::SessionExportProfile,
+    cache: &mut export::PreparedAttrCache<'r>,
+    routes: &'r [Route],
+    table: &[UnicastFormRow],
+    rows: &[usize],
+) -> Vec<Bytes> {
+    let actions: Vec<_> = table.iter().map(|row| row.1.clone()).collect();
+    shared_group::encode_shared_unicast_slice(profile, cache, routes, &actions, rows)
+        .expect("shareable")
+        .into_iter()
+        .map(|chunk| chunk.bytes)
+        .collect()
+}
+
 /// Every unicast wire form keeps its exact bytes, grouping and order when
 /// routes share one source attribute allocation across forms, repeat it,
 /// or carry an equal value in another allocation. The exact-export probe
 /// and the shared update-group encoder prepare through the same seam.
 #[tokio::test(start_paused = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one route table drives the live sender, the exact-export probe and the shared encoder"
-)]
 async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
-    use rustbgpd_rib::{ExactExportCandidate, ExactExportSnapshot};
     let stored = Ipv4Addr::new(10, 0, 0, 2);
-    let source = |med| {
-        AttrSet::new(vec![
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![65002])],
-            }),
-            PathAttribute::NextHop(stored),
-            PathAttribute::LocalPref(100),
-            PathAttribute::Med(med),
-        ])
-    };
     // A route-server client gets the attributes unchanged, less LOCAL_PREF.
-    let sent = |med, next_hop: Option<Ipv4Addr>| {
-        let mut attrs = vec![
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![65002])],
-            }),
-        ];
-        attrs.extend(next_hop.map(PathAttribute::NextHop));
-        attrs.push(PathAttribute::Med(med));
-        attrs
-    };
+    let sent = |med, next_hop| unicast_form_attrs(&[65002], next_hop, med);
     let (body, bare) = (|med| sent(med, Some(stored)), |med| sent(med, None));
     // `s` is shared across forms, `e` equals it in another allocation.
+    let source = |med| unicast_form_source(Some(stored), med);
     let (shared, equal, other) = (source(7), source(7), source(8));
     let (s, e, o) = (&shared, &equal, &other);
     let (v4, a6, b6) = ("10.0.0.2", "2001:db8::1", "2001:db8::2");
@@ -3474,9 +3549,7 @@ async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
     let mp4 = |next_hop: &str| Some((Afi::Ipv4, next_hop.parse().unwrap()));
     let mp6 = |next_hop: &str| Some((Afi::Ipv6, next_hop.parse().unwrap()));
     let to = |next_hop| Some(rustbgpd_policy::NextHopAction::Specific(next_hop));
-    // Route, next-hop action, then the form (`None` is body NLRI) and the
-    // attributes it must send.
-    let mut table = Vec::new();
+    let mut table: Vec<UnicastFormRow> = Vec::new();
     let mut row = |prefix, attributes, next_hop, action, mp, attrs| {
         let route = unicast_form_route(prefix, attributes, next_hop);
         table.push((route, action, mp, attrs));
@@ -3497,30 +3570,14 @@ async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
     row("2001:db8:0:c::/64", s, a6, to(policy_v6), form, bare(7));
     let (action, attrs) = (to(policy_v4.into()), sent(7, Some(policy_v4)));
     row("20.0.0.13/32", s, v4, action, None, attrs);
-    let routes: Arc<Vec<Route>> = Arc::new(table.iter().map(|row| row.0.clone()).collect());
-    let actions: Vec<_> = table.iter().map(|row| row.1.clone()).collect();
-    let frames = |groups: &[&[usize]]| -> Vec<Bytes> {
-        groups
-            .iter()
-            .map(|rows| {
-                let prefixes: Vec<_> = rows.iter().map(|&row| routes[row].prefix).collect();
-                let (_, _, mp, attrs) = &table[rows[0]];
-                unicast_form_frame(*mp, &prefixes, attrs.clone())
-            })
-            .collect()
-    };
+    let frames = |groups: &[&[usize]]| unicast_form_frames(&table, groups);
 
     let (mut session, _wire) = unicast_forms_session().await;
     let profile = session.publish_export_profile();
-    let update = OutboundRouteUpdate {
-        announce: Arc::clone(&routes),
-        next_hop_override: actions.clone().into(),
-        ..OutboundRouteUpdate::default()
-    };
     // IPv4 body groups, then IPv4 MP_REACH groups, then IPv6 groups, each
     // in first-arrival order with pointer and value joins.
     assert_eq!(
-        drain_frames(&mut session, update, false).await,
+        send_unicast_forms(&mut session, &table).await,
         frames(&[
             &[0, 2, 3],
             &[4],
@@ -3532,39 +3589,14 @@ async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
             &[12]
         ])
     );
-
-    let candidates: Vec<_> = routes
-        .iter()
-        .zip(&actions)
-        .map(|(route, action)| ExactExportCandidate::Unicast {
-            route,
-            next_hop_override: action.as_ref(),
-        })
-        .collect();
-    let batched = profile.probe_announcements(&candidates);
-    for (row, (candidate, result)) in candidates.iter().zip(&batched).enumerate() {
-        let alone = <export::SessionExportProfile as ExactExportSnapshot>::probe_announcement(
-            &profile, *candidate,
-        );
-        assert_eq!(*result, alone, "route {row}: batched probe");
-        assert_eq!(
-            result.as_ref().unwrap().encoded_len,
-            frames(&[&[row]])[0].len(),
-            "route {row}: probed length is the sent length"
-        );
-    }
+    assert_unicast_form_probes(&profile, &table);
 
     // The shared encoder groups by source and prepared allocation only.
+    let routes: Vec<_> = table.iter().map(|row| row.0.clone()).collect();
+    let rows: Vec<_> = (0..table.len()).collect();
     let mut cache = export::PreparedAttrCache::default();
-    let rows: Vec<_> = (0..routes.len()).collect();
-    let chunks =
-        shared_group::encode_shared_unicast_slice(&profile, &mut cache, &routes, &actions, &rows)
-            .expect("shareable");
     assert_eq!(
-        chunks
-            .into_iter()
-            .map(|chunk| chunk.bytes)
-            .collect::<Vec<_>>(),
+        shared_unicast_form_frames(&profile, &mut cache, &routes, &table, &rows),
         frames(&[
             &[0, 2],
             &[1, 7],
@@ -3578,6 +3610,99 @@ async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
             &[12],
             &[13]
         ])
+    );
+}
+
+/// The same exact-bytes check for next hops the session supplies itself: an
+/// eBGP peer that is not a route-server client (`NEXT_HOP` is rewritten to
+/// the local IPv4 address, then stripped for `MP_REACH_NLRI`), next-hop
+/// self, and source attributes with no `NEXT_HOP` to strip. A second shared
+/// encoder slice reuses an entry the first slice already stripped.
+#[tokio::test(start_paused = true)]
+async fn rewritten_self_and_absent_next_hops_keep_exact_bytes() {
+    let stored = Ipv4Addr::new(10, 0, 0, 2);
+    // `w` stores a NEXT_HOP, `e` equals it in another allocation, `b` has none.
+    let (with, equal, bare) = (
+        unicast_form_source(Some(stored), 7),
+        unicast_form_source(Some(stored), 7),
+        unicast_form_source(None, 7),
+    );
+    let (w, e, b) = (&with, &equal, &bare);
+    let (v4, a6) = ("10.0.0.2", "2001:db8::1");
+    let own = || Some(rustbgpd_policy::NextHopAction::Self_);
+
+    // eBGP, not a route-server client: AS_PATH gains the local AS and every
+    // MP_REACH next hop is the session's own IPv6 address.
+    let (mut session, _wire) = unicast_forms_session().await;
+    session.config.route_server_client = false;
+    let local6: Ipv6Addr = "2001:db8::ffff".parse().unwrap();
+    session.config.local_ipv6_nexthop = Some(local6);
+    let profile = session.publish_export_profile();
+    let sent = |next_hop| unicast_form_attrs(&[65001, 65002], next_hop, 7);
+    let (mp4, mp6) = (
+        Some((Afi::Ipv4, IpAddr::V6(local6))),
+        Some((Afi::Ipv6, IpAddr::V6(local6))),
+    );
+    let mut table: Vec<UnicastFormRow> = Vec::new();
+    let mut row = |prefix, attributes, next_hop, action, mp, attrs| {
+        let route = unicast_form_route(prefix, attributes, next_hop);
+        table.push((route, action, mp, attrs));
+    };
+    // NEXT_HOP rewritten to the local IPv4 address, then stripped.
+    row("20.1.0.0/32", w, v4, None, mp4, sent(None));
+    row("20.1.0.1/32", w, v4, None, mp4, sent(None));
+    row("20.1.0.2/32", e, v4, None, mp4, sent(None));
+    let local4 = Some(profile.local_ipv4());
+    row("20.1.0.3/32", w, v4, own(), None, sent(local4));
+    row("2001:db8:1:4::/64", w, a6, None, mp6, sent(None));
+    // Nothing to strip; equal to the stripped sets by value.
+    row("2001:db8:1:5::/64", b, a6, None, mp6, sent(None));
+    // NEXT_HOP added for the IPv4 route, then stripped.
+    row("20.1.0.6/32", b, v4, None, mp4, sent(None));
+    assert_eq!(
+        send_unicast_forms(&mut session, &table).await,
+        unicast_form_frames(&table, &[&[3], &[0, 1, 2, 6], &[4, 5]])
+    );
+    assert_unicast_form_probes(&profile, &table);
+
+    // Route-server client: next-hop self, and sources without a NEXT_HOP.
+    let (mut session, _wire) = unicast_forms_session().await;
+    let profile = session.publish_export_profile();
+    let sent = |next_hop| unicast_form_attrs(&[65002], next_hop, 7);
+    let (mp4, mp6) = (
+        Some((Afi::Ipv4, a6.parse().unwrap())),
+        Some((Afi::Ipv6, a6.parse().unwrap())),
+    );
+    let mut table: Vec<UnicastFormRow> = Vec::new();
+    let mut row = |prefix, attributes, next_hop, action, mp, attrs| {
+        let route = unicast_form_route(prefix, attributes, next_hop);
+        table.push((route, action, mp, attrs));
+    };
+    let local4 = Some(profile.local_ipv4());
+    row("20.2.0.0/32", w, v4, own(), None, sent(local4));
+    row("20.2.0.1/32", b, a6, None, mp4, sent(None));
+    row("20.2.0.2/32", w, a6, None, mp4, sent(None));
+    row("2001:db8:2:3::/64", b, a6, None, mp6, sent(None));
+    row("2001:db8:2:4::/64", w, a6, own(), mp6, sent(None));
+    row("2001:db8:2:5::/64", w, a6, None, mp6, sent(None));
+    row("2001:db8:2:6::/64", w, a6, None, mp6, sent(None));
+    let frames = |groups: &[&[usize]]| unicast_form_frames(&table, groups);
+    assert_eq!(
+        send_unicast_forms(&mut session, &table).await,
+        frames(&[&[0], &[1, 2], &[3, 4, 5, 6]])
+    );
+    assert_unicast_form_probes(&profile, &table);
+
+    // Row 6 hits the entry row 5 stripped in the first slice.
+    let routes: Vec<_> = table.iter().map(|row| row.0.clone()).collect();
+    let mut cache = export::PreparedAttrCache::default();
+    assert_eq!(
+        shared_unicast_form_frames(&profile, &mut cache, &routes, &table, &[0, 1, 2, 3, 5]),
+        frames(&[&[0], &[1], &[2], &[3], &[5]])
+    );
+    assert_eq!(
+        shared_unicast_form_frames(&profile, &mut cache, &routes, &table, &[4, 6]),
+        frames(&[&[4], &[6]])
     );
 }
 
@@ -3614,9 +3739,9 @@ async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
     };
 
     let (mut session, _wire) = unicast_forms_session().await;
-    let reference = drain_frames(&mut session, update(), false).await;
+    let reference = drain_frames(&mut session, update(), false).await.0;
     let mut seen = Vec::new();
-    let mut frames_per_form = [0; 3];
+    let mut forms = Vec::new();
     for frame in &reference {
         assert!(frame.len() <= usize::from(rustbgpd_wire::MAX_MESSAGE_LEN));
         let Message::Update(message) =
@@ -3637,11 +3762,11 @@ async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
         if let Some(mp) = mp {
             assert_eq!(body_next_hop, None, "no NEXT_HOP beside MP_REACH_NLRI");
             assert_eq!(mp.next_hop, mp_next_hop);
-            frames_per_form[if mp.afi == Afi::Ipv4 { 1 } else { 2 }] += 1;
+            forms.push(if mp.afi == Afi::Ipv4 { 1 } else { 2 });
             seen.extend(mp.announced.iter().map(|entry| entry.prefix));
         } else {
             assert_eq!(body_next_hop, Some(stored));
-            frames_per_form[0] += 1;
+            forms.push(0);
             seen.extend(
                 parsed
                     .announced
@@ -3651,6 +3776,13 @@ async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
         }
     }
     assert_eq!(seen, prefixes, "every route once, in source order");
+    let per_form = |frames: &mut dyn Iterator<Item = usize>| {
+        frames.fold([0; 3], |mut counts, form| {
+            counts[form] += 1;
+            counts
+        })
+    };
+    let frames_per_form = per_form(&mut forms.iter().copied());
     assert!(
         frames_per_form.iter().all(|&frames| frames > 1),
         "each form's one group spans several frames: {frames_per_form:?}"
@@ -3670,5 +3802,13 @@ async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
     );
 
     let (mut session, _wire) = unicast_forms_session().await;
-    assert_eq!(drain_frames(&mut session, update(), true).await, reference);
+    let (frames, resumed) = drain_frames(&mut session, update(), true).await;
+    assert_eq!(frames, reference);
+    // Every form had frames sent by a resume, which rebuilds its attributes.
+    let resumed_forms = forms.iter().zip(&resumed).filter(|(_, sent)| **sent);
+    let resumed_per_form = per_form(&mut resumed_forms.map(|(form, _)| *form));
+    assert!(
+        resumed_per_form.iter().all(|&frames| frames > 0),
+        "{resumed_per_form:?}"
+    );
 }
