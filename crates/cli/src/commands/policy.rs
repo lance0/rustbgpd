@@ -397,9 +397,12 @@ struct JsonLocation {
     end_column: usize,
 }
 
+// Bound index storage while keeping each UTF-8 lookup within 67 source bytes.
+const COLUMN_CHECKPOINT_BYTES: usize = 64;
+
 /// One module's display path and text, with its line starts indexed
-/// once. Character columns are cached on the first lookup in each line,
-/// so repeated diagnostics never rescan a long line.
+/// once. Character-column checkpoints bound each lookup to a short scan,
+/// without a column allocation for every source byte.
 struct SourceLines<'a> {
     name: &'a str,
     text: &'a str,
@@ -413,6 +416,8 @@ struct SourceLines<'a> {
     column_tables_built: std::cell::Cell<usize>,
     #[cfg(test)]
     column_lookups: std::cell::Cell<usize>,
+    #[cfg(test)]
+    column_lookup_bytes_scanned: std::cell::Cell<usize>,
 }
 
 impl<'a> SourceLines<'a> {
@@ -431,6 +436,8 @@ impl<'a> SourceLines<'a> {
             column_tables_built: std::cell::Cell::new(0),
             #[cfg(test)]
             column_lookups: std::cell::Cell::new(0),
+            #[cfg(test)]
+            column_lookup_bytes_scanned: std::cell::Cell::new(0),
         }
     }
 
@@ -461,16 +468,22 @@ impl<'a> SourceLines<'a> {
             if ascii {
                 return Vec::new();
             }
-            let mut columns = vec![0; text.len() + 1];
+            let mut columns = Vec::with_capacity(text.len() / COLUMN_CHECKPOINT_BYTES + 1);
             let mut column = 1;
+            let mut next_checkpoint = 0;
             for (byte, ch) in text.char_indices() {
                 #[cfg(test)]
                 self.column_bytes_scanned
                     .set(self.column_bytes_scanned.get() + ch.len_utf8());
-                columns[byte..byte + ch.len_utf8()].fill(column);
+                if next_checkpoint < byte + ch.len_utf8() {
+                    columns.push(column);
+                    next_checkpoint += COLUMN_CHECKPOINT_BYTES;
+                }
                 column += 1;
             }
-            columns[text.len()] = column;
+            if next_checkpoint == text.len() {
+                columns.push(column);
+            }
             columns
         });
         #[cfg(test)]
@@ -478,7 +491,15 @@ impl<'a> SourceLines<'a> {
         let column = if columns.is_empty() {
             offset - start + 1
         } else {
-            columns[offset - start]
+            let checkpoint = (offset - start) / COLUMN_CHECKPOINT_BYTES;
+            let byte = self
+                .text
+                .floor_char_boundary(start + checkpoint * COLUMN_CHECKPOINT_BYTES);
+            let tail = &self.text[byte..offset];
+            #[cfg(test)]
+            self.column_lookup_bytes_scanned
+                .set(self.column_lookup_bytes_scanned.get() + tail.len());
+            columns[checkpoint] + tail.chars().count()
         };
         (line, column)
     }
@@ -3510,14 +3531,84 @@ mod tests {
         for text in ["@a ".repeat(349_526), "é😀 ".repeat(150_000)] {
             let source = SourceLines::new("f", &text);
             let scan_budget = text.len() + usize::from(!text.is_ascii());
-            for offset in (0..=text.len()).rev() {
+            let mut lookups = 0;
+            for offset in (0..=text.len()).rev().step_by(257) {
+                let before = source.column_lookup_bytes_scanned.get();
                 let _ = source.line_col(offset);
+                assert!(source.column_lookup_bytes_scanned.get() - before <= 67);
+                lookups += 1;
                 assert!(source.column_bytes_scanned.get() <= scan_budget);
+                assert!(source.column_lookup_bytes_scanned.get() <= lookups * 67);
             }
             assert_eq!(source.column_tables_built.get(), 1);
-            assert_eq!(source.column_lookups.get(), text.len() + 1);
+            assert_eq!(source.column_lookups.get(), lookups);
             assert_eq!(source.column_bytes_scanned.get(), scan_budget);
+            assert!(source.columns.borrow()[&1].len() <= text.len() / COLUMN_CHECKPOINT_BYTES + 1);
+            assert!(
+                source.columns.borrow()[&1].capacity() * std::mem::size_of::<usize>()
+                    <= text.len() / 8 + 64
+            );
         }
+    }
+
+    #[test]
+    fn diagnostic_checkpoints_preserve_utf8_boundaries_and_eof() {
+        for padding in 60..=68 {
+            for ch in ["é", "€", "😀"] {
+                let line = format!("{}{ch}{}{ch}z", "a".repeat(padding), "b".repeat(64));
+                let text = format!("{line}\n\n{line}");
+                let source = SourceLines::new("f", &text);
+                for offset in 0..=text.len() + 2 {
+                    let lookup_bytes_before = source.column_lookup_bytes_scanned.get();
+                    let before = &text[..text.floor_char_boundary(offset)];
+                    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+                    let expected = (
+                        before.matches('\n').count() + 1,
+                        before[line_start..].chars().count() + 1,
+                    );
+                    assert_eq!(
+                        source.line_col(offset),
+                        expected,
+                        "{padding} {ch} @{offset}"
+                    );
+                    assert!(source.column_lookup_bytes_scanned.get() - lookup_bytes_before <= 67);
+                }
+                assert_eq!(source.column_tables_built.get(), 3);
+                assert_eq!(source.column_lookups.get(), text.len() + 3);
+                assert!(source.column_bytes_scanned.get() <= text.len() * 2);
+                assert!(
+                    source.column_lookup_bytes_scanned.get() <= source.column_lookups.get() * 67
+                );
+                for (&line, columns) in source.columns.borrow().iter() {
+                    let start = source.line_starts[line - 1];
+                    let end = source.line_starts.get(line).copied().unwrap_or(text.len());
+                    assert!(columns.len() <= (end - start) / COLUMN_CHECKPOINT_BYTES + 1);
+                    assert!(
+                        columns.capacity() * std::mem::size_of::<usize>() <= (end - start) / 8 + 64
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_column_cache_is_sparse_for_a_long_unicode_comment() {
+        let text = format!("@ #{}é", "a".repeat(1_048_571));
+        assert_eq!(text.len(), 1_048_576);
+        let source = SourceLines::new("f", &text);
+        assert_eq!(source.line_col(0), (1, 1));
+        assert_eq!(source.column_tables_built.get(), 1);
+        assert_eq!(source.column_lookups.get(), 1);
+        assert_eq!(source.column_bytes_scanned.get(), text.len() * 2 - 1);
+        assert_eq!(source.column_lookup_bytes_scanned.get(), 0);
+        assert!(
+            source.columns.borrow()[&1].capacity() * std::mem::size_of::<usize>()
+                <= text.len() / 8 + 64
+        );
+        assert!(source.columns.borrow()[&1].len() <= text.len() / COLUMN_CHECKPOINT_BYTES + 1);
+        assert_eq!(source.line_col(text.len()), (1, text.chars().count() + 1));
+        assert_eq!(source.column_lookups.get(), 2);
+        assert!(source.column_lookup_bytes_scanned.get() <= 67);
     }
 
     #[test]

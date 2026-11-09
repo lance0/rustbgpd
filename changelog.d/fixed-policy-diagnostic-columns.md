@@ -1,4 +1,5 @@
 ### Fixed
 
-- Locate repeated `rbgp policy check` diagnostics without rescanning long lines,
-  and avoid building JSON compile findings in text mode.
+- Locate repeated `rbgp policy check` diagnostics without rescanning long lines
+  or allocating a column entry per byte, and avoid unused JSON compile findings
+  in text mode.
