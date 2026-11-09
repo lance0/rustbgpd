@@ -17,6 +17,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Safi};
 
 use super::RibManager;
+use super::eor_hold::{EorHold, EorTrigger};
 
 /// Process-wide ceiling across every typed identity retained while route
 /// selection is frozen.  One million matches the documented per-neighbor
@@ -1659,12 +1660,8 @@ impl RibManager {
             .peer_sendable_families
             .iter()
             .inspect(|_| checkpoint())
-            .filter(|(peer, _)| {
-                // Only sessions whose initial marker was withheld still owe EoR.
-                self.pending_eor
-                    .get(peer)
-                    .is_some_and(|families| families.contains(&family))
-            })
+            // Only sessions whose initial marker was withheld still owe EoR.
+            .filter(|&(&peer, _)| self.eor.owes(peer, family))
             .map(|(&peer, _)| {
                 (
                     peer,
@@ -1686,12 +1683,7 @@ impl RibManager {
         // succeeds, preserving table-before-EoR ordering.
         for (&peer, &evpn_coverage_required) in &peers {
             checkpoint();
-            if !evpn_coverage_required
-                && !self
-                    .pending_eor
-                    .get(&peer)
-                    .is_some_and(|families| families.contains(&family))
-            {
+            if !evpn_coverage_required && !self.eor.owes(peer, family) {
                 // Recomputing this family can already admit its marker in
                 // a partial resync while another family stays held.
                 continue;
@@ -1716,7 +1708,7 @@ impl RibManager {
                         continue;
                     }
                 }
-                self.flush_pending_eor(peer);
+                self.release_eor_hold(peer, EorHold::Selection, EorTrigger::Release);
             }
         }
         let refresh_peers: Vec<_> = self
@@ -1766,16 +1758,15 @@ impl RibManager {
             return;
         }
         let peers: Vec<_> = self
-            .pending_eor
-            .iter()
+            .eor
+            .peers()
             .inspect(|_| self.replacement_checkpoint(false))
-            .filter_map(|(&peer, families)| {
-                (families.contains(&family)
+            .filter(|&peer| {
+                self.eor.owes(peer, family)
                     && !self.evpn_feed_is_current(peer)
                     && !self.evpn_recovery_reset_pending(peer)
                     && (self.evpn_grouped_member_of(peer).is_some()
-                        || self.has_private_evpn_handoff(peer)))
-                .then_some(peer)
+                        || self.has_private_evpn_handoff(peer))
             })
             .collect();
         let mut feeds = HashMap::new();
@@ -1821,10 +1812,7 @@ impl RibManager {
                 .inspect(|_| self.replacement_checkpoint(false))
                 .filter_map(|(&peer, families)| {
                     (families.contains(&family)
-                        && self
-                            .pending_eor
-                            .get(&peer)
-                            .is_some_and(|held| held.contains(&family))
+                        && self.eor.owes(peer, family)
                         && (self.evpn_grouped_member_of(peer).is_some()
                             || self.has_private_evpn_handoff(peer)))
                     .then_some(peer)
@@ -1832,7 +1820,6 @@ impl RibManager {
                 .collect();
             for peer in peers {
                 self.replacement_checkpoint(false);
-                self.pending_eor.entry(peer).or_default().insert(family);
                 self.capture_clean_evpn_before_dirty(peer);
             }
         }
@@ -2183,7 +2170,7 @@ impl RibManager {
             }
             // RFC 4684 §6 holds whose RT-Constrain EoR arrived during the
             // deferral end here, behind the routes the rebuild emitted.
-            self.release_ready_rtc_eor_holds();
+            self.release_completed_rt_membership_holds();
         }
         // Overflow state and logical byte budget stay sticky until every
         // typed store and RTC side effect for the family has completed.

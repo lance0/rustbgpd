@@ -1427,7 +1427,7 @@ fn withheld_family_eor_is_deferred_for_an_orf_gated_restarter() {
         .flat_map(|u| u.end_of_rib)
         .collect();
     assert_eq!(eor, ipv4_sendable());
-    assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
+    assert!(manager.eor_behind_orf_table(peer).contains(&ipv6));
 }
 
 /// After the registration `EoR`, unlocking the withheld family still sends
@@ -1694,7 +1694,7 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
 }
 
 /// A GR restarter whose unlocked family is still ORF-gated gets no `EoR`
-/// ahead of the gated flood: the marker waits in `gr_deferred_eor`.
+/// ahead of the gated flood: the marker waits behind the ORF table.
 #[test]
 fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
     let (_tx, rx) = mpsc::channel(1);
@@ -1723,7 +1723,7 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
         .flat_map(|u| u.end_of_rib)
         .collect();
     assert_eq!(eor, vec![], "no EoR ahead of the gated flood");
-    assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
+    assert!(manager.eor_behind_orf_table(peer).contains(&ipv6));
 }
 
 /// The same for a helper that may hold our routes stale, within its ORF
@@ -1756,7 +1756,7 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_stale_holder() {
         .flat_map(|u| u.end_of_rib)
         .collect();
     assert_eq!(eor, vec![], "no EoR ahead of the gated flood");
-    assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
+    assert!(manager.eor_behind_orf_table(peer).contains(&ipv6));
 }
 
 /// RFC 4271 §6.8 collision: `PeerUp(A)`, `PeerUp(B)`, then A's unlock, then
@@ -10514,11 +10514,7 @@ async fn queued_refresh_keeps_initial_eor_and_saturation_per_member() {
     let (tx, rx) = mpsc::channel(8);
     manager.rx = rx;
     let family = (Afi::Ipv4, Safi::Unicast);
-    manager
-        .gr_deferred_eor
-        .entry(peers[0])
-        .or_default()
-        .insert(family);
+    manager.owe_eor_behind_orf_table(peers[0], family);
     let held: Vec<_> = (0..8)
         .map(|_| {
             manager.outbound_peers[&peers[1]]
@@ -10539,7 +10535,7 @@ async fn queued_refresh_keeps_initial_eor_and_saturation_per_member() {
     let eor = receivers[0].try_recv().map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, vec![family]);
     assert!(eor.announce.is_empty());
-    assert!(!manager.gr_deferred_eor.contains_key(&peers[0]));
+    assert!(manager.eor_behind_orf_table(peers[0]).is_empty());
     assert!(receivers[1].try_recv().map(delivered).is_err());
     // The refused answer is refresh-only debt: not a dirty resync.
     assert!(!manager.dirty_peers.contains(&peers[1]));
@@ -12328,7 +12324,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
         );
     }
     let family = (Afi::Ipv4, Safi::MplsVpn);
-    manager.pending_eor.entry(peer).or_default().insert(family);
+    manager.owe_eor(peer, family);
     if stage == "group_prior_retirement" {
         // A durable fallback replaces the copied prior; exercise the copy.
         super::update_groups_recovery::detach_fallback_record(&mut manager, peer);
@@ -12409,7 +12405,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     assert_eq!(recovered.vpn_withdraw, vec![withdrawn]);
     assert_eq!(recovered.end_of_rib, vec![family]);
     assert!(!manager.dirty_peers.contains(&peer));
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     assert!(manager.pending_group_admitted.is_empty());
     assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
     assert!(manager.replacement_readiness.is_none());
@@ -12603,7 +12599,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 127);
     assert!(!manager.selection_deferred(family));
     assert!(!manager.dirty_peers.contains(&peer));
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     assert!(manager.pending_group_admitted.is_empty());
     assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
     assert!(manager.replacement_readiness.is_none());
@@ -13552,7 +13548,7 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
         outbound.try_recv().map(delivered).unwrap();
     }
     let family = (Afi::Ipv4, Safi::Unicast);
-    manager.pending_eor.entry(stuck).or_default().insert(family);
+    manager.owe_eor(stuck, family);
     let (tx, rx) = mpsc::channel(8);
     manager.rx = rx;
     let (query_tx, query_rx) = mpsc::channel(8);
@@ -13648,7 +13644,7 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
         vec![(full_channel_prefix(0), 0)]
     );
     assert_eq!(recovered.end_of_rib, vec![family]);
-    assert!(!manager.pending_eor.contains_key(&stuck));
+    assert!(manager.eor_pending(stuck).is_empty());
     assert!(!manager.dirty_peers.contains(&stuck));
     assert_eq!(manager.dirty_since[&stuck], dirty_since);
     assert!(manager.pending_group_admitted.is_empty());
@@ -13766,11 +13762,7 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
     let mut entered = Vec::new();
     let mut releases = Vec::new();
     for &peer in &peers[..ages.len()] {
-        manager
-            .pending_eor
-            .entry(peer)
-            .or_default()
-            .insert((Afi::Ipv4, Safi::Unicast));
+        manager.owe_eor(peer, (Afi::Ipv4, Safi::Unicast));
         let (entered_tx, entered_rx) = mpsc::unbounded_channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         manager.peer_export_encoders.insert(
@@ -13867,7 +13859,7 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
     assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
     assert!(manager.replacement_readiness.is_none());
     assert!(manager.readiness_rx.is_some());
-    assert!(manager.pending_eor.is_empty());
+    assert!(manager.eor.is_empty());
     for response in general {
         let update = manager.query_rx.try_recv().unwrap();
         manager.handle_update(update);

@@ -996,7 +996,7 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
     );
     while manager.process_next_route_chunk() {}
     // Capacity one admits the initial routes but forces the separate EoR
-    // into pending_eor. No scheduler race or synthetic pending state.
+    // among the owed End-of-RIB markers. No scheduler race or synthetic pending state.
     let (outbound_tx, mut out_rx) = mpsc::channel(1);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1016,7 +1016,7 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    assert!(manager.pending_eor[&peer].contains(&family));
+    assert!(manager.eor_pending(peer).contains(&family));
     assert!(manager.dirty_peers.contains(&peer));
     assert!(
         !out_rx
@@ -1041,7 +1041,7 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
     let resync = out_rx.try_recv().map(delivered).unwrap();
     assert_eq!(resync.refresh_markers.len(), 0);
     assert_eq!(resync.end_of_rib, vec![family]);
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     manager.send_route_refresh_response(peer, family.0, family.1);
     assert_eq!(
         out_rx.try_recv().map(delivered).unwrap().refresh_markers,
@@ -1260,10 +1260,7 @@ async fn peer_down_clears_gr_deferred_eor() {
         negotiated_llgr_families: Vec::new(),
     });
     assert!(
-        manager
-            .gr_deferred_eor
-            .get(&peer)
-            .is_some_and(|families| families.contains(&family)),
+        manager.eor_behind_orf_table(peer).contains(&family),
         "GR restarter with a gated family must have its EoR deferral armed"
     );
 
@@ -1273,7 +1270,7 @@ async fn peer_down_clears_gr_deferred_eor() {
         session_id: 0,
     });
     assert!(
-        !manager.gr_deferred_eor.contains_key(&peer),
+        manager.eor_behind_orf_table(peer).is_empty(),
         "peer down must clear the outstanding EoR deferral"
     );
 }

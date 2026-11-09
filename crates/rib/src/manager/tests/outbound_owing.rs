@@ -864,9 +864,9 @@ fn pending_marker_waits_behind_owed_keys() {
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
-    manager.pending_eor.entry(peer).or_default().insert(V4);
+    manager.owe_eor(peer, V4);
     for _ in 0..3 {
-        manager.retry_evpn_feed_markers_bounded();
+        manager.retry_eor_markers_bounded();
         manager.resync_dirty_peers_bounded();
     }
     assert!(
@@ -875,12 +875,7 @@ fn pending_marker_waits_behind_owed_keys() {
             .all(|update| !update.end_of_rib.contains(&V4)),
         "no End-of-RIB while the key is owed and the latch is live"
     );
-    assert!(
-        manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|f| f.contains(&V4))
-    );
+    assert!(manager.eor_pending(peer).contains(&V4));
     drop(dump);
     drop(charge);
     manager.resync_dirty_peers_bounded();
@@ -1982,7 +1977,7 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                 drop(charge);
                 let _waiter = connect_families(&mut manager, WAITER, vec![family], true);
                 assert!(manager.selection_deferred(family));
-                manager.pending_eor.entry(peer).or_default().insert(family);
+                manager.owe_eor(peer, family);
                 let rtbh = if afi == Afi::Ipv6 {
                     Prefix::V6(Ipv6Prefix::new(
                         "2001:db8:100::".parse().unwrap(),
@@ -2049,7 +2044,7 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                 assert!(!manager.owing_runnable());
                 assert!(!manager.owing_tick_due());
                 assert!(!wire.unicast.contains_key(&(ordinary_key, 0)));
-                assert!(manager.pending_eor[&peer].contains(&family));
+                assert!(manager.eor_pending(peer).contains(&family));
                 manager.expire_selection_deferral();
                 let mut released = Vec::new();
                 for _ in 0..4 {
@@ -2434,11 +2429,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             true,
         );
         assert!(manager.selection_deferred(flowspec));
-        manager
-            .pending_eor
-            .entry(peer)
-            .or_default()
-            .insert(flowspec);
+        manager.owe_eor(peer, flowspec);
         let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
         rule.peer = crate::PeerId::LOCAL;
         if afi == Afi::Ipv6 {
@@ -2517,8 +2508,8 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             assert!(manager.owes_whole(peer, OwedFamily::IPV4_UNICAST));
             assert!(send_all(&mut rx).is_empty());
             drop(charge);
-            manager.pending_eor.entry(peer).or_default().insert(V4);
-            manager.flush_pending_eor(peer);
+            manager.owe_eor(peer, V4);
+            manager.settle_eor_now(peer);
             let sibling = send_all(&mut rx);
             assert_eq!(
                 sibling
@@ -2582,7 +2573,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
         );
         assert!(!manager.owing_runnable());
         assert!(!manager.owing_tick_due());
-        assert!(manager.pending_eor[&peer].contains(&flowspec));
+        assert!(manager.eor_pending(peer).contains(&flowspec));
         manager.expire_selection_deferral();
         let mut released_eor = Vec::new();
         for _ in 0..4 {
@@ -2687,13 +2678,11 @@ fn a_failed_absorption_keeps_the_end_of_rib() {
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
     drop(charge);
-    manager
-        .pending_eor
-        .entry(peer)
-        .or_default()
-        .extend(families);
+    for family in families {
+        manager.owe_eor(peer, family);
+    }
     let encoder = manager.peer_export_encoders.remove(&peer).unwrap();
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     assert!(
         send_all(&mut rx)
             .iter()
@@ -2701,16 +2690,15 @@ fn a_failed_absorption_keeps_the_end_of_rib() {
         "no family End-of-RIB overtakes the failed absorption"
     );
     assert!(
-        manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|pending| families.iter().all(|family| pending.contains(family)))
+        families
+            .iter()
+            .all(|family| manager.eor_pending(peer).contains(family))
     );
     assert!(
         manager.dirty_peers.contains(&peer),
         "the peer resyncs instead"
     );
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     assert!(
         send_all(&mut rx).is_empty(),
         "a retry still waits for the resync"

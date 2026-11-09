@@ -1200,7 +1200,7 @@ fn a_selection_release_without_credit_stages_nothing() {
         let mut rx = connect(&mut manager, address, 64, false, true);
         assert!(manager.grouped_member_of(peer).is_none(), "private");
         send_all(&mut rx);
-        assert!(manager.pending_eor[&peer].contains(&FAMILY), "EoR held");
+        assert!(manager.eor_pending(peer).contains(&FAMILY), "EoR held");
         let charge = spent.then(|| {
             crate::OutboundCharge::new(
                 &manager.outbound_credit_handle(peer),
@@ -1221,7 +1221,7 @@ fn a_selection_release_without_credit_stages_nothing() {
             assert_eq!(staged, 0, "nothing staged without credit");
             assert!(manager.dirty_peers.contains(&peer));
             assert!(
-                manager.pending_eor[&peer].contains(&FAMILY),
+                manager.eor_pending(peer).contains(&FAMILY),
                 "EoR still owed"
             );
             assert!(sent.iter().all(|update| update.end_of_rib.is_empty()));

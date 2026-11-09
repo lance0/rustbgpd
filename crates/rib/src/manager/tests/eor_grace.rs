@@ -670,7 +670,7 @@ async fn late_family_marker_retry_and_selection_release_respect_the_hold() {
         family: V6,
         add_path_send_limit: None,
     });
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     assert_no_eor(&mut rx, "family-sendable / marker retry");
     release(&mut manager).await;
     let mut released = HashSet::new();
@@ -1375,6 +1375,25 @@ async fn interface_grace_survives_binding_retirement_but_ends_on_neighbor_deleti
         "a deleted and re-added neighbor inherits no startup window"
     );
     assert!(new.release());
+}
+
+/// An interface-only neighbor leaves the configuration while a session of
+/// its bound handle is still up: the window goes with it, and the
+/// End-of-RIB it held leaves with that event. It used to stay queued until
+/// the resync tick found it.
+#[tokio::test(start_paused = true)]
+async fn interface_grace_retired_under_a_live_session_releases_its_held_end_of_rib() {
+    let mut manager = manager_from(interface_grace_config(), &BgpMetrics::new());
+    let peer = interface_peer("fe80::1");
+    let mut rx = connect(&mut manager, peer, HELPER);
+    assert_no_eor(&mut rx, "window open");
+    manager.handle_update(RibUpdate::RetireEorGraceInterface {
+        interface: "swp1".into(),
+    });
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, [V4]);
+    assert!(manager.next_eor_hold_deadline().is_none());
+    assert!(!manager.resync_tick_pending());
+    assert!(peer.release());
 }
 
 #[tokio::test(start_paused = true)]

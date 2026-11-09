@@ -151,7 +151,7 @@ fn evpn_all_members_backpressured_regroup_preserves_old_and_releases_proof() {
         }
     }
     for &(peer, _) in &outputs {
-        manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+        manager.owe_eor(peer, EVPN);
     }
     manager
         .apply_export_policy_replacements_synchronously(
@@ -185,8 +185,8 @@ fn evpn_all_members_backpressured_regroup_preserves_old_and_releases_proof() {
         assert!(!manager.evpn_recovery.is_dormant(handle));
         assert!(manager.dirty_peers.contains(&peer));
         assert!(!manager.evpn_feed_is_current(peer));
-        manager.flush_pending_eor(peer);
-        assert!(manager.pending_eor[&peer].contains(&EVPN));
+        manager.settle_eor_now(peer);
+        assert!(manager.eor_pending(peer).contains(&EVPN));
     }
     #[cfg(feature = "bench-internals")]
     {
@@ -214,7 +214,7 @@ fn evpn_all_members_backpressured_regroup_preserves_old_and_releases_proof() {
         }
         assert!(output.try_recv().is_err());
         manager.resync_dirty_peers_bounded();
-        manager.flush_pending_eor(peer);
+        manager.settle_eor_now(peer);
         let mut withdrawn = HashSet::<EvpnRouteKey>::new();
         let mut announced = HashSet::new();
         let mut terminal_count = 0;

@@ -27,6 +27,7 @@ use tracing::debug;
 
 use super::RibManager;
 use super::distribution::OutboundCommitFailure;
+use super::eor_hold::{EorHold, EorTrigger};
 use crate::PeerId;
 use crate::fast_hash::{FastMap, FastSet};
 use crate::outbound_credit::{CHUNK_ROWS, OutboundOperation, OutboundSlot};
@@ -1195,16 +1196,6 @@ impl RibManager {
         })
     }
 
-    /// A pending End-of-RIB of `peer` that waits only for its family's owed
-    /// keys to be absorbed.
-    pub(super) fn owed_eor_ready(&self, peer: PeerId) -> bool {
-        self.pending_eor.get(&peer).is_some_and(|families| {
-            families.iter().any(|&family| {
-                self.owes(peer, family) && self.pending_marker_family_ready_unowed(peer, family)
-            })
-        })
-    }
-
     /// Whether `peer` has owed work the resync tick can run: a runnable
     /// family (a whole family needs its latch free), or an End-of-RIB that
     /// waits for an absorption with the latch free. Credit is not part of
@@ -1220,7 +1211,7 @@ impl RibManager {
         OwedFamily::ALL.iter().any(|&family| {
             self.owed_family_drainable(peer, owing, family, latch_free)
                 .is_some()
-        }) || (latch_free && self.owed_eor_ready(peer))
+        }) || (latch_free && self.eor_waits_on_owed_keys(peer))
     }
 
     /// Whether any peer has owed work the resync tick can run.
@@ -1244,7 +1235,7 @@ impl RibManager {
                     .get(&peer)
                     .is_some_and(|entry| entry.credit.rows() < limit)
                     && !self.outbound_channel_full(peer))
-                    || (!self.outbound_operation_live(peer) && self.owed_eor_ready(peer)))
+                    || (!self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer)))
         })
     }
 
@@ -1313,10 +1304,10 @@ impl RibManager {
             return false;
         }
         let mut progressed = false;
-        if !self.outbound_operation_live(peer) && self.owed_eor_ready(peer) {
-            let before = self.pending_eor.get(&peer).map_or(0, HashSet::len);
-            self.flush_pending_eor(peer);
-            progressed |= self.pending_eor.get(&peer).map_or(0, HashSet::len) < before;
+        if !self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer) {
+            let before = self.eor.families(peer).count();
+            self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
+            progressed |= self.eor.families(peer).count() < before;
         }
         let limit = self.outbound_row_credit();
         let rows = self
@@ -1429,14 +1420,12 @@ impl RibManager {
             self.put_owing(peer, owing);
         }
         if !self.owing(peer).is_some_and(|owing| owing.owes(family))
-            && self.pending_eor.get(&peer).is_some_and(|families| {
-                family
-                    .afi_safis()
-                    .iter()
-                    .any(|afi_safi| families.contains(afi_safi))
-            })
+            && family
+                .afi_safis()
+                .iter()
+                .any(|&afi_safi| self.eor.owes(peer, afi_safi))
         {
-            self.flush_pending_eor(peer);
+            self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
         }
     }
 

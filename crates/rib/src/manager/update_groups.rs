@@ -3036,13 +3036,11 @@ impl RibManager {
     }
 
     pub(super) fn complete_initial_selection_replay(&mut self, peer: PeerId) {
-        let still_held = self.pending_eor.get(&peer).is_some_and(|families| {
-            families.iter().any(|family| {
-                matches!(
-                    family,
-                    (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::MplsVpn)
-                ) && self.selection_convergence_held(*family)
-            })
+        let still_held = self.eor.families(peer).any(|family| {
+            matches!(
+                family,
+                (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::MplsVpn)
+            ) && self.selection_convergence_held(family)
         });
         if !still_held
             && !self.selection_resync_held(peer)
@@ -4241,8 +4239,8 @@ impl RibManager {
             .get(&peer)
             .is_some_and(|gated| gated.contains(&family));
         if !orf_gated {
-            self.pending_eor.entry(peer).or_default().insert(family);
-        } else if self.orf_initial_eor_follows_table(peer) || self.eor_held(peer, family) {
+            self.owe_eor(peer, family);
+        } else if self.orf_initial_eor_follows_table(peer) || self.eor_withheld(peer, family) {
             self.defer_orf_initial_eor(peer, family);
         }
         // The regroup can build a destination table from the whole Loc-RIB;

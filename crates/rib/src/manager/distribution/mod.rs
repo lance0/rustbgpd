@@ -21,6 +21,7 @@ use rustbgpd_wire::{
 };
 use tracing::{debug, info, warn};
 
+use super::eor_hold::EorTrigger;
 use super::helpers::{
     LOCAL_PEER, bgpls_route_family, bgpls_routes_equal, evpn_routes_equal, gauge_val,
     labeled_route_family, labeled_routes_equal, prefix_family, routes_equal, rtc_routes_equal,
@@ -2301,7 +2302,7 @@ impl RibManager {
             && !self.force_outbound_peers.contains(&peer)
             && !self.pending_regroup_baseline.contains_key(&peer)
             && !self.pending_extra_withdraws.contains_key(&peer)
-            && !self.pending_eor.contains_key(&peer)
+            && !self.eor.owes_peer(peer)
             && !self.pending_refresh.contains_key(&peer)
             && !self.pending_otc_blocked.contains_key(&peer)
             && !self.peer_unexportable.contains_key(&peer)
@@ -7609,25 +7610,23 @@ impl RibManager {
         if reset || when == WhenToRefresh::Immediate {
             // If this peer's EoR for the family was withheld at `PeerUp`
             // (GR restarter + §6 gate, see `send_initial_table`), the forced
-            // resync below is the gated flood: move the family into
-            // `pending_eor` and mark the peer dirty so the resync piggybacks
-            // the EoR behind the flooded routes (or flushes it standalone
-            // when the filter yields no routes). A reset without IMMEDIATE
-            // leaves the gate up, so the deferral stays put and rides the
-            // later plain ROUTE-REFRESH or IMMEDIATE update that actually
-            // advertises the family.
-            if lifts_gate
-                && let Some(families) = self.gr_deferred_eor.get_mut(&peer)
-                && families.remove(&family)
-            {
-                if families.is_empty() {
-                    self.gr_deferred_eor.remove(&peer);
-                }
-                self.pending_eor.entry(peer).or_default().insert(family);
+            // resync below is the gated flood: end the family's ORF table
+            // hold and mark the peer dirty so the resync piggybacks the EoR
+            // behind the flooded routes (or sends it standalone when the
+            // filter yields no routes). A reset without IMMEDIATE leaves
+            // the gate up, so the hold stays put and rides the later plain
+            // ROUTE-REFRESH or IMMEDIATE update that actually advertises
+            // the family.
+            let gated_flood = lifts_gate && self.eor.behind_orf_table(peer, family);
+            if gated_flood {
                 self.mark_outbound_dirty(peer);
             }
             self.set_selection_partial_caught_up(peer, false);
             self.force_outbound_peers.insert(peer);
+            if gated_flood {
+                // The forced resync is now owed, so it holds the marker.
+                self.release_eor_orf_table(peer, [family], EorTrigger::Release);
+            }
             self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
         }
         let _ = reply.send(Ok(()));
@@ -9068,9 +9067,7 @@ impl RibManager {
                         .as_deref()
                         .is_some_and(|drain| drain.whole && drain.slot.is_none());
                     if is_dirty || is_force || drain_whole_operation {
-                        let flush = usize::from(
-                            (is_dirty || is_force) && self.pending_eor.contains_key(&peer),
-                        );
+                        let flush = usize::from((is_dirty || is_force) && self.eor.owes_peer(peer));
                         match self.begin_outbound_operation(peer, 1 + flush) {
                             Ok(operation) => resync_operation = Some(operation),
                             Err(failure) => {
@@ -9097,7 +9094,7 @@ impl RibManager {
                         && all_affected.is_empty()
                         && !evpn_feeds.contains_key(&peer)
                     {
-                        self.flush_pending_eor(peer);
+                        self.settle_eor(peer, EorTrigger::Release);
                         break 'member;
                     }
                     // Preflight: a private peer whose queued envelopes hold its
@@ -9916,15 +9913,18 @@ impl RibManager {
                         if is_dirty && !self.selection_resync_held(peer) {
                             self.dirty_peers.remove(&peer);
                             self.clear_grouped_member_synced(peer);
-                            self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                            self.resync_settles_eor(peer, resync_operation.as_mut());
                             if !self.dirty_peers.contains(&peer) {
                                 self.retry_pending_refresh_in(peer, resync_operation.as_mut());
                             }
                         } else if is_dirty {
-                            self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                            self.resync_settles_eor(peer, resync_operation.as_mut());
                         }
                         if is_force && !self.selection_resync_held(peer) {
                             self.force_outbound_peers.remove(&peer);
+                            if !is_dirty {
+                                self.resync_settles_eor(peer, resync_operation.as_mut());
+                            }
                         }
                         if resync && self.selection_resync_held(peer) {
                             self.set_selection_partial_caught_up(peer, true);
@@ -10978,17 +10978,7 @@ impl RibManager {
                         // GShut-style outbound-attribute refresh and never
                         // carries pending EoR by definition.
                         let mut pending_eor: Vec<_> = if is_dirty {
-                            self.pending_eor
-                                .get(&peer)
-                                .map(|families| {
-                                    families
-                                        .iter()
-                                        .inspect(|_| checkpoint())
-                                        .copied()
-                                        .filter(|family| !self.pending_eor_held(peer, *family))
-                                        .collect()
-                                })
-                                .unwrap_or_default()
+                            self.eor_resync_ready(peer)
                         } else {
                             vec![]
                         };
@@ -11200,14 +11190,7 @@ impl RibManager {
                                 if is_dirty {
                                     // Other-family markers in this admitted envelope
                                     // are done even if EVPN coverage was rejected.
-                                    let empty =
-                                        self.pending_eor.get_mut(&peer).is_some_and(|families| {
-                                            families.retain(|family| !pending_eor.contains(family));
-                                            families.is_empty()
-                                        });
-                                    if empty {
-                                        self.pending_eor.remove(&peer);
-                                    }
+                                    self.eor_discharged(peer, &pending_eor);
                                     if evpn_covered && !self.selection_resync_held(peer) {
                                         #[cfg(test)]
                                         {
@@ -11215,20 +11198,25 @@ impl RibManager {
                                         }
                                         self.dirty_peers.remove(&peer);
                                         self.clear_grouped_member_synced(peer);
-                                        self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                                        self.resync_settles_eor(peer, resync_operation.as_mut());
                                         self.retry_pending_refresh_in(
                                             peer,
                                             resync_operation.as_mut(),
                                         );
                                     } else if evpn_covered {
                                         self.set_selection_partial_caught_up(peer, true);
-                                        self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                                        self.resync_settles_eor(peer, resync_operation.as_mut());
                                     }
                                 }
                                 // A force request is complete only when every covered
                                 // family's data reached its actual admission boundary.
                                 if is_force && evpn_covered && !self.selection_resync_held(peer) {
                                     self.force_outbound_peers.remove(&peer);
+                                    // A forced resync alone held the markers
+                                    // a release found behind it.
+                                    if !is_dirty {
+                                        self.resync_settles_eor(peer, resync_operation.as_mut());
+                                    }
                                 }
                             }
                         } else if let Err(failure) = commit {
@@ -11285,15 +11273,18 @@ impl RibManager {
                             if is_dirty && evpn_covered && !self.selection_resync_held(peer) {
                                 self.dirty_peers.remove(&peer);
                                 self.clear_grouped_member_synced(peer);
-                                self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                                self.resync_settles_eor(peer, resync_operation.as_mut());
                                 if !self.dirty_peers.contains(&peer) {
                                     self.retry_pending_refresh_in(peer, resync_operation.as_mut());
                                 }
                             } else if is_dirty && evpn_covered {
-                                self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                                self.resync_settles_eor(peer, resync_operation.as_mut());
                             }
                             if is_force && evpn_covered && !self.selection_resync_held(peer) {
                                 self.force_outbound_peers.remove(&peer);
+                                if !is_dirty {
+                                    self.resync_settles_eor(peer, resync_operation.as_mut());
+                                }
                             }
                             if resync && evpn_covered && self.selection_resync_held(peer) {
                                 self.set_selection_partial_caught_up(peer, true);
