@@ -1,9 +1,9 @@
 //! Static gRPC authorization inventory.
 //!
 //! ADR-0064 uses this table as the code-level source of truth for
-//! method risk tiers. Runtime authorization enforces listener-level
-//! `AccessMode` checks in `server.rs`, per-listener `max_tier`
-//! ceilings in `authz_runtime`, and ADR-0064 per-principal role
+//! method risk tiers. Runtime authorization enforces per-listener
+//! `max_tier` ceilings in `authz_runtime` (backed by handler-level
+//! read-only checks in `server.rs`), and ADR-0064 per-principal role
 //! ceilings — unconditionally: the pre-v0.24.0 "legacy" mode that
 //! skipped role ceilings was removed. Typed config accepts only `tier`;
 //! the exact retired value gets a migration diagnostic during loading.
@@ -30,6 +30,24 @@ impl AuthTier {
             Self::SensitiveRead => "sensitive_read",
             Self::Mutating => "mutating",
             Self::OperatorOnly => "operator_only",
+        }
+    }
+
+    /// Whether a listener capped at this tier is read-only: its ceiling is
+    /// below `Mutating`, so mutating handlers refuse the call themselves.
+    #[must_use]
+    pub const fn is_read_only_ceiling(self) -> bool {
+        matches!(self, Self::Read | Self::SensitiveRead)
+    }
+
+    /// Bounded `access_mode` label of `grpc_authz` audit records and
+    /// `bgp_grpc_authz_decisions_total`, derived from a listener ceiling.
+    #[must_use]
+    pub const fn access_mode_label(self) -> &'static str {
+        if self.is_read_only_ceiling() {
+            "read_only"
+        } else {
+            "read_write"
         }
     }
 }

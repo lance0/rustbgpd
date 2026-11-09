@@ -88,7 +88,7 @@ async fn reject_key_modes(service: &InjectionService, request: &proto::AddFlowSp
 async fn vpn_scope_refusals_precede_every_key_enqueue() {
     let (tx, mut rx) = mpsc::channel(64);
     let leases = Arc::new(InjectionLeases::new());
-    let service = InjectionService::new(tx, AccessMode::ReadWrite, Arc::clone(&leases));
+    let service = InjectionService::new(tx, AuthTier::OperatorOnly, Arc::clone(&leases));
     for family in [
         proto::AddressFamily::L3vpnIpv4Flowspec,
         proto::AddressFamily::L3vpnIpv6Flowspec,
@@ -142,7 +142,7 @@ async fn vpn_scope_refusals_precede_every_key_enqueue() {
 async fn vpn_rt_refusals_precede_all_add_modes() {
     let (tx, mut rx) = mpsc::channel(64);
     let leases = Arc::new(InjectionLeases::new());
-    let service = InjectionService::new(tx, AccessMode::ReadWrite, Arc::clone(&leases));
+    let service = InjectionService::new(tx, AuthTier::OperatorOnly, Arc::clone(&leases));
     for family in [
         proto::AddressFamily::L3vpnIpv4Flowspec,
         proto::AddressFamily::L3vpnIpv6Flowspec,
@@ -225,7 +225,7 @@ fn component_bytes(bytes: usize) -> Vec<proto::FlowSpecComponent> {
 async fn vpn_length_includes_rd_on_every_key_path() {
     let (tx, mut rx) = mpsc::channel(64);
     let service =
-        InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+        InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
     for family in [
         proto::AddressFamily::L3vpnIpv4Flowspec,
         proto::AddressFamily::L3vpnIpv6Flowspec,
@@ -545,7 +545,7 @@ async fn vpn_communicated_actions_round_trip_on_real_local_rules() {
     );
     let service = InjectionService::new(
         tx.clone(),
-        AccessMode::ReadWrite,
+        AuthTier::OperatorOnly,
         manager.injection_leases(),
     );
     let reader = crate::rib_service::RibService::new(tx);
@@ -646,7 +646,7 @@ fn fragment_request(family: proto::AddressFamily, value: &str) -> proto::AddFlow
 async fn ipv6_fragment_refuses_ipv4_only_and_reserved_bits() {
     let (tx, mut rx) = mpsc::channel(64);
     let leases = Arc::new(InjectionLeases::new());
-    let service = InjectionService::new(tx, AccessMode::ReadWrite, Arc::clone(&leases));
+    let service = InjectionService::new(tx, AuthTier::OperatorOnly, Arc::clone(&leases));
     for family in [
         proto::AddressFamily::Ipv6Flowspec,
         proto::AddressFamily::L3vpnIpv6Flowspec,

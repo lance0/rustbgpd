@@ -316,7 +316,7 @@ async fn shutdown_drains_the_roster_and_closes_the_cell() {
 /// queued on the RIB. Either way this request returned `DEADLINE_EXCEEDED`.
 #[tokio::test(start_paused = true)]
 async fn policy_stats_succeed_while_the_peer_manager_and_rib_are_never_polled() {
-    use rustbgpd_api::server::AccessMode;
+    use rustbgpd_api::authz::AuthTier;
 
     let dir = tempfile::tempdir().unwrap();
     let (command_tx, command_rx) = mpsc::channel(4);
@@ -354,7 +354,7 @@ async fn policy_stats_succeed_while_the_peer_manager_and_rib_are_never_polled() 
             .unwrap();
     }
     let service = rustbgpd_api::PolicyService::with_runtime_config_coordinator(
-        AccessMode::ReadOnly,
+        AuthTier::SensitiveRead,
         command_tx.clone(),
         None,
         None,
@@ -405,7 +405,7 @@ async fn policy_stats_succeed_while_the_peer_manager_and_rib_are_never_polled() 
 /// returns `UNAVAILABLE` once it resumes, not the values it captured.
 #[tokio::test]
 async fn policy_stats_fail_when_the_peer_manager_stops_mid_capture() {
-    use rustbgpd_api::server::AccessMode;
+    use rustbgpd_api::authz::AuthTier;
 
     let mut mgr = test_peer_manager();
     let peer: IpAddr = "192.0.2.40".parse().unwrap();
@@ -423,7 +423,7 @@ async fn policy_stats_fail_when_the_peer_manager_stops_mid_capture() {
     );
     let (peer_tx, _) = mpsc::channel(1);
     let service = rustbgpd_api::PolicyService::with_runtime_config_coordinator(
-        AccessMode::ReadOnly,
+        AuthTier::SensitiveRead,
         peer_tx,
         None,
         None,

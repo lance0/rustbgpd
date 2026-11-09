@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_summary_read};
+use crate::authz::AuthTier;
 use crate::health_probe::DaemonGate;
 use crate::owner_publication::dispatch_configured_owner_publication;
 use crate::peer_types::{
@@ -26,7 +27,7 @@ use crate::runtime_config_settlement::{
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, check_config_mutation_gate,
+    ConfigMutationGateFn, RuntimeConfigCoordinator, check_config_mutation_gate,
     fully_compensated_status, peer_manager_request, read_only_rejection, reserve_config_event_slot,
     stage_runtime_config_event_typed,
 };
@@ -93,7 +94,7 @@ pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi
     reason = "service fields intentionally keep neighbor/control-plane nouns explicit"
 )]
 pub struct NeighborService {
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     operator_tx: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -114,14 +115,14 @@ impl NeighborService {
     #[must_use]
     pub fn new(
         local_asn: u32,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
         Self::with_runtime_config_coordinator(
             local_asn,
-            access_mode,
+            max_tier,
             peer_mgr_tx,
             rib_tx,
             config_tx,
@@ -137,7 +138,7 @@ impl NeighborService {
     #[must_use]
     pub fn with_runtime_config_coordinator(
         _local_asn: u32,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -145,7 +146,7 @@ impl NeighborService {
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self {
-            access_mode,
+            max_tier,
             peer_mgr_tx,
             operator_tx: None,
             rib_tx,
@@ -1548,7 +1549,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::AddNeighborRequest>,
     ) -> Result<Response<proto::AddNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1565,7 +1566,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::DeleteNeighborRequest>,
     ) -> Result<Response<proto::DeleteNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1809,7 +1810,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::EnableNeighborRequest>,
     ) -> Result<Response<proto::EnableNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1832,7 +1833,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::SoftResetInRequest>,
     ) -> Result<Response<proto::SoftResetInResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1861,7 +1862,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::RefreshOutboundRequest>,
     ) -> Result<Response<proto::RefreshOutboundResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1882,7 +1883,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::ReplayOutboundRequest>,
     ) -> Result<Response<proto::ReplayOutboundResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1903,7 +1904,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::DisableNeighborRequest>,
     ) -> Result<Response<proto::DisableNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1925,7 +1926,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::ResetNeighborRequest>,
     ) -> Result<Response<proto::ResetNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1973,7 +1974,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::AddDynamicNeighborRequest>,
     ) -> Result<Response<proto::AddDynamicNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let range = request
@@ -2029,7 +2030,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::DeleteDynamicNeighborRequest>,
     ) -> Result<Response<proto::DeleteDynamicNeighborResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let prefix = request.into_inner().prefix;
@@ -2059,7 +2060,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::SetGracefulShutdownRequest>,
     ) -> Result<Response<proto::SetGracefulShutdownResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -2137,7 +2138,7 @@ mod tests {
     ) -> (NeighborService, mpsc::Receiver<RibUpdate>) {
         let (rib_tx, rib_rx) = mpsc::channel(1);
         (
-            NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None),
+            NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None),
             rib_rx,
         )
     }
@@ -2224,7 +2225,7 @@ mod tests {
         (
             NeighborService::new(
                 65001,
-                AccessMode::ReadWrite,
+                AuthTier::OperatorOnly,
                 peer_tx,
                 rib_tx,
                 Some(config_tx),
@@ -2413,7 +2414,7 @@ mod tests {
             }
         });
         (
-            NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None),
+            NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None),
             actor,
         )
     }
@@ -2581,7 +2582,7 @@ mod tests {
         coordinator.close();
         let service = NeighborService::with_runtime_config_coordinator(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             rib_tx,
             Some(config_tx),
@@ -2666,7 +2667,7 @@ mod tests {
 
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let call = tokio::spawn(async move { svc.add_neighbor(Request::new(request)).await });
         acknowledge_owner_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin)
             .await;
@@ -2708,7 +2709,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(1);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
             peer_tx,
             rib_tx,
             Some(config_tx),
@@ -2726,7 +2727,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(1);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             rib_tx,
             Some(config_tx),
@@ -2745,7 +2746,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             rib_tx,
             Some(config_tx),
@@ -2906,7 +2907,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -3080,7 +3081,7 @@ mod tests {
     async fn list_neighbors_lists_an_unbound_interface_only_neighbor_last() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let numbered = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let peer_task = tokio::spawn(async move {
             let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
@@ -3201,7 +3202,7 @@ mod tests {
     async fn graceful_shutdown_with_an_interface_selector_never_broadcasts() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let responder = tokio::spawn(async move {
             let mut other_commands = 0;
             while let Some(command) = peer_rx.recv().await {
@@ -3263,7 +3264,7 @@ mod tests {
                 .collect(),
             Vec::new(),
         );
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None)
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None)
             .with_peer_roster(publisher.reader());
         let responder = tokio::spawn(async move {
             let (mut snapshots, mut selected) = (0, Vec::new());
@@ -3402,7 +3403,7 @@ mod tests {
     async fn an_action_on_an_unbound_interface_only_neighbor_is_a_failed_precondition() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let responder = tokio::spawn(async move {
             let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
                 panic!("expected a peer snapshot");
@@ -3628,7 +3629,7 @@ mod tests {
         ] {
             let (peer_tx, mut peer_rx) = mpsc::channel(1);
             let (rib_tx, mut rib_rx) = mpsc::channel(1);
-            let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+            let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
             let request = Request::new(proto::GetNeighborStateRequest {
                 address: address.into(),
                 interface: interface.into(),
@@ -3804,7 +3805,7 @@ mod tests {
     async fn dynamic_neighbor_placeholders_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadOnly, tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::SensitiveRead, tx, rib_tx, None);
 
         let err = svc
             .add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
@@ -3831,7 +3832,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -3917,7 +3918,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -3958,7 +3959,7 @@ mod tests {
     async fn add_dynamic_neighbor_unknown_peer_group_maps_not_found() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_mgr_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_mgr_tx, rib_tx, None);
 
         let call = tokio::spawn(async move {
             svc.add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
@@ -4011,7 +4012,7 @@ mod tests {
         });
         let svc = NeighborService::with_runtime_config_coordinator(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             None,
@@ -4036,7 +4037,7 @@ mod tests {
         let coordinator = RuntimeConfigCoordinator::new();
         let svc = NeighborService::with_runtime_config_coordinator(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             None,
@@ -4097,7 +4098,7 @@ mod tests {
             let coordinator = RuntimeConfigCoordinator::new();
             let svc = NeighborService::with_runtime_config_coordinator(
                 65001,
-                AccessMode::ReadWrite,
+                AuthTier::OperatorOnly,
                 peer_mgr_tx,
                 rib_tx,
                 None,
@@ -4153,7 +4154,7 @@ mod tests {
             let coordinator = RuntimeConfigCoordinator::new();
             let svc = NeighborService::with_runtime_config_coordinator(
                 65001,
-                AccessMode::ReadWrite,
+                AuthTier::OperatorOnly,
                 peer_mgr_tx,
                 rib_tx,
                 None,
@@ -4227,7 +4228,7 @@ mod tests {
         let coordinator = RuntimeConfigCoordinator::new();
         let svc = NeighborService::with_runtime_config_coordinator(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             None,
@@ -4279,7 +4280,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -4342,7 +4343,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -4378,7 +4379,7 @@ mod tests {
     async fn lifecycle_mutations_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadOnly, tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::SensitiveRead, tx, rib_tx, None);
 
         let err = svc
             .delete_neighbor(Request::new(proto::DeleteNeighborRequest {
@@ -4523,7 +4524,7 @@ mod tests {
     async fn soft_reset_in_deduplicates_requested_families() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::SoftResetIn {
@@ -4559,7 +4560,7 @@ mod tests {
     async fn reset_neighbor_dispatches_scoped_peer_with_encoded_reason() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             let Some(PeerManagerCommand::ResetPeer {
@@ -4631,7 +4632,7 @@ mod tests {
     async fn refresh_outbound_dispatches_scoped_peer_and_confirms_scheduling() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             let Some(PeerManagerCommand::RefreshOutbound { peer, reply }) = peer_rx.recv().await
@@ -4658,7 +4659,7 @@ mod tests {
     async fn replay_outbound_dispatches_scoped_peer_and_confirms_scheduling() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             let Some(PeerManagerCommand::ReplayOutbound { peer, reply }) = peer_rx.recv().await
@@ -4685,7 +4686,7 @@ mod tests {
     async fn replay_outbound_rejects_invalid_peer_without_dispatch() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let error = svc
             .replay_outbound(Request::new(proto::ReplayOutboundRequest {
                 address: String::new(),
@@ -4701,7 +4702,7 @@ mod tests {
     async fn replay_outbound_preserves_refusal_status_and_reason() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::ReplayOutbound { reply, .. }) = peer_rx.recv().await
             else {
@@ -4747,7 +4748,7 @@ mod tests {
     async fn prefixes_sent_populated() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
 
         let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
 
@@ -4881,7 +4882,7 @@ mod tests {
     async fn list_neighbors_uses_one_aggregate_rib_snapshot_for_all_peers() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let second = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let tenth = PeerId::from_addr("10.0.0.10".parse().unwrap());
         let link_local = PeerId::from_addr("fe80::1".parse().unwrap());
@@ -5108,7 +5109,7 @@ mod tests {
     async fn list_neighbors_malformed_rib_snapshot_remains_internal() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let addr: IpAddr = "192.0.2.1".parse().unwrap();
         let peer = tokio::spawn(async move {
             let PeerManagerCommand::ListPeers { reply } = peer_rx.recv().await.unwrap() else {
@@ -5149,7 +5150,7 @@ mod tests {
     async fn get_neighbor_malformed_rib_snapshot_remains_internal() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let addr: IpAddr = "192.0.2.1".parse().unwrap();
         let wrong = PeerId::from_addr("192.0.2.2".parse().unwrap());
         let peer = tokio::spawn(async move {
@@ -5203,7 +5204,7 @@ mod tests {
     async fn get_neighbor_missing_comparison_snapshot_remains_internal() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let primary = PeerId::from_addr("192.0.2.1".parse().unwrap());
         let comparison = PeerId::from_addr("192.0.2.2".parse().unwrap());
         let peer = tokio::spawn(async move {
@@ -5270,7 +5271,7 @@ mod tests {
     async fn stalled_rib_snapshot_returns_deadline_exceeded() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let addr: IpAddr = "10.0.0.1".parse().unwrap();
         tokio::spawn(async move {
             let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await else {
@@ -5314,7 +5315,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let addr: IpAddr = "10.0.0.1".parse().unwrap();
         tokio::spawn(async move {
             let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await else {
@@ -5341,7 +5342,7 @@ mod tests {
     async fn comparison_validates_both_peers_then_uses_one_aggregate_rib_snapshot() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let primary = PeerId::from_addr("10.0.0.1".parse().unwrap());
         let comparison = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let peer_task = tokio::spawn(async move {
@@ -5480,7 +5481,7 @@ mod tests {
     async fn comparison_preserves_the_primary_neighbor_snapshot() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None);
         let primary = PeerId::from_addr("10.0.0.1".parse().unwrap());
         let secondary = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let snapshot = NeighborRibSnapshot {
@@ -6214,7 +6215,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -6282,7 +6283,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -6346,7 +6347,7 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(16);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_mgr_tx,
             rib_tx,
             Some(config_tx),
@@ -6390,7 +6391,7 @@ mod tests {
         drop(config_rx);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             rib_tx,
             Some(config_tx),
@@ -6424,7 +6425,7 @@ mod tests {
         drop(config_rx);
         let svc = NeighborService::new(
             65001,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             rib_tx,
             Some(config_tx),
@@ -6545,7 +6546,7 @@ mod tests {
         );
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None)
+        let svc = NeighborService::new(65001, AuthTier::OperatorOnly, peer_tx, rib_tx, None)
             .with_peer_roster(publisher.reader());
         tokio::spawn(async move {
             while let Some(command) = peer_rx.recv().await {

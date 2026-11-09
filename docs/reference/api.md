@@ -168,22 +168,22 @@ gnmic \
   capabilities
 ```
 
-Per-listener `access_mode = "read_only"` rejects mutating RPCs
-(neighbor add/delete, route injection, policy changes, peer-group
+A listener with `max_tier = "sensitive_read"` (or `"read"`) rejects mutating
+RPCs (neighbor add/delete, route injection, policy changes, peer-group
 changes, shutdown, MRT trigger) with `PERMISSION_DENIED`. Use this
 on a dedicated monitoring listener that exposes the read surface
 without the mutating control plane.
 
-Each configured listener can independently set `access_mode = "read_write"` or
-`"read_only"`. Read-only listeners allow query and watch RPCs but reject all
-mutating RPCs with `PERMISSION_DENIED`.
+Each configured listener sets its own `max_tier`; omitting it serves every
+tier. A listener capped below `mutating` allows query and watch RPCs but
+rejects all mutating RPCs with `PERMISSION_DENIED`.
 
 ### Listener Access Matrix
 
-`read_only` is a listener-level authorization boundary. It does not create
-per-user roles: every client accepted by that listener gets the same read-only
-surface. Use a separate `read_write` listener for automation that needs to
-mutate daemon state.
+A listener ceiling is a listener-level authorization boundary. It does not
+create per-user roles: every client accepted by that listener gets the same
+capped surface. Use a separate listener with a higher `max_tier` for
+automation that needs to mutate daemon state.
 
 `docs/reference/grpc-method-inventory.md`, `docs/reference/grpc-method-inventory.json`, and
 `crates/api/src/authz.rs` classify every RPC into `read`, `sensitive_read`,
@@ -191,7 +191,9 @@ mutate daemon state.
 machine-readable export for auditors and generated clients; the Rust `authz`
 tests verify it against the source-of-truth matrix. The runtime records tier
 decisions for every RPC via structured `grpc_authz` logs and
-`bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Listener
+`bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. The
+`access_mode` label (and log field) is `read_only` when the listener's
+`max_tier` is below `mutating` and `read_write` otherwise. Listener
 `max_tier` caps are always enforced. The same runtime layer also enforces the
 authenticated principal's configured role ceiling before the handler runs —
 unconditionally: `"tier"` has been the default since v0.24.0 and is the only

@@ -8,7 +8,6 @@ fn grpc_listeners_default_to_uds() {
         vec![GrpcListener::Uds {
             path: PathBuf::from("/var/lib/rustbgpd/grpc.sock"),
             mode: 0o600,
-            access_mode: GrpcAccessMode::ReadWrite,
             max_tier: GrpcMaxTier::OperatorOnly,
             token_file: None,
             principal: None,
@@ -30,7 +29,6 @@ fn grpc_tcp_listener_parses_when_enabled() {
         vec![
             GrpcListener::Tcp {
                 addr: "127.0.0.1:50051".parse().unwrap(),
-                access_mode: GrpcAccessMode::ReadWrite,
                 max_tier: GrpcMaxTier::OperatorOnly,
                 token_file: None,
                 principal: None,
@@ -89,27 +87,23 @@ fn grpc_explicit_uds_opt_out_disables_the_implicit_listener() {
     assert!(matches!(listeners[0], GrpcListener::Tcp { .. }));
 }
 
+/// `access_mode` was removed; `max_tier` is the only listener ceiling, so
+/// the old key is an unknown field on both listener tables.
 #[test]
-fn grpc_listener_access_mode_parses() {
-    let toml_str = format!(
-        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\naccess_mode = \"read_only\"\n",
-        valid_toml()
-    );
-    let config = parse_schema_only(&toml_str).unwrap();
-    assert_eq!(
-        config.grpc_listeners(),
-        vec![
-            GrpcListener::Tcp {
-                addr: "127.0.0.1:50051".parse().unwrap(),
-                access_mode: GrpcAccessMode::ReadOnly,
-                max_tier: GrpcMaxTier::SensitiveRead,
-                token_file: None,
-                principal: None,
-                tls: None,
-            },
-            implicit_uds_listener(&config),
-        ]
-    );
+fn grpc_listener_access_mode_is_rejected_as_unknown_field() {
+    for uds in [false, true] {
+        for mode in ["read_only", "read_write"] {
+            let err = parse_schema_only(&listener_toml(uds, &[("access_mode", mode)]))
+                .expect_err("access_mode must not load");
+            let ConfigError::Parse(err) = err else {
+                panic!("expected a TOML parse error, got {err:?}");
+            };
+            assert!(
+                err.to_string().contains("unknown field `access_mode`"),
+                "uds={uds} mode={mode}: {err}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -124,7 +118,6 @@ fn grpc_listener_max_tier_parses() {
         vec![
             GrpcListener::Tcp {
                 addr: "127.0.0.1:50051".parse().unwrap(),
-                access_mode: GrpcAccessMode::ReadWrite,
                 max_tier: GrpcMaxTier::Mutating,
                 token_file: None,
                 principal: None,
@@ -136,30 +129,7 @@ fn grpc_listener_max_tier_parses() {
 }
 
 #[test]
-fn grpc_listener_access_mode_read_only_caps_max_tier() {
-    let toml_str = format!(
-        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\naccess_mode = \"read_only\"\nmax_tier = \"operator_only\"\n",
-        valid_toml()
-    );
-    let config = parse_schema_only(&toml_str).unwrap();
-    assert_eq!(
-        config.grpc_listeners(),
-        vec![
-            GrpcListener::Tcp {
-                addr: "127.0.0.1:50051".parse().unwrap(),
-                access_mode: GrpcAccessMode::ReadOnly,
-                max_tier: GrpcMaxTier::SensitiveRead,
-                token_file: None,
-                principal: None,
-                tls: None,
-            },
-            implicit_uds_listener(&config),
-        ]
-    );
-}
-
-#[test]
-fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
+fn grpc_uds_listener_max_tier_parses() {
     let toml_str = format!(
         "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nmax_tier = \"read\"\n",
         valid_toml()
@@ -170,7 +140,6 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
         vec![GrpcListener::Uds {
             path: PathBuf::from("/tmp/rustbgpd-test.sock"),
             mode: 0o600,
-            access_mode: GrpcAccessMode::ReadWrite,
             max_tier: GrpcMaxTier::Read,
             token_file: None,
             principal: None,
@@ -270,8 +239,9 @@ fn configured_ceiling(config: &Config, uds: bool) -> GrpcMaxTier {
 }
 
 /// Load-bearing for the `access_mode` removal: every old (`access_mode`,
-/// `max_tier`) pair keeps its effective ceiling once migrated to
-/// `max_tier` alone, and no pair widens a listener.
+/// `max_tier`) pair keeps its pre-removal effective ceiling once migrated
+/// to `max_tier` alone, so no pair widens a listener. The literal table
+/// was asserted against the old loader before the key was removed.
 #[test]
 fn grpc_listener_ceiling_mapping_never_widens_on_migration() {
     for uds in [false, true] {
@@ -283,12 +253,16 @@ fn grpc_listener_ceiling_mapping_never_widens_on_migration() {
             if let Some(tier) = max_tier {
                 old_keys.push(("max_tier", tier));
             }
-            let old = parse_schema_only(&listener_toml(uds, &old_keys)).unwrap();
-            assert_eq!(
-                configured_ceiling(&old, uds),
-                expected,
-                "old ceiling for uds={uds} access_mode={access_mode:?} max_tier={max_tier:?}"
-            );
+            let old = parse_schema_only(&listener_toml(uds, &old_keys));
+            if access_mode.is_some() {
+                assert!(old.is_err(), "access_mode must no longer load");
+            } else {
+                assert_eq!(
+                    configured_ceiling(&old.unwrap(), uds),
+                    expected,
+                    "ceiling for uds={uds} max_tier={max_tier:?}"
+                );
+            }
 
             let migrated = migrated_max_tier(access_mode, max_tier);
             let new_keys: Vec<_> = migrated
@@ -776,7 +750,6 @@ fn grpc_tcp_bearer_principal_parses() {
         vec![
             GrpcListener::Tcp {
                 addr: "127.0.0.1:50051".parse().unwrap(),
-                access_mode: GrpcAccessMode::ReadWrite,
                 max_tier: GrpcMaxTier::OperatorOnly,
                 token_file: Some(token_file.path().to_path_buf()),
                 principal: Some("automation.example".to_string()),
@@ -810,7 +783,6 @@ fn grpc_security_tier_accepts_bearer_tcp_with_principal_role() {
         vec![
             GrpcListener::Tcp {
                 addr: "127.0.0.1:50051".parse().unwrap(),
-                access_mode: GrpcAccessMode::ReadWrite,
                 max_tier: GrpcMaxTier::Mutating,
                 token_file: Some(token_file.path().to_path_buf()),
                 principal: Some("automation.example".to_string()),
@@ -855,7 +827,6 @@ fn grpc_uds_principal_parses() {
         vec![GrpcListener::Uds {
             path: PathBuf::from("/tmp/rustbgpd-test.sock"),
             mode: 0o600,
-            access_mode: GrpcAccessMode::ReadWrite,
             max_tier: GrpcMaxTier::OperatorOnly,
             token_file: None,
             principal: Some("local-admin".to_string()),

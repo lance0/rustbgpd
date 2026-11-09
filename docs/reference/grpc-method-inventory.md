@@ -20,10 +20,9 @@ this inventory before the handler runs, and applies two checks in order:
 1. **Listener ceiling.** A listener's `max_tier` is a hard cap on the
    tiers it serves at all, regardless of who is calling; a call above the
    cap is rejected `PERMISSION_DENIED` with the bounded audit result
-   `listener_tier_denied`. `access_mode = "read_only"` translates to a
-   `sensitive_read` ceiling and the stricter of the two wins, so the
-   binary access mode is a compatibility ceiling layered over the tier
-   model rather than the mechanism behind it.
+   `listener_tier_denied`. A listener capped below `mutating` is
+   read-only: its mutating handlers also refuse the call, as a second
+   check behind this layer.
 2. **Principal role.** The call's authenticated principal is looked
    up in `[security.grpc.roles]` and the role's ceiling must reach the
    method's tier: `observer` reaches `sensitive_read`, `automation`

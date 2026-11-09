@@ -32,8 +32,9 @@ fn policy_counter_context() -> rustbgpd_policy::RouteContext<'static> {
     reason = "one real RPC fixture retains the session hold, counter values, live readiness and cleanup"
 )]
 async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held() {
+    use rustbgpd_api::authz::AuthTier;
     use rustbgpd_api::proto::policy_service_server::PolicyService as PolicyServiceRpc;
-    use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
+    use rustbgpd_api::server::RuntimeConfigCoordinator;
 
     let (commands, command_rx) = mpsc::channel(8);
     let (operator, operator_rx) = mpsc::channel(8);
@@ -115,7 +116,7 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
     let probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(commands.clone(), manager_rib)
         .with_peer_manager_readiness(readiness.clone());
     let service = rustbgpd_api::PolicyService::with_runtime_config_coordinator(
-        AccessMode::ReadOnly,
+        AuthTier::SensitiveRead,
         commands,
         None,
         None,

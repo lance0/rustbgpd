@@ -93,7 +93,7 @@ use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tracing::{error, info, warn};
 
 use crate::config::{
-    AcceptedConfigSnapshot, Config, GrpcAccessMode, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
+    AcceptedConfigSnapshot, Config, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
     UnpolicedEbgpBoundary,
 };
 use crate::config::{
@@ -123,8 +123,8 @@ use rustbgpd_api::runtime_config_settlement::{
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
-    AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
-    ListenerEndpoint, RuntimeConfigCoordinator, ServeConfig,
+    ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
+    RuntimeConfigCoordinator, ServeConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 
@@ -953,15 +953,6 @@ async fn await_bmp_client_shutdown(mut client_handles: Vec<JoinHandle<()>>, time
     }
 }
 
-impl From<GrpcAccessMode> for GrpcServerAccessMode {
-    fn from(value: GrpcAccessMode) -> Self {
-        match value {
-            GrpcAccessMode::ReadOnly => Self::ReadOnly,
-            GrpcAccessMode::ReadWrite => Self::ReadWrite,
-        }
-    }
-}
-
 const fn grpc_max_tier_to_auth_tier(value: GrpcMaxTier) -> rustbgpd_api::authz::AuthTier {
     match value {
         GrpcMaxTier::Read => rustbgpd_api::authz::AuthTier::Read,
@@ -1702,7 +1693,6 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
         .map(|(credential_index, listener)| match listener {
             GrpcListener::Tcp {
                 addr,
-                access_mode,
                 max_tier,
                 token_file: _,
                 principal,
@@ -1711,7 +1701,6 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 let _ = tls;
                 Ok(GrpcListenerConfig {
                     endpoint: ListenerEndpoint::Tcp(addr),
-                    access_mode: access_mode.into(),
                     max_tier: grpc_max_tier_to_auth_tier(max_tier),
                     roles: Arc::clone(&roles),
                     credential_store: credential_store.clone(),
@@ -1728,13 +1717,11 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
             GrpcListener::Uds {
                 path,
                 mode,
-                access_mode,
                 max_tier,
                 token_file: _,
                 principal,
             } => Ok(GrpcListenerConfig {
                 endpoint: ListenerEndpoint::Uds { path, mode },
-                access_mode: access_mode.into(),
                 max_tier: grpc_max_tier_to_auth_tier(max_tier),
                 roles: Arc::clone(&roles),
                 credential_store: credential_store.clone(),
@@ -2699,9 +2686,10 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
         } else {
             ""
         };
-        let access = match listener.access_mode {
-            GrpcServerAccessMode::ReadOnly => " (read-only)",
-            GrpcServerAccessMode::ReadWrite => "",
+        let access = if listener.max_tier.is_read_only_ceiling() {
+            " (read-only)"
+        } else {
+            ""
         };
         eprintln!("  |- {label}{access}{auth}");
     }
@@ -7223,7 +7211,7 @@ async fn run<T>(
                 config.global.asn,
                 config.global.router_id.clone(),
                 // Dial-out only renders Subscribe snapshots; it never serves Set.
-                rustbgpd_api::server::AccessMode::ReadOnly,
+                rustbgpd_api::authz::AuthTier::SensitiveRead,
                 peer_mgr_tx.clone(),
                 Some(peer_mgr_operator_tx.clone()),
             ),

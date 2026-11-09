@@ -709,8 +709,7 @@ uses `local-operator`. Without a token, that implicit identity uses
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
 | `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path without symlinks or `..` components |
 | `mode`       | u32    | no       | `0o600` | Filesystem socket mode; creation never grants wider access |
-| `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
-| `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
+| `max_tier`   | string | no       | `"operator_only"` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth; see [credential file permissions](#grpc-credential-file-permissions) |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
 
@@ -752,8 +751,7 @@ container/network exposure.
 |--------------|--------|----------|---------|-------------|
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
-| `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
-| `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
+| `max_tier`   | string | no       | `"operator_only"` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth; see [credential file permissions](#grpc-credential-file-permissions) |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for non-mTLS bearer-token listeners |
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
@@ -817,22 +815,26 @@ examples.
 If either listener subtable is present, at least one gRPC listener must remain
 enabled after applying `enabled = false`.
 
-`access_mode = "read_only"` permits query and watch RPCs but rejects mutating
-RPCs such as neighbor add/delete, route injection, policy changes, peer-group
-changes, shutdown, and MRT trigger requests with `PERMISSION_DENIED`. This is
-intended for monitoring or dashboard listeners that should not expose control
-plane writes.
-
 **ADR-0064 listener tier caps:** `max_tier` is a per-listener ceiling based on
 the checked gRPC method-tier matrix. Calls whose method tier is higher than the
-effective listener cap return `PERMISSION_DENIED` before the handler runs, after
+listener cap return `PERMISSION_DENIED` before the handler runs, after
 bearer-token listeners first authenticate the request so missing or invalid
-tokens still return `UNAUTHENTICATED` without exposing tier-cap details. The
-field is backwards-compatible with `access_mode`: omitting `max_tier` preserves
-the existing `access_mode` behavior, `read_only` implies `sensitive_read`, and
-`read_write` implies `operator_only`. When both fields are set, the effective
-cap is the stricter of the two, so `access_mode = "read_only"` cannot be
-weakened by `max_tier = "operator_only"`.
+tokens still return `UNAUTHENTICATED` without exposing tier-cap details.
+Omitting `max_tier` serves every tier (`operator_only`).
+
+A read-only listener sets `max_tier = "sensitive_read"` (or `"read"`). It
+permits query and watch RPCs but rejects mutating RPCs such as neighbor
+add/delete, route injection, policy changes, peer-group changes, shutdown, and
+MRT trigger requests with `PERMISSION_DENIED`. The mutating handlers also
+refuse the call themselves whenever the listener ceiling is below `mutating`,
+as a second check behind the tier layer. This is intended for monitoring or
+dashboard listeners that should not expose control plane writes.
+
+The former `access_mode` key was removed; a config that still sets it fails
+to load with an unknown-field error. `access_mode = "read_only"` becomes
+`max_tier = "sensitive_read"`, or keeps an existing stricter `max_tier =
+"read"`; `access_mode = "read_write"` is deleted. The
+[changelog](../../CHANGELOG.md) upgrade notes give the exact mapping.
 
 **Token file lifecycle:** When `token_file` is configured, the file must exist
 and contain a non-empty token at daemon startup. SIGHUP re-reads the bytes behind
@@ -1000,14 +1002,12 @@ log_format = "json"
 [global.telemetry.grpc_uds]
 path = "/run/rustbgpd-api/grpc.sock"
 mode = 0o660
-access_mode = "read_write"
 principal = "local-admin"
 
 # Under tier a TCP listener must authenticate: bearer token + principal
 # (create the token file first) or native mTLS.
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
-access_mode = "read_only"
 max_tier = "sensitive_read"
 token_file = "/etc/rustbgpd/grpc.token"
 principal = "observer-readonly"
@@ -6420,7 +6420,6 @@ quoting it:
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |
 | `grpc_uds.mode` must be <= `0o777` | `invalid gRPC config` |
-| `grpc_*.access_mode` must be `read_only` or `read_write` | TOML parse error |
 | `grpc_*.max_tier` must be `read`, `sensitive_read`, `mutating`, or `operator_only` | TOML parse error |
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |

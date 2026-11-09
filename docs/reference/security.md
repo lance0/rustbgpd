@@ -121,9 +121,9 @@ Preferred posture:
   config. The native path is the default recommendation; the proxy
   path is the multi-tenant / multi-host fallback.
 - If you need to expose monitoring directly, prefer a dedicated
-  `access_mode = "read_only"` listener over exposing the mutating control
+  `max_tier = "sensitive_read"` listener over exposing the mutating control
   surface.
-- `access_mode` is a listener-level boundary; per-client RBAC is layered on top
+- Listener `max_tier` is a listener-level boundary; per-client RBAC is layered on top
   via the ADR-0064 per-method tiers (`read`, `sensitive_read`, `mutating`,
   `operator_only`) cataloged in `docs/reference/grpc-method-inventory.md` and
   `crates/api/src/authz.rs`. The runtime emits `grpc_authz` decision logs and
@@ -148,9 +148,11 @@ Preferred posture:
   [ADR-0064 role-mapping decision](../adr/0064-grpc-authorization.md) does not
   describe this per-request authorization boundary.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
-  TCP listeners to the smallest required method tier. `access_mode =
-  "read_only"` remains a compatibility ceiling equivalent to
-  `sensitive_read`.
+  TCP listeners to the smallest required method tier. On a listener capped
+  below `mutating`, every mutating handler also refuses the call itself, as a
+  second check behind the tier layer. The former `access_mode` key was
+  removed; `access_mode = "read_only"` corresponds to `max_tier =
+  "sensitive_read"`.
 - gRPC `grpc_authz` audit records are result-aware for forwarded calls and use
   bounded result labels such as `handler_ok`, `handler_invalid_argument`, and
   `listener_tier_denied`. Credential-bearing request summaries are masked:
@@ -665,8 +667,7 @@ the roadmap:
 
 - Authorization is per-principal tier enforcement
   (`security.grpc.enforcement = "tier"`, default since v0.24.0, mandatory
-  since v0.63.0) layered on listener `access_mode` (`read_only` vs
-  `read_write`) and `max_tier` caps.
+  since v0.63.0) layered on listener `max_tier` caps.
   `enforcement = "legacy"` was removed in v0.63.0 and from the typed schema in
   v0.65. Boot, `--check`, and reload retain its exact migration diagnostic.
   Earlier editions of this document stated a

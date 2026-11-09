@@ -133,7 +133,7 @@ async fn vpn_flowspec_plain_and_leased_crud_preserve_rd_and_afi_siblings() {
         let leases = manager.injection_leases();
         let task = tokio::spawn(manager.run());
         let service =
-            InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+            InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
         let (rib, _roster) = rib_service_with_roster(rib_tx.clone());
         let rib = rib.with_injection_leases(leases);
         for family in FAMILIES {
@@ -273,7 +273,7 @@ async fn vpn_flowspec_typed_or_raw_read_back_is_unchanged_with_interleaved_commu
         let leases = manager.injection_leases();
         let task = tokio::spawn(manager.run());
         let service =
-            InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+            InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
         let rib = RibService::new(rib_tx.clone()).with_injection_leases(leases);
         let rate = flowspec_action_to_ec(&flowspec_rate(123.0))
             .unwrap()
@@ -398,8 +398,10 @@ async fn vpn_flowspec_page_one_lease_keys_echo_delete_only_the_listed_scope() {
     );
     let leases = manager.injection_leases();
     let task = tokio::spawn(manager.run());
-    let service = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
-    let reader = InjectionService::new(rib_tx.clone(), AccessMode::ReadOnly, Arc::clone(&leases));
+    let service =
+        InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
+    let reader =
+        InjectionService::new(rib_tx.clone(), AuthTier::SensitiveRead, Arc::clone(&leases));
     let rib = RibService::new(rib_tx.clone()).with_injection_leases(leases);
     let generation = service
         .add_leased_path(Request::new(proto::AddLeasedPathRequest {
@@ -551,7 +553,7 @@ async fn vpn_flowspec_export_evidence_requires_negotiation_and_fences_scope_toke
     let task = tokio::spawn(manager.run());
     let mut roster = crate::import_roster::ImportRosterPublisher::new();
     publish_managed(&mut roster, 3);
-    let service = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, leases)
+    let service = InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, leases)
         .with_peer_roster(roster.reader());
     let mut outbound = Vec::new();
     for (octet, safi) in [

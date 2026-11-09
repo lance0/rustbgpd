@@ -22,6 +22,7 @@ use tokio::sync::{broadcast, mpsc};
 use tonic::transport::{Channel, Endpoint, Server, Uri};
 
 use crate::NeighborService;
+use crate::authz::AuthTier;
 use crate::event_service::EventService;
 use crate::peer_types::{
     PeerManagerCommand, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
@@ -31,7 +32,6 @@ use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::event_service_server::EventServiceServer;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::neighbor_service_server::NeighborServiceServer;
-use crate::server::AccessMode;
 use crate::test_support::peer_info;
 
 const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
@@ -141,7 +141,7 @@ async fn connect(
     let peer_tx = daemon.spawn_peer_manager();
     let rib_tx = spawn_rib();
     let events = EventService::new(rib_tx.clone(), peer_tx.clone());
-    let neighbors = NeighborService::new(65001, AccessMode::ReadOnly, peer_tx, rib_tx, None);
+    let neighbors = NeighborService::new(65001, AuthTier::SensitiveRead, peer_tx, rib_tx, None);
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(
         Server::builder()

@@ -47,7 +47,7 @@ Treat all of the following as attacker-controlled:
   listeners are opt-in and must use a bearer token (`token_file`) or native mTLS. Unauthenticated TCP listeners are
   rejected at config load. Every method has an
   authorization tier: `read`, `sensitive_read`, `mutating` or `operator_only` (`crates/api/src/authz.rs`,
-  `docs/reference/grpc-method-inventory.md`, ADR-0064). Listener `max_tier` / `access_mode = "read_only"` ceilings
+  `docs/reference/grpc-method-inventory.md`, ADR-0064). Listener `max_tier` ceilings
   and per-principal role ceilings are both enforced. Treat a lower-tier principal as untrusted with respect to
   anything above its tier. That covers mutation and credential exposure through read responses or audit logs. Config
   commits (`ApplyConfigTransaction`, `StreamApplyConfigTransaction`, `RollbackConfigTransaction`) are `operator_only`.

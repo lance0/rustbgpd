@@ -1512,13 +1512,9 @@ impl Config {
                 // any-partial cases both resolve to no-TLS here.
                 _ => None,
             };
-            let access_mode = cfg
-                .access_mode
-                .map_or(GrpcAccessMode::ReadWrite, Into::into);
             listeners.push(GrpcListener::Tcp {
                 addr,
-                access_mode,
-                max_tier: effective_grpc_max_tier(access_mode, cfg.max_tier),
+                max_tier: grpc_max_tier(cfg.max_tier),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
                 principal: cfg.principal.clone(),
                 tls,
@@ -1529,14 +1525,10 @@ impl Config {
                 .path
                 .as_ref()
                 .map_or_else(|| self.default_grpc_uds_path(), PathBuf::from);
-            let access_mode = cfg
-                .access_mode
-                .map_or(GrpcAccessMode::ReadWrite, Into::into);
             listeners.push(GrpcListener::Uds {
                 path,
                 mode: cfg.mode,
-                access_mode,
-                max_tier: effective_grpc_max_tier(access_mode, cfg.max_tier),
+                max_tier: grpc_max_tier(cfg.max_tier),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
                 principal: cfg.principal.clone(),
             });
@@ -1546,7 +1538,6 @@ impl Config {
             listeners.push(GrpcListener::Uds {
                 path: self.default_grpc_uds_path(),
                 mode: 0o600,
-                access_mode: GrpcAccessMode::ReadWrite,
                 max_tier: GrpcMaxTier::OperatorOnly,
                 token_file: None,
                 principal: None,
@@ -2223,7 +2214,6 @@ impl Config {
 pub enum GrpcListener {
     Tcp {
         addr: SocketAddr,
-        access_mode: GrpcAccessMode,
         max_tier: GrpcMaxTier,
         token_file: Option<PathBuf>,
         principal: Option<String>,
@@ -2232,7 +2222,6 @@ pub enum GrpcListener {
     Uds {
         path: PathBuf,
         mode: u32,
-        access_mode: GrpcAccessMode,
         max_tier: GrpcMaxTier,
         token_file: Option<PathBuf>,
         principal: Option<String>,
@@ -2254,25 +2243,12 @@ pub struct GrpcTlsPaths {
     pub client_crl_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrpcAccessMode {
-    ReadOnly,
-    ReadWrite,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GrpcMaxTier {
     Read,
     SensitiveRead,
     Mutating,
     OperatorOnly,
-}
-
-const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> GrpcMaxTier {
-    match access_mode {
-        GrpcAccessMode::ReadOnly => GrpcMaxTier::SensitiveRead,
-        GrpcAccessMode::ReadWrite => GrpcMaxTier::OperatorOnly,
-    }
 }
 
 pub(crate) const TRANSACTION_FIB_SECTION: &str = "[[fib_tables]]";
@@ -2317,12 +2293,8 @@ fn retired_key_error(content: &str) -> Option<String> {
         .then(|| LEGACY_GRPC_ENFORCEMENT_MIGRATION.to_string())
 }
 
-fn effective_grpc_max_tier(
-    access_mode: GrpcAccessMode,
-    configured: Option<GrpcMaxTierConfig>,
-) -> GrpcMaxTier {
-    access_mode_compatibility_max_tier(access_mode)
-        .min(configured.map_or(GrpcMaxTier::OperatorOnly, GrpcMaxTier::from))
+fn grpc_max_tier(configured: Option<GrpcMaxTierConfig>) -> GrpcMaxTier {
+    configured.map_or(GrpcMaxTier::OperatorOnly, GrpcMaxTier::from)
 }
 
 /// Differences between two neighbor lists, keyed by address.
@@ -7514,15 +7486,6 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
             || !old.datasets.is_empty()
             || !new.datasets.is_empty(),
         external_inputs_identity: ExternalInputsIdentity::Unverified,
-    }
-}
-
-impl From<GrpcAccessModeConfig> for GrpcAccessMode {
-    fn from(value: GrpcAccessModeConfig) -> Self {
-        match value {
-            GrpcAccessModeConfig::ReadOnly => Self::ReadOnly,
-            GrpcAccessModeConfig::ReadWrite => Self::ReadWrite,
-        }
     }
 }
 

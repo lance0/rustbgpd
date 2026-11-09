@@ -14,6 +14,7 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::peer_manager_operator_read;
 use crate::audit::{gnmi_set_summary, set_request_summary};
+use crate::authz::AuthTier;
 use crate::gnmi;
 use crate::gnmi_ext;
 use crate::health_probe::DaemonGate;
@@ -23,8 +24,7 @@ use crate::peer_types::{
 };
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
-    AccessMode, GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction,
-    read_only_rejection,
+    GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction, read_only_rejection,
 };
 
 const GNMI_VERSION: &str = "0.10.0";
@@ -142,9 +142,9 @@ fn render_heartbeat_snapshot<'a>(
 pub struct GnmiService {
     asn: u32,
     router_id: String,
-    /// Listener access mode. `Set` is guarded explicitly like every other
+    /// Listener ceiling. `Set` is guarded explicitly like every other
     /// mutating service, in addition to the authz tier cap on `gnmi.gNMI/Set`.
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     peer_snapshot: PeerSnapshotFn,
     initial_roster_gate: Option<DaemonGate>,
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
@@ -187,10 +187,10 @@ impl GnmiService {
     pub fn new(
         asn: u32,
         router_id: String,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     ) -> Self {
-        Self::new_with_operator_queries(asn, router_id, access_mode, peer_mgr_tx, None)
+        Self::new_with_operator_queries(asn, router_id, max_tier, peer_mgr_tx, None)
     }
 
     /// Create a service whose live peer snapshots use the operator lane when
@@ -199,7 +199,7 @@ impl GnmiService {
     pub fn new_with_operator_queries(
         asn: u32,
         router_id: String,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
         operator_tx: Option<tokio::sync::mpsc::Sender<EnqueuedOperatorQuery>>,
     ) -> Self {
@@ -225,7 +225,7 @@ impl GnmiService {
                 .await
             })
         });
-        service.access_mode = access_mode;
+        service.max_tier = max_tier;
         service
     }
 
@@ -242,7 +242,7 @@ impl GnmiService {
         Self {
             asn,
             router_id: router_id.into(),
-            access_mode: AccessMode::ReadWrite,
+            max_tier: AuthTier::OperatorOnly,
             peer_snapshot: Arc::new(move || {
                 let snapshot = peer_snapshot();
                 Box::pin(async move { snapshot.await.map(addressed_peers) })
@@ -2493,7 +2493,7 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
         request: Request<gnmi::SetRequest>,
     ) -> Result<Response<gnmi::SetResponse>, Status> {
         set_request_summary(&request, gnmi_set_summary(request.get_ref()));
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let Some(set_handler) = &self.set_handler else {
@@ -3304,7 +3304,7 @@ mod tests {
             panic!("read-only listeners must reject Set before invoking the hook");
         });
         let mut service = test_service(Vec::new()).with_set_handler(Some(hook));
-        service.access_mode = crate::server::AccessMode::ReadOnly;
+        service.max_tier = crate::authz::AuthTier::SensitiveRead;
         let err = service
             .set(Request::new(gnmi::SetRequest {
                 prefix: None,
@@ -4347,7 +4347,7 @@ mod tests {
         let service = GnmiService::new_with_operator_queries(
             65001,
             "192.0.2.1".into(),
-            crate::server::AccessMode::ReadOnly,
+            crate::authz::AuthTier::SensitiveRead,
             peer_tx,
             Some(operator_tx),
         );
@@ -4425,7 +4425,7 @@ mod tests {
             let service = GnmiService::new_with_operator_queries(
                 65001,
                 "192.0.2.1".into(),
-                crate::server::AccessMode::ReadOnly,
+                crate::authz::AuthTier::SensitiveRead,
                 peer_tx,
                 Some(operator_tx),
             );
@@ -4452,7 +4452,7 @@ mod tests {
         let service = GnmiService::new(
             65001,
             "192.0.2.1".to_string(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         );
         assert_peer_snapshot_outage(service, "peer manager unavailable").await;
@@ -4476,7 +4476,7 @@ mod tests {
         let service = GnmiService::new(
             65001,
             "192.0.2.1".to_string(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         );
         assert_peer_snapshot_outage(service, "peer manager dropped reply").await;
@@ -5372,7 +5372,7 @@ mod tests {
         let mut harness = serve(GnmiService::new(
             65001,
             "192.0.2.1".into(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         ))
         .await;
@@ -5409,7 +5409,7 @@ mod tests {
         let mut harness = serve(GnmiService::new(
             65001,
             "192.0.2.1".into(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         ))
         .await;
@@ -5472,7 +5472,7 @@ mod tests {
         let mut harness = serve(GnmiService::new(
             65001,
             "192.0.2.1".into(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         ))
         .await;
@@ -5772,7 +5772,7 @@ mod tests {
         let service = GnmiService::new(
             65001,
             "192.0.2.1".to_string(),
-            crate::server::AccessMode::ReadOnly,
+            crate::authz::AuthTier::SensitiveRead,
             peer_tx,
         );
         let mut harness = serve(service).await;

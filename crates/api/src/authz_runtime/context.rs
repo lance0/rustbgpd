@@ -49,7 +49,6 @@ impl GrpcAuthnKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrpcAuthAuditContext {
     pub(super) listener: String,
-    pub(super) access_mode: &'static str,
     pub(super) max_tier: AuthTier,
     pub(super) authn: GrpcAuthnKind,
     principal: String,
@@ -68,14 +67,12 @@ impl GrpcAuthAuditContext {
     #[must_use]
     pub fn new(
         listener: impl Into<String>,
-        access_mode: &'static str,
         max_tier: AuthTier,
         authn: GrpcAuthnKind,
         principal: impl Into<String>,
     ) -> Self {
         Self {
             listener: listener.into(),
-            access_mode,
             max_tier,
             authn,
             principal: principal.into(),

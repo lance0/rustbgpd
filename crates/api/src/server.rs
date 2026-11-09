@@ -1254,8 +1254,8 @@ pub struct ServeConfig {
 #[derive(Clone, Debug)]
 pub struct ListenerConfig {
     pub endpoint: ListenerEndpoint,
-    pub access_mode: AccessMode,
-    /// Effective ADR-0064 listener method-tier ceiling.
+    /// ADR-0064 listener method-tier ceiling. A ceiling below `Mutating`
+    /// also makes every mutating handler refuse the call itself.
     pub max_tier: AuthTier,
     /// Global ADR-0064 principal-to-role map; role ceilings are
     /// enforced unconditionally.
@@ -1287,21 +1287,6 @@ impl ListenerConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccessMode {
-    ReadOnly,
-    ReadWrite,
-}
-
-impl AccessMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read_only",
-            Self::ReadWrite => "read_write",
-        }
-    }
-}
-
 /// Listener transport.
 #[derive(Clone, Debug)]
 pub enum ListenerEndpoint {
@@ -1311,7 +1296,6 @@ pub enum ListenerEndpoint {
 
 fn tcp_audit_context(
     addr: SocketAddr,
-    access_mode: AccessMode,
     max_tier: AuthTier,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     bearer_enabled: bool,
@@ -1332,14 +1316,8 @@ fn tcp_audit_context(
     } else {
         (GrpcAuthnKind::None, "unauthenticated".to_string())
     };
-    let context = GrpcAuthAuditContext::new(
-        format!("tcp://{addr}"),
-        access_mode.as_str(),
-        max_tier,
-        authn,
-        principal,
-    )
-    .with_roles(roles);
+    let context = GrpcAuthAuditContext::new(format!("tcp://{addr}"), max_tier, authn, principal)
+        .with_roles(roles);
     if tls_enabled {
         context.with_mtls_peer_principal()
     } else {
@@ -1350,7 +1328,6 @@ fn tcp_audit_context(
 fn uds_audit_context(
     path: &Path,
     mode: u32,
-    access_mode: AccessMode,
     max_tier: AuthTier,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     bearer_enabled: bool,
@@ -1390,7 +1367,6 @@ fn uds_audit_context(
     };
     let context = GrpcAuthAuditContext::new(
         format!("unix://{}", path.display()),
-        access_mode.as_str(),
         max_tier,
         authn,
         principal,
@@ -1456,8 +1432,10 @@ fn with_sighup_reload_status(
         .with_rib_query(rib_query_tx)
 }
 
-pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
-    if access_mode == AccessMode::ReadOnly {
+/// LAN-1681 handler-level belt behind the tier layer: a listener whose
+/// ceiling is below `Mutating` refuses every mutating handler itself.
+pub(crate) fn read_only_rejection(max_tier: AuthTier) -> Option<Status> {
+    if max_tier.is_read_only_ceiling() {
         Some(Status::permission_denied(
             "listener is read-only; mutating RPCs are not permitted",
         ))
@@ -1754,7 +1732,6 @@ async fn run_listener(
     let bfd_events = config.bfd_events;
     let ListenerConfig {
         endpoint,
-        access_mode,
         max_tier,
         roles,
         credential_store,
@@ -1767,7 +1744,6 @@ async fn run_listener(
         ListenerEndpoint::Tcp(addr) => {
             Box::pin(run_tcp_listener(
                 addr,
-                access_mode,
                 max_tier,
                 roles,
                 credential_store,
@@ -1843,7 +1819,6 @@ async fn run_listener(
             Box::pin(run_uds_listener(
                 path,
                 mode,
-                access_mode,
                 max_tier,
                 roles,
                 credential_store,
@@ -1924,7 +1899,6 @@ async fn run_listener(
 )]
 async fn run_tcp_listener(
     addr: SocketAddr,
-    access_mode: AccessMode,
     max_tier: AuthTier,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     credential_store: CredentialStore,
@@ -2012,14 +1986,13 @@ async fn run_tcp_listener(
     info!(
         %bound_addr,
         requested_addr = %addr,
-        access_mode = ?access_mode,
+        max_tier = max_tier.as_str(),
         auth_enabled,
         tls_enabled,
         "starting gRPC TCP listener"
     );
     let audit_context = tcp_audit_context(
         bound_addr,
-        access_mode,
         max_tier,
         roles,
         auth_enabled,
@@ -2083,7 +2056,7 @@ async fn run_tcp_listener(
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
         )
-        .with_fib_table_control(access_mode, fib_table_control.clone())
+        .with_fib_table_control(max_tier, fib_table_control.clone())
         .with_known_peer_queries(known_peers.clone())
         .with_injection_leases(Arc::clone(&injection_leases)),
         interceptor.clone(),
@@ -2111,14 +2084,14 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
-        InjectionService::new(rib_tx, access_mode, Arc::clone(&injection_leases))
+        InjectionService::new(rib_tx, max_tier, Arc::clone(&injection_leases))
             .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
         NeighborService::with_runtime_config_coordinator(
             asn,
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             rib_query_tx.clone(),
             config_tx.clone(),
@@ -2133,7 +2106,7 @@ async fn run_tcp_listener(
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
         PeerGroupService::with_runtime_config_coordinator(
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
@@ -2145,7 +2118,7 @@ async fn run_tcp_listener(
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
         PolicyService::with_runtime_config_coordinator(
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
@@ -2165,7 +2138,7 @@ async fn run_tcp_listener(
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
         with_sighup_reload_status(
-            ConfigService::new(access_mode, peer_mgr_tx.clone()),
+            ConfigService::new(max_tier, peer_mgr_tx.clone()),
             last_sighup_reload.clone(),
             rib_query_tx.clone(),
         )
@@ -2190,7 +2163,7 @@ async fn run_tcp_listener(
             evpn_fdb_nexthop_snapshot,
             evpn_runtime_model,
             evpn_runtime_apply,
-            access_mode,
+            max_tier,
             evpn_duplicate_mac_clear,
         )
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
@@ -2210,7 +2183,7 @@ async fn run_tcp_listener(
     ));
     routes.add_service(ControlServiceServer::with_interceptor(
         ControlService::new(
-            access_mode,
+            max_tier,
             start_time,
             metrics.clone(),
             peer_mgr_tx.clone(),
@@ -2228,7 +2201,7 @@ async fn run_tcp_listener(
             GnmiService::new_with_operator_queries(
                 asn,
                 router_id.clone(),
-                access_mode,
+                max_tier,
                 peer_mgr_tx.clone(),
                 Some(peer_mgr_operator_tx.clone()),
             )
@@ -2258,7 +2231,6 @@ async fn run_tcp_listener(
 async fn run_uds_listener(
     path: PathBuf,
     mode: u32,
-    access_mode: AccessMode,
     max_tier: AuthTier,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     credential_store: CredentialStore,
@@ -2344,7 +2316,6 @@ async fn run_uds_listener(
     let audit_context = uds_audit_context(
         &path,
         mode,
-        access_mode,
         max_tier,
         roles,
         auth_enabled,
@@ -2352,7 +2323,7 @@ async fn run_uds_listener(
     );
     info!(
         path = %path.display(),
-        access_mode = ?access_mode,
+        max_tier = max_tier.as_str(),
         auth_enabled,
         "starting gRPC UDS listener"
     );
@@ -2373,7 +2344,7 @@ async fn run_uds_listener(
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
         )
-        .with_fib_table_control(access_mode, fib_table_control.clone())
+        .with_fib_table_control(max_tier, fib_table_control.clone())
         .with_known_peer_queries(known_peers.clone())
         .with_injection_leases(Arc::clone(&injection_leases)),
         interceptor.clone(),
@@ -2401,14 +2372,14 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
-        InjectionService::new(rib_tx, access_mode, Arc::clone(&injection_leases))
+        InjectionService::new(rib_tx, max_tier, Arc::clone(&injection_leases))
             .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
         NeighborService::with_runtime_config_coordinator(
             asn,
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             rib_query_tx.clone(),
             config_tx.clone(),
@@ -2423,7 +2394,7 @@ async fn run_uds_listener(
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
         PeerGroupService::with_runtime_config_coordinator(
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
@@ -2435,7 +2406,7 @@ async fn run_uds_listener(
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
         PolicyService::with_runtime_config_coordinator(
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
@@ -2455,7 +2426,7 @@ async fn run_uds_listener(
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
         with_sighup_reload_status(
-            ConfigService::new(access_mode, peer_mgr_tx.clone()),
+            ConfigService::new(max_tier, peer_mgr_tx.clone()),
             last_sighup_reload.clone(),
             rib_query_tx.clone(),
         )
@@ -2480,7 +2451,7 @@ async fn run_uds_listener(
             evpn_fdb_nexthop_snapshot,
             evpn_runtime_model,
             evpn_runtime_apply,
-            access_mode,
+            max_tier,
             evpn_duplicate_mac_clear,
         )
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
@@ -2500,7 +2471,7 @@ async fn run_uds_listener(
     ));
     routes.add_service(ControlServiceServer::with_interceptor(
         ControlService::new(
-            access_mode,
+            max_tier,
             start_time,
             metrics.clone(),
             peer_mgr_tx.clone(),
@@ -2517,7 +2488,7 @@ async fn run_uds_listener(
         GnmiService::new_with_operator_queries(
             asn,
             router_id,
-            access_mode,
+            max_tier,
             peer_mgr_tx.clone(),
             Some(peer_mgr_operator_tx),
         )
@@ -3641,7 +3612,7 @@ mod tests {
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let service = with_sighup_reload_status(
-            ConfigService::new(AccessMode::ReadOnly, peer_tx),
+            ConfigService::new(AuthTier::SensitiveRead, peer_tx),
             Some(Arc::new(|| crate::proto::GetLastSighupReloadResponse {
                 record: Some(crate::proto::SighupReloadRecord {
                     outcome: "complete".to_string(),
@@ -4122,7 +4093,6 @@ mod tests {
             ));
             let context = tcp_audit_context(
                 addr,
-                AccessMode::ReadOnly,
                 AuthTier::SensitiveRead,
                 tier_authz("test"),
                 false,
@@ -4329,7 +4299,6 @@ mod tests {
         let (peer_tx, session_events, _) = spawn_fake_peer_manager();
         let context = tcp_audit_context(
             addr,
-            AccessMode::ReadOnly,
             AuthTier::SensitiveRead,
             tier_authz("test"),
             true,
@@ -4413,11 +4382,32 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// The handler belt and the audit `access_mode` label both follow the
+    /// listener ceiling: read-only exactly when it is below `Mutating`.
+    #[test]
+    fn read_only_belt_and_label_follow_the_listener_ceiling() {
+        for (tier, read_only) in [
+            (AuthTier::Read, true),
+            (AuthTier::SensitiveRead, true),
+            (AuthTier::Mutating, false),
+            (AuthTier::OperatorOnly, false),
+        ] {
+            assert_eq!(
+                read_only_rejection(tier).map(|status| status.code()),
+                read_only.then_some(tonic::Code::PermissionDenied),
+                "{tier:?}"
+            );
+            assert_eq!(
+                tier.access_mode_label(),
+                if read_only { "read_only" } else { "read_write" }
+            );
+        }
+    }
+
     #[test]
     fn tcp_audit_context_uses_configured_bearer_principal() {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
-            AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             tier_authz("automation.example"),
             true,
@@ -4439,7 +4429,6 @@ mod tests {
         // principal_unmapped.
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
-            AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             tier_authz("rustbgpd://operator/ci"),
             true,
@@ -4454,7 +4443,6 @@ mod tests {
     fn tcp_audit_context_uses_mtls_fallback_until_request_cert_available() {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
-            AccessMode::ReadWrite,
             AuthTier::Mutating,
             tier_authz("mtls-unresolved"),
             true,
@@ -4471,7 +4459,6 @@ mod tests {
         let context = uds_audit_context(
             Path::new("/run/rustbgpd/grpc.sock"),
             0o600,
-            AccessMode::ReadWrite,
             AuthTier::SensitiveRead,
             tier_authz("local-admin"),
             false,
@@ -4490,7 +4477,6 @@ mod tests {
         let context = uds_audit_context(
             Path::new("/run/rustbgpd/grpc.sock"),
             0o600,
-            AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             Arc::new(BTreeMap::new()),
             false,
@@ -4508,7 +4494,6 @@ mod tests {
         let context = uds_audit_context(
             Path::new("/run/rustbgpd/grpc.sock"),
             0o660,
-            AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             Arc::new(BTreeMap::new()),
             false,
@@ -4545,7 +4530,6 @@ mod tests {
                 let context = uds_audit_context(
                     Path::new("/run/rustbgpd/grpc.sock"),
                     mode,
-                    AccessMode::ReadWrite,
                     AuthTier::OperatorOnly,
                     Arc::new(roles),
                     bearer_enabled,

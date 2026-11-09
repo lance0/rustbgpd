@@ -23,6 +23,7 @@ use rustbgpd_wire::{
 use tokio::sync::{mpsc, oneshot};
 use tonic::Request;
 
+use crate::authz::AuthTier;
 use crate::control_service::ControlService;
 use crate::peer_types::{
     EnqueuedOperatorQuery, PeerManagerOperatorQuery, PeerManagerReadinessQuery,
@@ -31,7 +32,6 @@ use crate::policy_service::PolicyService;
 use crate::proto::control_service_server::ControlService as ControlRpc;
 use crate::proto::neighbor_service_server::NeighborService as NeighborRpc;
 use crate::proto::policy_service_server::PolicyService as PolicyRpc;
-use crate::server::AccessMode;
 use crate::{NeighborService, proto};
 
 struct ProbeHold {
@@ -207,16 +207,22 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         Vec::new(),
     );
     let policy = Arc::new(
-        PolicyService::new(AccessMode::ReadOnly, peer_tx.clone(), None, None)
+        PolicyService::new(AuthTier::SensitiveRead, peer_tx.clone(), None, None)
             .with_rib_query(query_tx.clone())
             .with_operator_queries(operator_tx.clone())
             .with_import_roster(roster.reader())
             .with_export_roster(export_roster),
     );
     let neighbor = Arc::new(
-        NeighborService::new(65000, AccessMode::ReadOnly, peer_tx, query_tx.clone(), None)
-            .with_operator_queries(operator_tx)
-            .with_rib_summary_queries(summary_tx.clone()),
+        NeighborService::new(
+            65000,
+            AuthTier::SensitiveRead,
+            peer_tx,
+            query_tx.clone(),
+            None,
+        )
+        .with_operator_queries(operator_tx)
+        .with_rib_summary_queries(summary_tx.clone()),
     );
     rib_tx
         .send(RibUpdate::SetPeerExportEncoder {
@@ -441,7 +447,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
     });
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
     let service = ControlService::new(
-        AccessMode::ReadOnly,
+        AuthTier::SensitiveRead,
         tokio::time::Instant::now(),
         BgpMetrics::new(),
         peer_tx,
@@ -731,7 +737,7 @@ async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
             }
         }
     });
-    let neighbor = NeighborService::new(65000, AccessMode::ReadOnly, peer_tx, query_tx, None)
+    let neighbor = NeighborService::new(65000, AuthTier::SensitiveRead, peer_tx, query_tx, None)
         .with_operator_queries(operator_tx);
     let get = |address: &str| {
         NeighborRpc::get_neighbor_state(

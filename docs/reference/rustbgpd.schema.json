@@ -1530,13 +1530,6 @@
         "paths"
       ]
     },
-    "GrpcAccessModeConfig": {
-      "type": "string",
-      "enum": [
-        "read_only",
-        "read_write"
-      ]
-    },
     "GrpcEnforcementConfig": {
       "oneOf": [
         {
@@ -1585,17 +1578,6 @@
     "GrpcTcpListenerConfig": {
       "type": "object",
       "properties": {
-        "access_mode": {
-          "description": "Listener access mode: `\"read_only\"` or `\"read_write\"`.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GrpcAccessModeConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "address": {
           "description": "Listen address (e.g. `\"127.0.0.1:50051\"`).",
           "type": [
@@ -1609,7 +1591,7 @@
           "default": true
         },
         "max_tier": {
-          "description": "ADR-0064 per-method listener ceiling. When omitted, the\nlistener preserves the compatibility cap implied by\n`access_mode`.",
+          "description": "ADR-0064 per-method listener ceiling. When omitted, the listener\nserves every tier (`operator_only`). A ceiling below `mutating`\nmakes the listener read-only.",
           "anyOf": [
             {
               "$ref": "#/$defs/GrpcMaxTierConfig"
@@ -1674,24 +1656,13 @@
     "GrpcUdsListenerConfig": {
       "type": "object",
       "properties": {
-        "access_mode": {
-          "description": "Listener access mode: `\"read_only\"` or `\"read_write\"`.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GrpcAccessModeConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "enabled": {
           "description": "Enable this listener. Default `true`.",
           "type": "boolean",
           "default": true
         },
         "max_tier": {
-          "description": "ADR-0064 per-method listener ceiling. When omitted, the\nlistener preserves the compatibility cap implied by\n`access_mode`.",
+          "description": "ADR-0064 per-method listener ceiling. When omitted, the listener\nserves every tier (`operator_only`). A ceiling below `mutating`\nmakes the listener read-only.",
           "anyOf": [
             {
               "$ref": "#/$defs/GrpcMaxTierConfig"

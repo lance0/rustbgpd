@@ -230,7 +230,7 @@ hold_time = 90
 
         let service = rustbgpd_api::NeighborService::with_runtime_config_coordinator(
             65001,
-            rustbgpd_api::server::AccessMode::ReadWrite,
+            rustbgpd_api::authz::AuthTier::OperatorOnly,
             peer_mgr_tx.clone(),
             rib_tx,
             Some(event_tx),

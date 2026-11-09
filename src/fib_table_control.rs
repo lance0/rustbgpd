@@ -844,10 +844,10 @@ fn config_to_snapshot(table: &FibTableConfig) -> FibTableSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_api::authz::AuthTier;
     use rustbgpd_api::peer_types::PeerManagerCommand;
     use rustbgpd_api::proto::rib_service_server::RibService as _;
     use rustbgpd_api::rib_service::RibService;
-    use rustbgpd_api::server::AccessMode;
     use tokio::sync::Mutex;
     use tonic::{Code, Request, Status};
 
@@ -959,7 +959,7 @@ mod tests {
             Arc::new(Vec::new),
             rustbgpd_api::rib_service::FibRouteSnapshotReader::default(),
         )
-        .with_fib_table_control(AccessMode::ReadWrite, Some(control))
+        .with_fib_table_control(AuthTier::OperatorOnly, Some(control))
     }
 
     #[tokio::test]
@@ -1246,7 +1246,7 @@ families = ["ipv4_unicast"]
             Arc::new(Vec::new),
             rustbgpd_api::rib_service::FibRouteSnapshotReader::default(),
         )
-        .with_fib_table_control(AccessMode::ReadWrite, Some(control))
+        .with_fib_table_control(AuthTier::OperatorOnly, Some(control))
         .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
         .await
         .unwrap_err();
