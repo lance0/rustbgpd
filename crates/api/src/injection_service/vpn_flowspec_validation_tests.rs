@@ -698,3 +698,122 @@ fn vpn_many_typed_targets_keep_exact_duplicate_checks() {
         tonic::Code::InvalidArgument
     );
 }
+
+fn marking_request(family: proto::AddressFamily, dscp: u32) -> proto::AddFlowSpecRequest {
+    let mut request = proto::AddFlowSpecRequest {
+        actions: vec![proto::FlowSpecAction {
+            action: Some(proto::flow_spec_action::Action::TrafficMarking(
+                proto::FlowSpecTrafficMarking { dscp },
+            )),
+        }],
+        ..vpn_request(family)
+    };
+    if matches!(
+        family,
+        proto::AddressFamily::Ipv4Flowspec | proto::AddressFamily::Ipv6Flowspec
+    ) {
+        request.rd.clear();
+        request.route_targets.clear();
+    }
+    request
+}
+
+/// RFC 8955 §7.5 gives the traffic-marking DSCP six bits and reserves the two
+/// above them. A typed DSCP of 64 or more used to be accepted and masked on
+/// encode, so a request for 64 advertised 0.
+#[tokio::test]
+async fn marking_dscp_above_63_is_refused_on_every_family_and_add_rpc() {
+    use proto::rib_service_server::RibService as _;
+    const MARKING: u64 = 0x8009 << 48;
+    let (tx, rx) = mpsc::channel(64);
+    let manager = rustbgpd_rib::RibManager::new(
+        rx,
+        mpsc::channel(1).1,
+        None,
+        None,
+        rustbgpd_telemetry::BgpMetrics::new(),
+    );
+    let leases = manager.injection_leases();
+    let service = InjectionService::new(tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
+    let reader = crate::rib_service::RibService::new(tx);
+    let task = tokio::spawn(manager.run());
+    for family in [
+        proto::AddressFamily::Ipv4Flowspec,
+        proto::AddressFamily::Ipv6Flowspec,
+        proto::AddressFamily::L3vpnIpv4Flowspec,
+        proto::AddressFamily::L3vpnIpv6Flowspec,
+    ] {
+        let local_rows = || async {
+            reader
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    afi_safi: family as i32,
+                    received_peer_address: "0.0.0.0".into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .received_routes
+        };
+        for dscp in [64, 255, 256, u32::MAX] {
+            let request = marking_request(family, dscp);
+            reject_add_modes(&service, &request).await;
+            let err = build_injected_flowspec(request).unwrap_err();
+            assert!(err.message().contains("0..=63"), "{}", err.message());
+        }
+        assert_eq!(leases.list(None).len(), 0, "{family:?}");
+        assert!(local_rows().await.is_empty(), "{family:?}");
+
+        let accepted = marking_request(family, 63);
+        service
+            .add_flow_spec(Request::new(accepted.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("{family:?} dscp 63: {e}"));
+        let rows = local_rows().await;
+        assert_eq!(rows.len(), 1, "{family:?}");
+        let row = rows[0].route.as_ref().unwrap();
+        assert_eq!(row.actions, accepted.actions, "{family:?}");
+        let marks: Vec<u64> = row
+            .extended_communities
+            .iter()
+            .copied()
+            .filter(|ec| ec & (0xffff << 48) == MARKING)
+            .collect();
+        assert_eq!(marks, [MARKING | 63], "{family:?}");
+    }
+    drop((service, reader));
+    task.await.unwrap();
+}
+
+/// A raw extended community is advertised and listed as supplied, as one
+/// received from a peer is. RFC 8955 §7.5 has a receiver ignore the reserved
+/// bits, so the typed view reports the six DSCP bits; the wire encoder keeps
+/// its mask so a typed value can never set them.
+#[test]
+fn raw_marking_reserved_bits_survive_and_are_ignored_on_decode() {
+    use rustbgpd_wire::FlowSpecAction;
+    let raw = (0x8009 << 48) | 0xc5;
+    let route = build_injected_flowspec(proto::AddFlowSpecRequest {
+        extended_communities: vec![raw],
+        ..marking_request(proto::AddressFamily::Ipv4Flowspec, 0)
+    })
+    .unwrap();
+    let ecs = route
+        .attributes
+        .iter()
+        .find_map(PathAttribute::extended_communities)
+        .unwrap();
+    assert_eq!(
+        ecs.iter().map(|ec| ec.as_u64()).collect::<Vec<_>>(),
+        [raw, 0x8009 << 48]
+    );
+    assert_eq!(
+        ecs[0].as_flowspec_action(),
+        Some(FlowSpecAction::TrafficMarking { dscp: 5 })
+    );
+    assert_eq!(
+        ExtendedCommunity::from_flowspec_action(&FlowSpecAction::TrafficMarking { dscp: 0xc5 })
+            .as_u64(),
+        (0x8009 << 48) | 5
+    );
+}

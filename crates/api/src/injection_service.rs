@@ -2267,8 +2267,18 @@ fn flowspec_action_to_ec(
             terminal: a.terminal,
         },
         proto::flow_spec_action::Action::TrafficMarking(m) => FlowSpecAction::TrafficMarking {
+            // RFC 8955 §7.5: the DSCP is six bits and the encoder zeroes the two
+            // reserved bits above it, so a larger value would be advertised as
+            // a different marking.
             dscp: u8::try_from(m.dscp)
-                .map_err(|_| Status::invalid_argument("dscp must be 0..=63"))?,
+                .ok()
+                .filter(|dscp| *dscp <= 63)
+                .ok_or_else(|| {
+                    Status::invalid_argument(format!(
+                        "traffic_marking.dscp must be 0..=63, got {}",
+                        m.dscp
+                    ))
+                })?,
         },
         proto::flow_spec_action::Action::TrafficRatePackets(r) => {
             FlowSpecAction::TrafficRatePackets {
