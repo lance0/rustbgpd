@@ -2,8 +2,9 @@
 
 **Status:** Current
 **Date:** 2026-07-26
-**Update (2026-11-09):** The v0.82.0 controls add client-CRL revocation,
-[candidate-source confinement](../reference/reload-matrix.md), and
+**Update (2026-11-09):** This update covers client-CRL revocation and
+[candidate-source confinement](../reference/reload-matrix.md) shipped in
+v0.82.0, plus the existing
 [gNMI dial-out credentials](../reference/configuration.md#gnmi_dialout).
 The rows below describe their current boundaries; the original decision date
 is unchanged.
