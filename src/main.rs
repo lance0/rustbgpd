@@ -6772,9 +6772,9 @@ async fn run<T>(
         },
         evpn_runtime_apply: {
             let reload_apply = evpn_runtime_reload_apply.clone();
-            Some(Arc::new(move |request| {
+            Some(Arc::new(move |request, caller_tier| {
                 let reload_apply = reload_apply.clone();
-                Box::pin(async move { reload_apply.apply_request(&request).await })
+                Box::pin(async move { reload_apply.apply_request(&request, caller_tier).await })
                     as rustbgpd_api::evpn_service::EvpnRuntimeApplyFuture
             })
                 as rustbgpd_api::evpn_service::EvpnRuntimeApplyFn)

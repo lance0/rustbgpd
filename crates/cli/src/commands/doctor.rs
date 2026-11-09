@@ -3061,6 +3061,7 @@ fn credential_file_checks(document: &toml::Value, process: Option<LocalProcess>)
     });
     let telemetry = document.get("global").and_then(|g| g.get("telemetry"));
     let mut checks = Vec::new();
+    let mut sources = Vec::new();
     for (listener, fields) in [
         (
             "grpc_tcp",
@@ -3083,6 +3084,34 @@ fn credential_file_checks(document: &toml::Value, process: Option<LocalProcess>)
         if table.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
             continue;
         }
+        sources.push((listener.to_string(), table, fields));
+    }
+    if let Some(targets) = document
+        .get("gnmi_dialout")
+        .and_then(|v| v.get("targets"))
+        .and_then(toml::Value::as_array)
+    {
+        for (index, target) in targets.iter().enumerate() {
+            sources.push((
+                format!("gnmi_dialout.targets[{index}]"),
+                target,
+                &[
+                    ("tls_ca_file", "dial-out CA", CredentialKind::Public),
+                    (
+                        "tls_cert_file",
+                        "dial-out certificate",
+                        CredentialKind::Public,
+                    ),
+                    (
+                        "tls_key_file",
+                        "dial-out private key",
+                        CredentialKind::Secret,
+                    ),
+                ][..],
+            ));
+        }
+    }
+    for (listener, table, fields) in sources {
         for &(field, label, kind) in fields {
             let Some(configured) = table.get(field).and_then(toml::Value::as_str) else {
                 continue;
@@ -7978,6 +8007,24 @@ paths = ["x"]
         ))
         .unwrap();
         assert!(credential_file_checks(&disabled, None).is_empty());
+    }
+
+    #[test]
+    fn doctor_reports_dialout_credential_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let document = toml::from_str(&format!(
+            "[[gnmi_dialout.targets]]\nname = \"collector\"\ntls_ca_file = {path:?}\ntls_cert_file = {path:?}\ntls_key_file = {path:?}\n"
+        )).unwrap();
+        let checks = credential_file_checks(&document, None);
+        assert_eq!(checks.len(), 3);
+        for field in ["tls_ca_file", "tls_cert_file", "tls_key_file"] {
+            let check = checks
+                .iter()
+                .find(|check| check.name == format!("credentials.gnmi_dialout.targets[0].{field}"))
+                .unwrap();
+            assert_eq!(check.status, CheckStatus::Fail);
+        }
     }
 
     #[test]

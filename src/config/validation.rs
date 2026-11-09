@@ -1561,6 +1561,31 @@ impl Config {
         // dial-in Subscribe request would get.
         super::gnmi_dialout_targets(self)
             .map_err(|reason| ConfigError::InvalidGnmiDialout { reason })?;
+        if read_credentials && let Some(section) = &self.gnmi_dialout {
+            for target in &section.targets {
+                for (path, field, kind) in [
+                    (
+                        &target.tls_ca_file,
+                        "gnmi_dialout.tls_ca_file",
+                        PemKind::Certificate,
+                    ),
+                    (
+                        &target.tls_cert_file,
+                        "gnmi_dialout.tls_cert_file",
+                        PemKind::Certificate,
+                    ),
+                    (
+                        &target.tls_key_file,
+                        "gnmi_dialout.tls_key_file",
+                        PemKind::PrivateKey,
+                    ),
+                ] {
+                    if let Some(path) = path {
+                        validate_grpc_pem_file(path, field, kind, true)?;
+                    }
+                }
+            }
+        }
 
         // Validate dynamic neighbor ranges
         let mut seen_prefixes = std::collections::HashSet::new();
@@ -3970,10 +3995,6 @@ enum PemKind {
     Crl,
 }
 
-/// Largest gRPC credential file (PEM bundle or token) config validation
-/// reads.
-const MAX_GRPC_CREDENTIAL_FILE_BYTES: u64 = 4 * 1024 * 1024;
-
 /// Validate a PEM-encoded TLS file at config-load / `--check` time.
 ///
 /// Checks readability and PEM framing/block kind. Startup and both `--check`
@@ -4062,38 +4083,24 @@ fn validate_grpc_pem_file(
 /// Read a gRPC credential file under the shared admission rules
 /// ([`rustbgpd_api::credential_file`]): a refused file fails config load.
 /// Permission warnings are reported by credential staging, once per load.
-/// At most [`MAX_GRPC_CREDENTIAL_FILE_BYTES`] are read; a larger file is
-/// refused rather than buffered.
+/// The shared reader bounds every read, including file growth after validation.
 fn read_grpc_credential_file(
     path: &str,
     field_name: &str,
     kind: rustbgpd_api::credential_file::CredentialKind,
-) -> Result<Vec<u8>, ConfigError> {
-    use std::io::Read as _;
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ConfigError> {
     #[cfg(test)]
     credential_read_probe::hold(path);
-    let (file, _warning) = rustbgpd_api::credential_file::open_credential(
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    rustbgpd_api::credential_file::read_credential(
         Path::new(path),
         field_name,
         kind,
         rustbgpd_api::credential_file::DaemonIdentity::current(),
+        &mut bytes,
     )
-    .map_err(|reason| ConfigError::InvalidGrpcConfig { reason })?;
-    let mut bytes = Vec::new();
-    file.take(MAX_GRPC_CREDENTIAL_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| ConfigError::InvalidGrpcConfig {
-            reason: format!("failed to read {field_name} {path:?}: {e}"),
-        })?;
-    if bytes.len() as u64 > MAX_GRPC_CREDENTIAL_FILE_BYTES {
-        return Err(ConfigError::InvalidGrpcConfig {
-            reason: format!(
-                "failed to read {field_name} {path:?}: larger than \
-                 {MAX_GRPC_CREDENTIAL_FILE_BYTES} bytes"
-            ),
-        });
-    }
-    Ok(bytes)
+    .map(|_warning| bytes)
+    .map_err(|reason| ConfigError::InvalidGrpcConfig { reason })
 }
 
 fn validate_grpc_token_file(
@@ -4117,7 +4124,7 @@ fn validate_grpc_token_file(
         field_name,
         rustbgpd_api::credential_file::CredentialKind::Secret,
     )?;
-    let token = String::from_utf8(bytes).map_err(|_| ConfigError::InvalidGrpcConfig {
+    let token = std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidGrpcConfig {
         reason: format!("{field_name} {path:?} is not valid UTF-8"),
     })?;
     if token.trim_end().is_empty() {
@@ -4438,5 +4445,38 @@ pub(crate) mod credential_read_probe {
                 probe.release.recv().unwrap();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod credential_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn validation_retains_zeroizing_buffers_through_parse_errors() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"private material").unwrap();
+        let path = file.path().to_str().unwrap();
+        let bytes: zeroize::Zeroizing<Vec<u8>> = read_grpc_credential_file(
+            path,
+            "private key",
+            rustbgpd_api::credential_file::CredentialKind::Secret,
+        )
+        .unwrap();
+        assert_eq!(bytes.as_slice(), b"private material");
+        assert!(validate_grpc_pem_file(path, "private key", PemKind::PrivateKey, true).is_err());
+        std::fs::write(file.path(), [0xff]).unwrap();
+        assert!(validate_grpc_token_file(Some(path), "token", true).is_err());
+        file.as_file()
+            .set_len(rustbgpd_api::credential_file::MAX_CREDENTIAL_FILE_BYTES + 1)
+            .unwrap();
+        assert!(
+            read_grpc_credential_file(
+                path,
+                "private key",
+                rustbgpd_api::credential_file::CredentialKind::Secret
+            )
+            .is_err()
+        );
     }
 }

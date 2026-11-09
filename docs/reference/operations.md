@@ -2264,6 +2264,18 @@ rejection, non-negotiated `MP_REACH_NLRI` and scoped-peer body NLRI have no
 counter: `warning_updates` shows them only to power-of-two resolution, and
 `rbgp rib received <peer> --rejected` lists retained next-hop rejections.
 
+Ignored ROUTE-REFRESH messages use the same schedule, with an independent
+per-connection count for each "ignoring …" class: a peer without the Route
+Refresh capability, an unknown AFI/SAFI, an unnegotiated family, BoRR or EoRR
+from a peer without Enhanced Route Refresh, BoRR before End-of-RIB from a
+Graceful Restart peer, an unknown or unsupported subtype (one shared class),
+and ORF entries for a family where ORF was not negotiated. Each class logs at
+counts 1, 2, 4, 8, ... and includes its count of ignored messages on the
+current TCP connection as `warning_messages`. Reconnect re-arms every class.
+Only `bgp_messages_received_total{type="route_refresh"}` counts these messages;
+there is no per-reason counter, so `warning_messages` shows each reason only to
+power-of-two resolution.
+
 Malformed UPDATE cause reasons are bounded to `attribute_list`,
 `unrecognized_well_known`, `missing_well_known`, `attribute_flags`,
 `attribute_length`, `invalid_origin`, `invalid_next_hop`, `optional_attribute`,
@@ -3323,7 +3335,7 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, and crash reports write there |
-| `credentials.<listener>.<field>` | For a Unix-socket daemon address, each configured gRPC `token_file`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file` and `tls_client_crl_file`, judged by the daemon's [credential file rules](configuration.md#grpc-credential-file-permissions). A verified local daemon supplies its mount namespace and effective user and group; without one, only the mode is judged | red: the daemon refuses the file (not a regular file, or a world-writable token or key); yellow: a token or key readable beyond the daemon, or a file doctor could not inspect |
+| `credentials.<listener>.<field>`, `credentials.gnmi_dialout.targets[i].<field>` | For a Unix-socket daemon address, each configured gRPC `token_file`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file` and `tls_client_crl_file`, and each gNMI dial-out target's `tls_ca_file`, `tls_cert_file` and `tls_key_file`, judged by the daemon's [credential file rules](configuration.md#grpc-credential-file-permissions). A verified local daemon supplies its mount namespace and effective user and group; without one, only the mode is judged | red: the daemon refuses the file (not a regular file, larger than 4 MiB, or world-writable); yellow: a token or key readable beyond the daemon, or a file doctor could not inspect |
 | `host.run_context` | systemd / container / unknown from pid-1 facts | tailors remediation lines (e.g. `LimitNOFILE=` vs container ulimits) |
 | `daemon.config_freshness.<pid>` | whether the config file's mtime differs, at full filesystem resolution, from the daemon's last config-file marker (the mtime of the file the daemon last read or wrote); a whole-second marker from an older daemon, or process start when there is no marker, is compared by later second | yellow means on-disk changes may be pending; green does not prove effective runtime agreement, and two saves within one filesystem timestamp tick cannot be told apart |
 

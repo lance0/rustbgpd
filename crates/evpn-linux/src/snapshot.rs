@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
+use rustbgpd_evpn::{EvpnInstanceId, MacAddress, ManagedSvdVxlanBinding};
 
 /// `RTPROT_BGP` (186) — the daemon's kernel ownership identity, shared
 /// with every route we install (`rtm_protocol`) and, per ADR-0082, the
@@ -206,6 +206,227 @@ pub struct KernelBridgeVlanTunnelInfo {
     pub vid: Option<u16>,
     /// Kernel flags for this tunnel row.
     pub flags: KernelBridgeVlanFlags,
+}
+
+/// Expand the kernel's compressed VID/VNI ranges before comparing or pruning.
+pub(crate) fn svd_tunnel_bindings(
+    rows: &[KernelBridgeVlanTunnelInfo],
+) -> Option<Vec<ManagedSvdVxlanBinding>> {
+    let mut bindings = Vec::new();
+    visit_svd_tunnel_ranges(rows, |first_vid, last_vid, first_vni| {
+        for bridge_vlan in first_vid..=last_vid {
+            #[cfg(test)]
+            let previous_capacity = bindings.capacity();
+            bindings.push(ManagedSvdVxlanBinding {
+                bridge_vlan,
+                vni: first_vni + u32::from(bridge_vlan - first_vid),
+            });
+            #[cfg(test)]
+            record_svd_tunnel_work(|work| {
+                work.expanded_bindings += 1;
+                work.allocation_growths += usize::from(bindings.capacity() != previous_capacity);
+            });
+        }
+    })?;
+    Some(bindings)
+}
+
+/// Match one binding without expanding ranges; malformed trailing rows still reject it.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn svd_tunnel_binding_matches(
+    rows: &[KernelBridgeVlanTunnelInfo],
+    bridge_vlan: u16,
+    want_vni: u32,
+) -> bool {
+    let mut matches = false;
+    let valid = visit_svd_tunnel_ranges(rows, |first_vid, last_vid, first_vni| {
+        if (first_vid..=last_vid).contains(&bridge_vlan) {
+            matches |= first_vni.checked_add(u32::from(bridge_vlan - first_vid)) == Some(want_vni);
+        }
+    });
+    valid.is_some() && matches
+}
+
+fn visit_svd_tunnel_ranges(
+    rows: &[KernelBridgeVlanTunnelInfo],
+    mut visit: impl FnMut(u16, u16, u32),
+) -> Option<()> {
+    let mut start = None;
+    for row in rows {
+        #[cfg(test)]
+        record_svd_tunnel_work(|work| work.raw_rows += 1);
+        let (vid, vni) = (row.vid?, row.tunnel_id?);
+        if !(1..=4094).contains(&vid) {
+            return None;
+        }
+        if row.flags.range_begin {
+            if row.flags.range_end || start.replace((vid, vni)).is_some() {
+                return None;
+            }
+        } else if row.flags.range_end {
+            let (first_vid, first_vni) = start.take()?;
+            if vid < first_vid || first_vni.checked_add(u32::from(vid - first_vid))? != vni {
+                return None;
+            }
+            #[cfg(test)]
+            record_svd_tunnel_work(|work| work.ranges += 1);
+            visit(first_vid, vid, first_vni);
+        } else {
+            if start.is_some() {
+                return None;
+            }
+            #[cfg(test)]
+            record_svd_tunnel_work(|work| work.ranges += 1);
+            visit(vid, vid, vni);
+        }
+    }
+    start.is_none().then_some(())
+}
+
+/// Whether an SVD port carries exactly `bindings`, as both port VLANs and
+/// tunnel mappings, and the bridge holds every binding's VLAN.
+///
+/// `bindings` must be strictly vid-sorted, as config resolution produces
+/// them; any other order fails closed. Work is linear in the inventory rows
+/// plus `bindings`: VLAN rows fill a bitset and compressed tunnel ranges are
+/// matched in place, never expanded into a vector.
+pub(crate) fn svd_vlan_bindings_present(
+    bridge_vlans: &[KernelBridgeVlanInfo],
+    ports: &[KernelBridgePortVlanInfo],
+    vxlan_ifindex: u32,
+    vxlan_name: &str,
+    bindings: &[ManagedSvdVxlanBinding],
+) -> bool {
+    if !bindings
+        .windows(2)
+        .all(|pair| pair[0].bridge_vlan < pair[1].bridge_vlan)
+        || bindings
+            .iter()
+            .any(|binding| !(1..=4094).contains(&binding.bridge_vlan))
+    {
+        return false;
+    }
+    let Some(port) = ports.iter().find(|port| {
+        port.is_vxlan && (port.ifindex == vxlan_ifindex || port.name.as_deref() == Some(vxlan_name))
+    }) else {
+        return false;
+    };
+    let mut desired = VlanBits::default();
+    for binding in bindings {
+        desired.insert_range(binding.bridge_vlan, binding.bridge_vlan);
+    }
+    if VlanBits::from_rows(&port.vlans) != desired
+        || !desired.is_subset(&VlanBits::from_rows(bridge_vlans))
+    {
+        return false;
+    }
+    let mut seen = VlanBits::default();
+    let mut covered = 0usize;
+    let mut exact = true;
+    let valid = visit_svd_tunnel_ranges(&port.vlan_tunnels, |first_vid, last_vid, first_vni| {
+        if !exact {
+            return;
+        }
+        let start = bindings.partition_point(|binding| binding.bridge_vlan < first_vid);
+        for (offset, vid) in (first_vid..=last_vid).enumerate() {
+            covered += 1;
+            exact &= seen.insert(vid)
+                && bindings.get(start + offset).is_some_and(|binding| {
+                    binding.bridge_vlan == vid
+                        && first_vni.checked_add(u32::from(vid - first_vid)) == Some(binding.vni)
+                });
+            if !exact {
+                return;
+            }
+        }
+    });
+    valid.is_some() && exact && covered == bindings.len()
+}
+
+/// Membership of VLANs `1..=4094` as a 4096-bit set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VlanBits([u64; 64]);
+
+impl Default for VlanBits {
+    fn default() -> Self {
+        Self([0; 64])
+    }
+}
+
+impl VlanBits {
+    /// Same row interpretation as [`vlan_rows_contain`], restricted to `1..=4094`.
+    fn from_rows(rows: &[KernelBridgeVlanInfo]) -> Self {
+        let mut bits = Self::default();
+        let mut range_start = None;
+        for row in rows {
+            if row.flags.range_begin {
+                range_start = Some(row.vid);
+            } else if row.flags.range_end
+                && let Some(start) = range_start.take()
+            {
+                bits.insert_range(start, row.vid);
+            }
+            bits.insert_range(row.vid, row.vid);
+        }
+        bits
+    }
+
+    fn insert_range(&mut self, first: u16, last: u16) {
+        let (mut vid, last) = (usize::from(first.max(1)), usize::from(last.min(4094)));
+        while vid <= last {
+            let bit = vid % 64;
+            let span = (64 - bit).min(last - vid + 1);
+            self.0[vid / 64] |= (u64::MAX >> (64 - span)) << bit;
+            vid += span;
+        }
+    }
+
+    /// Insert one VLAN; `false` when it was already present.
+    fn insert(&mut self, vid: u16) -> bool {
+        let (word, mask) = (usize::from(vid) / 64, 1u64 << (vid % 64));
+        let fresh = self.0[word] & mask == 0;
+        self.0[word] |= mask;
+        fresh
+    }
+
+    fn is_subset(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .zip(other.0)
+            .all(|(mine, theirs)| mine & !theirs == 0)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SvdTunnelWork {
+    pub(crate) raw_rows: usize,
+    pub(crate) ranges: usize,
+    pub(crate) expanded_bindings: usize,
+    pub(crate) allocation_growths: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SVD_TUNNEL_WORK: std::cell::Cell<SvdTunnelWork> = const {
+        std::cell::Cell::new(SvdTunnelWork { raw_rows: 0, ranges: 0, expanded_bindings: 0, allocation_growths: 0 })
+    };
+}
+
+#[cfg(test)]
+fn record_svd_tunnel_work(update: impl FnOnce(&mut SvdTunnelWork)) {
+    SVD_TUNNEL_WORK.with(|cell| {
+        let mut work = cell.get();
+        update(&mut work);
+        cell.set(work);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn measure_svd_tunnel_work(f: impl FnOnce() -> bool) -> (bool, SvdTunnelWork) {
+    SVD_TUNNEL_WORK.with(|cell| cell.set(SvdTunnelWork::default()));
+    let result = f();
+    (result, SVD_TUNNEL_WORK.with(std::cell::Cell::get))
 }
 
 /// VLAN inventory observed on one bridge-member link.
@@ -1070,6 +1291,122 @@ mod tests {
     }
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn svd_tunnel_bindings_expands_ranges_and_refuses_incomplete_inventory() {
+        let row = |vid, vni, range_begin, range_end| KernelBridgeVlanTunnelInfo {
+            vid: Some(vid),
+            tunnel_id: Some(vni),
+            flags: KernelBridgeVlanFlags {
+                range_begin,
+                range_end,
+                ..Default::default()
+            },
+        };
+        let begin = row(10, 100, true, false);
+        let end = row(12, 102, false, true);
+        let rows = [begin.clone(), end];
+        assert!(svd_tunnel_binding_matches(&rows, 11, 101));
+        assert_eq!(
+            svd_tunnel_bindings(&rows),
+            Some(vec![
+                ManagedSvdVxlanBinding {
+                    bridge_vlan: 10,
+                    vni: 100
+                },
+                ManagedSvdVxlanBinding {
+                    bridge_vlan: 11,
+                    vni: 101
+                },
+                ManagedSvdVxlanBinding {
+                    bridge_vlan: 12,
+                    vni: 102
+                },
+            ])
+        );
+        assert_eq!(svd_tunnel_bindings(std::slice::from_ref(&begin)), None);
+        assert_eq!(
+            svd_tunnel_bindings(&[begin.clone(), row(12, 103, false, true)]),
+            None
+        );
+        assert_eq!(svd_tunnel_bindings(&[row(12, 102, false, true)]), None);
+        assert_eq!(svd_tunnel_bindings(&[begin, row(9, 99, false, true)]), None);
+        assert_eq!(svd_tunnel_bindings(&[row(0, 100, false, false)]), None);
+    }
+
+    #[test]
+    fn svd_vlan_bindings_present_matches_full_range_without_expansion() {
+        let flags = |range_begin, range_end| KernelBridgeVlanFlags {
+            range_begin,
+            range_end,
+            ..Default::default()
+        };
+        let vlan = |vid, begin, end| KernelBridgeVlanInfo {
+            vid,
+            flags: flags(begin, end),
+        };
+        let tunnel = |vid, vni, begin, end| KernelBridgeVlanTunnelInfo {
+            vid: Some(vid),
+            tunnel_id: Some(vni),
+            flags: flags(begin, end),
+        };
+        let full = [vlan(1, true, false), vlan(4094, false, true)];
+        let bindings: Vec<_> = (1..=4094)
+            .map(|bridge_vlan| ManagedSvdVxlanBinding {
+                bridge_vlan,
+                vni: 10_000 + u32::from(bridge_vlan),
+            })
+            .collect();
+        let mut port = KernelBridgePortVlanInfo {
+            ifindex: 42,
+            name: Some("vxsvd".to_string()),
+            is_vxlan: true,
+            vlans: full.to_vec(),
+            vlan_tunnels: vec![
+                tunnel(1, 10_001, true, false),
+                tunnel(4094, 14_094, false, true),
+            ],
+        };
+        let present = |port: &KernelBridgePortVlanInfo, bindings: &[ManagedSvdVxlanBinding]| {
+            measure_svd_tunnel_work(|| {
+                svd_vlan_bindings_present(&full, std::slice::from_ref(port), 42, "vxsvd", bindings)
+            })
+        };
+
+        let (ok, work) = present(&port, &bindings);
+        assert!(ok);
+        assert_eq!(
+            (
+                work.raw_rows,
+                work.ranges,
+                work.expanded_bindings,
+                work.allocation_growths
+            ),
+            (2, 1, 0, 0)
+        );
+        let mut reversed = bindings.clone();
+        reversed.reverse();
+        assert!(
+            !present(&port, &reversed).0,
+            "unsorted bindings fail closed"
+        );
+        port.vlan_tunnels[1] = tunnel(4093, 14_093, false, true);
+        assert!(!present(&port, &bindings).0, "missing mapping");
+        port.vlan_tunnels.push(tunnel(7, 10_007, false, false));
+        assert!(
+            !present(&port, &bindings).0,
+            "a duplicate mapping must not stand in for the missing one"
+        );
+        port.vlan_tunnels.pop();
+        port.vlan_tunnels[1] = tunnel(4094, 14_094, false, true);
+        port.vlans = vec![vlan(1, true, false), vlan(4093, false, true)];
+        assert!(!present(&port, &bindings).0, "missing port VLAN");
+        port.vlans = full.to_vec();
+        assert!(
+            !present(&port, &bindings[1..]).0,
+            "extra port VLAN and mapping"
+        );
     }
 
     #[test]

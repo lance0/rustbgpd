@@ -1,3 +1,4 @@
+use super::inbound::InboundWarningClass;
 use super::{
     BmpEvent, Bytes, ConnectFailureEpisode, ConnectFailureSource, Event, Message, NotificationCode,
     OwnedReadHalf, PeerDownReason, PeerSession, RibUpdate, RouteRefreshSubtype,
@@ -113,11 +114,16 @@ impl PeerSession {
             .as_ref()
             .is_some_and(|n| n.negotiated_orf_recv.contains(&(afi, safi)));
         if !negotiated {
-            warn!(
-                peer = %self.peer_label,
-                ?afi, ?safi,
-                "ignoring ORF entries — ORF not negotiated for this family"
-            );
+            let (warn, warning_messages) =
+                self.inbound_warning_due(InboundWarningClass::OrfNotNegotiated);
+            if warn {
+                warn!(
+                    warning_messages,
+                    peer = %self.peer_label,
+                    ?afi, ?safi,
+                    "ignoring ORF entries — ORF not negotiated for this family"
+                );
+            }
             return false;
         }
         let mut accepted = false;
@@ -851,8 +857,15 @@ impl PeerSession {
                         .record_message_received(&self.peer_label, "route_refresh");
                     let afi_raw = u16::from_be_bytes([raw_pdu[19], raw_pdu[20]]);
                     let safi_raw = raw_pdu.get(22).copied();
-                    warn!(peer = %self.peer_label, subtype, afi_raw, ?safi_raw,
-                        "ignoring ROUTE-REFRESH with unknown subtype");
+                    let (warn, warning_messages) =
+                        self.inbound_warning_due(InboundWarningClass::RefreshUnknownSubtype);
+                    if warn {
+                        warn!(
+                            warning_messages,
+                            peer = %self.peer_label, subtype, afi_raw, ?safi_raw,
+                            "ignoring ROUTE-REFRESH with unknown subtype"
+                        );
+                    }
                     // Preserve the established hold-timer behavior of ignored
                     // subtypes with a complete, negotiated AFI/SAFI header.
                     // A three-byte body has no SAFI and cannot identify one.
@@ -1035,29 +1048,45 @@ impl PeerSession {
                                 .as_ref()
                                 .is_some_and(|n| n.peer_route_refresh);
                             if !peer_rr {
-                                warn!(
-                                    peer = %self.peer_label,
-                                    "ignoring ROUTE-REFRESH from peer without capability"
-                                );
+                                let (warn, warning_messages) = self
+                                    .inbound_warning_due(InboundWarningClass::RefreshNotNegotiated);
+                                if warn {
+                                    warn!(
+                                        warning_messages,
+                                        peer = %self.peer_label,
+                                        "ignoring ROUTE-REFRESH from peer without capability"
+                                    );
+                                }
                                 continue;
                             }
                             // Resolve typed AFI/SAFI — ignore unknown families
                             let (Some(afi), Some(safi)) = (rr.afi(), rr.safi()) else {
-                                warn!(
-                                    peer = %self.peer_label,
-                                    afi_raw = rr.afi_raw,
-                                    safi_raw = rr.safi_raw,
-                                    "ignoring ROUTE-REFRESH for unknown AFI/SAFI"
-                                );
+                                let (warn, warning_messages) = self
+                                    .inbound_warning_due(InboundWarningClass::RefreshUnknownFamily);
+                                if warn {
+                                    warn!(
+                                        warning_messages,
+                                        peer = %self.peer_label,
+                                        afi_raw = rr.afi_raw,
+                                        safi_raw = rr.safi_raw,
+                                        "ignoring ROUTE-REFRESH for unknown AFI/SAFI"
+                                    );
+                                }
                                 continue;
                             };
                             // Ignore requests for unnegotiated families
                             if !self.negotiated_families().contains(&(afi, safi)) {
-                                warn!(
-                                    peer = %self.peer_label,
-                                    ?afi, ?safi,
-                                    "ignoring ROUTE-REFRESH for unnegotiated family"
+                                let (warn, warning_messages) = self.inbound_warning_due(
+                                    InboundWarningClass::RefreshUnnegotiatedFamily,
                                 );
+                                if warn {
+                                    warn!(
+                                        warning_messages,
+                                        peer = %self.peer_label,
+                                        ?afi, ?safi,
+                                        "ignoring ROUTE-REFRESH for unnegotiated family"
+                                    );
+                                }
                                 continue;
                             }
                             match rr.subtype() {
@@ -1086,11 +1115,17 @@ impl PeerSession {
                                         .as_ref()
                                         .is_some_and(|n| n.peer_enhanced_route_refresh);
                                     if !peer_err_capable {
-                                        warn!(
-                                            peer = %self.peer_label,
-                                            ?afi, ?safi,
-                                            "ignoring BoRR from peer without Enhanced Route Refresh"
+                                        let (warn, warning_messages) = self.inbound_warning_due(
+                                            InboundWarningClass::BorrNotNegotiated,
                                         );
+                                        if warn {
+                                            warn!(
+                                                warning_messages,
+                                                peer = %self.peer_label,
+                                                ?afi, ?safi,
+                                                "ignoring BoRR from peer without Enhanced Route Refresh"
+                                            );
+                                        }
                                     } else if self.negotiated.as_ref().is_some_and(|n| {
                                         n.peer_capabilities.iter().any(|capability| {
                                             matches!(
@@ -1102,11 +1137,17 @@ impl PeerSession {
                                         .received_eor_families
                                         .contains(&(afi, safi))
                                     {
-                                        warn!(
-                                            peer = %self.peer_label,
-                                            ?afi, ?safi,
-                                            "ignoring BoRR before End-of-RIB from Graceful Restart peer"
+                                        let (warn, warning_messages) = self.inbound_warning_due(
+                                            InboundWarningClass::BorrBeforeEor,
                                         );
+                                        if warn {
+                                            warn!(
+                                                warning_messages,
+                                                peer = %self.peer_label,
+                                                ?afi, ?safi,
+                                                "ignoring BoRR before End-of-RIB from Graceful Restart peer"
+                                            );
+                                        }
                                     } else if self
                                         .send_to_rib_then(
                                             RibUpdate::BeginRouteRefresh {
@@ -1144,11 +1185,17 @@ impl PeerSession {
                                         .as_ref()
                                         .is_some_and(|n| n.peer_enhanced_route_refresh);
                                     if !peer_err_capable {
-                                        warn!(
-                                            peer = %self.peer_label,
-                                            ?afi, ?safi,
-                                            "ignoring EoRR from peer without Enhanced Route Refresh"
+                                        let (warn, warning_messages) = self.inbound_warning_due(
+                                            InboundWarningClass::EorrNotNegotiated,
                                         );
+                                        if warn {
+                                            warn!(
+                                                warning_messages,
+                                                peer = %self.peer_label,
+                                                ?afi, ?safi,
+                                                "ignoring EoRR from peer without Enhanced Route Refresh"
+                                            );
+                                        }
                                     } else if self
                                         .send_to_rib_then(
                                             RibUpdate::EndRouteRefresh {
@@ -1177,24 +1224,36 @@ impl PeerSession {
                                     }
                                 }
                                 RouteRefreshSubtype::Unknown(subtype) => {
-                                    warn!(
-                                        peer = %self.peer_label,
-                                        ?afi,
-                                        ?safi,
-                                        subtype,
-                                        "ignoring ROUTE-REFRESH with unknown subtype"
+                                    let (warn, warning_messages) = self.inbound_warning_due(
+                                        InboundWarningClass::RefreshUnknownSubtype,
                                     );
+                                    if warn {
+                                        warn!(
+                                            warning_messages,
+                                            peer = %self.peer_label,
+                                            ?afi,
+                                            ?safi,
+                                            subtype,
+                                            "ignoring ROUTE-REFRESH with unknown subtype"
+                                        );
+                                    }
                                 }
                                 // Non-exhaustive: subtypes this build does not
                                 // implement are ignored like unrecognized wire
                                 // values above.
                                 _ => {
-                                    warn!(
-                                        peer = %self.peer_label,
-                                        ?afi,
-                                        ?safi,
-                                        "ignoring ROUTE-REFRESH with unsupported subtype"
+                                    let (warn, warning_messages) = self.inbound_warning_due(
+                                        InboundWarningClass::RefreshUnknownSubtype,
                                     );
+                                    if warn {
+                                        warn!(
+                                            warning_messages,
+                                            peer = %self.peer_label,
+                                            ?afi,
+                                            ?safi,
+                                            "ignoring ROUTE-REFRESH with unsupported subtype"
+                                        );
+                                    }
                                 }
                             }
                             Event::RouteRefreshReceived { afi, safi }

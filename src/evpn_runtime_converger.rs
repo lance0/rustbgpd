@@ -523,8 +523,9 @@ impl EvpnRuntimeReloadApply {
     pub(crate) async fn apply_request(
         &self,
         request: &proto::ApplyEvpnRuntimeRequest,
+        caller_tier: Option<rustbgpd_api::authz::CallerTier>,
     ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
-        // External sources stay under the on-disk config's policy
+        // Below operator_only, sources stay under the on-disk config's policy
         // directories, and reading them stays off the async workers. The
         // blocking task owns the permit, so a dropped caller frees it only
         // once the read is done.
@@ -549,7 +550,9 @@ impl EvpnRuntimeReloadApply {
                 &candidate_toml,
                 "candidate EVPN runtime config",
                 false,
-                Some(&limits),
+                caller_tier
+                    .is_none_or(|tier| tier.0 != rustbgpd_api::authz::AuthTier::OperatorOnly)
+                    .then_some(&limits),
             )
         })
         .await

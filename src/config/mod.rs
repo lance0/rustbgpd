@@ -21,7 +21,7 @@ pub(crate) use validation::credential_read_probe;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustbgpd_evpn::runtime_plan_shape::validate_supported_plan_shape;
@@ -1054,33 +1054,17 @@ impl Config {
         CandidateSourceLimits {
             roots,
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
-            // The gNMI dial-out TLS files are read only when a target
-            // connects, so a candidate never names them, but they are the
-            // daemon's credentials all the same.
             protected_files: self
                 .file_path
                 .iter()
                 .cloned()
                 .chain(self.grpc_credential_files().map(PathBuf::from))
-                .chain(
-                    self.gnmi_dialout
-                        .iter()
-                        .flat_map(|section| &section.targets)
-                        .flat_map(|target| {
-                            [
-                                &target.tls_ca_file,
-                                &target.tls_cert_file,
-                                &target.tls_key_file,
-                            ]
-                        })
-                        .filter_map(|path| path.as_deref().map(PathBuf::from)),
-                )
                 .collect(),
             max_graph_bytes: self.policy.rpol_max_graph_bytes,
         }
     }
 
-    /// The gRPC listener credential files config validation reads: every
+    /// The listener and gNMI dial-out credential files validation reads: every
     /// file a candidate load opens besides its policy sources.
     fn grpc_credential_files(&self) -> impl Iterator<Item = &str> {
         let telemetry = &self.global.telemetry;
@@ -1094,7 +1078,20 @@ impl Config {
             ]
         });
         let uds = telemetry.grpc_uds.iter().map(|uds| &uds.token_file);
-        tcp.chain(uds).filter_map(|path| path.as_deref())
+        let dialout = self
+            .gnmi_dialout
+            .iter()
+            .flat_map(|section| &section.targets)
+            .flat_map(|target| {
+                [
+                    &target.tls_ca_file,
+                    &target.tls_cert_file,
+                    &target.tls_key_file,
+                ]
+            });
+        tcp.chain(uds)
+            .chain(dialout)
+            .filter_map(|path| path.as_deref())
     }
 
     /// Load a candidate received over the API (config diff, plan, apply,
@@ -1205,7 +1202,7 @@ impl Config {
         path: &str,
         prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
     ) -> Result<Self, String> {
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_config_text(Path::new(path)) {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
@@ -1230,7 +1227,7 @@ impl Config {
         path: &str,
         prior_datasets: &rustbgpd_policy::datasets::DatasetBindings,
     ) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
+        let content = read_config_text(Path::new(path))
             .map_err(|error| format!("error: failed to read {path}: {error}"))?;
         let file_path = absolute_config_path(std::path::Path::new(path))?;
         let mut config = Self::load_from_toml_source_with_datasets(
@@ -3538,11 +3535,18 @@ pub(crate) fn persisted_config_document(config: &Config) -> Result<String, toml:
 }
 
 /// Render the exact persisted document while bounding statement-serialization
-/// memory and retaining just one header-bearing String.
+/// memory and retaining just one header-bearing String. Reject a normalized
+/// document that cannot be read back under the primary config file limit.
 pub(crate) fn persisted_config_document_bounded(
     config: &mut Config,
 ) -> Result<String, toml::ser::Error> {
-    canonical::render_document_bounded(config).map(|(document, _)| document)
+    let (document, _) = canonical::render_document_bounded(config)?;
+    if document.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(<toml::ser::Error as serde::ser::Error>::custom(format!(
+            "normalized config is larger than {MAX_CONFIG_FILE_BYTES} bytes"
+        )));
+    }
+    Ok(document)
 }
 
 /// Render the legacy raw `Config` TOML shape with bounded statement chunks.
@@ -8358,6 +8362,37 @@ pub(crate) fn gnmi_dialout_targets(
         });
     }
     Ok(targets)
+}
+
+/// Generous bound for the primary TOML document, independent of policy inputs.
+pub(crate) const MAX_CONFIG_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_config_text(path: &Path) -> std::io::Result<String> {
+    let bytes = rustbgpd_policy::datasets::read_regular_file_bounded(path, MAX_CONFIG_FILE_BYTES)?;
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn open_config_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config target is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("larger than {MAX_CONFIG_FILE_BYTES} bytes"),
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

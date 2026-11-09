@@ -823,3 +823,32 @@ fn check_judges_grpc_token_file_permissions() {
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("not a regular file"), "{stderr}");
 }
+
+#[test]
+fn check_refuses_unsafe_dialout_tls_files_in_both_modes() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let ca = dir.path().join("ca.pem");
+    std::fs::write(&ca, CHECK_CERT).unwrap();
+    std::fs::set_permissions(&ca, std::fs::Permissions::from_mode(0o666)).unwrap();
+    for (path, reason) in [
+        (&ca, "world-writable"),
+        (&dir.path().to_path_buf(), "not a regular file"),
+    ] {
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, format!(
+            "{CLEAN}\n[[gnmi_dialout.targets]]\nname = \"collector\"\naddress = \"127.0.0.1:57400\"\npaths = [\"network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/global/state/as\"]\ntls_ca_file = {path:?}\n"
+        )).unwrap();
+        for strict in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
+            command.arg("--check");
+            if strict {
+                command.arg("--strict");
+            }
+            let output = command.arg(&config).output().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(reason), "{stderr}");
+        }
+    }
+}
