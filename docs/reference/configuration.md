@@ -6163,6 +6163,10 @@ the old tunnel mapping before adding the new VNI. Removed bindings also remove
 their bridge-self VLAN when no other bridge port uses it. Unrelated bridge-self
 VLANs and all foreign-port VLANs are preserved. Binding drift makes the SVD
 incomplete and triggers repair rather than protected-attribute rejection.
+While that repair is converging, including the one-time removal of the kernel's
+default VLAN 1 from an existing managed SVD after upgrade, status reports
+`owned-unsafe` and the `managed-netdev fail-closed state observed` warning is
+logged until the bindings match.
 
 Reaping is equally conservative. When the owner token stays but a bridge,
 fixed-VNI VXLAN, SVD VXLAN, VLAN upper, VRF, or L3VXLAN row is removed, only
