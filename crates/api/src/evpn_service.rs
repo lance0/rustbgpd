@@ -150,8 +150,15 @@ const DUPLICATE_MAC_QUARANTINE_RESPONSE_CAP: usize = 4096;
 pub type EvpnRuntimeApplyFuture = Pin<
     Box<dyn Future<Output = Result<proto::ApplyEvpnRuntimeResponse, EvpnRuntimeApplyError>> + Send>,
 >;
-pub type EvpnRuntimeApplyFn =
-    Arc<dyn Fn(proto::ApplyEvpnRuntimeRequest) -> EvpnRuntimeApplyFuture + Send + Sync + 'static>;
+pub type EvpnRuntimeApplyFn = Arc<
+    dyn Fn(
+            proto::ApplyEvpnRuntimeRequest,
+            Option<crate::authz::CallerTier>,
+        ) -> EvpnRuntimeApplyFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Error returned by the daemon EVPN runtime apply hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,7 +882,11 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .runtime_apply
             .as_ref()
             .ok_or_else(|| Status::unavailable("EVPN runtime apply control is unavailable"))?;
-        apply(request.into_inner())
+        let caller_tier = request
+            .extensions()
+            .get::<crate::authz::CallerTier>()
+            .copied();
+        apply(request.into_inner(), caller_tier)
             .await
             .map(Response::new)
             .map_err(EvpnRuntimeApplyError::into_status)
@@ -2478,7 +2489,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_evpn_runtime_rejects_read_only_listener() {
-        let apply: EvpnRuntimeApplyFn = Arc::new(|_| {
+        let apply: EvpnRuntimeApplyFn = Arc::new(|_, _| {
             Box::pin(async {
                 Ok(proto::ApplyEvpnRuntimeResponse {
                     outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
@@ -2518,7 +2529,8 @@ mod tests {
 
     #[tokio::test]
     async fn apply_evpn_runtime_forwards_to_control_hook() {
-        let apply: EvpnRuntimeApplyFn = Arc::new(|request| {
+        let apply: EvpnRuntimeApplyFn = Arc::new(|request, caller_tier| {
+            assert_eq!(caller_tier, None);
             assert_eq!(request.candidate_toml, "candidate");
             assert!(request.validate_only);
             Box::pin(async {
@@ -2546,6 +2558,21 @@ mod tests {
             proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32
         );
         assert_eq!(resp.message, "validated");
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_preserves_caller_tier() {
+        use crate::authz::{AuthTier, CallerTier};
+        for tier in [AuthTier::OperatorOnly, AuthTier::Mutating] {
+            let apply: EvpnRuntimeApplyFn = Arc::new(move |_, caller_tier| {
+                assert_eq!(caller_tier, Some(CallerTier(tier)));
+                Box::pin(async { Ok(proto::ApplyEvpnRuntimeResponse::default()) })
+            });
+            let svc = service_with_runtime_apply(crate::server::AccessMode::ReadWrite, Some(apply));
+            let mut request = Request::new(proto::ApplyEvpnRuntimeRequest::default());
+            request.extensions_mut().insert(CallerTier(tier));
+            svc.apply_evpn_runtime(request).await.unwrap();
+        }
     }
 
     #[tokio::test]
