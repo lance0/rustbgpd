@@ -957,7 +957,7 @@ mod tests {
         GnmiService::new(
             65000,
             "192.0.2.1".to_string(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         )
     }
@@ -1242,7 +1242,7 @@ mod tests {
         let service = GnmiService::new(
             65000,
             "192.0.2.1".to_string(),
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             peer_tx,
         );
 

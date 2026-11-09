@@ -1033,11 +1033,9 @@ pub struct GrpcTcpListenerConfig {
     pub enabled: bool,
     /// Listen address (e.g. `"127.0.0.1:50051"`).
     pub address: Option<String>,
-    /// Listener access mode: `"read_only"` or `"read_write"`.
-    pub access_mode: Option<GrpcAccessModeConfig>,
-    /// ADR-0064 per-method listener ceiling. When omitted, the
-    /// listener preserves the compatibility cap implied by
-    /// `access_mode`.
+    /// ADR-0064 per-method listener ceiling. When omitted, the listener
+    /// serves every tier (`operator_only`). A ceiling below `mutating`
+    /// makes the listener read-only.
     pub max_tier: Option<GrpcMaxTierConfig>,
     /// Path to a bearer-token file for client authentication.
     pub token_file: Option<String>,
@@ -1078,11 +1076,9 @@ pub struct GrpcUdsListenerConfig {
     /// Socket file mode bits. Default `0o600`.
     #[serde(default = "default_grpc_uds_mode")]
     pub mode: u32,
-    /// Listener access mode: `"read_only"` or `"read_write"`.
-    pub access_mode: Option<GrpcAccessModeConfig>,
-    /// ADR-0064 per-method listener ceiling. When omitted, the
-    /// listener preserves the compatibility cap implied by
-    /// `access_mode`.
+    /// ADR-0064 per-method listener ceiling. When omitted, the listener
+    /// serves every tier (`operator_only`). A ceiling below `mutating`
+    /// makes the listener read-only.
     pub max_tier: Option<GrpcMaxTierConfig>,
     /// Path to a bearer-token file for client authentication.
     pub token_file: Option<String>,
@@ -1090,13 +1086,6 @@ pub struct GrpcUdsListenerConfig {
     /// listener. Filesystem permissions authenticate the socket, but
     /// this gives audit logs an operator-controlled identity.
     pub principal: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum GrpcAccessModeConfig {
-    ReadOnly,
-    ReadWrite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

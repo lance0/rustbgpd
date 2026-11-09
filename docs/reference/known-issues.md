@@ -474,7 +474,7 @@ resolved.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **gRPC listener shape is restart-required; credential bytes rotate on
-  SIGHUP.** The listener *shape* — `address`, `access_mode`, the auth mode,
+  SIGHUP.** The listener *shape* — `address`, `max_tier`, the auth mode,
   and the configured `token_file` / `tls_cert_file` / `tls_key_file` /
   `tls_client_ca_file` / `tls_client_crl_file` **paths** — is fixed for the
   process. Adding, removing, or repointing any of those on `[global.telemetry.grpc_tcp]` does **not** take

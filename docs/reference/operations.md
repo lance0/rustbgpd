@@ -2620,14 +2620,14 @@ Prometheus should watch handshake failures, authorization volume, and stream pre
 sum by (reason) (increase(bgp_grpc_tls_handshake_failures_total[5m]))
 
 # Any denied management-plane call in the last five minutes.
-sum by (tier, result, authn, access_mode) (
+sum by (tier, result, authn, listener_max_tier) (
   increase(bgp_grpc_authz_decisions_total{
     result=~"listener_tier_denied|principal_unmapped|role_tier_denied|authn_failed"
   }[5m])
 )
 
 # Operator-only calls, successful or denied.
-sum by (result, authn, access_mode) (
+sum by (result, authn, listener_max_tier) (
   increase(bgp_grpc_authz_decisions_total{tier="operator_only"}[5m])
 )
 

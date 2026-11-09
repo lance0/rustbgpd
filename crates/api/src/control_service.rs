@@ -4,10 +4,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::authz::AuthTier;
 use crate::health_probe::{CoreReadinessError, CoreReadinessProbe};
 use crate::peer_types::{PeerManagerCommand, PeerManagerReadinessQuery};
 use crate::proto;
-use crate::server::{AccessMode, read_only_rejection};
+use crate::server::read_only_rejection;
 use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 
@@ -20,7 +21,7 @@ pub type MrtTriggerTx = mpsc::Sender<oneshot::Sender<Result<PathBuf, String>>>;
 /// `GetMetrics` returns Prometheus text exposition.
 /// `Shutdown` triggers coordinated daemon shutdown via a watch channel.
 pub struct ControlService {
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     start_time: tokio::time::Instant,
     metrics: BgpMetrics,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -38,7 +39,7 @@ impl ControlService {
     /// `shutdown_tx` is set to `true` by the first `Shutdown` RPC call to
     /// trigger coordinated daemon exit.
     pub fn new(
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         start_time: tokio::time::Instant,
         metrics: BgpMetrics,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -47,7 +48,7 @@ impl ControlService {
         mrt_trigger_tx: Option<MrtTriggerTx>,
     ) -> Self {
         Self {
-            access_mode,
+            max_tier,
             start_time,
             metrics,
             peer_mgr_tx,
@@ -160,7 +161,7 @@ impl proto::control_service_server::ControlService for ControlService {
         &self,
         request: Request<proto::ShutdownRequest>,
     ) -> Result<Response<proto::ShutdownResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let reason = request.into_inner().reason;
@@ -175,7 +176,7 @@ impl proto::control_service_server::ControlService for ControlService {
         &self,
         _request: Request<proto::TriggerMrtDumpRequest>,
     ) -> Result<Response<proto::TriggerMrtDumpResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let trigger_tx = self
@@ -213,7 +214,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             metrics,
             peer_tx,
@@ -277,7 +278,7 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             metrics,
             peer_tx,
@@ -336,7 +337,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
             tokio::time::Instant::now(),
             metrics,
             peer_tx,
@@ -361,7 +362,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
             tokio::time::Instant::now(),
             metrics,
             peer_tx,
@@ -388,7 +389,7 @@ mod tests {
         let (mrt_tx, mrt_rx) = mpsc::channel(1);
         drop(mrt_rx);
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             BgpMetrics::new(),
             peer_tx,
@@ -415,7 +416,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             metrics,
             peer_tx,
@@ -460,7 +461,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             metrics,
             peer_tx,
@@ -490,7 +491,7 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             BgpMetrics::new(),
             peer_tx,
@@ -524,7 +525,7 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             BgpMetrics::new(),
             peer_tx,
@@ -544,7 +545,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let svc = ControlService::new(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             tokio::time::Instant::now(),
             BgpMetrics::new(),
             peer_tx,

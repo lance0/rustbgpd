@@ -111,7 +111,7 @@ pub(super) fn record_audit_decision(
         decision.tier.as_str(),
         result,
         context.authn.as_str(),
-        context.access_mode,
+        context.max_tier.as_str(),
     );
     let method = lookup.method;
     let service = method.map_or("unknown", |m| m.service);
@@ -119,7 +119,6 @@ pub(super) fn record_audit_decision(
     let known_method = decision.known_method;
     let tier = decision.tier.as_str();
     let listener = context.listener.as_str();
-    let access_mode = context.access_mode;
     let max_tier = context.max_tier.as_str();
     let authn = context.authn.as_str();
     let role = context.role_label(principal);
@@ -136,7 +135,6 @@ pub(super) fn record_audit_decision(
             known_method,
             result,
             listener,
-            access_mode,
             max_tier,
             authn,
             role,
@@ -154,7 +152,6 @@ pub(super) fn record_audit_decision(
             known_method,
             result,
             listener,
-            access_mode,
             max_tier,
             authn,
             role,
@@ -172,7 +169,6 @@ pub(super) fn record_audit_decision(
             known_method,
             result,
             listener,
-            access_mode,
             max_tier,
             authn,
             role,

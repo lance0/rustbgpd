@@ -1102,7 +1102,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     let service = GnmiService::new_with_operator_queries(
         65001,
         "10.0.0.1".into(),
-        rustbgpd_api::server::AccessMode::ReadOnly,
+        rustbgpd_api::authz::AuthTier::SensitiveRead,
         command_tx.clone(),
         Some(operator_tx.clone()),
     );

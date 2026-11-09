@@ -4894,7 +4894,7 @@ mod tests {
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(1);
         let state = Arc::clone(state);
         let service = rustbgpd_api::ConfigService::new(
-            rustbgpd_api::server::AccessMode::ReadOnly,
+            rustbgpd_api::authz::AuthTier::SensitiveRead,
             peer_mgr_tx,
         )
         .with_last_sighup_reload(Some(Arc::new(move || {

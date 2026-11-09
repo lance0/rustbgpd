@@ -26,9 +26,10 @@ use rustbgpd_evpn::{
 use tonic::{Request, Response, Status};
 
 use crate::audit::{apply_evpn_runtime_summary, set_request_summary};
+use crate::authz::AuthTier;
 use crate::proto;
 use crate::route_distinguisher::format_rd;
-use crate::server::{AccessMode, read_only_rejection};
+use crate::server::read_only_rejection;
 
 /// Read-side hook for per-instance local-MAC origination counts.
 pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
@@ -235,7 +236,7 @@ pub type EthernetSegmentDrainFn = Arc<
 
 /// EVPN service backed by shared resolved tables and optional actor controls.
 pub struct EvpnService {
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     originated_local_mac_count: OriginatedLocalMacCountFn,
     instance_status_snapshot: InstanceStatusSnapshotFn,
     unscoped_apply_failure_snapshot: UnscopedApplyFailureSnapshotFn,
@@ -266,7 +267,7 @@ impl EvpnService {
         let ip_vrfs = Arc::new(IpVrfTable::new());
         let runtime_model = startup_runtime_model_fn(instances, ip_vrfs);
         Self {
-            access_mode: AccessMode::ReadWrite,
+            max_tier: AuthTier::OperatorOnly,
             originated_local_mac_count: Arc::new(|_| 0),
             instance_status_snapshot: Arc::new(Vec::new),
             unscoped_apply_failure_snapshot: Arc::new(
@@ -303,7 +304,7 @@ impl EvpnService {
         let ip_vrfs = Arc::new(IpVrfTable::new());
         let runtime_model = startup_runtime_model_fn(instances, ip_vrfs);
         Self {
-            access_mode: AccessMode::ReadWrite,
+            max_tier: AuthTier::OperatorOnly,
             originated_local_mac_count,
             instance_status_snapshot: Arc::new(Vec::new),
             unscoped_apply_failure_snapshot: Arc::new(
@@ -355,7 +356,7 @@ impl EvpnService {
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
             fdb_nexthop_snapshot,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             None,
         )
     }
@@ -375,7 +376,7 @@ impl EvpnService {
         originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
         installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
         fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         duplicate_mac_clear: Option<DuplicateMacClearFn>,
     ) -> Self {
         let runtime_model = startup_runtime_model_fn(instances, ip_vrfs);
@@ -387,7 +388,7 @@ impl EvpnService {
             fdb_nexthop_snapshot,
             runtime_model,
             None,
-            access_mode,
+            max_tier,
             duplicate_mac_clear,
         )
     }
@@ -408,11 +409,11 @@ impl EvpnService {
         fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
         runtime_model: EvpnRuntimeModelFn,
         runtime_apply: Option<EvpnRuntimeApplyFn>,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         duplicate_mac_clear: Option<DuplicateMacClearFn>,
     ) -> Self {
         Self {
-            access_mode,
+            max_tier,
             originated_local_mac_count,
             instance_status_snapshot: Arc::new(Vec::new),
             unscoped_apply_failure_snapshot: Arc::new(
@@ -786,7 +787,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         &self,
         request: Request<proto::ClearDuplicateMacQuarantineRequest>,
     ) -> Result<Response<proto::ClearDuplicateMacQuarantineResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -841,7 +842,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         &self,
         request: Request<proto::SetEthernetSegmentDrainRequest>,
     ) -> Result<Response<proto::SetEthernetSegmentDrainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -868,7 +869,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         &self,
         request: Request<proto::ApplyEvpnRuntimeRequest>,
     ) -> Result<Response<proto::ApplyEvpnRuntimeResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         set_request_summary(
@@ -1372,7 +1373,7 @@ mod tests {
     }
 
     fn service_with_duplicate_mac_clear(
-        access_mode: crate::server::AccessMode,
+        max_tier: crate::authz::AuthTier,
         duplicate_mac_clear: Option<DuplicateMacClearFn>,
     ) -> EvpnService {
         EvpnService::with_full_surface_and_duplicate_mac_control(
@@ -1383,7 +1384,7 @@ mod tests {
             Arc::new(|_| 0),
             Arc::new(|_| 0),
             Arc::new(FdbNexthopDataplaneStatus::default),
-            access_mode,
+            max_tier,
             duplicate_mac_clear,
         )
     }
@@ -1398,7 +1399,7 @@ mod tests {
     }
 
     fn service_with_runtime_apply(
-        access_mode: crate::server::AccessMode,
+        max_tier: crate::authz::AuthTier,
         runtime_apply: Option<EvpnRuntimeApplyFn>,
     ) -> EvpnService {
         EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
@@ -1411,7 +1412,7 @@ mod tests {
                 EvpnRuntimeModel::startup(EvpnInstanceTable::new(), IpVrfTable::new(), Vec::new())
             }),
             runtime_apply,
-            access_mode,
+            max_tier,
             None,
         )
     }
@@ -1841,7 +1842,7 @@ mod tests {
             Arc::new(FdbNexthopDataplaneStatus::default),
             Arc::new(move || model.clone()),
             None,
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             None,
         );
 
@@ -1880,7 +1881,7 @@ mod tests {
             Arc::new(FdbNexthopDataplaneStatus::default),
             Arc::new(move || live_model.clone()),
             None,
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             None,
         );
 
@@ -2020,7 +2021,7 @@ mod tests {
             Arc::new(move || fdb.clone()),
             Arc::new(move || model.clone()),
             None,
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             None,
         )
         .with_ethernet_segment_state(
@@ -2105,7 +2106,7 @@ mod tests {
     #[tokio::test]
     async fn clear_duplicate_mac_quarantine_rejects_read_only_listener() {
         let svc = service_with_duplicate_mac_clear(
-            crate::server::AccessMode::ReadOnly,
+            crate::authz::AuthTier::SensitiveRead,
             Some(fixed_duplicate_mac_clear(Ok(DuplicateMacClearOutcome {
                 cleared: true,
             }))),
@@ -2124,7 +2125,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_duplicate_mac_quarantine_requires_control_hook() {
-        let svc = service_with_duplicate_mac_clear(crate::server::AccessMode::ReadWrite, None);
+        let svc = service_with_duplicate_mac_clear(crate::authz::AuthTier::OperatorOnly, None);
         let err = svc
             .clear_duplicate_mac_quarantine(Request::new(
                 proto::ClearDuplicateMacQuarantineRequest {
@@ -2146,7 +2147,7 @@ mod tests {
                 as DuplicateMacClearFuture
         });
         let svc =
-            service_with_duplicate_mac_clear(crate::server::AccessMode::ReadWrite, Some(clear));
+            service_with_duplicate_mac_clear(crate::authz::AuthTier::OperatorOnly, Some(clear));
         let resp = svc
             .clear_duplicate_mac_quarantine(Request::new(
                 proto::ClearDuplicateMacQuarantineRequest {
@@ -2161,7 +2162,7 @@ mod tests {
         assert!(resp.message.contains("cleared"));
 
         let svc = service_with_duplicate_mac_clear(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_duplicate_mac_clear(Ok(DuplicateMacClearOutcome {
                 cleared: false,
             }))),
@@ -2183,7 +2184,7 @@ mod tests {
     #[tokio::test]
     async fn clear_duplicate_mac_quarantine_validates_request() {
         let svc = service_with_duplicate_mac_clear(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_duplicate_mac_clear(Ok(DuplicateMacClearOutcome {
                 cleared: true,
             }))),
@@ -2214,7 +2215,7 @@ mod tests {
     #[tokio::test]
     async fn clear_duplicate_mac_quarantine_maps_control_errors() {
         let svc = service_with_duplicate_mac_clear(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_duplicate_mac_clear(Err(
                 DuplicateMacClearError::NotFound("missing VNI".to_string()),
             ))),
@@ -2231,7 +2232,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
 
         let svc = service_with_duplicate_mac_clear(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_duplicate_mac_clear(Err(
                 DuplicateMacClearError::Unavailable("control unavailable".to_string()),
             ))),
@@ -2249,10 +2250,10 @@ mod tests {
     }
 
     fn service_with_es_drain(
-        access_mode: crate::server::AccessMode,
+        max_tier: crate::authz::AuthTier,
         ethernet_segment_drain: Option<EthernetSegmentDrainFn>,
     ) -> EvpnService {
-        service_with_duplicate_mac_clear(access_mode, None)
+        service_with_duplicate_mac_clear(max_tier, None)
             .with_ethernet_segment_drain(ethernet_segment_drain)
     }
 
@@ -2270,7 +2271,7 @@ mod tests {
     #[tokio::test]
     async fn set_ethernet_segment_drain_rejects_read_only_listener() {
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadOnly,
+            crate::authz::AuthTier::SensitiveRead,
             Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
                 drained: true,
                 changed: true,
@@ -2290,7 +2291,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_ethernet_segment_drain_requires_control_hook() {
-        let svc = service_with_es_drain(crate::server::AccessMode::ReadWrite, None);
+        let svc = service_with_es_drain(crate::authz::AuthTier::OperatorOnly, None);
         let err = svc
             .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
                 esi: TEST_ESI.to_string(),
@@ -2304,7 +2305,7 @@ mod tests {
     #[tokio::test]
     async fn set_ethernet_segment_drain_validates_esi() {
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
                 drained: true,
                 changed: true,
@@ -2343,7 +2344,7 @@ mod tests {
                 })
             }) as EthernetSegmentDrainFuture
         });
-        let svc = service_with_es_drain(crate::server::AccessMode::ReadWrite, Some(drain));
+        let svc = service_with_es_drain(crate::authz::AuthTier::OperatorOnly, Some(drain));
         let resp = svc
             .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
                 esi: TEST_ESI.to_string(),
@@ -2360,7 +2361,7 @@ mod tests {
         assert_eq!(resp.reasons, vec!["operator".to_string()]);
 
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
                 drained: true,
                 changed: false,
@@ -2390,7 +2391,7 @@ mod tests {
     async fn set_ethernet_segment_drain_reports_composed_state_and_reasons() {
         // Operator undrain accepted, but the bound link is down.
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
                 drained: true,
                 changed: true,
@@ -2415,7 +2416,7 @@ mod tests {
         // Operator drain stacked on an existing link drain: no fresh
         // withdrawal happened.
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
                 drained: true,
                 changed: true,
@@ -2443,7 +2444,7 @@ mod tests {
     #[tokio::test]
     async fn set_ethernet_segment_drain_maps_control_errors() {
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_es_drain(Err(EthernetSegmentDrainError::NotFound(
                 "not configured".to_string(),
             )))),
@@ -2458,7 +2459,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
 
         let svc = service_with_es_drain(
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             Some(fixed_es_drain(Err(EthernetSegmentDrainError::Unavailable(
                 "control closed".to_string(),
             )))),
@@ -2499,7 +2500,7 @@ mod tests {
                 })
             }) as EvpnRuntimeApplyFuture
         });
-        let svc = service_with_runtime_apply(crate::server::AccessMode::ReadOnly, Some(apply));
+        let svc = service_with_runtime_apply(crate::authz::AuthTier::SensitiveRead, Some(apply));
 
         let err = svc
             .apply_evpn_runtime(Request::new(proto::ApplyEvpnRuntimeRequest {
@@ -2514,7 +2515,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_evpn_runtime_requires_control_hook() {
-        let svc = service_with_runtime_apply(crate::server::AccessMode::ReadWrite, None);
+        let svc = service_with_runtime_apply(crate::authz::AuthTier::OperatorOnly, None);
 
         let err = svc
             .apply_evpn_runtime(Request::new(proto::ApplyEvpnRuntimeRequest {
@@ -2542,7 +2543,7 @@ mod tests {
                 })
             }) as EvpnRuntimeApplyFuture
         });
-        let svc = service_with_runtime_apply(crate::server::AccessMode::ReadWrite, Some(apply));
+        let svc = service_with_runtime_apply(crate::authz::AuthTier::OperatorOnly, Some(apply));
 
         let resp = svc
             .apply_evpn_runtime(Request::new(proto::ApplyEvpnRuntimeRequest {
@@ -2568,7 +2569,7 @@ mod tests {
                 assert_eq!(caller_tier, Some(CallerTier(tier)));
                 Box::pin(async { Ok(proto::ApplyEvpnRuntimeResponse::default()) })
             });
-            let svc = service_with_runtime_apply(crate::server::AccessMode::ReadWrite, Some(apply));
+            let svc = service_with_runtime_apply(crate::authz::AuthTier::OperatorOnly, Some(apply));
             let mut request = Request::new(proto::ApplyEvpnRuntimeRequest::default());
             request.extensions_mut().insert(CallerTier(tier));
             svc.apply_evpn_runtime(request).await.unwrap();
@@ -2859,7 +2860,7 @@ mod tests {
             Arc::new(FdbNexthopDataplaneStatus::default),
             Arc::new(move || live_model.clone()),
             None,
-            crate::server::AccessMode::ReadWrite,
+            crate::authz::AuthTier::OperatorOnly,
             None,
         );
 

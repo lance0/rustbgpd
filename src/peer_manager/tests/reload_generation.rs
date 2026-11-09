@@ -2521,6 +2521,7 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
         AcceptedBridgeReplacement, SighupAuthority, SighupCompletion, SighupEffect,
         SighupReloadTrace, finalize_sighup_authority,
     };
+    use rustbgpd_api::authz::AuthTier;
     use rustbgpd_api::gnmi_dialout::{DialoutManager, GnmiService};
     use rustbgpd_api::health_probe::DaemonGate;
     use rustbgpd_api::peer_types::{
@@ -2530,7 +2531,7 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
         OwnedRuntimeConfigOutcome, RuntimeConfigFenceReason, RuntimeConfigOperationKind,
         RuntimeConfigSettlementWatchdog,
     };
-    use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
+    use rustbgpd_api::server::RuntimeConfigCoordinator;
     use rustbgpd_transport::listener::ReloadDispatch;
 
     for (bridge_failure, finalizer_effects_staged) in [(true, true), (false, true), (false, false)]
@@ -2601,7 +2602,7 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
             GnmiService::new(
                 65001,
                 "10.0.0.1".into(),
-                AccessMode::ReadWrite,
+                AuthTier::OperatorOnly,
                 pm_tx.clone(),
             ),
             BgpMetrics::new(),
@@ -2694,6 +2695,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
         SighupReloadOutcome, SighupReloadPlan, finalize_sighup_authority,
         reload_config_with_tcp_ao, run_config_bridge_accepted,
     };
+    use rustbgpd_api::authz::AuthTier;
     use rustbgpd_api::gnmi_dialout::{DialoutManager, GnmiService};
     use rustbgpd_api::health_probe::DaemonGate;
     use rustbgpd_api::owner_publication::{
@@ -2704,7 +2706,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
         OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
         RuntimeConfigSettlementWatchdog,
     };
-    use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
+    use rustbgpd_api::server::RuntimeConfigCoordinator;
 
     let fixture = RsFixture::new();
     let policy_source = |med| {
@@ -2766,7 +2768,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
         GnmiService::new(
             65001,
             "10.0.0.1".to_string(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             pm_tx.clone(),
         ),
         BgpMetrics::new(),

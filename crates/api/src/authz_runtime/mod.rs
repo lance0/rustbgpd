@@ -3,9 +3,9 @@
 //! This layer records the method tier that feeds ADR-0064 authorization,
 //! enforces the per-listener method-tier cap plus optional
 //! per-principal role ceilings, then forwards permitted requests to
-//! the existing tonic services. Bearer-token authentication and
-//! listener `AccessMode` checks remain in `server.rs` and the service
-//! handlers.
+//! the existing tonic services. Bearer-token authentication and the
+//! handler-level read-only checks for listeners capped below `mutating`
+//! remain in `server.rs` and the service handlers.
 
 mod context;
 mod decision;

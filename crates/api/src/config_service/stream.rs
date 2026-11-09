@@ -728,7 +728,7 @@ mod tests {
     use crate::config_service::ConfigService;
     use crate::proto::config_service_client::ConfigServiceClient;
     use crate::proto::config_service_server::ConfigServiceServer;
-    use crate::server::{AccessMode, AuthInterceptor, ConfigTransactionApplyFn};
+    use crate::server::{AuthInterceptor, ConfigTransactionApplyFn};
     use rustbgpd_telemetry::BgpMetrics;
 
     type AuthClient = ConfigServiceClient<InterceptedService<Channel, ClientAuth>>;
@@ -796,7 +796,7 @@ mod tests {
             None,
             AuthTier::SensitiveRead,
             PrincipalRole::Observer,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await
     }
@@ -808,21 +808,20 @@ mod tests {
         transaction_apply: Option<ConfigTransactionApplyFn>,
         max_tier: AuthTier,
         role: PrincipalRole,
-        access_mode: AccessMode,
+        service_max_tier: AuthTier,
     ) -> ListenerHandle {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let roles = Arc::new(BTreeMap::from([("stream-test".to_string(), role)]));
         let context = GrpcAuthAuditContext::new(
             format!("tcp://{addr}"),
-            "read_write",
             max_tier,
             GrpcAuthnKind::BearerToken,
             "stream-test",
         )
         .with_roles(roles)
         .with_bearer_token(Some("stream-secret"));
-        let service = ConfigService::new(access_mode, peer_mgr_tx)
+        let service = ConfigService::new(service_max_tier, peer_mgr_tx)
             .with_transaction_hooks(transaction_apply, None, None, None, None, None)
             .with_stream_plan(Some(state), authenticated_transport);
         let audit_observer = Arc::new(Mutex::new(None));
@@ -1316,7 +1315,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let marker = b"STREAM_APPLY_CANDIDATE_MARKER";
@@ -1602,7 +1601,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let token_text = token.to_string();
@@ -1668,7 +1667,7 @@ mod tests {
             None,
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let held = state.try_admit().unwrap();
@@ -1712,7 +1711,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let error = listener
@@ -1769,7 +1768,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
         )
         .await;
         let error = listener
@@ -1831,7 +1830,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let token_text = token.to_string();
@@ -1912,7 +1911,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let candidate = b"candidate";
@@ -2019,7 +2018,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
         let candidate = b"candidate";
@@ -2212,7 +2211,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
         )
         .await;
 

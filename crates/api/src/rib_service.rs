@@ -409,9 +409,9 @@ pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotReader,
-    /// Per-listener access mode; gates the mutating FIB-table RPCs as
+    /// Per-listener ceiling; gates the mutating FIB-table RPCs as
     /// defense-in-depth behind the authz interceptor's `Mutating` tier.
-    access_mode: crate::server::AccessMode,
+    max_tier: crate::authz::AuthTier,
     /// Daemon FIB-table CRUD hook. `None` when the service was built without
     /// it (tests, or a build without FIB control) — the mutating RPCs then
     /// return `FAILED_PRECONDITION`.
@@ -445,7 +445,7 @@ impl RibService {
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
             fib_route_snapshot: FibRouteSnapshotReader::default(),
             // Fail closed: callers opt into mutations via `with_fib_table_control`.
-            access_mode: crate::server::AccessMode::ReadOnly,
+            max_tier: crate::authz::AuthTier::SensitiveRead,
             fib_table_control: None,
             known_peers: None,
             injection_leases: None,
@@ -464,7 +464,7 @@ impl RibService {
             rib_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
-            access_mode: crate::server::AccessMode::ReadOnly,
+            max_tier: crate::authz::AuthTier::SensitiveRead,
             fib_table_control: None,
             known_peers: None,
             injection_leases: None,
@@ -484,16 +484,16 @@ impl RibService {
         self
     }
 
-    /// Attach the per-listener access mode and the daemon FIB-table CRUD hook,
+    /// Attach the per-listener ceiling and the daemon FIB-table CRUD hook,
     /// enabling `SetFibTable` / `DeleteFibTable` / `ListFibTables`. Without this
     /// the mutating RPCs report the runtime as unavailable.
     #[must_use]
     pub fn with_fib_table_control(
         mut self,
-        access_mode: crate::server::AccessMode,
+        max_tier: crate::authz::AuthTier,
         fib_table_control: Option<FibTableControlFn>,
     ) -> Self {
-        self.access_mode = access_mode;
+        self.max_tier = max_tier;
         self.fib_table_control = fib_table_control;
         self
     }
@@ -4189,7 +4189,7 @@ impl proto::rib_service_server::RibService for RibService {
         &self,
         request: Request<proto::SetFibTableRequest>,
     ) -> Result<Response<proto::ListFibTablesResponse>, Status> {
-        if let Some(status) = crate::server::read_only_rejection(self.access_mode) {
+        if let Some(status) = crate::server::read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let table = request
@@ -4207,7 +4207,7 @@ impl proto::rib_service_server::RibService for RibService {
         &self,
         request: Request<proto::DeleteFibTableRequest>,
     ) -> Result<Response<proto::ListFibTablesResponse>, Status> {
-        if let Some(status) = crate::server::read_only_rejection(self.access_mode) {
+        if let Some(status) = crate::server::read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let name = request.into_inner().name;
@@ -4227,7 +4227,7 @@ impl proto::rib_service_server::RibService for RibService {
         &self,
         _request: Request<proto::ListFibTablesRequest>,
     ) -> Result<Response<proto::ListFibTablesResponse>, Status> {
-        // Read-only: no access-mode gate. The hook reports runtime availability
+        // Read-only: no listener-ceiling gate. The hook reports runtime availability
         // even when the reconciler is not running (configured-but-not-started).
         dispatch_fib_table_control(
             self.fib_table_control.as_ref(),
@@ -8340,7 +8340,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_fib_table_rejected_when_read_only() {
-        // make_service() defaults to ReadOnly with no control hook.
+        // make_service() defaults to a sensitive_read ceiling with no control hook.
         let status = make_service()
             .set_fib_table(Request::new(proto::SetFibTableRequest {
                 table: Some(fib_table_proto("edge")),
@@ -8354,7 +8354,7 @@ mod tests {
     async fn set_fib_table_unavailable_without_control_hook() {
         let (tx, _rx) = mpsc::channel(16);
         let svc =
-            RibService::new(tx).with_fib_table_control(crate::server::AccessMode::ReadWrite, None);
+            RibService::new(tx).with_fib_table_control(crate::authz::AuthTier::OperatorOnly, None);
         let status = svc
             .set_fib_table(Request::new(proto::SetFibTableRequest {
                 table: Some(fib_table_proto("edge")),
@@ -8368,7 +8368,7 @@ mod tests {
     async fn set_fib_table_missing_table_is_invalid_argument() {
         let (tx, _rx) = mpsc::channel(16);
         let svc =
-            RibService::new(tx).with_fib_table_control(crate::server::AccessMode::ReadWrite, None);
+            RibService::new(tx).with_fib_table_control(crate::authz::AuthTier::OperatorOnly, None);
         let status = svc
             .set_fib_table(Request::new(proto::SetFibTableRequest { table: None }))
             .await

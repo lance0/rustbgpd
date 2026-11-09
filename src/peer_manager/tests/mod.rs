@@ -250,7 +250,6 @@ fn make_dynamic_manager_config() -> Config {
                     enabled: true,
                     path: Some("/tmp/rustbgpd-test.sock".to_string()),
                     mode: 0o600,
-                    access_mode: None,
                     max_tier: None,
                     token_file: None,
                     principal: Some("rustbgpd://operator/test-only".to_string()),

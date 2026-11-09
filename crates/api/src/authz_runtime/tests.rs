@@ -115,13 +115,12 @@ fn roles(entries: &[(&str, PrincipalRole)]) -> Arc<BTreeMap<String, PrincipalRol
 
 fn tier_test_context(
     listener: &str,
-    access_mode: &'static str,
     max_tier: AuthTier,
     authn: GrpcAuthnKind,
     principal: &str,
     role: PrincipalRole,
 ) -> GrpcAuthAuditContext {
-    GrpcAuthAuditContext::new(listener, access_mode, max_tier, authn, principal)
+    GrpcAuthAuditContext::new(listener, max_tier, authn, principal)
         .with_roles(roles(&[(principal, role)]))
 }
 
@@ -284,7 +283,6 @@ async fn audit_layer_records_metric_and_forwards_request() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -305,7 +303,7 @@ async fn audit_layer_records_metric_and_forwards_request() {
     assert!(text.contains("tier=\"sensitive_read\""));
     assert!(text.contains("result=\"handler_ok\""));
     assert!(text.contains("authn=\"bearer_token\""));
-    assert!(text.contains("access_mode=\"read_write\""));
+    assert!(text.contains("listener_max_tier=\"operator_only\""));
 }
 
 #[tokio::test]
@@ -313,7 +311,6 @@ async fn audit_layer_records_handler_error_status() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -340,7 +337,6 @@ async fn audit_layer_attaches_request_summary_handle() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -365,7 +361,6 @@ async fn audit_layer_denies_method_above_listener_cap() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -387,12 +382,70 @@ async fn audit_layer_denies_method_above_listener_cap() {
     assert!(text.contains("result=\"listener_tier_denied\""));
 }
 
+/// A read-only listener (`max_tier = "sensitive_read"`) denies every
+/// inventoried `mutating` and `operator_only` method, even for an operator
+/// principal, and still forwards every read.
+#[tokio::test]
+async fn sensitive_read_listener_denies_every_mutating_and_operator_only_method() {
+    let metrics = BgpMetrics::new();
+    let context = tier_test_context(
+        "tcp://127.0.0.1:50051",
+        AuthTier::SensitiveRead,
+        GrpcAuthnKind::BearerToken,
+        "bearer-token",
+        PrincipalRole::Operator,
+    );
+    let mut service = GrpcAuthzLayer::new(context, metrics.clone()).layer(EchoService);
+    let mut denied = 0;
+    for method in crate::authz::METHODS {
+        let request = Request::builder()
+            .uri(method.path)
+            .body(Body::empty())
+            .unwrap();
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers());
+        if method.tier >= AuthTier::Mutating {
+            assert_eq!(
+                status.map(|status| status.code()),
+                Some(tonic::Code::PermissionDenied),
+                "{} ({}) must be denied at sensitive_read",
+                method.path,
+                method.tier.as_str()
+            );
+            denied += 1;
+        } else {
+            assert!(status.is_none(), "{} must be forwarded", method.path);
+        }
+    }
+    assert_eq!(
+        denied,
+        crate::authz::method_count_by_tier(AuthTier::Mutating)
+            + crate::authz::method_count_by_tier(AuthTier::OperatorOnly)
+    );
+    assert!(denied > 0);
+    let text = gather_text(&metrics);
+    let listener_denied: u64 = text
+        .lines()
+        .filter(|line| {
+            line.starts_with("bgp_grpc_authz_decisions_total{")
+                && line.contains("result=\"listener_tier_denied\"")
+        })
+        .inspect(|line| {
+            assert!(
+                line.contains("listener_max_tier=\"sensitive_read\""),
+                "{line}"
+            );
+        })
+        .map(|line| line.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+        .sum();
+    assert_eq!(listener_denied, u64::try_from(denied).unwrap());
+}
+
 #[tokio::test]
 async fn audit_layer_denies_unknown_path_below_operator_cap() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::Mutating,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -415,7 +468,6 @@ async fn audit_layer_authenticates_bearer_token_before_listener_cap() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -443,7 +495,6 @@ async fn audit_layer_denies_over_cap_request_after_valid_bearer_token() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -485,7 +536,6 @@ async fn aspa_diagnostics_require_authenticated_sensitive_read_access() {
         ] {
             let context = GrpcAuthAuditContext::new(
                 "tcp://127.0.0.1:50051",
-                "read_only",
                 ceiling,
                 GrpcAuthnKind::BearerToken,
                 "observer.example",
@@ -526,7 +576,6 @@ async fn tier_enforcement_allows_observer_sensitive_read() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "observer.example",
@@ -577,7 +626,6 @@ async fn tier_enforcement_denies_mutating_for_observer() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "observer.example",
@@ -606,7 +654,6 @@ async fn tier_enforcement_denies_operator_only_for_automation() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Uds,
         "automation.example",
@@ -632,7 +679,6 @@ async fn tier_enforcement_allows_operator_only_for_operator() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Uds,
         "operator.example",
@@ -659,7 +705,6 @@ async fn tier_enforcement_denies_unmapped_principal() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Uds,
         "unmapped.example",
@@ -689,7 +734,6 @@ async fn tier_enforcement_authorizes_implicit_local_operator_with_empty_roles() 
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::UdsOwner,
         LOCAL_OPERATOR_PRINCIPAL,
@@ -720,7 +764,6 @@ async fn tier_enforcement_still_caps_implicit_local_operator_by_listener_tier() 
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::UdsOwner,
         LOCAL_OPERATOR_PRINCIPAL,
@@ -747,7 +790,6 @@ async fn tier_enforcement_authenticates_bearer_before_role_denial() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "observer.example",
@@ -775,7 +817,6 @@ async fn listener_cap_remains_stricter_than_operator_role() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::Uds,
         "operator.example",
@@ -807,7 +848,6 @@ async fn unmapped_denial_names_principal_and_roles_entry_fix() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(
         "unix:///run/rustbgpd/grpc.sock",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Uds,
         "ci-bot",
@@ -842,7 +882,6 @@ async fn role_tier_denial_names_principal_current_and_required_role() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "ci-bot",
@@ -878,7 +917,6 @@ async fn listener_cap_denial_names_cap_and_listener_fix() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "ci-bot",
@@ -913,7 +951,6 @@ async fn listener_cap_denial_names_cap_and_listener_fix() {
 fn audit_context_debug_redacts_bearer_secret() {
     let context = GrpcAuthAuditContext::new(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
@@ -930,7 +967,6 @@ fn audit_context_debug_redacts_bearer_secret() {
 fn mtls_principal_resolution_falls_back_without_peer_certs() {
     let context = GrpcAuthAuditContext::new(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Mtls,
         "mtls-unresolved",
@@ -963,7 +999,6 @@ async fn mtls_principal_resolution_uses_tonic_tls_connect_info_peer_certs() {
     extensions.insert(connect_info);
     let context = GrpcAuthAuditContext::new(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Mtls,
         "mtls-unresolved",
@@ -1009,7 +1044,6 @@ async fn mtls_principal_resolution_uses_rustbgpd_connection_cache() {
     extensions.insert(connect_info);
     let context = GrpcAuthAuditContext::new(
         "tcp://127.0.0.1:50051",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::Mtls,
         "mtls-unresolved",
@@ -1081,7 +1115,6 @@ async fn conditional_advertisement_status_is_a_sensitive_read() {
         let metrics = BgpMetrics::new();
         let context = tier_test_context(
             "tcp://127.0.0.1",
-            "read_only",
             ceiling,
             GrpcAuthnKind::BearerToken,
             "observer.example",
@@ -1092,7 +1125,7 @@ async fn conditional_advertisement_status_is_a_sensitive_read() {
         let (rib_tx, rib_rx) = mpsc::channel(1);
         let rib = spawn_conditional_status_rib(rib_rx);
         let policy = crate::policy_service::PolicyService::new(
-            crate::server::AccessMode::ReadOnly,
+            crate::authz::AuthTier::SensitiveRead,
             peer_tx,
             None,
             None,
@@ -1166,7 +1199,6 @@ async fn liveness_rpc_authenticates_and_respects_read_listener_cap() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "tcp://127.0.0.1",
-        "read_only",
         AuthTier::Read,
         GrpcAuthnKind::BearerToken,
         "probe",
@@ -1178,7 +1210,7 @@ async fn liveness_rpc_authenticates_and_respects_read_listener_cap() {
     let (rib_tx, _) = mpsc::channel(1);
     let (shutdown_tx, _) = watch::channel(false);
     let control = crate::control_service::ControlService::new(
-        crate::server::AccessMode::ReadOnly,
+        crate::authz::AuthTier::SensitiveRead,
         tokio::time::Instant::now(),
         metrics.clone(),
         peer_tx,
@@ -1277,7 +1309,6 @@ fn only_successful_read_audits_are_debug_and_all_are_counted() {
     let metrics = BgpMetrics::new();
     let context = tier_test_context(
         "uds",
-        "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::UdsOwner,
         LOCAL_OPERATOR_PRINCIPAL,

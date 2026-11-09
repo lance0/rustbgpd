@@ -23,13 +23,13 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tonic::transport::{Channel, Endpoint, Server, Uri};
 use tonic::{Code, Request, Status};
 
+use crate::authz::AuthTier;
 use crate::injection_service::InjectionService;
 use crate::proto;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::injection_service_server::{InjectionService as _, InjectionServiceServer};
 use crate::proto::rib_service_server::RibService as _;
 use crate::rib_service::RibService;
-use crate::server::AccessMode;
 
 /// `google.rpc.Status`, as a client decodes `grpc-status-details-bin`.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -282,7 +282,7 @@ fn self_service(
     rib_tx: mpsc::Sender<RibUpdate>,
     leases: &Arc<InjectionLeases>,
 ) -> InjectionService {
-    InjectionService::new(rib_tx, AccessMode::ReadWrite, Arc::clone(leases))
+    InjectionService::new(rib_tx, AuthTier::OperatorOnly, Arc::clone(leases))
 }
 
 fn rule_row(

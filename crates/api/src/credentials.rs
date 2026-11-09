@@ -1349,7 +1349,6 @@ mod tests {
         extensions.insert(wrapped.connect_info());
         let context = crate::authz_runtime::GrpcAuthAuditContext::new(
             "tcp://127.0.0.1:0",
-            "read_write",
             crate::authz::AuthTier::OperatorOnly,
             crate::authz_runtime::GrpcAuthnKind::Mtls,
             "mtls-unresolved",

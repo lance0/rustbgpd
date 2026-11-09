@@ -10,9 +10,10 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::rib_manager_read;
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary, safe_summary_value, set_request_summary};
+use crate::authz::AuthTier;
 use crate::proto;
 use crate::route_distinguisher::{format_rd, parse_originated_rd, parse_rd};
-use crate::server::{AccessMode, read_only_rejection};
+use crate::server::read_only_rejection;
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
     GUARDED_OWNER_PREFIX, GuardedFence, InjectedKey, InjectedKeyCursor, InjectionLeases,
@@ -40,7 +41,7 @@ use std::num::NonZeroU64;
 
 /// gRPC service for injecting and withdrawing locally-originated routes.
 pub struct InjectionService {
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     rib_tx: mpsc::Sender<RibUpdate>,
     leases: Arc<InjectionLeases>,
     /// Published managed-peer roster, for `include_configured` export reads.
@@ -55,11 +56,11 @@ impl InjectionService {
     /// renew and list them.
     pub fn new(
         rib_tx: mpsc::Sender<RibUpdate>,
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         leases: Arc<InjectionLeases>,
     ) -> Self {
         Self {
-            access_mode,
+            max_tier,
             rib_tx,
             leases,
             roster: None,
@@ -1102,7 +1103,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddPathRequest>,
     ) -> Result<Response<proto::AddPathResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let route = build_injected_route(request.into_inner())?;
@@ -1135,7 +1136,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::DeletePathRequest>,
     ) -> Result<Response<proto::DeletePathResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1185,7 +1186,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddFlowSpecRequest>,
     ) -> Result<Response<proto::AddFlowSpecResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let route = build_injected_flowspec(request.into_inner())?;
@@ -1218,7 +1219,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::DeleteFlowSpecRequest>,
     ) -> Result<Response<proto::DeleteFlowSpecResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1267,7 +1268,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddLeasedPathRequest>,
     ) -> Result<Response<proto::AddLeasedPathResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let (owner, lease_seconds) = parse_lease(request.get_ref().lease.clone())?;
@@ -1313,7 +1314,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddLeasedFlowSpecRequest>,
     ) -> Result<Response<proto::AddLeasedFlowSpecResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let (owner, lease_seconds) = parse_lease(request.get_ref().lease.clone())?;
@@ -1359,7 +1360,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::RenewLeaseRequest>,
     ) -> Result<Response<proto::RenewLeaseResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1393,7 +1394,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::IssueMutationWindowRequest>,
     ) -> Result<Response<proto::IssueMutationWindowResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1416,7 +1417,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddGuardedFlowSpecRequest>,
     ) -> Result<Response<proto::AddGuardedFlowSpecResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1476,7 +1477,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::DeleteGuardedFlowSpecRequest>,
     ) -> Result<Response<proto::DeleteGuardedFlowSpecResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1526,7 +1527,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::RenewGuardedLeaseRequest>,
     ) -> Result<Response<proto::RenewGuardedLeaseResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1778,7 +1779,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::MarkReplayCompleteRequest>,
     ) -> Result<Response<proto::MarkReplayCompleteResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.get_ref();
@@ -1825,7 +1826,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddEvpnRouteRequest>,
     ) -> Result<Response<proto::AddEvpnRouteResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1882,7 +1883,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::DeleteEvpnRouteRequest>,
     ) -> Result<Response<proto::DeleteEvpnRouteResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -2707,13 +2708,13 @@ mod tests {
 
     fn make_service() -> InjectionService {
         let (tx, _rx) = mpsc::channel(16);
-        InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()))
+        InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()))
     }
 
     fn make_service_with_rx() -> (InjectionService, mpsc::Receiver<RibUpdate>) {
         let (tx, rx) = mpsc::channel(16);
         (
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new())),
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new())),
             rx,
         )
     }
@@ -2795,7 +2796,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
         let err = svc
             .add_path(add_path_request(0, "192.0.2.1"))
             .await
@@ -2841,7 +2842,11 @@ mod tests {
             after: Some((peer2.addr(), Some(Arc::from("eth0")))),
         };
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
         let responder_cursor = cursor.clone();
         let responder = tokio::spawn(async move {
             let mut seen: Vec<Seen> = Vec::new();
@@ -3020,7 +3025,7 @@ mod tests {
         // UNAVAILABLE instead.
         let svc = InjectionService::new(
             mpsc::channel(1).0,
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
             Arc::new(InjectionLeases::new()),
         );
         let key = |prefix: &str, prefix_length, path_id| proto::LeasedPathKey {
@@ -3061,7 +3066,11 @@ mod tests {
         }
         // Exactly the limit is accepted and reaches the RIB.
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
         let at_limit = (0..LOCAL_ROUTE_EXPORT_MAX_KEYS)
             .map(|path_id| key("203.0.113.7", 32, u32::try_from(path_id).unwrap()))
             .collect();
@@ -3099,7 +3108,7 @@ mod tests {
         let manager_task = tokio::spawn(manager.run());
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         );
         let mut outbound = Vec::new();
@@ -3273,7 +3282,7 @@ mod tests {
         publish_managed(&mut roster, 3);
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         )
         .with_peer_roster(roster.reader());
@@ -3452,7 +3461,7 @@ mod tests {
         publish_managed(&mut roster, 3);
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         )
         .with_peer_roster(roster.reader());
@@ -3893,7 +3902,11 @@ mod tests {
     #[tokio::test]
     async fn add_path_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
         let req = Request::new(proto::AddPathRequest {
             prefix: "10.0.0.0".into(),
             prefix_length: 24,
@@ -3918,7 +3931,11 @@ mod tests {
     #[tokio::test]
     async fn non_evpn_mutations_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
 
         let err = svc
             .delete_path(Request::new(proto::DeletePathRequest {
@@ -4124,7 +4141,7 @@ mod tests {
         let rd = RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]);
         let (tx, mut rx) = mpsc::channel(2);
         let service =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
         let actor = tokio::spawn(async move {
             let Some(RibUpdate::InjectEvpn { route, reply }) = rx.recv().await else {
                 panic!("expected injection");
@@ -4171,7 +4188,7 @@ mod tests {
     async fn add_evpn_type2_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         // Drive the reply side: accept one InjectEvpn, reply Ok(()).
         let reply_task = tokio::spawn(async move {
@@ -4222,7 +4239,7 @@ mod tests {
     async fn add_evpn_default_request_attaches_vxlan_encap_community() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -4277,7 +4294,7 @@ mod tests {
     async fn add_evpn_disable_vxlan_encap_suppresses_community() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -4435,7 +4452,7 @@ mod tests {
     async fn add_evpn_type5_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -4513,7 +4530,7 @@ mod tests {
     async fn add_evpn_type5_overlay_gateway_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -4562,7 +4579,7 @@ mod tests {
     async fn add_evpn_type5_ipv6_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -4825,7 +4842,7 @@ mod tests {
     async fn delete_evpn_type5_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc =
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -4946,7 +4963,11 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_rejected_on_read_only_listener() {
         let (tx, _rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
         let req = Request::new(proto::AddEvpnRouteRequest {
             route_type: 2,
             rd: "65000:100".into(),
@@ -4970,7 +4991,11 @@ mod tests {
     #[tokio::test]
     async fn delete_evpn_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
         let req = Request::new(proto::DeleteEvpnRouteRequest {
             route_type: 2,
             rd: "65000:100".into(),
@@ -5142,7 +5167,7 @@ mod tests {
         let manager_task = tokio::spawn(manager.run());
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         );
         let (rib, _roster) = rib_service_with_roster(rib_tx.clone());
@@ -5277,7 +5302,7 @@ mod tests {
         let manager_task = tokio::spawn(manager.run());
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         );
         let rib = crate::rib_service::RibService::new(rib_tx.clone());
@@ -5447,7 +5472,7 @@ mod tests {
         let manager_task = tokio::spawn(manager.run());
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         );
         let rib = crate::rib_service::RibService::new(rib_tx.clone());
@@ -5597,7 +5622,7 @@ mod tests {
             let leases = manager.injection_leases();
             let manager_task = tokio::spawn(manager.run());
             let svc =
-                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+                InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
             let rib =
                 crate::rib_service::RibService::new(rib_tx.clone()).with_injection_leases(leases);
             for (family, target, destination) in [
@@ -5721,7 +5746,7 @@ mod tests {
         let manager_task = tokio::spawn(manager.run());
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         );
 
@@ -5788,7 +5813,8 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+        let svc =
+            InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
         let generation = svc
             .add_leased_path(Request::new(leased_path("ctl", 30)))
             .await
@@ -5814,7 +5840,7 @@ mod tests {
         .await
         .unwrap();
         let reader =
-            InjectionService::new(rib_tx.clone(), AccessMode::ReadOnly, Arc::clone(&leases));
+            InjectionService::new(rib_tx.clone(), AuthTier::SensitiveRead, Arc::clone(&leases));
         let list = |page_token: String, owner: &str| {
             reader.list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
                 owner: owner.into(),
@@ -5931,7 +5957,8 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+        let svc =
+            InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
         for (octet, port) in [(1, "<>80"), (2, "<>=80")] {
             svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
                 rule: Some(proto::AddFlowSpecRequest {
@@ -6041,7 +6068,7 @@ mod tests {
             let leases = manager.injection_leases();
             let task = tokio::spawn(manager.run());
             (
-                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases)),
+                InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases)),
                 rib_tx,
                 task,
             )
@@ -6114,7 +6141,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let svc = Arc::new(InjectionService::new(
             tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         ));
         let path = tokio::spawn({
@@ -6169,7 +6196,7 @@ mod tests {
         );
 
         let server = proto::injection_service_server::InjectionServiceServer::new(
-            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new())),
+            InjectionService::new(tx, AuthTier::OperatorOnly, Arc::new(InjectionLeases::new())),
         );
         let request = tonic::codegen::http::Request::builder()
             .method("POST")
@@ -6250,7 +6277,7 @@ mod tests {
         );
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             manager.injection_leases(),
         );
         let manager_task = tokio::spawn(manager.run());
@@ -6297,7 +6324,7 @@ mod tests {
             .unwrap();
         let leases = Arc::new(InjectionLeases::new());
         let generation = leases.admit("ctl", 30).unwrap().generation;
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite, Arc::clone(&leases));
+        let svc = InjectionService::new(tx, AuthTier::OperatorOnly, Arc::clone(&leases));
         let renewed = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             svc.renew_lease(Request::new(proto::RenewLeaseRequest {
@@ -6330,7 +6357,8 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+        let svc =
+            InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
         let audited = |audit: &GrpcAuditHandle| {
             audit
                 .summary()
@@ -6433,7 +6461,7 @@ mod tests {
         let manager_task = tokio::spawn(manager.run());
         let svc = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::new(InjectionLeases::new()),
         );
         let generation = svc
@@ -6525,7 +6553,7 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         let leases = Arc::new(InjectionLeases::new());
         let generation = leases.admit("ctl", 5).unwrap().generation;
-        let svc = InjectionService::new(rib_tx, AccessMode::ReadWrite, Arc::clone(&leases));
+        let svc = InjectionService::new(rib_tx, AuthTier::OperatorOnly, Arc::clone(&leases));
         let listed = || async {
             svc.list_injection_leases(Request::new(proto::ListInjectionLeasesRequest::default()))
                 .await
@@ -6601,7 +6629,7 @@ mod tests {
         let leases = manager.injection_leases();
         let incarnation = leases.incarnation();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, leases);
+        let svc = InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, leases);
         let mark = |owner: &str, incarnation: u64| {
             Request::new(proto::MarkReplayCompleteRequest {
                 owner: owner.into(),
@@ -6663,7 +6691,7 @@ mod tests {
 
         let read_only = InjectionService::new(
             rib_tx.clone(),
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
             Arc::new(InjectionLeases::new()),
         );
         assert!(
@@ -6699,7 +6727,7 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, leases);
+        let svc = InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, leases);
 
         let lease = |owner: &str| {
             Some(proto::InjectionLease {
@@ -6877,7 +6905,8 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+        let svc =
+            InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
         let rib = crate::rib_service::RibService::new(rib_tx.clone())
             .with_injection_leases(Arc::clone(&leases));
 
@@ -7060,7 +7089,7 @@ mod tests {
             let leases = manager.injection_leases();
             let manager_task = tokio::spawn(manager.run());
             let svc =
-                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+                InjectionService::new(rib_tx.clone(), AuthTier::OperatorOnly, Arc::clone(&leases));
             let rib = crate::rib_service::RibService::new(rib_tx.clone())
                 .with_injection_leases(Arc::clone(&leases));
             Self {
@@ -7783,7 +7812,7 @@ mod tests {
             });
         let svc = InjectionService::new(
             rig.rib_tx.clone(),
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             Arc::clone(&rig.leases),
         );
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);

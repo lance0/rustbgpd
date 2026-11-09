@@ -1560,13 +1560,9 @@ impl Config {
                 // any-partial cases both resolve to no-TLS here.
                 _ => None,
             };
-            let access_mode = cfg
-                .access_mode
-                .map_or(GrpcAccessMode::ReadWrite, Into::into);
             listeners.push(GrpcListener::Tcp {
                 addr,
-                access_mode,
-                max_tier: effective_grpc_max_tier(access_mode, cfg.max_tier),
+                max_tier: grpc_max_tier(cfg.max_tier),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
                 principal: cfg.principal.clone(),
                 tls,
@@ -1577,14 +1573,10 @@ impl Config {
                 .path
                 .as_ref()
                 .map_or_else(|| self.default_grpc_uds_path(), PathBuf::from);
-            let access_mode = cfg
-                .access_mode
-                .map_or(GrpcAccessMode::ReadWrite, Into::into);
             listeners.push(GrpcListener::Uds {
                 path,
                 mode: cfg.mode,
-                access_mode,
-                max_tier: effective_grpc_max_tier(access_mode, cfg.max_tier),
+                max_tier: grpc_max_tier(cfg.max_tier),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
                 principal: cfg.principal.clone(),
             });
@@ -1594,7 +1586,6 @@ impl Config {
             listeners.push(GrpcListener::Uds {
                 path: self.default_grpc_uds_path(),
                 mode: 0o600,
-                access_mode: GrpcAccessMode::ReadWrite,
                 max_tier: GrpcMaxTier::OperatorOnly,
                 token_file: None,
                 principal: None,
@@ -2271,7 +2262,6 @@ impl Config {
 pub enum GrpcListener {
     Tcp {
         addr: SocketAddr,
-        access_mode: GrpcAccessMode,
         max_tier: GrpcMaxTier,
         token_file: Option<PathBuf>,
         principal: Option<String>,
@@ -2280,7 +2270,6 @@ pub enum GrpcListener {
     Uds {
         path: PathBuf,
         mode: u32,
-        access_mode: GrpcAccessMode,
         max_tier: GrpcMaxTier,
         token_file: Option<PathBuf>,
         principal: Option<String>,
@@ -2302,25 +2291,12 @@ pub struct GrpcTlsPaths {
     pub client_crl_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrpcAccessMode {
-    ReadOnly,
-    ReadWrite,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GrpcMaxTier {
     Read,
     SensitiveRead,
     Mutating,
     OperatorOnly,
-}
-
-const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> GrpcMaxTier {
-    match access_mode {
-        GrpcAccessMode::ReadOnly => GrpcMaxTier::SensitiveRead,
-        GrpcAccessMode::ReadWrite => GrpcMaxTier::OperatorOnly,
-    }
 }
 
 pub(crate) const TRANSACTION_FIB_SECTION: &str = "[[fib_tables]]";
@@ -2356,6 +2332,10 @@ enforcement = \"tier\"\n\
 
 fn retired_key_error(content: &str) -> Option<String> {
     let document: toml::Value = toml::from_str(content).ok()?;
+    legacy_grpc_enforcement_error(&document).or_else(|| retired_access_mode_error(&document))
+}
+
+fn legacy_grpc_enforcement_error(document: &toml::Value) -> Option<String> {
     (document
         .get("security")?
         .get("grpc")?
@@ -2365,12 +2345,55 @@ fn retired_key_error(content: &str) -> Option<String> {
         .then(|| LEGACY_GRPC_ENFORCEMENT_MIGRATION.to_string())
 }
 
-fn effective_grpc_max_tier(
-    access_mode: GrpcAccessMode,
-    configured: Option<GrpcMaxTierConfig>,
-) -> GrpcMaxTier {
-    access_mode_compatibility_max_tier(access_mode)
-        .min(configured.map_or(GrpcMaxTier::OperatorOnly, GrpcMaxTier::from))
+fn retired_access_mode_error(document: &toml::Value) -> Option<String> {
+    let telemetry = document.get("global")?.get("telemetry")?;
+    ["grpc_tcp", "grpc_uds"].into_iter().find_map(|table| {
+        let listener = telemetry.get(table)?;
+        let access_mode = listener.get("access_mode")?;
+        Some(retired_access_mode_migration(
+            table,
+            access_mode.as_str(),
+            listener.get("max_tier").and_then(toml::Value::as_str),
+        ))
+    })
+}
+
+/// Migration for the removed listener `access_mode`: `read_only` becomes
+/// the stricter of `sensitive_read` and any existing `max_tier`;
+/// `read_write` is deleted. The effective ceiling never widens.
+fn retired_access_mode_migration(
+    table: &str,
+    access_mode: Option<&str>,
+    max_tier: Option<&str>,
+) -> String {
+    let fix = match (access_mode, max_tier) {
+        (Some("read_only"), Some("read")) => {
+            "delete access_mode and keep max_tier = \"read\"".to_string()
+        }
+        (Some("read_only"), _) => {
+            "delete access_mode and set max_tier = \"sensitive_read\" (the stricter of \
+             \"sensitive_read\" and any existing max_tier)"
+                .to_string()
+        }
+        (Some("read_write"), Some(tier)) => {
+            format!("delete access_mode and keep max_tier = {tier:?}")
+        }
+        (Some("read_write"), None) => {
+            "delete access_mode; without max_tier the listener serves every tier".to_string()
+        }
+        _ => "with access_mode = \"read_only\", delete it and set max_tier to the stricter of \
+              \"sensitive_read\" and any existing max_tier; with access_mode = \"read_write\", \
+              delete it and keep any existing max_tier"
+            .to_string(),
+    };
+    format!(
+        "global.telemetry.{table}.access_mode was removed; max_tier is the only listener \
+         ceiling: {fix} (migration: docs/reference/configuration.md [global.telemetry.{table}])"
+    )
+}
+
+fn grpc_max_tier(configured: Option<GrpcMaxTierConfig>) -> GrpcMaxTier {
+    configured.map_or(GrpcMaxTier::OperatorOnly, GrpcMaxTier::from)
 }
 
 /// Differences between two neighbor lists, keyed by address.
@@ -7562,15 +7585,6 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
             || !old.datasets.is_empty()
             || !new.datasets.is_empty(),
         external_inputs_identity: ExternalInputsIdentity::Unverified,
-    }
-}
-
-impl From<GrpcAccessModeConfig> for GrpcAccessMode {
-    fn from(value: GrpcAccessModeConfig) -> Self {
-        match value {
-            GrpcAccessModeConfig::ReadOnly => Self::ReadOnly,
-            GrpcAccessModeConfig::ReadWrite => Self::ReadWrite,
-        }
     }
 }
 

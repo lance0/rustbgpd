@@ -499,7 +499,7 @@ runtime_state_dir = {json.dumps(str(output / "state"))}
 log_format = "json"
 [global.telemetry.grpc_uds]
 path = {json.dumps(str(output / "api.sock"))}
-access_mode = "read_only"
+max_tier = "sensitive_read"
 '''
     for peer in [SOURCE, ALTERNATE, SINK, *RESET_SOURCES]:
         text += f'''\n[[neighbors]]

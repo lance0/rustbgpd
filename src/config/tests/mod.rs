@@ -655,7 +655,6 @@ fn implicit_uds_listener(config: &Config) -> GrpcListener {
     GrpcListener::Uds {
         path: config.default_grpc_uds_path(),
         mode: 0o600,
-        access_mode: GrpcAccessMode::ReadWrite,
         max_tier: GrpcMaxTier::OperatorOnly,
         token_file: None,
         principal: None,

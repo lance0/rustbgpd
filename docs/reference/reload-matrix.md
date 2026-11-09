@@ -531,7 +531,7 @@ rebind on reload.
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required | Listener address. |
-| `enabled`, `access_mode`, `max_tier`, `principal` | restart-required | The whole listener config is pinned to the live listener on reload. |
+| `enabled`, `max_tier`, `principal` | restart-required | The whole listener config is pinned to the live listener on reload. |
 | `tls_expiry_warning_seconds` (`grpc_tcp`) | restart-required | Pinned with the rest of the listener config. |
 | `tls_client_crl_file` path (`grpc_tcp`) | restart-required | Adding, removing, or moving the CRL is pinned with the listener; the CRL bytes behind an unchanged path reload with the other credentials. |
 | credential bytes behind unchanged token/TLS paths | reload-applied | Staged for all listeners and published as one atomic generation after the runtime reload is acknowledged; existing connections/streams survive. |

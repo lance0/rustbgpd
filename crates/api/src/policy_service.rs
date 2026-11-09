@@ -21,6 +21,7 @@ use crate::import_roster::{
 };
 use rustbgpd_rib::export_roster::{ExportCaptureError, ExportRosterReader, capture_export};
 
+use crate::authz::AuthTier;
 use crate::peer_types::{
     ConfigEvent, EnqueuedOperatorQuery, NamedPolicyDefinition, OwnedCatalogMutation,
     OwnedCatalogMutationOutcome, PeerKey, PeerManagerCommand, PeerManagerOperatorQuery,
@@ -34,7 +35,7 @@ use crate::runtime_config_settlement::{
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
+    ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
     catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
     fully_compensated_status, read_only_rejection, reserve_config_event_slot,
     stage_runtime_config_event_typed, with_catalog_persist_ack,
@@ -367,7 +368,7 @@ fn input_definition_to_proto(definition: &NamedPolicyDefinition) -> proto::Polic
 
 /// gRPC service for named policy CRUD and chain assignment.
 pub struct PolicyService {
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     operator_tx: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -476,13 +477,13 @@ impl PolicyService {
     #[cfg(test)]
     #[must_use]
     pub fn new(
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self::with_runtime_config_coordinator(
-            access_mode,
+            max_tier,
             peer_mgr_tx,
             config_tx,
             config_mutation_gate,
@@ -495,14 +496,14 @@ impl PolicyService {
     /// reload, neighbor / FIB-table CRUD, and config transactions.
     #[must_use]
     pub fn with_runtime_config_coordinator(
-        access_mode: AccessMode,
+        max_tier: AuthTier,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
         runtime_config_lock: RuntimeConfigCoordinator,
     ) -> Self {
         Self {
-            access_mode,
+            max_tier,
             peer_mgr_tx,
             operator_tx: None,
             config_tx,
@@ -992,7 +993,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetPolicyRequest>,
     ) -> Result<Response<proto::SetPolicyResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1029,7 +1030,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::DeletePolicyRequest>,
     ) -> Result<Response<proto::DeletePolicyResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1104,7 +1105,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetNeighborSetRequest>,
     ) -> Result<Response<proto::SetNeighborSetResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1145,7 +1146,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::DeleteNeighborSetRequest>,
     ) -> Result<Response<proto::DeleteNeighborSetResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1185,7 +1186,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetGlobalImportChainRequest>,
     ) -> Result<Response<proto::SetGlobalImportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1212,7 +1213,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetGlobalExportChainRequest>,
     ) -> Result<Response<proto::SetGlobalExportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1239,7 +1240,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::ClearGlobalImportChainRequest>,
     ) -> Result<Response<proto::ClearGlobalImportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
@@ -1259,7 +1260,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::ClearGlobalExportChainRequest>,
     ) -> Result<Response<proto::ClearGlobalExportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
@@ -1314,7 +1315,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetNeighborImportChainRequest>,
     ) -> Result<Response<proto::SetNeighborImportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1352,7 +1353,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetNeighborExportChainRequest>,
     ) -> Result<Response<proto::SetNeighborExportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1390,7 +1391,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::ClearNeighborImportChainRequest>,
     ) -> Result<Response<proto::ClearNeighborImportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -1425,7 +1426,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::ClearNeighborExportChainRequest>,
     ) -> Result<Response<proto::ClearNeighborExportChainResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         let req = request.into_inner();
@@ -3206,7 +3207,7 @@ mod tests {
             let (peer_tx, peer_rx) = mpsc::channel(1);
             let (rib_tx, rib_rx) = mpsc::channel(1);
             let roster = ImportRosterPublisher::new();
-            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            let service = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
                 .with_rib_query(rib_tx)
                 .with_import_roster(roster.reader());
             let expected = if rpc.rib_first() {
@@ -3232,7 +3233,7 @@ mod tests {
             let (peer_tx, mut peer_rx) = mpsc::channel(1);
             let (rib_tx, mut rib_rx) = mpsc::channel(1);
             let roster = ImportRosterPublisher::new();
-            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            let service = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
                 .with_rib_query(rib_tx)
                 .with_import_roster(roster.reader());
             let (actor, expected) = if rpc.rib_first() {
@@ -3301,7 +3302,7 @@ mod tests {
             drop(peer_rx);
             let (rib_tx, rib_rx) = mpsc::channel(1);
             let rib = tokio::spawn(answer_policy_stage_rib(rib_rx));
-            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            let service = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
                 .with_rib_query(rib_tx);
             let error = invoke_policy_extra_stage(&service, stage)
                 .await
@@ -3324,7 +3325,7 @@ mod tests {
             });
             let (rib_tx, rib_rx) = mpsc::channel(1);
             let rib = tokio::spawn(answer_policy_stage_rib(rib_rx));
-            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            let service = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
                 .with_rib_query(rib_tx);
             let error = invoke_policy_extra_stage(&service, stage)
                 .await
@@ -3342,7 +3343,7 @@ mod tests {
     #[tokio::test]
     async fn policy_reads_preserve_invalid_and_not_found() {
         let (peer_tx, mut peer_rx) = mpsc::channel(3);
-        let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let service = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None);
 
         let invalid = PolicyServiceRpc::get_policy(
             &service,
@@ -3541,7 +3542,7 @@ mod tests {
         reply: Option<ImportExplainReply>,
     ) -> proto::ExplainImportPolicyResponse {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None);
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
@@ -3566,7 +3567,7 @@ mod tests {
     #[tokio::test]
     async fn explain_all_path_limit_is_resource_exhausted() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None);
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::ExplainImportPolicy { reply, .. }) =
                 peer_rx.recv().await
@@ -3589,7 +3590,7 @@ mod tests {
         reply: Option<RejectedRoutesReply>,
     ) -> Result<proto::ListRejectedRoutesResponse, Status> {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None);
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
@@ -3640,7 +3641,7 @@ mod tests {
     #[tokio::test]
     async fn policy_query_timeouts_are_deadlines_not_absence() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None);
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
@@ -3816,7 +3817,7 @@ mod tests {
     async fn set_policy_emits_config_event_after_runtime_success() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
@@ -3874,7 +3875,7 @@ mod tests {
     async fn set_policy_persist_failure_leaves_the_catalog_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         let prior = NamedPolicyDefinition {
             default_action: "deny".to_string(),
@@ -3941,7 +3942,7 @@ mod tests {
     async fn set_policy_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::set_policy(
             &svc,
@@ -3962,7 +3963,7 @@ mod tests {
     async fn policy_and_neighbor_set_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::delete_policy(
             &svc,
@@ -4003,7 +4004,7 @@ mod tests {
     async fn global_chain_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::set_global_import_chain(
             &svc,
@@ -4049,7 +4050,7 @@ mod tests {
     async fn neighbor_chain_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::set_neighbor_import_chain(
             &svc,
@@ -4101,7 +4102,7 @@ mod tests {
     async fn delete_policy_in_use_maps_to_failed_precondition() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
@@ -4158,7 +4159,7 @@ mod tests {
     async fn delete_policy_persist_failure_leaves_the_catalog_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         let prior = NamedPolicyDefinition {
             default_action: "deny".to_string(),
@@ -4224,7 +4225,7 @@ mod tests {
     async fn set_global_import_chain_persist_failure_leaves_the_chain_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         let set_chains = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let set_chains_pm = set_chains.clone();
@@ -4287,7 +4288,7 @@ mod tests {
     async fn set_global_import_chain_persist_failure_issues_no_clear() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         let cleared = std::sync::Arc::new(tokio::sync::Mutex::new(0_u32));
         let cleared_pm = cleared.clone();
@@ -4344,7 +4345,7 @@ mod tests {
     async fn set_neighbor_import_chain_persist_failure_leaves_the_chain_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
         let set_chains = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let set_chains_pm = set_chains.clone();
@@ -4598,7 +4599,7 @@ policy customer-in(peer_lp: u32) {
             }
         });
         (
-            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx),
+            PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None).with_rib_query(rib_tx),
             commands,
         )
     }
@@ -4652,7 +4653,7 @@ policy customer-in(peer_lp: u32) {
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let service =
-            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+            PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None).with_rib_query(rib_tx);
         tokio::spawn(async move {
             let Some(rustbgpd_rib::RibUpdate::QueryConditionalAdvertisements { reply }) =
                 rib_rx.recv().await
@@ -4725,7 +4726,7 @@ policy customer-in(peer_lp: u32) {
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let service =
-            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+            PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None).with_rib_query(rib_tx);
         let held = tokio::spawn(async move { rib_rx.recv().await });
         let started = tokio::time::Instant::now();
         let error = PolicyServiceRpc::list_conditional_advertisements(
@@ -4751,7 +4752,7 @@ policy customer-in(peer_lp: u32) {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (operator_tx, mut operator_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let service = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_operator_queries(operator_tx)
             .with_rib_query(rib_tx);
         let rib = tokio::spawn(async move {
@@ -4937,7 +4938,7 @@ policy customer-in(peer_lp: u32) {
         let (rib_tx, mut rib_rx) = mpsc::channel(4);
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
         let health = crate::control_service::ControlService::new(
-            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
             tokio::time::Instant::now(),
             rustbgpd_telemetry::BgpMetrics::new(),
             peer_tx,
@@ -5121,7 +5122,7 @@ policy customer-in(peer_lp: u32) {
         });
         let (gate, release) = BlockingGate::new();
         let mut svc =
-            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+            PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None).with_rib_query(rib_tx);
         svc.page_gate = Some(std::sync::Arc::clone(&gate));
         let svc = std::sync::Arc::new(svc);
         let start = || {
@@ -5375,7 +5376,7 @@ policy customer-in(peer_lp: u32) {
             }
         });
         let svc =
-            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+            PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None).with_rib_query(rib_tx);
         let bounded = Duration::from_secs(3600);
         let status = tokio::time::timeout(
             bounded,
@@ -6711,7 +6712,7 @@ policy client-x {
         let chain = stats_export_chain();
         let export = stats_export_roster(&chain);
         let (roster, publication) = stats_roster();
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
         (svc, roster, publication, export, chain.hit_counters().id())
@@ -6787,7 +6788,7 @@ policy client-x {
         );
         let (roster, _publication) = stats_roster();
         let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
         let resp = PolicyServiceRpc::get_policy_stats(
@@ -6870,7 +6871,7 @@ policy client-x {
                 Vec::new(),
             );
             let (peer_tx, _) = mpsc::channel(1);
-            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
                 .with_import_roster(roster.reader());
             let audit = GrpcAuditHandle::default();
             let mut request = Request::new(policy_stats_rpc_request("10.0.0.2", "import"));
@@ -6929,7 +6930,7 @@ policy client-x {
             tokio::sync::watch::channel(Some(roster_support::installed(0, None)));
         let mut roster = ImportRosterPublisher::new();
         let export = stats_export_roster(&stats_export_chain());
-        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
         for generation in 1..=4 {
@@ -6998,7 +6999,7 @@ policy client-x {
 
     #[tokio::test]
     async fn get_policy_stats_partial_rejects_filtered_and_export_before_backend_work() {
-        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None);
+        let svc = PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None);
         for (peer, direction) in [
             ("", ""),
             ("", "export"),
@@ -7033,7 +7034,7 @@ policy client-x {
             Vec::new(),
         );
         drop(tx);
-        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None)
             .with_import_roster(roster.reader());
         for expected in [vec!["192.0.2.1", "192.0.2.2"], Vec::new()] {
             let request = proto::GetPolicyStatsRequest {
@@ -7076,7 +7077,7 @@ policy client-x {
                 vec![dataset],
             );
             let export = stats_export_roster(&stats_export_chain());
-            let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            let svc = PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None)
                 .with_import_roster(roster.reader())
                 .with_export_roster(export.reader());
             let request = proto::GetPolicyStatsRequest {
@@ -7148,7 +7149,7 @@ policy client-x {
             Vec::new(),
         );
         let export = stats_export_roster(&stats_export_chain());
-        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
         for direction in ["import", "both"] {
@@ -7175,12 +7176,14 @@ policy client-x {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let svc =
-            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+            PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None).with_rib_query(rib_tx);
         let import = ImportRosterPublisher::new();
-        let export_only = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
-            .with_export_roster(ExportRosterPublisher::new().reader());
-        let import_only = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
-            .with_import_roster(import.reader());
+        let export_only =
+            PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None)
+                .with_export_roster(ExportRosterPublisher::new().reader());
+        let import_only =
+            PolicyService::new(AuthTier::SensitiveRead, mpsc::channel(1).0, None, None)
+                .with_import_roster(import.reader());
         for direction in ["export", "import", "both"] {
             for (svc, answers) in [
                 (&svc, false),
@@ -7217,7 +7220,7 @@ policy client-x {
         let roster =
             roster_support::publisher(vec![roster_support::peer("10.0.0.2", receiver)], Vec::new());
         let (peer_tx, _) = mpsc::channel(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader());
         let read = tokio::spawn(async move {
             PolicyServiceRpc::get_policy_stats(
@@ -7249,7 +7252,7 @@ policy client-x {
             roster_support::publisher(vec![roster_support::peer("10.0.0.2", receiver)], Vec::new());
         let export = stats_export_roster(&stats_export_chain());
         let (peer_tx, _) = mpsc::channel(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
         let read = tokio::spawn(async move {
@@ -7305,7 +7308,7 @@ policy client-x {
             .unwrap();
         let (roster, _publication) = stats_roster();
         let (peer_tx, _) = mpsc::channel(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_rib_query(query_tx.clone())
             .with_import_roster(roster.reader())
             .with_export_roster(rib.export_roster());
@@ -7377,7 +7380,7 @@ policy client-x {
                 Vec::new(),
             );
             let (peer_tx, _peer_rx) = mpsc::channel(1);
-            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
                 .with_import_roster(roster.reader());
             let started = tokio::time::Instant::now();
             let audit = GrpcAuditHandle::default();
@@ -7447,7 +7450,7 @@ policy client-x {
         });
         let export = stats_export_roster(&stats_export_chain());
         let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
 
@@ -7501,7 +7504,7 @@ policy client-x {
             std::future::pending::<()>().await;
         });
         let (peer_tx, _) = mpsc::channel(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader());
 
         let audit = GrpcAuditHandle::default();
@@ -7547,7 +7550,7 @@ policy client-x {
         let roster =
             roster_support::publisher(vec![roster_support::peer("10.0.0.2", receiver)], Vec::new());
         let (peer_tx, _) = mpsc::channel(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader());
         let audit = GrpcAuditHandle::default();
         let mut request = Request::new(policy_stats_rpc_request("", "import"));
@@ -7610,7 +7613,7 @@ policy client-x {
         );
         let (roster, _publication) = stats_roster();
         let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(roster.reader())
             .with_export_roster(export.reader());
         let err = PolicyServiceRpc::get_policy_stats(
@@ -7663,7 +7666,7 @@ policy client-x {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let coordinator = RuntimeConfigCoordinator::new();
         let svc = PolicyService::with_runtime_config_coordinator(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             Some(config_tx),
             None,
@@ -7720,7 +7723,7 @@ policy client-x {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let coordinator = RuntimeConfigCoordinator::new();
         let svc = PolicyService::with_runtime_config_coordinator(
-            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             peer_tx,
             Some(config_tx),
             None,
@@ -7758,7 +7761,7 @@ policy client-x {
     async fn owned_policy_actor_reply_loss_parks_without_response() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
         let (mut call, ack) = staged_policy_delete(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
         match peer_rx.recv().await.expect("expected owned policy delete") {
@@ -7785,7 +7788,7 @@ policy client-x {
     async fn owned_policy_commit_ack_loss_parks_without_response() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
         let (mut call, ack) = staged_policy_delete(svc, &mut config_rx).await;
         let crate::peer_types::ConfigPersistAck::Staged { staged, commit } = ack else {
             panic!("expected staged persistence")
@@ -8007,7 +8010,7 @@ policy client-x {
     async fn peer_manager_policy_reads_carry_the_scope_and_map_a_stale_one_to_not_found() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (_roster, reader) = eth0_roster();
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(reader);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let actor_seen = Arc::clone(&seen);
@@ -8235,7 +8238,7 @@ policy client-x {
             Some(Arc::clone(export_chain.hit_counters())),
         );
         let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+        let svc = PolicyService::new(AuthTier::SensitiveRead, peer_tx, None, None)
             .with_import_roster(import.reader())
             .with_export_roster(export.reader());
         let resp = PolicyServiceRpc::get_policy_stats(

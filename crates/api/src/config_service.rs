@@ -14,6 +14,7 @@ use crate::audit::{
     get_last_sighup_reload_summary, list_config_history_summary, plan_config_transaction_summary,
     preview_config_rollback_summary, rollback_config_transaction_summary, set_request_summary,
 };
+use crate::authz::AuthTier;
 use crate::peer_types::{
     PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
@@ -21,10 +22,9 @@ use crate::peer_types::{
 use crate::proto;
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
-    AccessMode, ConfigHistoryListFn, ConfigRollbackFn, ConfigRollbackPreviewFn,
-    ConfigTransactionAbortFn, ConfigTransactionApplyContext, ConfigTransactionApplyError,
-    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
-    LastSighupReloadFn, read_only_rejection,
+    ConfigHistoryListFn, ConfigRollbackFn, ConfigRollbackPreviewFn, ConfigTransactionAbortFn,
+    ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
+    ConfigTransactionConfirmFn, ConfigTransactionStatusFn, LastSighupReloadFn, read_only_rejection,
 };
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
@@ -61,7 +61,7 @@ async fn request_peer_manager<T>(
 }
 
 pub struct ConfigService {
-    access_mode: AccessMode,
+    max_tier: AuthTier,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     transaction_apply: Option<ConfigTransactionApplyFn>,
     transaction_confirm: Option<ConfigTransactionConfirmFn>,
@@ -78,9 +78,9 @@ pub struct ConfigService {
 
 impl ConfigService {
     #[must_use]
-    pub fn new(access_mode: AccessMode, peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
+    pub fn new(max_tier: AuthTier, peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
         Self {
-            access_mode,
+            max_tier,
             peer_mgr_tx,
             transaction_apply: None,
             transaction_confirm: None,
@@ -364,7 +364,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<tonic::Streaming<proto::StreamApplyConfigTransactionRequest>>,
     ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         stream::apply::stream_apply_config_transaction(
@@ -380,7 +380,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::ApplyConfigTransactionRequest>,
     ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         set_request_summary(
@@ -411,7 +411,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::ConfirmConfigTransactionRequest>,
     ) -> Result<Response<proto::ConfirmConfigTransactionResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         set_request_summary(
@@ -435,7 +435,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::AbortConfigTransactionRequest>,
     ) -> Result<Response<proto::AbortConfigTransactionResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         set_request_summary(
@@ -543,7 +543,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::RollbackConfigTransactionRequest>,
     ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
-        if let Some(status) = read_only_rejection(self.access_mode) {
+        if let Some(status) = read_only_rejection(self.max_tier) {
             return Err(status);
         }
         set_request_summary(
@@ -675,7 +675,7 @@ mod tests {
                 outcome: outcome.to_string(),
                 ..Default::default()
             };
-            let svc = ConfigService::new(AccessMode::ReadOnly, peer_tx)
+            let svc = ConfigService::new(AuthTier::SensitiveRead, peer_tx)
                 .with_last_sighup_reload(Some(Arc::new(move || {
                     proto::GetLastSighupReloadResponse {
                         record: Some(record.clone()),
@@ -748,7 +748,7 @@ mod tests {
 
         for request_kind in [RequestKind::Diff, RequestKind::Plan, RequestKind::Effective] {
             let (tx, mut rx) = mpsc::channel(1);
-            let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+            let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
             let request = tokio::spawn(async move {
                 match request_kind {
                     RequestKind::Diff => svc
@@ -911,7 +911,7 @@ mod tests {
             (Some(AuthTier::OperatorOnly), true),
         ] {
             let (tx, mut rx) = mpsc::channel(2);
-            let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+            let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
             let server = tokio::spawn(async move {
                 let Some(PeerManagerCommand::DiffRuntimeConfig {
                     operator_sources,
@@ -952,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn diff_runtime_config_forwards_candidate_to_peer_manager() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,
@@ -995,7 +995,7 @@ mod tests {
     #[tokio::test]
     async fn get_effective_config_returns_peer_manager_toml() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::EffectiveRuntimeConfig { reply }) = rx.recv().await else {
                 panic!("expected EffectiveRuntimeConfig command");
@@ -1021,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn get_effective_config_maps_serialization_failure_to_internal() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::EffectiveRuntimeConfig { reply }) = rx.recv().await else {
                 panic!("expected EffectiveRuntimeConfig command");
@@ -1081,7 +1081,7 @@ mod tests {
     #[tokio::test]
     async fn plan_config_transaction_forwards_candidate_and_token() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
@@ -1136,7 +1136,7 @@ mod tests {
         // A stale expected token is an optimistic-concurrency failure, not a
         // malformed request — same mapping as the apply path.
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
             else {
@@ -1163,7 +1163,7 @@ mod tests {
     async fn plan_config_transaction_maps_validation_error_to_invalid_argument() {
         // A candidate validation error (not a token race) stays InvalidArgument.
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
             else {
@@ -1187,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn plan_config_transaction_audit_summary_redacts_candidate_toml() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
             else {
@@ -1237,7 +1237,7 @@ mod tests {
     #[tokio::test]
     async fn apply_config_transaction_without_hook_fails_closed_but_audited() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::ApplyConfigTransactionRequest {
             candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
@@ -1263,7 +1263,7 @@ mod tests {
     #[tokio::test]
     async fn apply_config_transaction_forwards_to_hook() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx).with_transaction_hooks(
             Some(Arc::new(|request, _context| {
                 Box::pin(async move {
                     assert_eq!(request.candidate_toml, "candidate");
@@ -1313,7 +1313,7 @@ mod tests {
     #[tokio::test]
     async fn confirmed_transaction_control_hooks_forward_requests() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx).with_transaction_hooks(
             None,
             Some(Arc::new(|request, context| {
                 Box::pin(async move {
@@ -1426,7 +1426,7 @@ mod tests {
         };
         let (tx, _rx) = mpsc::channel(1);
         let svc = Arc::new(
-            ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
+            ConfigService::new(AuthTier::OperatorOnly, tx).with_transaction_hooks(
                 None,
                 Some(Arc::new({
                     let probe = probe.clone();
@@ -1473,7 +1473,7 @@ mod tests {
     #[tokio::test]
     async fn confirmed_transaction_control_hooks_fail_closed_without_executor() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
 
         let err = svc
             .confirm_config_transaction(Request::new(proto::ConfirmConfigTransactionRequest {
@@ -1503,7 +1503,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_preview_is_read_only_and_uses_redacted_plan_response() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadOnly, tx).with_rollback_preview(Some(
+        let svc = ConfigService::new(AuthTier::SensitiveRead, tx).with_rollback_preview(Some(
             Arc::new(|request| {
                 Box::pin(async move {
                     assert_eq!(request.index, 2);
@@ -1558,7 +1558,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_preview_fails_closed_without_hook_or_on_unavailable_history() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         assert_eq!(
             svc.preview_config_rollback(Request::new(proto::PreviewConfigRollbackRequest {
                 index: 1
@@ -1590,7 +1590,7 @@ mod tests {
         for cancel in [false, true] {
             let (tx, _rx) = mpsc::channel(1);
             let (started_tx, mut started_rx) = mpsc::channel(1);
-            let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_rollback_preview(Some(
+            let svc = ConfigService::new(AuthTier::OperatorOnly, tx).with_rollback_preview(Some(
                 Arc::new(move |_| {
                     let started = started_tx.clone();
                     Box::pin(async move {
@@ -1630,7 +1630,7 @@ mod tests {
     #[tokio::test]
     async fn history_and_rollback_hooks_forward_requests() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx).with_transaction_hooks(
             None,
             None,
             None,
@@ -1702,7 +1702,7 @@ mod tests {
     #[tokio::test]
     async fn history_and_rollback_fail_closed_without_executor() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
 
         let err = svc
             .list_config_history(Request::new(proto::ListConfigHistoryRequest {}))
@@ -1753,7 +1753,7 @@ mod tests {
     async fn read_only_service_rejects_transaction_mutations_before_executors() {
         let (tx, _rx) = mpsc::channel(1);
         let calls = Arc::new(AtomicUsize::new(0));
-        let svc = ConfigService::new(AccessMode::ReadOnly, tx).with_transaction_hooks(
+        let svc = ConfigService::new(AuthTier::SensitiveRead, tx).with_transaction_hooks(
             Some(counting_hook(&calls)),
             Some(counting_hook(&calls)),
             Some(counting_hook(&calls)),
@@ -1805,7 +1805,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_audit_summary_hides_comment_body() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::RollbackConfigTransactionRequest {
             index: 3,
@@ -1835,7 +1835,7 @@ mod tests {
     #[tokio::test]
     async fn diff_runtime_config_audit_summary_redacts_candidate_toml() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
@@ -1868,7 +1868,7 @@ mod tests {
     #[tokio::test]
     async fn diff_runtime_config_audit_summary_redacts_tcp_ao_key() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
@@ -1906,7 +1906,7 @@ tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
     #[tokio::test]
     async fn diff_runtime_config_maps_peer_manager_error_to_invalid_argument() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
@@ -1929,7 +1929,7 @@ tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
     #[tokio::test]
     async fn diff_runtime_config_maps_internal_render_error_to_internal() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        let svc = ConfigService::new(AuthTier::OperatorOnly, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
