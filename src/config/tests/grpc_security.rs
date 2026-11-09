@@ -178,6 +178,133 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
     );
 }
 
+/// Listener ceiling the loader produced for every (`access_mode`,
+/// `max_tier`) pair before `access_mode` was removed. The expected
+/// column is literal, not computed, so it stays the record of the old
+/// effective ceilings.
+const LISTENER_CEILING_MAPPING: &[(Option<&str>, Option<&str>, GrpcMaxTier)] = &[
+    (None, None, GrpcMaxTier::OperatorOnly),
+    (None, Some("read"), GrpcMaxTier::Read),
+    (None, Some("sensitive_read"), GrpcMaxTier::SensitiveRead),
+    (None, Some("mutating"), GrpcMaxTier::Mutating),
+    (None, Some("operator_only"), GrpcMaxTier::OperatorOnly),
+    (Some("read_write"), None, GrpcMaxTier::OperatorOnly),
+    (Some("read_write"), Some("read"), GrpcMaxTier::Read),
+    (
+        Some("read_write"),
+        Some("sensitive_read"),
+        GrpcMaxTier::SensitiveRead,
+    ),
+    (Some("read_write"), Some("mutating"), GrpcMaxTier::Mutating),
+    (
+        Some("read_write"),
+        Some("operator_only"),
+        GrpcMaxTier::OperatorOnly,
+    ),
+    (Some("read_only"), None, GrpcMaxTier::SensitiveRead),
+    (Some("read_only"), Some("read"), GrpcMaxTier::Read),
+    (
+        Some("read_only"),
+        Some("sensitive_read"),
+        GrpcMaxTier::SensitiveRead,
+    ),
+    (
+        Some("read_only"),
+        Some("mutating"),
+        GrpcMaxTier::SensitiveRead,
+    ),
+    (
+        Some("read_only"),
+        Some("operator_only"),
+        GrpcMaxTier::SensitiveRead,
+    ),
+];
+
+/// The documented upgrade rule: `read_only` becomes the stricter of
+/// `sensitive_read` and any existing `max_tier`; `read_write` (or no
+/// `access_mode`) keeps the existing `max_tier`.
+fn migrated_max_tier(access_mode: Option<&str>, max_tier: Option<&str>) -> Option<&'static str> {
+    const ORDER: [&str; 4] = ["read", "sensitive_read", "mutating", "operator_only"];
+    let rank = |tier: &str| ORDER.iter().position(|t| *t == tier).unwrap();
+    let existing = max_tier.map(|tier| ORDER[rank(tier)]);
+    match access_mode {
+        Some("read_only") => Some(existing.map_or("sensitive_read", |tier| {
+            ORDER[rank(tier).min(rank("sensitive_read"))]
+        })),
+        Some("read_write") | None => existing,
+        Some(other) => panic!("unknown access_mode {other}"),
+    }
+}
+
+fn listener_toml(uds: bool, keys: &[(&str, &str)]) -> String {
+    use std::fmt::Write as _;
+    let mut toml = format!(
+        "{}\n{}",
+        valid_toml(),
+        if uds {
+            "[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\n"
+        } else {
+            "[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n"
+        }
+    );
+    for (key, value) in keys {
+        writeln!(toml, "{key} = \"{value}\"").unwrap();
+    }
+    toml
+}
+
+fn configured_ceiling(config: &Config, uds: bool) -> GrpcMaxTier {
+    config
+        .grpc_listeners()
+        .into_iter()
+        .find_map(|listener| match listener {
+            GrpcListener::Tcp { max_tier, .. } if !uds => Some(max_tier),
+            GrpcListener::Uds { max_tier, path, .. }
+                if uds && path == Path::new("/tmp/rustbgpd-test.sock") =>
+            {
+                Some(max_tier)
+            }
+            _ => None,
+        })
+        .expect("configured listener present")
+}
+
+/// Load-bearing for the `access_mode` removal: every old (`access_mode`,
+/// `max_tier`) pair keeps its effective ceiling once migrated to
+/// `max_tier` alone, and no pair widens a listener.
+#[test]
+fn grpc_listener_ceiling_mapping_never_widens_on_migration() {
+    for uds in [false, true] {
+        for &(access_mode, max_tier, expected) in LISTENER_CEILING_MAPPING {
+            let mut old_keys = Vec::new();
+            if let Some(mode) = access_mode {
+                old_keys.push(("access_mode", mode));
+            }
+            if let Some(tier) = max_tier {
+                old_keys.push(("max_tier", tier));
+            }
+            let old = parse_schema_only(&listener_toml(uds, &old_keys)).unwrap();
+            assert_eq!(
+                configured_ceiling(&old, uds),
+                expected,
+                "old ceiling for uds={uds} access_mode={access_mode:?} max_tier={max_tier:?}"
+            );
+
+            let migrated = migrated_max_tier(access_mode, max_tier);
+            let new_keys: Vec<_> = migrated
+                .map(|tier| ("max_tier", tier))
+                .into_iter()
+                .collect();
+            let new = parse_schema_only(&listener_toml(uds, &new_keys)).unwrap();
+            assert_eq!(
+                configured_ceiling(&new, uds),
+                expected,
+                "migrated ceiling for uds={uds} access_mode={access_mode:?} max_tier={max_tier:?} -> {migrated:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn explicit_legacy_grpc_enforcement_is_rejected() {
     // Load-bearing: restoring the enum variant bypasses the post-deserialize
