@@ -1798,10 +1798,13 @@ impl PeerManager {
         command
     }
 
+    /// The daemon always has an accepted snapshot, whose limits were resolved
+    /// when it was accepted; only a manager built without one (tests) builds
+    /// them from the live config here.
     fn candidate_source_limits(&self) -> crate::config::CandidateSourceLimits {
         self.accepted_rx.as_ref().map_or_else(
             || self.current_config.candidate_source_limits(),
-            |source| source.borrow().config_ref().candidate_source_limits(),
+            |source| source.borrow().candidate_source_limits(),
         )
     }
 

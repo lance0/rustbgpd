@@ -1414,3 +1414,395 @@ fn confined_dataset_symlink_retargeted_after_the_check_is_not_followed() {
         );
     }
 }
+
+/// A manager and its accepted snapshot, which loads `edge.rpol` from
+/// `policy/` under `base`, with the given extra `[policy]` body.
+fn accepted_manager(
+    base: &Path,
+    policy_extra: &str,
+) -> (PeerManager, Arc<crate::config::AcceptedConfigSnapshot>) {
+    accepted_manager_with(base, |edge| candidate(&[edge], policy_extra))
+}
+
+/// [`accepted_manager`] with the accepted document built from `edge.rpol`'s
+/// path.
+fn accepted_manager_with(
+    base: &Path,
+    document: impl FnOnce(&Path) -> String,
+) -> (PeerManager, Arc<crate::config::AcceptedConfigSnapshot>) {
+    let (etc, policy) = (base.join("etc"), base.join("policy"));
+    std::fs::create_dir_all(&etc).unwrap();
+    std::fs::create_dir_all(&policy).unwrap();
+    let edge = policy.join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = etc.join("config.toml");
+    std::fs::write(&config_path, document(&edge)).unwrap();
+    let accepted =
+        Arc::new(crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let mut manager = test_peer_manager();
+    manager.replace_current_config(accepted.config());
+    let (_accepted_tx, accepted_rx) = tokio::sync::watch::channel(Arc::clone(&accepted));
+    (manager.with_accepted_identity(accepted_rx), accepted)
+}
+
+/// Roots are resolved when the config is accepted. A nested root swapped
+/// for a symlink afterwards does not move the confinement with it, and a
+/// later API commit keeps the roots it was accepted with.
+#[test]
+fn nested_root_swapped_for_a_symlink_after_accept_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let (lib, outside) = (base.join("policy/lib"), base.join("outside"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(lib.join("inside.rpol"), POLICY).unwrap();
+    std::fs::write(outside.join("edge.rpol"), OUTSIDE_POLICY).unwrap();
+    let (manager, accepted) = accepted_manager(
+        &base,
+        &format!("rpol_roots = [{:?}]\n", lib.display().to_string()),
+    );
+    for capture in [false, true] {
+        Config::load_rpc_candidate(
+            &candidate(&[&lib.join("inside.rpol")], ""),
+            "candidate",
+            capture,
+            Some(&manager.candidate_source_limits()),
+        )
+        .expect("the nested root admits its own files");
+    }
+    std::fs::rename(&lib, base.join("policy/lib.old")).unwrap();
+    std::os::unix::fs::symlink(&outside, &lib).unwrap();
+    let committed = accepted.derive_config(accepted.config()).unwrap();
+    let sources = [
+        manager.candidate_source_limits(),
+        committed.candidate_source_limits(),
+    ];
+    // The commit kept its roots: it still admits what they hold.
+    for capture in [false, true] {
+        Config::load_rpc_candidate(
+            &candidate(&[&base.join("policy/edge.rpol")], ""),
+            "candidate",
+            capture,
+            Some(&sources[1]),
+        )
+        .expect("a committed snapshot keeps the accepted roots");
+    }
+    for (limits, capture) in sources
+        .iter()
+        .flat_map(|limits| [(limits, false), (limits, true)])
+    {
+        let loaded = Config::load_rpc_candidate(
+            &candidate(&[&lib.join("edge.rpol")], ""),
+            "candidate",
+            capture,
+            Some(limits),
+        );
+        let error = match loaded {
+            Ok(config) => panic!("a swapped root was followed: {:?}", policy_names(&config)),
+            Err(error) => error,
+        };
+        assert!(!error.to_string().contains("outside-in"), "{error}");
+    }
+}
+
+/// A configured root that is a regular file admits that file alone: it
+/// loads, but its imports do not resolve from the directory around it.
+#[test]
+fn a_root_that_is_a_file_admits_only_that_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let shared = base.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    let (plain, importer, sibling) = (
+        shared.join("plain.rpol"),
+        shared.join("importer.rpol"),
+        shared.join("sibling.rpol"),
+    );
+    std::fs::write(&plain, "policy plain-in {\n    term rest { accept }\n}\n").unwrap();
+    std::fs::write(&importer, "import \"sibling.rpol\"\n").unwrap();
+    std::fs::write(&sibling, OUTSIDE_POLICY).unwrap();
+    let (manager, _) = accepted_manager(
+        &base,
+        &format!(
+            "rpol_roots = [{:?}, {:?}]\n",
+            plain.display().to_string(),
+            importer.display().to_string()
+        ),
+    );
+    let limits = manager.candidate_source_limits();
+    for capture in [false, true] {
+        let config = Config::load_rpc_candidate(
+            &candidate(&[&plain], ""),
+            "candidate",
+            capture,
+            Some(&limits),
+        )
+        .expect("a file root admits itself");
+        assert_eq!(policy_names(&config), ["plain-in"]);
+        for source in [&importer, &sibling] {
+            let loaded = Config::load_rpc_candidate(
+                &candidate(&[source], ""),
+                "candidate",
+                capture,
+                Some(&limits),
+            );
+            let error = match loaded {
+                Ok(config) => panic!(
+                    "{} reached its directory: {:?}",
+                    source.display(),
+                    policy_names(&config)
+                ),
+                Err(error) => error,
+            };
+            assert!(!error.to_string().contains("outside-in"), "{error}");
+        }
+    }
+
+    // With its directory under another root, the same file root's imports
+    // resolve there as usual.
+    let (manager, _) = accepted_manager(
+        &base.join("covered"),
+        &format!(
+            "rpol_roots = [{:?}, {:?}]\n",
+            importer.display().to_string(),
+            shared.display().to_string()
+        ),
+    );
+    let limits = manager.candidate_source_limits();
+    for capture in [false, true] {
+        let config = Config::load_rpc_candidate(
+            &candidate(&[&importer], ""),
+            "candidate",
+            capture,
+            Some(&limits),
+        )
+        .expect("a root covers the file root's directory");
+        assert_eq!(policy_names(&config), ["outside-in"]);
+    }
+}
+
+/// Whether a root is a file or a directory is fixed when the config is
+/// accepted, and a later API commit keeps it. A directory put where a file
+/// root was is not a root, and a file put where a directory root was is not
+/// a source.
+#[test]
+fn a_root_replaced_by_the_other_kind_after_accept_admits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let (file_root, dir_root) = (base.join("shared/plain.rpol"), base.join("lib"));
+    std::fs::create_dir(base.join("shared")).unwrap();
+    std::fs::create_dir(&dir_root).unwrap();
+    std::fs::write(&file_root, POLICY).unwrap();
+    let (manager, accepted) = accepted_manager(
+        &base,
+        &format!(
+            "rpol_roots = [{:?}, {:?}]\n",
+            file_root.display().to_string(),
+            dir_root.display().to_string()
+        ),
+    );
+
+    std::fs::remove_file(&file_root).unwrap();
+    std::fs::create_dir(&file_root).unwrap();
+    std::fs::write(file_root.join("child.rpol"), OUTSIDE_POLICY).unwrap();
+    std::fs::remove_dir(&dir_root).unwrap();
+    std::fs::write(&dir_root, OUTSIDE_POLICY).unwrap();
+    let policy = base.join("policy");
+    let (importer, reach) = (policy.join("importer.rpol"), policy.join("reach.rpol"));
+    std::fs::write(&importer, "import \"child.rpol\"\n").unwrap();
+    std::fs::write(&reach, "import \"../lib\"\n").unwrap();
+
+    let root = |path: &Path| format!("rpol_roots = [{:?}]\n", path.display().to_string());
+    let cases = [
+        (
+            "a file beneath a replaced file root",
+            candidate(&[&file_root.join("child.rpol")], ""),
+        ),
+        (
+            "an import searched in a replaced file root",
+            candidate(&[&importer], &root(&file_root)),
+        ),
+        (
+            "a file that replaced a directory root",
+            candidate(&[&dir_root], ""),
+        ),
+        (
+            "an import of a file that replaced a directory root",
+            candidate(&[&reach], &root(&dir_root)),
+        ),
+    ];
+    let committed = accepted.derive_config(accepted.config()).unwrap();
+    let sources = [
+        ("accepted", manager.candidate_source_limits()),
+        ("committed", committed.candidate_source_limits()),
+    ];
+    for ((snapshot, limits), (case, toml), capture) in sources.iter().flat_map(|source| {
+        cases
+            .iter()
+            .flat_map(move |case| [(source, case, false), (source, case, true)])
+    }) {
+        let loaded = Config::load_rpc_candidate(toml, "candidate", capture, Some(limits));
+        let error = match loaded {
+            Ok(config) => panic!(
+                "{snapshot}: {case} was admitted: {:?}",
+                policy_names(&config)
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            !error.to_string().contains("outside-in"),
+            "{snapshot}: {case}: {error}"
+        );
+    }
+}
+
+/// A credential path may be a symlink the operator rotates between reloads.
+/// The file it resolves to when a candidate loads is protected, as is the
+/// one it resolved to when the config was accepted, which is still the live
+/// credential. An API commit after the rotation keeps both.
+#[test]
+fn a_credential_symlink_rotated_after_accept_protects_both_targets() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let policy = base.join("policy");
+    std::fs::create_dir(&policy).unwrap();
+    let token = |name: &str| {
+        let path = policy.join(name);
+        std::fs::write(&path, format!("{SECRET}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    };
+    let (old, new) = (token("token-v2"), token("token-v3"));
+    let link = policy.join("token");
+    std::os::unix::fs::symlink("token-v2", &link).unwrap();
+    let with_token = |toml: String| {
+        toml.replace(
+            "[global.telemetry.grpc_uds]\n",
+            &format!(
+                "[global.telemetry.grpc_uds]\ntoken_file = {:?}\n",
+                link.display().to_string()
+            ),
+        )
+    };
+    let (manager, accepted) =
+        accepted_manager_with(&base, |edge| with_token(candidate(&[edge], "")));
+    let declaring = policy.join("declaring.rpol");
+    std::fs::write(
+        &declaring,
+        "dataset asn-set customers\npolicy uses { term t { if route.origin-as in customers { accept } } }\n",
+    )
+    .unwrap();
+
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("token-v3", &link).unwrap();
+    let sources = [
+        ("accepted", manager.candidate_source_limits()),
+        (
+            "committed event",
+            accepted
+                .derive_config(accepted.config())
+                .unwrap()
+                .candidate_source_limits(),
+        ),
+        (
+            "committed transaction",
+            accepted
+                .derive_toml_without_sources(accepted.normalized_toml(), "commit")
+                .unwrap()
+                .candidate_source_limits(),
+        ),
+    ];
+    for (snapshot, limits) in &sources {
+        for (capture, target) in [(false, &old), (false, &new), (true, &old), (true, &new)] {
+            let dataset = format!("[policy.datasets.customers]\npath = {target:?}\n");
+            for candidate_toml in [candidate(&[target], ""), candidate(&[&declaring], &dataset)] {
+                let loaded = Config::load_rpc_candidate(
+                    &with_token(candidate_toml),
+                    "candidate",
+                    capture,
+                    Some(limits),
+                );
+                let Err(error) = loaded else {
+                    panic!("{snapshot}: {} was read as a source", target.display());
+                };
+                let error = error.to_string();
+                assert!(
+                    error.contains("is not a file under"),
+                    "{snapshot}: {}: {error}",
+                    target.display()
+                );
+                assert!(!error.contains(SECRET), "{error}");
+            }
+        }
+    }
+}
+
+/// Imports written in an entry admitted only as a file root are looked up
+/// under the candidate's policy directories, never relative to the entry's
+/// own directory, and another module cannot import a file root. Listing the
+/// directory in `rpol_roots` is the remedy for both.
+#[test]
+fn a_file_root_entry_resolves_imports_only_under_policy_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let shared = base.join("shared");
+    let (main, lib) = (shared.join("main.rpol"), shared.join("lib"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("common.rpol"), OUTSIDE_POLICY).unwrap();
+    std::fs::write(&main, "import \"common.rpol\"\n").unwrap();
+    let roots = |extra: &[&Path]| {
+        let roots: Vec<String> = [main.as_path(), lib.as_path()]
+            .iter()
+            .chain(extra)
+            .map(|root| root.display().to_string())
+            .collect();
+        format!("rpol_roots = {roots:?}\n")
+    };
+    let load = |entry: &Path, roots: &str, limits, capture| {
+        Config::load_rpc_candidate(
+            &candidate(&[entry], roots),
+            "candidate",
+            capture,
+            Some(limits),
+        )
+    };
+    let (manager, _) = accepted_manager(&base, &roots(&[]));
+    let limits = manager.candidate_source_limits();
+    let reach = base.join("policy/reach.rpol");
+    std::fs::write(&reach, "import \"../shared/main.rpol\"\n").unwrap();
+    for capture in [false, true] {
+        // `shared/lib/common.rpol` is under a root, but `lib/common.rpol` is
+        // relative to the unadmitted `shared/`.
+        std::fs::write(&main, "import \"lib/common.rpol\"\n").unwrap();
+        let Err(error) = load(&main, &roots(&[]), &limits, capture) else {
+            panic!("an import resolved relative to a file root's directory");
+        };
+        assert!(error.to_string().contains("resolve-error"), "{error}");
+        // The same module is found by its path under the `lib` root.
+        std::fs::write(&main, "import \"common.rpol\"\n").unwrap();
+        let config = load(&main, &roots(&[]), &limits, capture).expect("resolves under a root");
+        assert_eq!(policy_names(&config), ["outside-in"]);
+        // A module in an admitted directory cannot import the file root.
+        let Err(error) = load(&reach, &roots(&[]), &limits, capture) else {
+            panic!("a file root was imported by another module");
+        };
+        assert!(error.to_string().contains("resolve-error"), "{error}");
+    }
+
+    // With `shared/` listed, both forms load.
+    let listed = base.join("listed");
+    let (manager, _) = accepted_manager(&listed, &roots(&[&shared]));
+    let limits = manager.candidate_source_limits();
+    let reach = listed.join("policy/reach.rpol");
+    std::fs::write(&reach, "import \"../../shared/main.rpol\"\n").unwrap();
+    for capture in [false, true] {
+        std::fs::write(&main, "import \"lib/common.rpol\"\n").unwrap();
+        for entry in [&main, &reach] {
+            let config =
+                load(entry, &roots(&[&shared]), &limits, capture).expect("the directory is a root");
+            assert_eq!(policy_names(&config), ["outside-in"]);
+        }
+    }
+}

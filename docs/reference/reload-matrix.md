@@ -733,8 +733,27 @@ before sending the configuration to the daemon. Below `operator_only`, a
 candidate sent over the API (diff, plan, or EVPN apply) may name only `.rpol`
 files, `rpol_roots` and dataset files that resolve under the running config's
 policy directories: its `[policy] rpol_roots` and the directories of its
-`.rpol` and dataset files. Its gRPC TLS and token file paths must be ones the
-running config already uses. Operator callers may stage candidate sources
+`.rpol` and dataset files. The daemon resolves those directories when it
+accepts the config at boot or on SIGHUP and holds them until the next accepted
+reload, so a directory or symlink replaced in between does not move them; a
+config committed over the API keeps the directories already resolved. An
+`rpol_roots` entry that is a regular file admits only that file, as a path the
+candidate names; the directory around it is not a policy directory. Unless
+another policy directory covers that directory, this has two consequences below
+`operator_only`. Another module cannot `import` that file. And `import` lines
+written in it are looked up only under the candidate's policy directories,
+never relative to the file's own directory: with
+`/etc/x/main.rpol` and `/etc/x/lib` both listed in `rpol_roots`,
+`import "lib/common.rpol"` in `main.rpol` is refused, while
+`import "common.rpol"` resolves. Listing `/etc/x` in `rpol_roots` admits both.
+The candidate's gRPC TLS and token file paths must be ones the running config
+already uses. The file each of those paths resolved to when the config was
+accepted is not admitted as a policy source until the next accepted reload,
+across API commits, and neither is the file the path resolves to when a
+candidate is loaded; a credential symlink rotated in between therefore keeps
+both its old and its new target out. The check follows the configured path, so
+a credential file moved aside by rename is not covered under its new name.
+Operator callers may stage candidate sources
 elsewhere, including on `ApplyEvpnRuntime`. For every API caller, compile and
 dataset errors for those files report path, line and column without quoting file text; `rbgp policy check`
 on the host shows the full diagnostic.

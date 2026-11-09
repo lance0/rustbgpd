@@ -573,7 +573,7 @@ impl EvpnRuntimeReloadApply {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .clone()
                         },
-                        |accepted| accepted.config_ref().candidate_source_limits(),
+                        |accepted| accepted.candidate_source_limits(),
                     )
                 });
             Config::load_rpc_candidate(
