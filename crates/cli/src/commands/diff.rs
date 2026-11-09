@@ -1664,21 +1664,16 @@ mod tests {
             next_hop: "192.0.2.254".to_string(),
             origin: 0,
             as_path: vec![65001],
-            med,
             med_attr: (med != 0).then_some(med),
             communities: vec![(64501 << 16) | 100],
             ..Default::default()
         }
     }
 
-    fn live_route_with_med_attr(
-        prefix: &str,
-        med: u32,
-        med_attr: Option<u32>,
-    ) -> server_proto::Route {
+    fn live_route_with_med_attr(prefix: &str, med_attr: Option<u32>) -> server_proto::Route {
         server_proto::Route {
             med_attr,
-            ..live_route(prefix, med)
+            ..live_route(prefix, 0)
         }
     }
 
@@ -2508,8 +2503,8 @@ mod tests {
 
     #[tokio::test]
     async fn med_attr_zero_and_absence_compare_exactly() {
-        // Load-bearing: falling back to bare `med` makes the absent route
-        // diverge, while dropping `med_attr` loses the explicit zero.
+        // Load-bearing: dropping `med_attr` loses the explicit zero, and
+        // treating an absent MED as 0 makes the absent route diverge.
         let file = snapshot_file(&[
             header_line(),
             route_line("10.0.0.0/24", Some(0)),
@@ -2518,8 +2513,8 @@ mod tests {
         ]);
         let server = server_with_pages(vec![page(
             vec![
-                live_route_with_med_attr("10.0.0.0", 0, Some(0)),
-                live_route_with_med_attr("10.0.1.0", 99, None),
+                live_route_with_med_attr("10.0.0.0", Some(0)),
+                live_route_with_med_attr("10.0.1.0", None),
             ],
             "",
             2,
@@ -2538,28 +2533,6 @@ mod tests {
             "the retired MED caveat returned: {notes:?}"
         );
         assert!(!notes.is_empty(), "structural notes remain");
-    }
-
-    /// Load-bearing authority proof: restoring `route.med` as a fallback
-    /// makes the route compare in sync and this exact delta disappears.
-    #[tokio::test]
-    async fn versioned_bare_med_is_not_a_presence_fallback() {
-        let file = snapshot_file(&[
-            header_line(),
-            route_line("10.0.0.0/24", Some(55)),
-            trailer_line(1),
-        ]);
-        let bare_med = server_proto::Route {
-            med_attr: None,
-            ..live_route("10.0.0.0", 55)
-        };
-        let server = server_with_pages(vec![page(vec![bare_med], "", 1)]).await;
-        let (rendered, code) = run_against(&server, &opts(file.path())).await.unwrap();
-        assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
-        assert!(
-            rendered.contains("med: 55 -> null"),
-            "output was:\n{rendered}"
-        );
     }
 
     #[tokio::test]
@@ -2905,7 +2878,6 @@ mod tests {
                 wire_route("100.69.0.0", 24, "10.83.1.2", vec![65001]),
                 wire_route("100.70.0.0", 24, "10.83.1.2", vec![65001]),
                 server_proto::Route {
-                    med: 120,
                     med_attr: Some(120),
                     communities: vec![(65001 << 16) | 111],
                     large_communities: vec!["65001:1:1".to_string()],
@@ -2927,7 +2899,6 @@ mod tests {
             assert_eq!(BIRD3.golden, "bird3-export-table.expected.ndjson");
             check_golden(&BIRD3);
             let routes = vec![server_proto::Route {
-                med: 120,
                 med_attr: Some(120),
                 communities: vec![(64501 << 16) | 111],
                 large_communities: vec!["64501:92:6".to_string()],
@@ -2956,7 +2927,6 @@ mod tests {
             let routes = ["100.67.0.0", "100.68.0.0", "100.70.0.0"]
                 .into_iter()
                 .map(|p| server_proto::Route {
-                    med: 55,
                     med_attr: Some(55),
                     communities: vec![(65003 << 16) | 99],
                     ..wire_route(p, 24, "10.83.3.2", vec![65003])
@@ -2980,7 +2950,6 @@ mod tests {
             let routes = vec![
                 wire_route("100.65.0.0", 24, "10.83.2.2", vec![65002]),
                 server_proto::Route {
-                    med: 77,
                     med_attr: Some(77),
                     communities: vec![(65002 << 16) | 222],
                     large_communities: vec!["65002:2:2".to_string()],
@@ -3002,7 +2971,6 @@ mod tests {
             check_golden(&GOBGP_V47);
             let routes = vec![
                 server_proto::Route {
-                    med: 92,
                     med_attr: Some(92),
                     communities: vec![(64501 << 16) | 92],
                     large_communities: vec!["64501:92:4".to_string()],
@@ -3010,7 +2978,6 @@ mod tests {
                 },
                 wire_route("203.0.113.0", 24, "192.0.2.13", vec![64502]),
                 server_proto::Route {
-                    med: 192,
                     med_attr: Some(192),
                     communities: vec![(64501 << 16) | 192],
                     large_communities: vec!["64501:92:6".to_string()],
@@ -3111,7 +3078,6 @@ mod tests {
 
             let routes = vec![
                 server_proto::Route {
-                    med: 92,
                     med_attr: Some(92),
                     communities: vec![(64501 << 16) | 92],
                     large_communities: vec!["64501:92:4".to_string()],
@@ -3119,7 +3085,6 @@ mod tests {
                 },
                 wire_route("203.0.113.0", 24, "192.0.2.13", vec![64502]),
                 server_proto::Route {
-                    med: 192,
                     med_attr: Some(192),
                     communities: vec![(64501 << 16) | 192],
                     large_communities: vec!["64501:92:6".to_string()],
@@ -3144,7 +3109,6 @@ mod tests {
             let routes = ["100.67.0.0", "100.70.0.0"]
                 .into_iter()
                 .map(|p| server_proto::Route {
-                    med: 55,
                     med_attr: Some(55),
                     communities: vec![(65003 << 16) | 99],
                     ..wire_route(p, 24, "10.83.3.2", vec![65003])
@@ -3219,7 +3183,6 @@ mod tests {
                     next_hop: "192.0.2.1".to_string(),
                     origin: 0,
                     as_path: vec![65001, 65002],
-                    med: 120,
                     med_attr: Some(120),
                     local_pref_attr: Some(100),
                     communities: vec![(65001 << 16) | 111],
@@ -3264,7 +3227,6 @@ mod tests {
                     next_hop: "192.0.2.254".to_string(),
                     origin: 0,
                     as_path: vec![65500, 64999],
-                    med: 121,
                     med_attr: Some(121),
                     communities: vec![(65500 << 16) | 100],
                     path_id: 1,
@@ -3295,7 +3257,6 @@ mod tests {
                     next_hop: "2001:db8::1".to_string(),
                     origin: 0,
                     as_path: vec![65500, 64997],
-                    med: 51,
                     med_attr: Some(51),
                     ..Default::default()
                 },
@@ -3355,7 +3316,6 @@ mod tests {
 
             // A real attribute delta (MED drift on the v6 route).
             let mut truth = from_bmp_wire_truth();
-            truth[1][1].med = 999;
             truth[1][1].med_attr = Some(999);
             let server = from_bmp_server(truth).await;
             let mut opts = opts(&golden);

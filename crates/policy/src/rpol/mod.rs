@@ -161,7 +161,34 @@ impl RpolFile {
         max_graph_bytes: usize,
         protection: &crate::datasets::SourceFileProtection,
     ) -> Result<Self, LoadError> {
-        let graph = modules::resolve(path, roots, max_graph_bytes, protection)?;
+        Self::from_graph(modules::resolve(path, roots, max_graph_bytes, protection)?)
+    }
+
+    /// [`Self::load_protected`] for an entry path and roots the caller already
+    /// canonicalized and confined. Neither is resolved again, so the read
+    /// walks exactly the checked components and refuses a symlink swapped
+    /// into any of them after the check. Pass `protection` built with
+    /// [`crate::datasets::SourceFileProtection::confined`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load`].
+    #[doc(hidden)]
+    pub fn load_canonical(
+        canonical_path: &Path,
+        canonical_roots: &[PathBuf],
+        max_graph_bytes: usize,
+        protection: &crate::datasets::SourceFileProtection,
+    ) -> Result<Self, LoadError> {
+        Self::from_graph(modules::resolve_canonical(
+            canonical_path,
+            canonical_roots,
+            max_graph_bytes,
+            protection,
+        )?)
+    }
+
+    fn from_graph(graph: modules::ResolvedGraph) -> Result<Self, LoadError> {
         let type_diags = typeck::typecheck(&graph.merged);
         if !type_diags.is_empty() {
             return Err(LoadError::Compile {

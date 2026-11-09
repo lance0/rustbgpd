@@ -267,13 +267,52 @@ pub(super) fn resolve(
     max_graph_bytes: usize,
     excluded: &crate::datasets::SourceFileProtection,
 ) -> Result<ResolvedGraph, LoadError> {
+    let main_canon = main_path.canonicalize().map_err(|e| LoadError::Io {
+        path: main_path.display().to_string(),
+        reason: format!("failed to read: {e}"),
+    })?;
+    resolve_from(
+        main_path,
+        main_canon,
+        roots,
+        Path::canonicalize,
+        max_graph_bytes,
+        excluded,
+    )
+}
+
+/// [`resolve`] for an entry path and roots the caller already canonicalized
+/// and checked. Neither is resolved again: re-canonicalizing would follow a
+/// symlink swapped into a checked component afterwards, while reading the
+/// checked path itself walks it with `O_NOFOLLOW` and refuses such a swap.
+pub(super) fn resolve_canonical(
+    main_canon: &Path,
+    roots: &[PathBuf],
+    max_graph_bytes: usize,
+    excluded: &crate::datasets::SourceFileProtection,
+) -> Result<ResolvedGraph, LoadError> {
+    resolve_from(
+        main_canon,
+        main_canon.to_path_buf(),
+        roots,
+        |root| Ok(root.to_path_buf()),
+        max_graph_bytes,
+        excluded,
+    )
+}
+
+fn resolve_from(
+    main_path: &Path,
+    main_canon: PathBuf,
+    roots: &[PathBuf],
+    root_path: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    max_graph_bytes: usize,
+    excluded: &crate::datasets::SourceFileProtection,
+) -> Result<ResolvedGraph, LoadError> {
     let io = |path: &Path, reason: String| LoadError::Io {
         path: path.display().to_string(),
         reason,
     };
-    let main_canon = main_path
-        .canonicalize()
-        .map_err(|e| io(main_path, format!("failed to read: {e}")))?;
     if excluded.protects_path(&main_canon) {
         return Err(io(
             main_path,
@@ -291,10 +330,8 @@ pub(super) fn resolve(
     // change which file an import resolves to.
     let mut confine: Vec<PathBuf> = vec![main_dir];
     for root in roots {
-        confine.push(
-            root.canonicalize()
-                .map_err(|e| io(root, format!("policy root is unusable: {e}")))?,
-        );
+        confine
+            .push(root_path(root).map_err(|e| io(root, format!("policy root is unusable: {e}")))?);
     }
 
     let mut resolver = Resolver {

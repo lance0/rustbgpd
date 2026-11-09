@@ -509,7 +509,7 @@ path identifier, even when their prefixes match.
 
 The projection combines API `prefix` and `prefix_length` into a CIDR `prefix`.
 JSON `med` comes from optional API `med_attr`: absent is `null`, and explicit
-zero is `0`; the obsolete scalar API `med` is not authoritative. `local_pref`
+zero is `0`. `local_pref`
 is the effective value, while optional `local_pref_attr` records attribute
 presence. This is an API route view, not a complete copy of wire attributes.
 

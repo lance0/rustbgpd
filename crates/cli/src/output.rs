@@ -725,7 +725,7 @@ pub struct JsonRoute {
     pub next_hop: String,
     pub as_path: Vec<u32>,
     pub local_pref: u32,
-    pub med: u32,
+    pub med: Option<u32>,
     pub origin: String,
     pub best: bool,
     pub peer_address: String,

@@ -3294,10 +3294,10 @@ message Route {
   // route carries one, otherwise the default 100 the RIB applies during
   // best-path selection. Wire-level presence is `local_pref_attr`.
   uint32 local_pref = 7;
-  // Deprecated for absence-sensitive consumers: a bare integer cannot
-  // distinguish "no MED attribute" from "MED 0" (absent encodes as 0).
-  // Prefer `med_attr`.
-  uint32 med = 8;
+  // The bare MED scalar could not distinguish "no MED attribute" from
+  // "MED 0"; `med_attr` carries MED with presence.
+  reserved 8;
+  reserved "med";
   bool best = 9;
   repeated uint32 communities = 10;
   repeated uint64 extended_communities = 11;
@@ -3322,10 +3322,9 @@ message Route {
   // same recovery the RFC 9069 BMP Loc-RIB dump uses for its per-peer
   // header timestamp). 0 = unknown.
   uint64 received_at_epoch_seconds = 17;
-  // Distinguishes "explicit MED attribute set on the wire or by policy"
-  // (Some(value)) from "no MED attribute" (absent). Without this
-  // distinction `med = 0` could mean either "MED zero" or "no
-  // attribute". Mirrors `local_pref_attr`.
+  // MULTI_EXIT_DISC with presence: set when the route carries a MED
+  // attribute (on the wire or from policy), absent when it carries none.
+  // Mirrors `local_pref_attr`.
   optional uint32 med_attr = 18;
   // True while this route is retained as stale during a peer graceful
   // restart (RFC 4724). Mirrors the per-family route entries

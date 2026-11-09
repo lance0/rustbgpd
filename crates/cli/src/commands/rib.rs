@@ -3328,7 +3328,7 @@ mod tests {
             next_hop: r.next_hop.clone(),
             as_path: r.as_path.clone(),
             local_pref: r.local_pref,
-            med: r.med,
+            med: r.med_attr,
             origin: output::format_origin(r.origin).to_string(),
             best: r.best,
             peer_address: r.peer_address.clone(),
@@ -3406,7 +3406,6 @@ mod tests {
             next_hop: "198.51.100.1".to_string(),
             as_path: vec![64512, 64496],
             local_pref: 200,
-            med: 50,
             med_attr: Some(50),
             origin: 0,
             best: true,
@@ -4892,8 +4891,6 @@ mod tests {
     fn route_json_covers_proto_fields() {
         let mut route = route_for_json(7, "valid");
         route.local_pref_attr = Some(200);
-        // The legacy scalar is deliberately not authoritative.
-        route.med = 999;
         route.stale = true;
         route.llgr_stale = true;
         // This nested generated message must also remain exhaustive.
@@ -5044,28 +5041,14 @@ mod tests {
 
     #[test]
     fn route_list_json_honors_med_absence_marker() {
-        // MED-absence-aware daemon: `med_attr` present somewhere in
-        // the response, so an explicit MED 0 stays 0 and an absent MED
-        // serializes as null.
+        // `med_attr` is the only MED source: an explicit MED 0 stays 0 and
+        // an absent MED serializes as null.
         let mut zero = route_for_json(0, "");
-        zero.med = 0;
         zero.med_attr = Some(0);
         let mut absent = route_for_json(0, "");
-        absent.med = 0;
         absent.med_attr = None;
         let value: serde_json::Value = serde_json::to_value(JsonRoutes(&[zero, absent])).unwrap();
         assert_eq!(value[0]["med"], 0);
-        assert_eq!(value[1]["med"], serde_json::Value::Null);
-
-        // An all-absent response must not revive the legacy scalar.
-        let mut legacy_scalar_only = route_for_json(0, "");
-        legacy_scalar_only.med_attr = None;
-        let mut zero_med = route_for_json(0, "");
-        zero_med.med = 0;
-        zero_med.med_attr = None;
-        let value: serde_json::Value =
-            serde_json::to_value(JsonRoutes(&[legacy_scalar_only, zero_med])).unwrap();
-        assert_eq!(value[0]["med"], serde_json::Value::Null);
         assert_eq!(value[1]["med"], serde_json::Value::Null);
     }
 
