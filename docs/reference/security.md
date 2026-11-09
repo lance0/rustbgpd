@@ -610,6 +610,17 @@ It adds `CAP_NET_RAW` to both capability sets while keeping the base unit at
 `CAP_NET_BIND_SERVICE` only. If the same configuration programs the kernel,
 install the dataplane drop-in as well; the two capability additions compose.
 
+## BFD and VPN FlowSpec boundaries
+
+BFD's on-link spoofing risk, TTL / Hop-Limit checks and deferred authentication
+are documented in [ADR-0117](../adr/0117-authenticated-single-hop-bfd-decision.md).
+VPN FlowSpec's origination-only boundary, receiver validation and RD / Route
+Target scope are documented in [ADR-0146](../adr/0146-vpn-flowspec.md), with
+controller authorization and guarded mutations in
+[ADR-0139](../adr/0139-flowspec-controller-contract.md) and
+[ADR-0144](../adr/0144-guarded-flowspec-mutations.md).
+These transport and forwarding boundaries sit outside the gRPC threat model.
+
 ## Deferred hardening
 
 The following security improvements are intentionally deferred and tracked in

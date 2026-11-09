@@ -843,13 +843,13 @@ Changing the path or enabling/disabling token auth remains restart-required.
 
 <a id="grpc-credential-file-permissions"></a>
 **Credential file permissions.** The same rules apply to every listener's
-`token_file`, `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file` at
-config load, at startup, on every SIGHUP credential reload, in both `--check`
+`token_file`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`, and
+`tls_client_crl_file` at config load, at startup, on every SIGHUP credential reload, in both `--check`
 modes, and in `rbgp doctor`. Symlinks are followed and their target is judged.
 
 | Condition | Files | Result |
 |---|---|---|
-| The target is not a regular file (directory, FIFO, device) | all four | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
+| The target is not a regular file (directory, FIFO, device) | all listener credential files | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
 | World-writable | `token_file`, `tls_key_file` | Refused |
 | Readable by every local user | `token_file`, `tls_key_file` | Accepted with a warning |
 | Owned by someone other than the daemon user or root | `token_file`, `tls_key_file` | Accepted with a warning |
@@ -860,8 +860,8 @@ Mode `0600` owned by the daemon user, or `0640` owned by `root:<daemon group>`
 names the file, its mode and owner, and the remedy. It is logged once per
 load or reload as `grpc_credential_file_permissions`, never per request. It
 counts as a `--check` warning, so `--check --strict` exits 1, and `rbgp doctor`
-reports it as `credentials.<listener>.<field>`. Certificates and CA bundles are
-public and are checked only as regular files. Warnings rather than refusals
+reports it as `credentials.<listener>.<field>`. Certificates, CA bundles and
+CRLs are public and are checked only as regular files. Warnings rather than refusals
 keep existing deployments that mount a shared token, such as the lab and
 Compose examples, running while they are tightened.
 
@@ -4029,7 +4029,11 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   route-server policies (a 320-member exchange with 1k–40k-entry IRR
   prefix lists renders to ~65 MB) load with headroom, while still
   stopping unbounded or recursively generated graphs at load time. A
-  unit over the budget is a config load error naming the file.
+  unit over the budget is a config load error naming the file. For API
+  candidates below `operator_only`, the source-read budget is clamped to the
+  running config's value, even if the candidate specifies a larger value.
+  The larger candidate value is not itself rejected; runtime transactions
+  separately refuse changes to this setting.
 - **Test gate (`require_passing_tests`, default `false`):** when `true`,
   every load runs the in-language `test` blocks of each loaded unit
   (each unit that defines a policy) after compiling it. A failing test,
