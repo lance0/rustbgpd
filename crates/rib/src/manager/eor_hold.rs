@@ -179,9 +179,13 @@ pub(super) struct EorObligations {
     /// selection was deferred: membership is rebuilt when that deferral is
     /// staged or released, and the hold ends there.
     rt_membership_complete: HashSet<PeerId>,
-    /// Markers the tick's fallback sent ([`RibManager::eor_unsettled_ready`]).
+    /// Markers the tick's fallback found ([`RibManager::eor_unsettled`]).
     #[cfg(test)]
-    pub(super) unsettled_tick_sends: usize,
+    pub(super) unsettled_tick_finds: usize,
+    /// A test of the fallback itself: let it run, and let a marker stay
+    /// unsettled past a checked point.
+    #[cfg(test)]
+    pub(super) allow_unsettled: bool,
 }
 
 impl EorObligations {
@@ -668,19 +672,25 @@ impl RibManager {
             return;
         }
         let evpn_bits = Self::evpn_admitted_marker_bits(&families, &refresh_markers);
-        if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {
-            return;
-        }
         if !unsettled.is_empty() {
+            // Logged whether or not the writer takes it: a refused send
+            // becomes an ordinary retry, which is not reported again.
             warn!(
                 %peer,
                 families = ?unsettled,
-                "End-of-RIB sent by the resync tick: the release of its last hold did not send it"
+                "End-of-RIB left to the resync tick: the release of its last hold did not send it"
             );
             #[cfg(test)]
             {
-                self.eor.unsettled_tick_sends += unsettled.len();
+                assert!(
+                    self.eor.allow_unsettled,
+                    "End-of-RIB for {unsettled:?} toward {peer} was left to the resync tick:                      the release that emptied its hold set did not settle it"
+                );
+                self.eor.unsettled_tick_finds += unsettled.len();
             }
+        }
+        if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {
+            return;
         }
         if self.outbound_session_ids.get(&peer).copied() == session_id
             && self
@@ -692,22 +702,32 @@ impl RibManager {
         }
     }
 
-    /// Production fallback of the tick's marker lane: the owed markers of
-    /// `peer` that nothing holds and that no refused send explains. Every
-    /// release sends the markers it frees, so this is empty unless one
-    /// missed a marker. The tick then sends it within one interval, where
-    /// it would otherwise stay owed until the session ended, and logs it.
-    /// A test build fails earlier, at the end of the turn that left the
-    /// marker (`assert_eor_settled`). The EVPN marker a current
-    /// complete feed still owes is that feed's own tick retry, not this.
+    /// Whether `family`'s marker toward `peer` was left behind by a release:
+    /// owed, not refused by the writer, and held by nothing a polling lane
+    /// respects. The EVPN marker a current complete feed still owes is that
+    /// feed's own tick retry, not a missed release. The tick's fallback and
+    /// the test-build check both ask here, so they cannot disagree.
+    fn eor_unsettled(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        !self.eor.stored(peer, family).contains(EorHold::Writer)
+            && self.eor_retry_ready(peer, family)
+            && !(family == EVPN && self.evpn_feed_owed_markers(peer).0)
+    }
+
+    /// Production fallback of the tick's marker lane: the markers of `peer`
+    /// a release left behind ([`Self::eor_unsettled`]), unless the peer's
+    /// writer is gone or its EVPN recovery reset is pending. Every release
+    /// sends the markers it frees, so this is empty unless one missed a
+    /// marker. The tick then sends it within one interval, where it would
+    /// otherwise stay owed until the session ended, and logs it. A test
+    /// build fails instead, here and at every checked point
+    /// (`assert_eor_settled`).
     fn eor_unsettled_ready(&self, peer: PeerId) -> Vec<(Afi, Safi)> {
+        if self.outbound_channel_gone(peer) || self.evpn_recovery_reset_pending(peer) {
+            return Vec::new();
+        }
         self.eor
             .families(peer)
-            .filter(|&family| {
-                !self.eor.stored(peer, family).contains(EorHold::Writer)
-                    && self.eor_retry_ready(peer, family)
-                    && !(family == EVPN && self.evpn_feed_owed_markers(peer).0)
-            })
+            .filter(|&family| self.eor_unsettled(peer, family))
             .collect()
     }
 
@@ -776,28 +796,22 @@ impl RibManager {
         sent
     }
 
-    /// Test builds: after every actor turn, no owed marker may be left
-    /// with an empty hold set and a live writer. Such a marker would leave
-    /// only on a later, unrelated event: the release that emptied its set
-    /// did not send it.
+    /// Test builds: after every actor turn and every resync tick, no
+    /// marker may be left behind ([`Self::eor_unsettled_ready`]). Such a
+    /// marker would leave only on a later tick: the release that emptied its
+    /// hold set did not send it.
     #[cfg(test)]
     pub(super) fn assert_eor_settled(&self) {
+        if self.eor.allow_unsettled {
+            return;
+        }
         for peer in self.eor.peers() {
-            if self
-                .outbound_peers
-                .get(&peer)
-                .is_none_or(tokio::sync::mpsc::Sender::is_closed)
-            {
-                continue;
-            }
-            for family in self.eor.families(peer) {
-                let holds = self.eor_holds(peer, family);
-                assert!(
-                    !holds.is_empty(),
-                    "End-of-RIB for {family:?} toward {peer} is owed with no hold and was not sent: \
-                     the release that emptied its hold set did not settle it"
-                );
-            }
+            let unsettled = self.eor_unsettled_ready(peer);
+            assert!(
+                unsettled.is_empty(),
+                "End-of-RIB for {unsettled:?} toward {peer} is owed with no hold and was not sent: \
+                 the release that emptied its hold set did not settle it"
+            );
         }
     }
 

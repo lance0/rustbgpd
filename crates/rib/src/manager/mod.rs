@@ -4069,9 +4069,14 @@ impl RibManager {
         }
         // A whole member replay can outlive the tick's peer-stride budget.
         // Activate its existing interior checkpoints on every timer arm.
-        with_executor_handoff(|| {
+        let rearm = with_executor_handoff(|| {
             self.with_replacement_readiness(Self::resync_dirty_peers_with_readiness)
-        })
+        });
+        // The lanes after the marker lane must not leave a marker for the
+        // next tick either.
+        #[cfg(test)]
+        self.assert_eor_settled();
+        rearm
     }
 
     fn resync_dirty_peers_with_readiness(&mut self) -> bool {

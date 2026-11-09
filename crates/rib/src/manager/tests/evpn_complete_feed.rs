@@ -1989,6 +1989,29 @@ fn review_ready_unicast_marker_does_not_wait_for_held_evpn() {
     assert!(output.try_recv().map(delivered).is_err());
 }
 
+/// The EVPN End-of-RIB a current complete feed still owes is that feed's
+/// own tick retry, not a release that missed its marker: it passes the
+/// check after an actor turn, leaves on the next tick, and the fallback
+/// does not report it.
+#[test]
+fn feed_owed_evpn_marker_passes_the_checks_and_leaves_on_the_tick_unreported() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().map(delivered).unwrap();
+    assert!(manager.evpn_feed_is_current(peer));
+    assert_eq!(manager.eor_pending(peer), HashSet::from([EVPN]));
+    assert!(manager.eor_holds(peer, EVPN).is_empty());
+    manager.handle_update(RibUpdate::RetireEorGraceInterface {
+        interface: "unused0".into(),
+    });
+    assert!(output.try_recv().map(delivered).is_err());
+    manager.resync_dirty_peers_bounded();
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    assert!(manager.eor_pending(peer).is_empty());
+}
+
 /// The two ways a refused marker of an ORF-gated family is offered again
 /// keep their own rule: the resync tick waits for the RFC 5291 §6 gate,
 /// and a release does not (the family's honest-empty marker is immediate

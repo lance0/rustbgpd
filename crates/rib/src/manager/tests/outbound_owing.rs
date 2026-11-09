@@ -1355,6 +1355,7 @@ fn refresh_absorbing_on_the_last_slot_offers_the_marker_it_freed() {
         .expect("the deferred answer follows");
     assert!(marker < answer, "the initial End-of-RIB precedes the BoRR");
     assert!(manager.eor_pending(peer).is_empty());
+    assert_eq!(manager.eor.unsettled_tick_finds, 0, "an ordinary retry");
 }
 
 /// The keep-set: a marked key is kept while the peer holds it, a source

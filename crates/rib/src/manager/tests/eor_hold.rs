@@ -441,13 +441,25 @@ fn the_tick_sends_an_unsettled_marker_and_reports_it() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let mut output = connect(&mut manager, TARGET, 2, V4);
     while output.try_recv().is_ok() {}
+    manager.eor.allow_unsettled = true;
     manager.owe_eor(TARGET, V4);
     assert!(manager.resync_tick_pending());
     manager.resync_dirty_peers_bounded();
     assert_eq!(output.try_recv().unwrap().end_of_rib, [V4]);
-    assert_eq!(manager.eor.unsettled_tick_sends, 1);
+    assert_eq!(manager.eor.unsettled_tick_finds, 1);
     assert!(!manager.eor.owes(TARGET, V4));
     assert!(!manager.resync_tick_pending());
+}
+
+/// Without the opt-in, a test build fails as soon as the fallback finds a
+/// marker, so a test that drives ticks directly cannot pass through it.
+#[test]
+#[should_panic(expected = "was left to the resync tick")]
+fn the_tick_fallback_fails_a_test_that_did_not_opt_in() {
+    let mut manager = plain_manager();
+    let _output = connect(&mut manager, TARGET, 2, V4);
+    manager.owe_eor(TARGET, V4);
+    manager.retry_eor_markers_bounded();
 }
 
 /// A refused marker is the tick's ordinary retry and is not reported.
@@ -461,5 +473,29 @@ async fn the_tick_does_not_report_a_refused_marker() {
     assert_eq!(markers(&mut output), 0);
     manager.retry_eor_markers_bounded();
     assert_eq!(markers(&mut output), 1);
-    assert_eq!(manager.eor.unsettled_tick_sends, 0);
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+}
+
+/// The fallback reports a marker it finds whether or not the writer takes
+/// it: a refused send becomes an ordinary retry, which is not reported
+/// again.
+#[test]
+fn the_tick_reports_an_unsettled_marker_even_when_the_writer_refuses_it() {
+    let mut manager = plain_manager();
+    let mut output = connect(&mut manager, TARGET, 2, V4);
+    while output.try_recv().is_ok() {}
+    manager.eor.allow_unsettled = true;
+    manager.owe_eor(TARGET, V4);
+    let sender = manager.outbound_peers[&TARGET].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    manager.retry_eor_markers_bounded();
+    assert_eq!(manager.eor.unsettled_tick_finds, 1);
+    assert!(manager.eor_holds(TARGET, V4).contains(EorHold::Writer));
+    while output.try_recv().is_ok() {}
+    manager.retry_eor_markers_bounded();
+    assert_eq!(output.try_recv().unwrap().end_of_rib, [V4]);
+    assert_eq!(
+        manager.eor.unsettled_tick_finds, 1,
+        "the retry is not reported"
+    );
 }
