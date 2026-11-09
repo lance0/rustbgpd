@@ -487,7 +487,23 @@ pub fn load_dataset_file_protected(
     let path = path
         .canonicalize()
         .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
-    let bytes = read_regular_file_bounded_protected(&path, MAX_DATASET_BYTES, protection)
+    load_dataset_file_canonical(&path, kind, protection)
+}
+
+/// [`load_dataset_file_protected`] for a path the caller already
+/// canonicalized and confined. It is not resolved again, so the read walks
+/// the checked components and refuses a symlink swapped in after the check.
+///
+/// # Errors
+///
+/// As [`load_dataset_file`], or a protected-source refusal.
+#[doc(hidden)]
+pub fn load_dataset_file_canonical(
+    path: &Path,
+    kind: DatasetKind,
+    protection: &SourceFileProtection,
+) -> Result<DatasetData, String> {
+    let bytes = read_regular_file_bounded_protected(path, MAX_DATASET_BYTES, protection)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let text =
         String::from_utf8(bytes).map_err(|e| format!("cannot read {}: {e}", path.display()))?;

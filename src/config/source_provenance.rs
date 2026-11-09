@@ -184,8 +184,15 @@ impl SourceManifest {
     }
 }
 
+/// `checked` is the canonical path a confined load already checked; it is
+/// read as is, never resolved again.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the confined canonical path joins the existing per-dataset reuse inputs"
+)]
 pub(super) fn load_dataset_captured(
     path: &Path,
+    checked: Option<&Path>,
     name: &str,
     kind: DatasetKind,
     existing: Option<&Arc<DatasetHandle>>,
@@ -198,9 +205,12 @@ pub(super) fn load_dataset_captured(
         source: None,
         source_rebound: false,
     };
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
+    let canonical_path = match checked {
+        Some(checked) => checked.to_path_buf(),
+        None => path
+            .canonicalize()
+            .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?,
+    };
     let bytes = read_regular_file_bounded_protected(&canonical_path, MAX_DATASET_BYTES, protection)
         .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
     let source = DatasetFileFingerprint {
@@ -870,6 +880,7 @@ import_policy_chain = ["inbound"]
 
         let exact = load_dataset_captured(
             &second_path,
+            None,
             "customers",
             DatasetKind::Asn,
             Some(&handle),
@@ -892,6 +903,7 @@ import_policy_chain = ["inbound"]
         assert!(matches!(
             load_dataset_captured(
                 &first_path,
+                None,
                 "customers",
                 DatasetKind::Asn,
                 Some(&handle),
@@ -906,6 +918,7 @@ import_policy_chain = ["inbound"]
         fs::write(&second_path, "64502\n").unwrap();
         let changed_path = load_dataset_captured(
             &second_path,
+            None,
             "customers",
             DatasetKind::Asn,
             Some(&handle),
@@ -921,6 +934,7 @@ import_policy_chain = ["inbound"]
         assert!(matches!(
             load_dataset_captured(
                 &second_path,
+                None,
                 "vendors",
                 DatasetKind::Asn,
                 Some(&handle),
@@ -934,6 +948,7 @@ import_policy_chain = ["inbound"]
         ));
         let kind_mismatch = load_dataset_captured(
             &second_path,
+            None,
             "customers",
             DatasetKind::Prefix,
             Some(&handle),

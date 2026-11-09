@@ -1221,3 +1221,196 @@ fn config_under_a_search_only_ancestor_loads() {
     )
     .unwrap();
 }
+
+const OUTSIDE_POLICY: &str = "policy outside-in {\n    term rest { reject }\n}\n";
+
+/// An accepted config in `etc/` whose `policy/` directory is the only place
+/// a candidate below `operator_only` may name; `outside/` is not.
+fn swap_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    crate::config::CandidateSourceLimits,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let (etc, policy, outside) = (base.join("etc"), base.join("policy"), base.join("outside"));
+    for path in [&etc, &policy, &outside] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let edge = policy.join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    std::fs::write(outside.join("edge.rpol"), OUTSIDE_POLICY).unwrap();
+    let config_path = etc.join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let limits = accepted.config_ref().candidate_source_limits();
+    (dir, policy, outside, limits)
+}
+
+fn after_inventory(hook: impl FnOnce() + 'static) {
+    crate::config::AFTER_INVENTORY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn policy_names(config: &Config) -> Vec<&str> {
+    let mut names: Vec<&str> = config
+        .policy
+        .rpol
+        .policies
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// The entry module is read at the canonical path confinement checked, not
+/// wherever its symlink points when the read starts.
+#[test]
+fn confined_entry_symlink_retargeted_after_the_check_is_not_followed() {
+    let (_dir, policy, outside, limits) = swap_fixture();
+    let link = policy.join("link.rpol");
+    for capture in [false, true] {
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("edge.rpol", &link).unwrap();
+        let (swap, target) = (link.clone(), outside.join("edge.rpol"));
+        after_inventory(move || {
+            std::fs::remove_file(&swap).unwrap();
+            std::os::unix::fs::symlink(target, &swap).unwrap();
+        });
+        let config = Config::load_rpc_candidate(
+            &candidate(&[&link], ""),
+            "candidate",
+            capture,
+            Some(&limits),
+        )
+        .unwrap();
+        assert_eq!(policy_names(&config), ["edge-in"], "capture={capture}");
+        // The candidate keeps the path as written.
+        assert_eq!(config.policy.rpol_files, [link.display().to_string()]);
+    }
+}
+
+/// A directory between a root and the entry, swapped for a symlink after the
+/// check, is refused by the descriptor walk. File-less limits (no config file
+/// or credentials to protect) still walk the checked path.
+#[test]
+fn confined_entry_refuses_an_ancestor_swapped_into_a_symlink() {
+    let (_dir, policy, outside, accepted_limits) = swap_fixture();
+    let sub = policy.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let entry = sub.join("edge.rpol");
+    std::fs::write(&entry, POLICY).unwrap();
+    let fileless = Config::load_toml_with_diagnostics(
+        &candidate(&[&policy.join("edge.rpol")], ""),
+        "file-less",
+    )
+    .unwrap();
+    assert!(fileless.file_path.is_none());
+    let fileless_limits = fileless.candidate_source_limits();
+    for limits in [&accepted_limits, &fileless_limits] {
+        for capture in [false, true] {
+            let (swap, retired, target) = (sub.clone(), policy.join("sub.old"), outside.clone());
+            after_inventory(move || {
+                std::fs::rename(&swap, &retired).unwrap();
+                std::os::unix::fs::symlink(target, &swap).unwrap();
+            });
+            let loaded = Config::load_rpc_candidate(
+                &candidate(&[&entry], ""),
+                "candidate",
+                capture,
+                Some(limits),
+            );
+            std::fs::remove_file(&sub).unwrap();
+            std::fs::rename(policy.join("sub.old"), &sub).unwrap();
+            let error = match loaded {
+                Ok(config) => panic!(
+                    "a swapped ancestor was followed: {:?}",
+                    policy_names(&config)
+                ),
+                Err(error) => error,
+            };
+            assert!(!error.to_string().contains("outside-in"), "{error}");
+        }
+    }
+}
+
+/// The accepted root directory itself, swapped for a symlink after the check,
+/// is refused rather than resolved again.
+#[test]
+fn confined_entry_refuses_a_root_directory_swap() {
+    let (_dir, policy, outside, limits) = swap_fixture();
+    let entry = policy.join("edge.rpol");
+    let retired = policy.with_extension("old");
+    for capture in [false, true] {
+        let (swap, aside, target) = (policy.clone(), retired.clone(), outside.clone());
+        after_inventory(move || {
+            std::fs::rename(&swap, &aside).unwrap();
+            std::os::unix::fs::symlink(target, &swap).unwrap();
+        });
+        let loaded = Config::load_rpc_candidate(
+            &candidate(&[&entry], ""),
+            "candidate",
+            capture,
+            Some(&limits),
+        );
+        std::fs::remove_file(&policy).unwrap();
+        std::fs::rename(&retired, &policy).unwrap();
+        let error = match loaded {
+            Ok(config) => panic!("a swapped root was followed: {:?}", policy_names(&config)),
+            Err(error) => error,
+        };
+        assert!(!error.to_string().contains("outside-in"), "{error}");
+    }
+}
+
+/// A dataset is read at the canonical path confinement checked, not wherever
+/// its symlink points when the read starts.
+#[test]
+fn confined_dataset_symlink_retargeted_after_the_check_is_not_followed() {
+    use rustbgpd_policy::datasets::{DatasetKind, load_dataset_file};
+    let (_dir, policy, outside, limits) = swap_fixture();
+    let declaring = policy.join("declaring.rpol");
+    std::fs::write(&declaring, "dataset asn-set customers\npolicy uses { term t { if route.origin-as in customers { accept } } }\n").unwrap();
+    let safe = policy.join("safe.list");
+    std::fs::write(&safe, "64500\n").unwrap();
+    let secret = outside.join("secret.list");
+    std::fs::write(&secret, "64999\n").unwrap();
+    let expected = load_dataset_file(&safe, DatasetKind::Asn).unwrap();
+    assert_ne!(
+        load_dataset_file(&secret, DatasetKind::Asn).unwrap(),
+        expected
+    );
+    let link = policy.join("customers.list");
+    let toml = candidate(
+        &[&declaring],
+        &format!(
+            "[policy.datasets.customers]\npath = {:?}\n",
+            link.display().to_string()
+        ),
+    );
+    for capture in [false, true] {
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("safe.list", &link).unwrap();
+        let (swap, target) = (link.clone(), secret.clone());
+        crate::config::AFTER_DATASET_CONFINEMENT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&swap).unwrap();
+                std::os::unix::fs::symlink(target, &swap).unwrap();
+            }));
+        });
+        let config = Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits))
+            .expect("the checked dataset loads");
+        let bound = config
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .unwrap()
+            .pin();
+        assert_eq!(bound.data, expected, "capture={capture}");
+        assert_eq!(
+            config.policy.datasets["customers"].path,
+            link.display().to_string()
+        );
+    }
+}
