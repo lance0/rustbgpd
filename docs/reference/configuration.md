@@ -4046,8 +4046,9 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   unit over the budget is a config load error naming the file. For API
   candidates below `operator_only`, the source-read budget is clamped to the
   running config's value, even if the candidate specifies a larger value.
-  The larger candidate value is not itself rejected; runtime transactions
-  separately refuse changes to this setting.
+  A candidate value inside the accepted 1 MiB–4 GiB range is clamped
+  rather than rejected; a value outside that range is still rejected.
+  Runtime transactions separately refuse changes to this setting.
 - **Test gate (`require_passing_tests`, default `false`):** when `true`,
   every load runs the in-language `test` blocks of each loaded unit
   (each unit that defines a policy) after compiling it. A failing test,
