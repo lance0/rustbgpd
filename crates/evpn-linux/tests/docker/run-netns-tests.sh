@@ -192,7 +192,7 @@ case "${1:-all}" in
     l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_"; EXACT_FILTER=0 ;;
     managed_bridge)     TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_create_adopt_and_reap_round_trip" ;;
     managed_vxlan)      TEST_BIN="netns_managed_netdev"; FILTER="managed_vxlan_create_adopt_and_reap_round_trip" ;;
-    managed_svd_vxlan)  TEST_BIN="netns_managed_netdev"; FILTER="managed_svd_vxlan_create_adopt_and_reap_round_trip" ;;
+    managed_svd_vxlan)  TEST_BIN="netns_managed_netdev"; FILTER="managed_svd_vxlan_"; EXACT_FILTER=0 ;;
     managed_vlan_upper) TEST_BIN="netns_managed_netdev"; FILTER="managed_vlan_upper_create_adopt_and_reap_round_trip" ;;
     managed_ready)      TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_and_vxlan_make_instance_ready_round_trip" ;;
     managed_ip_vrf_ready) TEST_BIN="netns_managed_netdev"; FILTER="managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip" ;;

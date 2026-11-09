@@ -25,7 +25,8 @@ use crate::error::DataplaneError;
 
 use super::links::{self, BridgeLink};
 use crate::snapshot::{
-    KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo, vlan_rows_contain,
+    KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo, svd_tunnel_bindings,
+    svd_vlan_bindings_present, vlan_rows_contain,
 };
 
 const ERRNO_EEXIST: i32 = libc::EEXIST;
@@ -543,10 +544,88 @@ async fn ensure_svd_vlan_bindings(
         .await
         .map_err(|err| classify_link_apply_error(&err, "managed SVD VXLAN vlan_tunnel enable"))?;
 
+    if let Some(port) = bridge
+        .port_vlan_inventory
+        .iter()
+        .find(|port| port.ifindex == vxlan_ifindex)
+    {
+        let observed = svd_tunnel_bindings(&port.vlan_tunnels).ok_or_else(|| {
+            unsafe_managed_svd_vxlan(format!(
+                "managed SVD VXLAN {name} has an invalid tunnel mapping inventory"
+            ))
+        })?;
+        for row in observed {
+            let (vid, vni) = (row.bridge_vlan, row.vni);
+            if spec
+                .bindings
+                .iter()
+                .any(|binding| binding.bridge_vlan == vid && binding.vni == vni)
+            {
+                continue;
+            }
+            let removed = !spec
+                .bindings
+                .iter()
+                .any(|binding| binding.bridge_vlan == vid);
+            // Only an old tunnel binding establishes ownership of a bridge-self VLAN.
+            if removed
+                && !bridge.port_vlan_inventory.iter().any(|other| {
+                    other.ifindex != vxlan_ifindex && vlan_rows_contain(&other.vlans, vid)
+                })
+            {
+                delete_svd_vlan(handle, bridge.ifindex, vid, true).await?;
+            }
+            handle
+                .link()
+                .del_with_message(
+                    LinkBridgeVlan::new(vxlan_ifindex)
+                        .append_af_spec(AfSpecBridge::VlanTunnelInfo(vec![
+                            BridgeVlanTunnelInfo::Id(vni),
+                            BridgeVlanTunnelInfo::Vid(vid),
+                            BridgeVlanTunnelInfo::Flags(BridgeVlanInfoFlags::empty()),
+                        ]))
+                        .build(),
+                )
+                .execute()
+                .await
+                .map_err(|err| {
+                    classify_link_apply_error(&err, "managed SVD VXLAN tunnel mapping delete")
+                })?;
+        }
+        // Membership on the exactly stamped SVD belongs to this manager, including
+        // the kernel's initial default VLAN; leave unrelated bridge-self rows alone.
+        for vid in 1..=4094 {
+            if vlan_rows_contain(&port.vlans, vid)
+                && !spec
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.bridge_vlan == vid)
+            {
+                delete_svd_vlan(handle, vxlan_ifindex, vid, false).await?;
+            }
+        }
+    }
     for binding in &spec.bindings {
         ensure_svd_binding(handle, bridge.ifindex, vxlan_ifindex, *binding).await?;
     }
     Ok(())
+}
+
+async fn delete_svd_vlan(
+    handle: &Handle,
+    ifindex: u32,
+    vid: u16,
+    bridge_self: bool,
+) -> Result<(), DataplaneError> {
+    let mut vlan = LinkBridgeVlan::new(ifindex).vlan(vid, BridgeVlanInfoFlags::empty());
+    if bridge_self {
+        vlan = vlan.bridge_self();
+    }
+    match handle.link().del_with_message(vlan.build()).execute().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_ENOENT) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(&err, "managed SVD VLAN delete")),
+    }
 }
 
 async fn ensure_svd_binding(
@@ -577,7 +656,7 @@ async fn ensure_svd_binding(
         .execute()
         .await
         .map_err(|err| classify_link_apply_error(&err, "managed SVD VXLAN VLAN add"))?;
-    match handle
+    let added = handle
         .link()
         .set(
             LinkBridgeVlan::new(vxlan_ifindex)
@@ -589,10 +668,40 @@ async fn ensure_svd_binding(
                 .build(),
         )
         .execute()
-        .await
-    {
+        .await;
+    settle_svd_tunnel_add(added, binding, || {
+        super::vlan_tunnel::dump_port_vlans(vxlan_ifindex)
+    })
+    .await
+}
+
+/// `EEXIST` on a tunnel-mapping add is success only when a fresh
+/// target-scoped dump shows the exact desired (vid, vni).
+async fn settle_svd_tunnel_add<Dump>(
+    added: Result<(), rtnetlink::Error>,
+    binding: ManagedSvdVxlanBinding,
+    dump: impl FnOnce() -> Dump,
+) -> Result<(), DataplaneError>
+where
+    Dump: std::future::Future<Output = Result<Vec<super::vlan_tunnel::VlanEntry>, DataplaneError>>,
+{
+    match added {
         Ok(()) => Ok(()),
-        Err(err) if is_errno(&err, ERRNO_EEXIST) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => {
+            let entries = dump().await?;
+            if super::vlan_tunnel::entries_map_vlan_to_tunnel(
+                &entries,
+                binding.bridge_vlan,
+                binding.vni,
+            ) {
+                Ok(())
+            } else {
+                Err(transient_link_race(
+                    "managed SVD VXLAN tunnel mapping EEXIST without the desired binding"
+                        .to_string(),
+                ))
+            }
+        }
         Err(err) => Err(classify_link_apply_error(
             &err,
             "managed SVD VXLAN tunnel mapping add",
@@ -1364,26 +1473,6 @@ fn ensure_exact_svd_vxlan_stamp(
     )))
 }
 
-fn svd_vlan_bindings_present(
-    bridge: &BridgeLink,
-    vxlan_ifindex: u32,
-    vxlan_name: &str,
-    bindings: &[ManagedSvdVxlanBinding],
-) -> bool {
-    let Some(port) = bridge.port_vlan_inventory.iter().find(|port| {
-        port.is_vxlan && (port.ifindex == vxlan_ifindex || port.name.as_deref() == Some(vxlan_name))
-    }) else {
-        return false;
-    };
-    bindings.iter().all(|binding| {
-        vlan_rows_contain(&bridge.vlans, binding.bridge_vlan)
-            && vlan_rows_contain(&port.vlans, binding.bridge_vlan)
-            && port.vlan_tunnels.iter().any(|row| {
-                row.vid == Some(binding.bridge_vlan) && row.tunnel_id == Some(binding.vni)
-            })
-    })
-}
-
 fn ensure_svd_vlan_bindings_observed(
     name: &str,
     vxlan: &KernelVxlanLinkInfo,
@@ -1396,7 +1485,13 @@ fn ensure_svd_vlan_bindings_observed(
             spec.bridge
         )));
     };
-    if svd_vlan_bindings_present(bridge, vxlan.ifindex, &vxlan.name, &spec.bindings) {
+    if svd_vlan_bindings_present(
+        &bridge.vlans,
+        &bridge.port_vlan_inventory,
+        vxlan.ifindex,
+        &vxlan.name,
+        &spec.bindings,
+    ) {
         Ok(())
     } else {
         Err(unsafe_managed_svd_vxlan(format!(
@@ -1823,6 +1918,59 @@ fn unsafe_managed_vlan_upper(message: String) -> DataplaneError {
 
 #[cfg(test)]
 mod tests {
+    use crate::linux::vlan_tunnel::VlanEntry;
+
+    fn netlink_error(errno: i32) -> rtnetlink::Error {
+        let mut message = netlink_packet_core::ErrorMessage::default();
+        message.code = std::num::NonZeroI32::new(-errno);
+        rtnetlink::Error::NetlinkError(message)
+    }
+
+    // A re-key that loses a race to a conflicting mapping (20 -> 200) must
+    // not report the desired 20 -> 300 as programmed.
+    #[tokio::test]
+    async fn svd_tunnel_add_eexist_requires_exact_fresh_mapping() {
+        let binding = super::ManagedSvdVxlanBinding {
+            bridge_vlan: 20,
+            vni: 300,
+        };
+        let entry = |vid_start, vid_end, tunnel_start| VlanEntry {
+            vid_start,
+            vid_end,
+            tunnel_start,
+        };
+        let settle = |entries: Vec<VlanEntry>| {
+            super::settle_svd_tunnel_add(Err(netlink_error(libc::EEXIST)), binding, move || {
+                std::future::ready(Ok(entries))
+            })
+        };
+
+        let conflicting = settle(vec![entry(20, 20, Some(200))]).await;
+        assert!(
+            matches!(&conflicting, Err(crate::error::DataplaneError::Other(msg))
+                if msg.contains("EEXIST without the desired binding")),
+            "{conflicting:?}"
+        );
+        assert!(settle(vec![entry(20, 20, None)]).await.is_err());
+        assert!(settle(Vec::new()).await.is_err());
+        settle(vec![entry(20, 20, Some(300))]).await.unwrap();
+        settle(vec![entry(19, 21, Some(299))]).await.unwrap();
+        assert!(
+            super::settle_svd_tunnel_add(Ok(()), binding, || async {
+                unreachable!("a successful add needs no confirmation dump")
+            })
+            .await
+            .is_ok()
+        );
+        assert!(
+            super::settle_svd_tunnel_add(Err(netlink_error(libc::EINVAL)), binding, || async {
+                unreachable!("only EEXIST is confirmed")
+            })
+            .await
+            .is_err()
+        );
+    }
+
     // LAN-2909 L-E4 review: only the link that was stamped is ever rolled
     // back. A same-name link with another ifindex is a replacement, and
     // deleting it would destroy someone else's device.
