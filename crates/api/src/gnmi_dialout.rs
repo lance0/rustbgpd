@@ -335,8 +335,9 @@ async fn run_target(service: GnmiService, series: TargetSeries, target: DialoutT
     series.write(|metrics, name| metrics.set_gnmi_dialout_connected(name, false));
     let mut backoff = target.backoff_initial.max(Duration::from_millis(1));
     let mut failure_announced = false;
+    let mut permission_warnings = Vec::new();
     loop {
-        match publish_session(&service, &series, &target).await {
+        match publish_session(&service, &series, &target, &mut permission_warnings).await {
             Ok(()) => {
                 // Connected and then cleanly/abruptly disconnected.
                 series.write(|metrics, name| {
@@ -450,8 +451,11 @@ async fn publish_session(
     service: &GnmiService,
     series: &TargetSeries,
     target: &DialoutTarget,
+    permission_warnings: &mut Vec<String>,
 ) -> Result<(), SessionError> {
-    let channel = connect(target).await.map_err(SessionError::Connect)?;
+    let channel = connect(target, permission_warnings)
+        .await
+        .map_err(SessionError::Connect)?;
     let mut client = GnmiDialoutClient::new(channel);
 
     // Fresh subscription per connection: the spawned task ends when the
@@ -515,6 +519,9 @@ async fn publish_session(
         endpoint = %target.endpoint,
         "gNMI dial-out collector connected"
     );
+    // Re-arm: a permission problem still present on the next outage is
+    // reported again.
+    permission_warnings.clear();
     series.write(|metrics, name| metrics.set_gnmi_dialout_connected(name, true));
 
     let mut queue_observation = tokio::time::interval(QUEUE_OBSERVATION_INTERVAL);
@@ -553,7 +560,10 @@ async fn publish_session(
 /// Establish the (optionally TLS) channel for a target. Key material is
 /// read per attempt into a zeroizing buffer and handed to the transport —
 /// error strings carry file paths and IO error text only, never contents.
-async fn connect(target: &DialoutTarget) -> Result<Channel, String> {
+async fn connect(
+    target: &DialoutTarget,
+    permission_warnings: &mut Vec<String>,
+) -> Result<Channel, String> {
     let mut endpoint = Endpoint::from_shared(target.endpoint.clone())
         .map_err(|e| format!("invalid endpoint {}: {e}", target.endpoint))?
         .connect_timeout(CONNECT_TIMEOUT);
@@ -561,13 +571,12 @@ async fn connect(target: &DialoutTarget) -> Result<Channel, String> {
         let tls_files = tls.clone();
         let config = tokio::task::spawn_blocking(move || {
             use crate::credential_file::{CredentialKind, DaemonIdentity, read_credential};
-            let read = |path: &std::path::Path, label, kind| {
+            let mut warnings = Vec::new();
+            let mut read = |path: &std::path::Path, label, kind| {
                 let mut bytes = Zeroizing::new(Vec::new());
                 let warning =
                     read_credential(path, label, kind, DaemonIdentity::current(), &mut bytes)?;
-                if let Some(warning) = warning {
-                    warn!(%warning, "gNMI dial-out credential file permissions");
-                }
+                warnings.extend(warning);
                 Ok::<_, String>(bytes)
             };
             let ca = read(&tls_files.ca_file, "dial-out CA", CredentialKind::Public)?;
@@ -578,11 +587,12 @@ async fn connect(target: &DialoutTarget) -> Result<Channel, String> {
                 let key = read(key_file, "dial-out private key", CredentialKind::Secret)?;
                 config = config.identity(Identity::from_pem(cert.as_slice(), key.as_slice()));
             }
-            Ok::<_, String>(config)
+            Ok::<_, String>((config, warnings))
         })
         .await
         .map_err(|error| format!("TLS credential reader failed: {error}"))??;
-        let mut config = config;
+        let (mut config, warnings) = config;
+        announce_permission_warnings(&target.name, permission_warnings, warnings);
         if let Some(server_name) = &tls.server_name {
             config = config.domain_name(server_name.clone());
         }
@@ -594,6 +604,27 @@ async fn connect(target: &DialoutTarget) -> Result<Channel, String> {
         .connect()
         .await
         .map_err(|e| format!("connect {}: {e}", target.endpoint))
+}
+
+/// Log each credential permission warning once per target until the target
+/// next connects. A retry that reads the same files stays quiet; a changed
+/// mode or owner yields a different message and is logged again.
+fn announce_permission_warnings(target: &str, announced: &mut Vec<String>, current: Vec<String>) {
+    for warning in &current {
+        if !announced.contains(warning) {
+            warn!(target = %target, %warning, "gNMI dial-out credential file permissions");
+            #[cfg(test)]
+            PERMISSION_WARNINGS_LOGGED.with(|count| count.set(count.get() + 1));
+        }
+    }
+    *announced = current;
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Permission warnings logged on this thread, counted instead of
+    /// captured from the log because tracing interest is process-wide.
+    static PERMISSION_WARNINGS_LOGGED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -648,7 +679,7 @@ mod tests {
             }
         });
         let started = std::time::Instant::now();
-        let attempt = tokio::spawn(async move { connect(&target).await });
+        let attempt = tokio::spawn(async move { connect(&target, &mut Vec::new()).await });
         let (reservation, addr) = reserve_port(None);
         let (server, mut received) = spawn_stub_collector(reservation);
         let mut manager = DialoutManager::new(test_service(), BgpMetrics::new());
@@ -666,6 +697,44 @@ mod tests {
             "runtime stalled for {elapsed:?}"
         );
         assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    /// A collector outage with a world-readable key logs the permission
+    /// warning on the first attempt only; a changed mode is reported again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dialout_permission_warning_logged_once_per_outage() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"pem\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            path
+        };
+        let key = file("key");
+        let target = DialoutTarget {
+            name: "permissions".into(),
+            endpoint: "https://127.0.0.1:1".into(),
+            tls: Some(DialoutTls {
+                ca_file: file("ca"),
+                cert_file: Some(file("cert")),
+                key_file: Some(key.clone()),
+                server_name: None,
+            }),
+            subscriptions: gnmi::SubscriptionList::default(),
+            backoff_initial: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(1),
+        };
+        let logged = || PERMISSION_WARNINGS_LOGGED.with(std::cell::Cell::get);
+        let before = logged();
+        let mut announced = Vec::new();
+        for _ in 0..2 {
+            connect(&target, &mut announced).await.unwrap_err();
+        }
+        assert_eq!(logged() - before, 1, "{announced:?}");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o604)).unwrap();
+        connect(&target, &mut announced).await.unwrap_err();
+        assert_eq!(logged() - before, 2, "{announced:?}");
     }
 
     // ── parse_path units ──────────────────────────────────────────────
