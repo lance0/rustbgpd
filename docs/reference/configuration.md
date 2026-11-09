@@ -851,8 +851,10 @@ including each reconnect. Config load and both `--check` modes enforce
 these refusals. Doctor reports nonfatal dial-out permission warnings, and
 connection attempts log them when reading the files.
 Credential reads are capped at 4 MiB. The primary TOML file is capped at
-64 MiB and must be a regular file. Symlinks are followed and their target
-is judged.
+64 MiB and must be a regular file. Canonical persisted documents must also
+fit 64 MiB before a candidate is accepted or written. Restricted API
+candidates can reuse only the running config's listener and dial-out
+credential paths. Symlinks are followed and their target is judged.
 
 | Condition | Files | Result |
 |---|---|---|

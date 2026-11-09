@@ -384,3 +384,63 @@ address = "127.0.0.1:11019"
     let err = parse(toml).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
 }
+
+#[test]
+fn restricted_dialout_candidates_check_each_credential_before_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let fields = ["tls_ca_file", "tls_cert_file", "tls_key_file"];
+    let paths: Vec<_> = fields.iter().map(|field| dir.path().join(field)).collect();
+    for (index, path) in paths.iter().enumerate() {
+        let kind = if index == 2 {
+            "PRIVATE KEY"
+        } else {
+            "CERTIFICATE"
+        };
+        std::fs::write(
+            path,
+            format!("-----BEGIN {kind}-----\nx\n-----END {kind}-----\n"),
+        )
+        .unwrap();
+    }
+    let source = tier_authorized_uds_test_config(&gnmi_dialout_toml(&format!(
+        "tls_ca_file = {:?}\ntls_cert_file = {:?}\ntls_key_file = {:?}",
+        paths[0], paths[1], paths[2]
+    )));
+    let running: Config = toml::from_str(&source).unwrap();
+    running.validate().unwrap();
+    let limits = running.candidate_source_limits();
+    for capture in [false, true] {
+        Config::load_rpc_candidate(&source, "same credentials", capture, Some(&limits)).unwrap();
+    }
+    for (index, field) in fields.iter().enumerate() {
+        let outside = dir.path().join(format!("other-{field}"));
+        std::fs::copy(&paths[index], &outside).unwrap();
+        let candidate = source.replace(&format!("{:?}", paths[index]), &format!("{outside:?}"));
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        release.send(()).unwrap();
+        super::credential_read_probe::arm(outside, entered, held);
+        let error =
+            Config::load_rpc_candidate(&candidate, "unaccepted credentials", false, Some(&limits))
+                .unwrap_err();
+        assert!(
+            error.contains("is not one the running config uses"),
+            "{error}"
+        );
+        assert_eq!(
+            observed.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        Config::load_rpc_candidate(&candidate, "operator credentials", false, None).unwrap();
+        assert_eq!(observed.try_recv().unwrap(), "credential_read");
+        assert!(observed.try_recv().is_err(), "only one read of this field");
+    }
+    for path in &paths {
+        assert!(
+            limits
+                .credential_files
+                .contains(&path.display().to_string())
+        );
+        assert!(limits.protected_files.contains(path));
+    }
+}

@@ -4088,10 +4088,10 @@ fn read_grpc_credential_file(
     path: &str,
     field_name: &str,
     kind: rustbgpd_api::credential_file::CredentialKind,
-) -> Result<Vec<u8>, ConfigError> {
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ConfigError> {
     #[cfg(test)]
     credential_read_probe::hold(path);
-    let mut bytes = Vec::new();
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
     rustbgpd_api::credential_file::read_credential(
         Path::new(path),
         field_name,
@@ -4124,7 +4124,7 @@ fn validate_grpc_token_file(
         field_name,
         rustbgpd_api::credential_file::CredentialKind::Secret,
     )?;
-    let token = String::from_utf8(bytes).map_err(|_| ConfigError::InvalidGrpcConfig {
+    let token = std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidGrpcConfig {
         reason: format!("{field_name} {path:?} is not valid UTF-8"),
     })?;
     if token.trim_end().is_empty() {
@@ -4445,5 +4445,38 @@ pub(crate) mod credential_read_probe {
                 probe.release.recv().unwrap();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod credential_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn validation_retains_zeroizing_buffers_through_parse_errors() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"private material").unwrap();
+        let path = file.path().to_str().unwrap();
+        let bytes: zeroize::Zeroizing<Vec<u8>> = read_grpc_credential_file(
+            path,
+            "private key",
+            rustbgpd_api::credential_file::CredentialKind::Secret,
+        )
+        .unwrap();
+        assert_eq!(bytes.as_slice(), b"private material");
+        assert!(validate_grpc_pem_file(path, "private key", PemKind::PrivateKey, true).is_err());
+        std::fs::write(file.path(), [0xff]).unwrap();
+        assert!(validate_grpc_token_file(Some(path), "token", true).is_err());
+        file.as_file()
+            .set_len(rustbgpd_api::credential_file::MAX_CREDENTIAL_FILE_BYTES + 1)
+            .unwrap();
+        assert!(
+            read_grpc_credential_file(
+                path,
+                "private key",
+                rustbgpd_api::credential_file::CredentialKind::Secret
+            )
+            .is_err()
+        );
     }
 }

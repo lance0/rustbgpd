@@ -1469,3 +1469,36 @@ fn config_load_refuses_oversized_document() {
         .unwrap();
     assert!(error.contains("larger than"), "{error}");
 }
+
+#[test]
+fn normalized_config_limit_applies_before_snapshot_derivation() {
+    let mut config = parse(valid_toml()).unwrap();
+    config.neighbors[0].description = Some(String::new());
+    let accepted = AcceptedConfigSnapshot::from_config_for_test(config.clone());
+    let overhead = persisted_config_document_bounded(&mut config)
+        .unwrap()
+        .len();
+    let limit = usize::try_from(super::MAX_CONFIG_FILE_BYTES).unwrap();
+    config.neighbors[0].description = Some("x".repeat(limit - overhead));
+    assert_eq!(
+        config.neighbors[0].description.as_ref().unwrap().len(),
+        limit - overhead
+    );
+    let exact = persisted_config_document_bounded(&mut config).unwrap();
+    assert_eq!(exact.len(), limit);
+    drop(exact);
+    config.neighbors[0].description.as_mut().unwrap().push('x');
+    let Err(error) = persisted_config_document_bounded(&mut config) else {
+        panic!("oversized normalized document was accepted");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("normalized config is larger than")
+    );
+    let Err(error) = accepted.derive_config(config) else {
+        panic!("oversized candidate reached an accepted snapshot");
+    };
+    assert!(error.contains("normalized config is larger than"));
+    assert!(accepted.normalized_toml().len() < limit);
+}

@@ -1054,33 +1054,17 @@ impl Config {
         CandidateSourceLimits {
             roots,
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
-            // The gNMI dial-out TLS files are read only when a target
-            // connects, so a candidate never names them, but they are the
-            // daemon's credentials all the same.
             protected_files: self
                 .file_path
                 .iter()
                 .cloned()
                 .chain(self.grpc_credential_files().map(PathBuf::from))
-                .chain(
-                    self.gnmi_dialout
-                        .iter()
-                        .flat_map(|section| &section.targets)
-                        .flat_map(|target| {
-                            [
-                                &target.tls_ca_file,
-                                &target.tls_cert_file,
-                                &target.tls_key_file,
-                            ]
-                        })
-                        .filter_map(|path| path.as_deref().map(PathBuf::from)),
-                )
                 .collect(),
             max_graph_bytes: self.policy.rpol_max_graph_bytes,
         }
     }
 
-    /// The gRPC listener credential files config validation reads: every
+    /// The listener and gNMI dial-out credential files validation reads: every
     /// file a candidate load opens besides its policy sources.
     fn grpc_credential_files(&self) -> impl Iterator<Item = &str> {
         let telemetry = &self.global.telemetry;
@@ -1094,7 +1078,20 @@ impl Config {
             ]
         });
         let uds = telemetry.grpc_uds.iter().map(|uds| &uds.token_file);
-        tcp.chain(uds).filter_map(|path| path.as_deref())
+        let dialout = self
+            .gnmi_dialout
+            .iter()
+            .flat_map(|section| &section.targets)
+            .flat_map(|target| {
+                [
+                    &target.tls_ca_file,
+                    &target.tls_cert_file,
+                    &target.tls_key_file,
+                ]
+            });
+        tcp.chain(uds)
+            .chain(dialout)
+            .filter_map(|path| path.as_deref())
     }
 
     /// Load a candidate received over the API (config diff, plan, apply,
@@ -3538,11 +3535,18 @@ pub(crate) fn persisted_config_document(config: &Config) -> Result<String, toml:
 }
 
 /// Render the exact persisted document while bounding statement-serialization
-/// memory and retaining just one header-bearing String.
+/// memory and retaining just one header-bearing String. Reject a normalized
+/// document that cannot be read back under the primary config file limit.
 pub(crate) fn persisted_config_document_bounded(
     config: &mut Config,
 ) -> Result<String, toml::ser::Error> {
-    canonical::render_document_bounded(config).map(|(document, _)| document)
+    let (document, _) = canonical::render_document_bounded(config)?;
+    if document.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(<toml::ser::Error as serde::ser::Error>::custom(format!(
+            "normalized config is larger than {MAX_CONFIG_FILE_BYTES} bytes"
+        )));
+    }
+    Ok(document)
 }
 
 /// Render the legacy raw `Config` TOML shape with bounded statement chunks.

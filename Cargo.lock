@@ -3223,6 +3223,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "yaml_serde",
+ "zeroize",
 ]
 
 [[package]]

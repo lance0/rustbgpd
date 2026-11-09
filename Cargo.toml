@@ -205,6 +205,7 @@ serde_json.workspace = true
 lru.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 owo-colors.workspace = true
 socket2.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
