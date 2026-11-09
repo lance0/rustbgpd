@@ -1896,7 +1896,11 @@ text `active_limit_exceeded` or `install_rate_limited`; both are retryable.
 
 The three unicast route-listing RPCs return raw ordered
 `extended_communities`, the ASPA verification string in `aspa_state`, and
-`received_at_epoch_seconds` on every `Route` (`0` means unknown). Native
+`received_at_epoch_seconds` on every `Route` (`0` means unknown). MED is
+reported only by the optional `med_attr`: it is set when the route carries a
+MULTI_EXIT_DISC attribute, including an explicit `0`, and absent when it
+carries none. The bare `med` scalar (field 8), which reported an absent MED as
+`0`, is removed; its number and name are reserved. Native
 `rbgp --json rib` preserves the raw extended-community values, omits an empty
 `aspa_state` from an older daemon but retains a genuine `"unknown"` state, and
 retains the zero receive-time sentinel. The same native route serializer is

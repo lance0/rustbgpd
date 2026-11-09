@@ -2788,7 +2788,6 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     // what best-path selection actually compares. Wire-level presence is
     // `local_pref_attr` below.
     let mut local_pref = 100u32;
-    let mut med = 0u32;
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();
     let mut large_communities = Vec::new();
@@ -2819,7 +2818,6 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
                 }
             }
             PathAttribute::LocalPref(lp) => local_pref = *lp,
-            PathAttribute::Med(m) => med = *m,
             PathAttribute::Aggregator(a) => {
                 aggregator = Some(proto::RouteAggregator {
                     asn: a.asn,
@@ -2844,7 +2842,6 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         origin,
         as_path,
         local_pref,
-        med,
         best,
         communities,
         extended_communities,
@@ -2863,8 +2860,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         // tagged route (otherwise local_pref=0 is ambiguous between
         // "policy set it" and "no LOCAL_PREF on EBGP wire").
         local_pref_attr: route.local_pref_attr(),
-        // Distinguishes "explicit MED attribute" from "no attribute" —
-        // the bare `med` field encodes absent as 0 (LAN-313).
+        // MED with presence: `None` means the route carries no MED.
         med_attr: route.med_attr(),
         // RFC 4271 AGGREGATOR / ATOMIC_AGGREGATE, straight from the
         // stored path attributes; an absent attribute stays None / false.
@@ -12371,10 +12367,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_routes_distinguishes_med_absent_from_med_zero() {
-        // LAN-313: `med_attr` is the honest absence marker — a route
-        // whose MED attribute is explicitly 0 and a route with no MED
-        // attribute both encode bare `med = 0`, but must differ in
-        // `med_attr` through the service and a wire round trip.
+        // LAN-313: `med_attr` is the only MED report — a route whose MED
+        // attribute is explicitly 0 and a route with no MED attribute must
+        // differ in `med_attr` through the service and a wire round trip.
         use prost::Message;
 
         let (tx, mut rx) = mpsc::channel(16);
@@ -12412,8 +12407,6 @@ mod tests {
         assert_eq!(resp.routes.len(), 2);
         let zero = &resp.routes[0];
         let absent = &resp.routes[1];
-        assert_eq!(zero.med, 0);
-        assert_eq!(absent.med, 0, "bare med conflates absent with 0");
         assert_eq!(zero.med_attr, Some(0));
         assert_eq!(absent.med_attr, None);
 
