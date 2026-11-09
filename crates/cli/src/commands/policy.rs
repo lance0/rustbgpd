@@ -233,16 +233,20 @@ fn check_local_with_writer(
             if !options.json {
                 eprint!("{}", diagnostics.render_sources(&sources, stderr_color()));
             }
-            let sources: Vec<SourceLines<'_>> = sources
-                .iter()
-                .map(|(name, text)| SourceLines::new(name, text))
-                .collect();
             let messages = diagnostics.0.iter().map(|d| d.message.clone()).collect();
-            let findings = diagnostics
-                .0
-                .iter()
-                .map(|d| JsonFinding::compile_error(d, &sources))
-                .collect();
+            let findings = if options.json {
+                let sources: Vec<SourceLines<'_>> = sources
+                    .iter()
+                    .map(|(name, text)| SourceLines::new(name, text))
+                    .collect();
+                diagnostics
+                    .0
+                    .iter()
+                    .map(|d| JsonFinding::compile_error(d, &sources))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             (None, messages, findings)
         }
     };
@@ -394,24 +398,39 @@ struct JsonLocation {
 }
 
 /// One module's display path and text, with its line starts indexed
-/// once so locating each finding costs a binary search plus a scan of
-/// its own line, not a scan from the start of the file.
+/// once. Character columns are cached on the first lookup in each line,
+/// so repeated diagnostics never rescan a long line.
 struct SourceLines<'a> {
     name: &'a str,
     text: &'a str,
     /// Byte offset of every line start; the first is 0.
     line_starts: Vec<usize>,
+    /// An empty table marks an ASCII line, whose byte and character columns agree.
+    columns: std::cell::RefCell<std::collections::HashMap<usize, Vec<usize>>>,
+    #[cfg(test)]
+    column_bytes_scanned: std::cell::Cell<usize>,
+    #[cfg(test)]
+    column_tables_built: std::cell::Cell<usize>,
+    #[cfg(test)]
+    column_lookups: std::cell::Cell<usize>,
 }
 
 impl<'a> SourceLines<'a> {
     fn new(name: &'a str, text: &'a str) -> Self {
-        let line_starts = std::iter::once(0)
+        let line_starts: Vec<usize> = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
             .collect();
         Self {
             name,
             text,
+            columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             line_starts,
+            #[cfg(test)]
+            column_bytes_scanned: std::cell::Cell::new(0),
+            #[cfg(test)]
+            column_tables_built: std::cell::Cell::new(0),
+            #[cfg(test)]
+            column_lookups: std::cell::Cell::new(0),
         }
     }
 
@@ -421,10 +440,46 @@ impl<'a> SourceLines<'a> {
         let offset = self.text.floor_char_boundary(offset);
         // `line_starts[0] == 0`, so at least one start is <= offset.
         let line = self.line_starts.partition_point(|&start| start <= offset);
-        let column = self.text[self.line_starts[line - 1]..offset]
-            .chars()
-            .count()
-            + 1;
+        let start = self.line_starts[line - 1];
+        let mut cached_columns = self.columns.borrow_mut();
+        let columns = cached_columns.entry(line).or_insert_with(|| {
+            let end = self
+                .line_starts
+                .get(line)
+                .copied()
+                .unwrap_or(self.text.len());
+            let text = &self.text[start..end];
+            #[cfg(test)]
+            self.column_tables_built
+                .set(self.column_tables_built.get() + 1);
+            let ascii = text.bytes().all(|byte| {
+                #[cfg(test)]
+                self.column_bytes_scanned
+                    .set(self.column_bytes_scanned.get() + 1);
+                byte.is_ascii()
+            });
+            if ascii {
+                return Vec::new();
+            }
+            let mut columns = vec![0; text.len() + 1];
+            let mut column = 1;
+            for (byte, ch) in text.char_indices() {
+                #[cfg(test)]
+                self.column_bytes_scanned
+                    .set(self.column_bytes_scanned.get() + ch.len_utf8());
+                columns[byte..byte + ch.len_utf8()].fill(column);
+                column += 1;
+            }
+            columns[text.len()] = column;
+            columns
+        });
+        #[cfg(test)]
+        self.column_lookups.set(self.column_lookups.get() + 1);
+        let column = if columns.is_empty() {
+            offset - start + 1
+        } else {
+            columns[offset - start]
+        };
         (line, column)
     }
 }
@@ -3448,6 +3503,21 @@ mod tests {
         assert_eq!(lines.line_col(x), (3, 3));
         assert_eq!(lines.line_col(tail.len()), (3, 4));
         assert_eq!(lines.line_col(x - 1), (3, 2), "inside the emoji");
+    }
+
+    #[test]
+    fn diagnostic_columns_scan_each_long_line_once() {
+        for text in ["@a ".repeat(349_526), "é😀 ".repeat(150_000)] {
+            let source = SourceLines::new("f", &text);
+            let scan_budget = text.len() + usize::from(!text.is_ascii());
+            for offset in (0..=text.len()).rev() {
+                let _ = source.line_col(offset);
+                assert!(source.column_bytes_scanned.get() <= scan_budget);
+            }
+            assert_eq!(source.column_tables_built.get(), 1);
+            assert_eq!(source.column_lookups.get(), text.len() + 1);
+            assert_eq!(source.column_bytes_scanned.get(), scan_budget);
+        }
     }
 
     #[test]
