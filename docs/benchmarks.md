@@ -1574,9 +1574,11 @@ tag (peak 601.3 MB in a reload window, 5th–95th percentile 455.3–475.8 MB) a
 [2026-10-26 run](soaks/soak-rs-flagship-24h-2026-10-26.md) on the v0.80.1
 tag (peak 680.0 MB in a reload window, 5th–95th percentile 507.6–547.8 MB; PASS,
 [rescored under the split management gate](soaks/soak-rs-flagship-24h-2026-10-26.md#amendment-2026-10-26-rescored-under-the-split-management-gate)
-with 1 tolerated availability miss during a reload) and the
+with 1 tolerated availability miss during a reload), the
 [2026-11-01 run](soaks/soak-rs-flagship-24h-2026-11-01.md) on the v0.81.0
-tag (peak 698.8 MiB in a reload window, 5th–95th percentile 508.8–573.3 MiB). The
+tag (peak 698.8 MiB in a reload window, 5th–95th percentile 508.8–573.3 MiB) and the
+[2026-11-08 run](soaks/soak-rs-flagship-24h-2026-11-08.md) on the v0.82.0
+tag (peak 671.8 MiB in a reload window, 5th–95th percentile 539.3–575.3 MiB). The
 [2026-09-28 route-reflector run](soaks/soak-rr-flagship-24h-2026-09-28.md) on
 the v0.73.0 tag, on the same virtualized host shape, passed its RSS gates
 (hold band 237.7–254.6 MB, peak 427.6 MB in the terminal refresh). Different hosts

@@ -151,7 +151,10 @@ tag passes,
 [rescored under the split management gate](../soaks/soak-rs-flagship-24h-2026-10-26.md#amendment-2026-10-26-rescored-under-the-split-management-gate)
 with 1 tolerated availability miss during a reload. The
 [2026-11-01 run](../soaks/soak-rs-flagship-24h-2026-11-01.md) qualified the
-v0.81.0 tag on its on-host verdict, every gate passing. Use the
+v0.81.0 tag on its on-host verdict, every gate passing. The
+[2026-11-08 run](../soaks/soak-rs-flagship-24h-2026-11-08.md) qualified the
+v0.82.0 tag on its on-host verdict, every gate passing with 1 tolerated
+availability miss during a reload. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 
