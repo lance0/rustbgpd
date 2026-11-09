@@ -277,6 +277,7 @@ pub struct SourceFileProtection {
     pub files: Vec<PathBuf>,
     pub config_file: Option<PathBuf>,
     backups: Option<Arc<BackupSnapshot>>,
+    confined: bool,
 }
 
 impl SourceFileProtection {
@@ -287,6 +288,18 @@ impl SourceFileProtection {
             files,
             config_file,
             backups: None,
+            confined: false,
+        }
+    }
+
+    /// Read every source through the `O_NOFOLLOW` descriptor walk, even with
+    /// no protected file: confined callers pass paths they already resolved
+    /// and checked, so a symlink swapped in afterwards must be refused.
+    #[must_use]
+    pub fn confined(self) -> Self {
+        Self {
+            confined: true,
+            ..self
         }
     }
 
@@ -413,7 +426,10 @@ impl SourceFileProtection {
     /// Whether descriptor-level protection is required.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        !self.files.is_empty() || self.config_file.is_some() || self.backups.is_some()
+        self.confined
+            || !self.files.is_empty()
+            || self.config_file.is_some()
+            || self.backups.is_some()
     }
 
     /// Check fixed names and the accepted config backup prefix.

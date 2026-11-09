@@ -367,6 +367,9 @@ thread_local! {
     /// Runs once the lazy backup inventory is taken, before any source read.
     pub(crate) static AFTER_INVENTORY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    /// Runs once a dataset path is confined, before that dataset is read.
+    pub(crate) static AFTER_DATASET_CONFINEMENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 /// What an API candidate below `operator_only` may name, taken from the
@@ -423,6 +426,7 @@ impl CandidateSourceLimits {
                     protected_files,
                     config_file,
                 )
+                .confined()
                 .snapshot(target.as_ref())
                 .map_err(|error| {
                     if error.kind() == std::io::ErrorKind::ResourceBusy {
@@ -445,7 +449,9 @@ impl CandidateSourceLimits {
 }
 
 /// Check that an external source named by an RPC candidate resolves under
-/// one of the limits' canonical roots, and is not a protected file.
+/// one of the limits' canonical roots, and is not a protected file. Returns
+/// the checked canonical path: the caller reads that path, never `path` again,
+/// so a symlink retargeted after this check cannot redirect the read.
 ///
 /// Every refusal is the same message, whatever stopped the path: missing,
 /// unreadable, not a directory, outside every root, or protected. A caller
@@ -455,13 +461,13 @@ impl CandidateSourceLimits {
 fn confined_source_path(
     path: &std::path::Path,
     limits: &CandidateSourceLimits,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     match path.canonicalize() {
         Ok(canonical)
             if limits.roots.iter().any(|root| canonical.starts_with(root))
                 && !limits.protected_files.contains(&canonical) =>
         {
-            Ok(())
+            Ok(canonical)
         }
         _ => Err(format!(
             "{} is not a file under the accepted config's policy directories \
@@ -713,6 +719,10 @@ impl Config {
         self.load_rpol_files_capturing(base_dir, None, SourceRules::OnDisk)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "confined loads keep their checked canonical paths beside the lexical config paths in one pass"
+    )]
     fn load_rpol_files_capturing(
         &mut self,
         base_dir: Option<&std::path::Path>,
@@ -741,6 +751,9 @@ impl Config {
 
         // Policy roots for `import` resolution (LAN-300): absolutize
         // against the config directory and rewrite, like `rpol_files`.
+        // A confined load keeps the lexical paths in the config but resolves
+        // imports against the checked canonical roots.
+        let mut confined_roots = Vec::new();
         for root in &mut self.policy.rpol_roots {
             let mut path = PathBuf::from(&*root);
             if path.is_relative()
@@ -749,11 +762,11 @@ impl Config {
                 path = base.join(path);
             }
             if let SourceRules::Api(Some(limits)) = sources {
-                confined_source_path(&path, limits).map_err(|reason| {
+                confined_roots.push(confined_source_path(&path, limits).map_err(|reason| {
                     ConfigError::InvalidPolicyEntry {
                         reason: format!("[policy] rpol_roots: {reason}"),
                     }
-                })?;
+                })?);
             }
             *root = path.display().to_string();
         }
@@ -768,14 +781,17 @@ impl Config {
                 path = base.join(path);
             }
             let display = path.display().to_string();
-            if let SourceRules::Api(Some(limits)) = sources {
-                confined_source_path(&path, limits).map_err(|reason| {
-                    ConfigError::InvalidRpolFile {
-                        path: display.clone(),
-                        reason,
-                    }
-                })?;
-            }
+            let checked = match sources {
+                SourceRules::Api(Some(limits)) => {
+                    Some(confined_source_path(&path, limits).map_err(|reason| {
+                        ConfigError::InvalidRpolFile {
+                            path: display.clone(),
+                            reason,
+                        }
+                    })?)
+                }
+                _ => None,
+            };
             // `RpolFile::load` canonicalizes before reading (LAN-218):
             // symlinks and `..` resolve once, then that resolved path
             // is read (closes the symlink TOCTOU window). It also
@@ -783,10 +799,24 @@ impl Config {
             // (LAN-300) as one compilation unit — a missing or broken
             // import anywhere rejects the whole load.
             // Imports may not reach a protected file either.
+            // A confined load reads the checked canonical path and roots
+            // without resolving them again.
             let excluded = sources.protection()?;
-            let file = match RpolFile::load_protected(&path, &roots, max_graph_bytes, &excluded) {
+            let loaded = match &checked {
+                Some(canonical) => {
+                    RpolFile::load_canonical(canonical, &confined_roots, max_graph_bytes, &excluded)
+                }
+                None => RpolFile::load_protected(&path, &roots, max_graph_bytes, &excluded),
+            };
+            let file = match loaded {
                 Ok(file) => file,
                 Err(LoadError::Io { path, reason }) => {
+                    // Name the entry as the candidate spelled it.
+                    let path = if checked.is_some() {
+                        display.clone()
+                    } else {
+                        path
+                    };
                     return Err(ConfigError::InvalidRpolFile { path, reason });
                 }
                 Err(error @ LoadError::Compile { .. }) => {
@@ -945,16 +975,24 @@ impl Config {
             let accepted = accepted_datasets
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
-            if let SourceRules::Api(Some(limits)) = sources {
-                confined_source_path(&path, limits).map_err(|reason| {
-                    ConfigError::InvalidPolicyEntry {
-                        reason: format!("dataset {name:?}: {reason}"),
-                    }
-                })?;
+            let checked = match sources {
+                SourceRules::Api(Some(limits)) => {
+                    Some(confined_source_path(&path, limits).map_err(|reason| {
+                        ConfigError::InvalidPolicyEntry {
+                            reason: format!("dataset {name:?}: {reason}"),
+                        }
+                    })?)
+                }
+                _ => None,
+            };
+            #[cfg(test)]
+            if let Some(hook) = AFTER_DATASET_CONFINEMENT.with(|hook| hook.borrow_mut().take()) {
+                hook();
             }
             let loaded = if let Some(capture) = capture.as_deref_mut() {
                 match source_provenance::load_dataset_captured(
                     &path,
+                    checked.as_deref(),
                     name,
                     kind,
                     existing,
@@ -994,11 +1032,20 @@ impl Config {
                     }
                 }
             } else {
-                match rustbgpd_policy::datasets::load_dataset_file_protected(
-                    &path,
-                    kind,
-                    &sources.protection()?,
-                ) {
+                let protection = sources.protection()?;
+                let loaded = match &checked {
+                    Some(canonical) => rustbgpd_policy::datasets::load_dataset_file_canonical(
+                        canonical,
+                        kind,
+                        &protection,
+                    ),
+                    None => rustbgpd_policy::datasets::load_dataset_file_protected(
+                        &path,
+                        kind,
+                        &protection,
+                    ),
+                };
+                match loaded {
                     Ok(data) => {
                         summary.parsed += 1;
                         Ok(source_provenance::CapturedDatasetLoad::Parsed(data))
@@ -1226,7 +1273,8 @@ impl Config {
     /// With `limits` (callers below `operator_only`), the load is
     /// confined: every `.rpol` file, `[policy] rpol_roots` entry and
     /// dataset file must resolve (symlinks included) under one of its
-    /// roots, and the gRPC credential files must be ones the running config
+    /// roots and is then read at that checked canonical path, never resolved
+    /// again, and the gRPC credential files must be ones the running config
     /// already uses. The limits come from [`Self::candidate_source_limits`]
     /// of the running config. Imports stay confined as usual, to the
     /// candidate's own roots, which are themselves inside, and may not
