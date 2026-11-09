@@ -204,17 +204,54 @@ fn gnmi_dialout_valid_config_accepted_with_defaults() {
 
 #[test]
 fn gnmi_dialout_tls_target_builds_https_endpoint() {
-    let config = parse(&gnmi_dialout_toml(
-        "tls_ca_file = \"/etc/rustbgpd/collector-ca.pem\"\n\
-         tls_cert_file = \"/etc/rustbgpd/client.pem\"\n\
-         tls_key_file = \"/etc/rustbgpd/client.key\"\n\
-         tls_server_name = \"collector.example\"",
-    ))
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("cert");
+    let key = dir.path().join("key");
+    std::fs::write(
+        &cert,
+        "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n",
+    )
     .unwrap();
+    std::fs::write(
+        &key,
+        "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    let config = parse(&gnmi_dialout_toml(&format!(
+        "tls_ca_file = {cert:?}\ntls_cert_file = {cert:?}\ntls_key_file = {key:?}\ntls_server_name = \"collector.example\""
+    ))).unwrap();
     let targets = super::gnmi_dialout_targets(&config).unwrap();
     assert_eq!(targets[0].endpoint, "https://192.0.2.10:57400");
     let tls = targets[0].tls.as_ref().unwrap();
     assert_eq!(tls.server_name.as_deref(), Some("collector.example"));
+}
+
+#[test]
+fn gnmi_dialout_refuses_non_regular_and_world_writable_credentials() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ca");
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+    let toml = gnmi_dialout_toml(&format!("tls_ca_file = {path:?}"));
+    assert!(
+        parse(&toml)
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file")
+    );
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(
+        &path,
+        "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(
+        parse(&toml)
+            .unwrap_err()
+            .to_string()
+            .contains("world-writable")
+    );
 }
 
 #[test]

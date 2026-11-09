@@ -6,8 +6,8 @@
 //! uses only `std` and `nix`.
 //!
 //! Every credential file must be a regular file once symlinks are followed:
-//! a directory or FIFO is refused, and opening never blocks on one. A bearer
-//! token or private key that any local user can write is refused. A token or
+//! a directory or FIFO is refused, and opening never blocks on one. A credential
+//! file that any local user can write is refused. A token or
 //! key readable beyond the daemon is accepted with a warning: owned by
 //! someone other than the daemon user or root, readable by every user, or
 //! accessible to a group other than the daemon's. Mode `0600` owned by the
@@ -15,6 +15,7 @@
 //! pass silently. Certificates, CA bundles and CRLs are public.
 
 use std::fs::{File, Metadata, OpenOptions};
+use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 
@@ -71,8 +72,10 @@ pub fn assess(
             "{label} file {path} is not a regular file (after following symlinks)"
         ));
     }
-    if kind == CredentialKind::Public {
-        return Verdict::Accept;
+    if metadata.len() > MAX_CREDENTIAL_FILE_BYTES {
+        return Verdict::Refuse(format!(
+            "{label} file {path} is larger than {MAX_CREDENTIAL_FILE_BYTES} bytes"
+        ));
     }
     let mode = metadata.mode() & 0o7777;
     let (uid, gid) = (metadata.uid(), metadata.gid());
@@ -80,6 +83,9 @@ pub fn assess(
         return Verdict::Refuse(format!(
             "{label} file {path} is world-writable (mode {mode:04o}); any local user could replace it"
         ));
+    }
+    if kind == CredentialKind::Public {
+        return Verdict::Accept;
     }
     let mut problems = Vec::new();
     if mode & 0o004 != 0 {
@@ -147,10 +153,93 @@ pub fn open_credential(
     }
 }
 
+/// Maximum size of any management credential file.
+pub const MAX_CREDENTIAL_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read into the caller-owned buffer from the judged descriptor, including
+/// a one-byte oversize probe. Secret callers keep the buffer zeroizing even
+/// when admission or reading fails.
+///
+/// # Errors
+/// Returns the admission or bounded read failure.
+pub fn read_credential(
+    path: &Path,
+    label: &str,
+    kind: CredentialKind,
+    daemon: DaemonIdentity,
+    bytes: &mut Vec<u8>,
+) -> Result<Option<String>, String> {
+    let (file, warning) = open_credential(path, label, kind, daemon)?;
+    read_bounded(file, MAX_CREDENTIAL_FILE_BYTES, bytes)
+        .map_err(|error| format!("failed to read {label} file {}: {error}", path.display()))?;
+    Ok(warning)
+}
+
+/// Read at most `max_bytes + 1` bytes from an already admitted file.
+///
+/// # Errors
+/// Returns a read failure or an oversize error.
+pub fn read_bounded(
+    reader: impl std::io::Read,
+    max_bytes: u64,
+    bytes: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("larger than {max_bytes} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn bounded_reader_limits_each_read_and_total_bytes() {
+        struct Growing {
+            calls: usize,
+            bytes: usize,
+            largest_request: usize,
+        }
+        impl std::io::Read for Growing {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                if self.bytes == 128 {
+                    return Ok(0);
+                }
+                self.largest_request = self.largest_request.max(out.len());
+                let count = out.len().min(1);
+                out[..count].fill(b'x');
+                self.bytes += count;
+                Ok(count)
+            }
+        }
+        let mut reader = Growing {
+            calls: 0,
+            bytes: 0,
+            largest_request: 0,
+        };
+        let mut bytes = Vec::new();
+        assert_eq!(
+            read_bounded(&mut reader, 32, &mut bytes)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::FileTooLarge
+        );
+        assert_eq!(reader.bytes, 33);
+        assert_eq!(reader.calls, 33);
+        assert!(reader.largest_request <= 33);
+        bytes.clear();
+        read_bounded(&b"abc"[..], 3, &mut bytes).unwrap();
+        assert_eq!(bytes, b"abc");
+    }
 
     fn me() -> DaemonIdentity {
         DaemonIdentity::current()
@@ -212,13 +301,17 @@ mod tests {
         }
     }
 
-    /// Public material is judged only as a regular file.
+    /// Public material may be shared for reading, but not for writing.
     #[test]
     fn public_material_ignores_mode() {
         let file = file_with_mode(0o644);
         assert_eq!(
             verdict(file.path(), CredentialKind::Public, me()),
             Verdict::Accept
+        );
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(
+            matches!(verdict(file.path(), CredentialKind::Public, me()), Verdict::Refuse(message) if message.contains("world-writable"))
         );
     }
 

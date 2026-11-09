@@ -21,7 +21,7 @@ pub(crate) use validation::credential_read_probe;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustbgpd_evpn::runtime_plan_shape::validate_supported_plan_shape;
@@ -1205,7 +1205,7 @@ impl Config {
         path: &str,
         prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
     ) -> Result<Self, String> {
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_config_text(Path::new(path)) {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
@@ -1230,7 +1230,7 @@ impl Config {
         path: &str,
         prior_datasets: &rustbgpd_policy::datasets::DatasetBindings,
     ) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
+        let content = read_config_text(Path::new(path))
             .map_err(|error| format!("error: failed to read {path}: {error}"))?;
         let file_path = absolute_config_path(std::path::Path::new(path))?;
         let mut config = Self::load_from_toml_source_with_datasets(
@@ -8358,6 +8358,37 @@ pub(crate) fn gnmi_dialout_targets(
         });
     }
     Ok(targets)
+}
+
+/// Generous bound for the primary TOML document, independent of policy inputs.
+pub(crate) const MAX_CONFIG_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_config_text(path: &Path) -> std::io::Result<String> {
+    let bytes = rustbgpd_policy::datasets::read_regular_file_bounded(path, MAX_CONFIG_FILE_BYTES)?;
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn open_config_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config target is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("larger than {MAX_CONFIG_FILE_BYTES} bytes"),
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

@@ -558,18 +558,31 @@ async fn connect(target: &DialoutTarget) -> Result<Channel, String> {
         .map_err(|e| format!("invalid endpoint {}: {e}", target.endpoint))?
         .connect_timeout(CONNECT_TIMEOUT);
     if let Some(tls) = &target.tls {
-        let ca = std::fs::read(&tls.ca_file)
-            .map_err(|e| format!("read TLS CA file {}: {e}", tls.ca_file.display()))?;
-        let mut config = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca));
-        if let (Some(cert_file), Some(key_file)) = (&tls.cert_file, &tls.key_file) {
-            let cert = std::fs::read(cert_file)
-                .map_err(|e| format!("read TLS cert file {}: {e}", cert_file.display()))?;
-            let key = Zeroizing::new(
-                std::fs::read(key_file)
-                    .map_err(|e| format!("read TLS key file {}: {e}", key_file.display()))?,
-            );
-            config = config.identity(Identity::from_pem(cert, key.as_slice()));
-        }
+        let tls_files = tls.clone();
+        let config = tokio::task::spawn_blocking(move || {
+            use crate::credential_file::{CredentialKind, DaemonIdentity, read_credential};
+            let read = |path: &std::path::Path, label, kind| {
+                let mut bytes = Zeroizing::new(Vec::new());
+                let warning =
+                    read_credential(path, label, kind, DaemonIdentity::current(), &mut bytes)?;
+                if let Some(warning) = warning {
+                    warn!(%warning, "gNMI dial-out credential file permissions");
+                }
+                Ok::<_, String>(bytes)
+            };
+            let ca = read(&tls_files.ca_file, "dial-out CA", CredentialKind::Public)?;
+            let mut config =
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca.as_slice()));
+            if let (Some(cert_file), Some(key_file)) = (&tls_files.cert_file, &tls_files.key_file) {
+                let cert = read(cert_file, "dial-out certificate", CredentialKind::Public)?;
+                let key = read(key_file, "dial-out private key", CredentialKind::Secret)?;
+                config = config.identity(Identity::from_pem(cert.as_slice(), key.as_slice()));
+            }
+            Ok::<_, String>(config)
+        })
+        .await
+        .map_err(|error| format!("TLS credential reader failed: {error}"))??;
+        let mut config = config;
         if let Some(server_name) = &tls.server_name {
             config = config.domain_name(server_name.clone());
         }
@@ -604,6 +617,56 @@ mod tests {
     const SESSION_STATE_PATH: &str = "network-instances/network-instance[name=DEFAULT]/protocols/\
                                       protocol[identifier=BGP][name=BGP]/bgp/neighbors/\
                                       neighbor[neighbor-address=*]/state/session-state";
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fifo_tls_ca_does_not_stall_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("ca");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let target = DialoutTarget {
+            name: "fifo".into(),
+            endpoint: "https://127.0.0.1:1".into(),
+            tls: Some(DialoutTls {
+                ca_file: fifo.clone(),
+                cert_file: None,
+                key_file: None,
+                server_name: None,
+            }),
+            subscriptions: gnmi::SubscriptionList::default(),
+            backoff_initial: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(1),
+        };
+        // A watchdog releases an old blocking open so the red proof cannot hang the suite.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                let _writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+                    .open(fifo);
+            }
+        });
+        let started = std::time::Instant::now();
+        let attempt = tokio::spawn(async move { connect(&target).await });
+        let (reservation, addr) = reserve_port(None);
+        let (server, mut received) = spawn_stub_collector(reservation);
+        let mut manager = DialoutManager::new(test_service(), BgpMetrics::new());
+        manager.apply(&[test_target("healthy", addr)]);
+        expect_update_with_as(&mut received).await;
+        let error = attempt.await.unwrap().unwrap_err();
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        watchdog.join().unwrap();
+        manager.apply(&[]);
+        server.abort();
+        let _ = server.await;
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "runtime stalled for {elapsed:?}"
+        );
+        assert!(error.contains("not a regular file"), "{error}");
+    }
 
     // ── parse_path units ──────────────────────────────────────────────
 

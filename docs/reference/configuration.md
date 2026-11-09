@@ -845,12 +845,16 @@ Changing the path or enabling/disabling token auth remains restart-required.
 **Credential file permissions.** The same rules apply to every listener's
 `token_file`, `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file` at
 config load, at startup, on every SIGHUP credential reload, in both `--check`
-modes, and in `rbgp doctor`. Symlinks are followed and their target is judged.
+modes, and in `rbgp doctor`. The same rules cover gNMI dial-out targets'
+`tls_ca_file`, `tls_cert_file`, and `tls_key_file`, including each reconnect.
+Credential reads are capped at 4 MiB. The primary TOML file is capped at
+64 MiB and must be a regular file. Symlinks are followed and their target
+is judged.
 
 | Condition | Files | Result |
 |---|---|---|
-| The target is not a regular file (directory, FIFO, device) | all four | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
-| World-writable | `token_file`, `tls_key_file` | Refused |
+| The target is not a regular file (directory, FIFO, device) | all listener and dial-out credential files | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
+| World-writable | all listener and dial-out credential files | Refused |
 | Readable by every local user | `token_file`, `tls_key_file` | Accepted with a warning |
 | Owned by someone other than the daemon user or root | `token_file`, `tls_key_file` | Accepted with a warning |
 | Readable or writable by a group other than the daemon's | `token_file`, `tls_key_file` | Accepted with a warning |
@@ -858,10 +862,12 @@ modes, and in `rbgp doctor`. Symlinks are followed and their target is judged.
 Mode `0600` owned by the daemon user, or `0640` owned by `root:<daemon group>`
 (the packaged config pattern, `root:rustbgpd`), passes silently. A warning
 names the file, its mode and owner, and the remedy. It is logged once per
-load or reload as `grpc_credential_file_permissions`, never per request. It
+load or reload as `grpc_credential_file_permissions` for listeners; dial-out
+logs a warning when reading credentials for a connection attempt. It
 counts as a `--check` warning, so `--check --strict` exits 1, and `rbgp doctor`
 reports it as `credentials.<listener>.<field>`. Certificates and CA bundles are
-public and are checked only as regular files. Warnings rather than refusals
+public and are checked for regular-file type, world-writable mode, and size.
+Warnings rather than refusals
 keep existing deployments that mount a shared token, such as the lab and
 Compose examples, running while they are tightened.
 

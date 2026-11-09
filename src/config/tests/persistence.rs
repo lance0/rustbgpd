@@ -1455,3 +1455,17 @@ md5_password = "hunter2"
     let err = Config::load_toml_with_diagnostics(&rendered, "effective.toml").unwrap_err();
     assert!(err.contains("md5_password"), "{err}");
 }
+
+#[test]
+fn config_load_refuses_oversized_document() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file()
+        .set_len(super::MAX_CONFIG_FILE_BYTES + 1)
+        .unwrap();
+    let diagnostic = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap_err();
+    assert!(diagnostic.contains("larger than"), "{diagnostic}");
+    let error = super::AcceptedConfigSnapshot::load(file.path(), None)
+        .err()
+        .unwrap();
+    assert!(error.contains("larger than"), "{error}");
+}
