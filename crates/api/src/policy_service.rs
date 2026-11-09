@@ -5289,6 +5289,7 @@ policy customer-in(peer_lp: u32) {
             let routes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let evaluated_pages = Arc::clone(&pages);
             let evaluated_routes = Arc::clone(&routes);
+            let (start, started) = std::sync::mpsc::channel();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             if expired_before_start {
                 tokio::time::advance(Duration::from_secs(2)).await;
@@ -5313,6 +5314,7 @@ policy customer-in(peer_lp: u32) {
                 0,
                 (),
                 move |page, ()| {
+                    started.recv_timeout(Duration::from_secs(20)).unwrap();
                     evaluated_pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     evaluated_routes
                         .fetch_add(page.routes.len(), std::sync::atomic::Ordering::SeqCst);
@@ -5329,6 +5331,7 @@ policy customer-in(peer_lp: u32) {
                         .poll(&mut Context::from_waker(&waker))
                         .is_pending()
                 );
+                start.send(()).unwrap();
                 // Keep paused time and the walk stopped until JoinHandle
                 // publishes its result and wakes this waiter.
                 completion.recv_timeout(Duration::from_secs(20)).unwrap();
