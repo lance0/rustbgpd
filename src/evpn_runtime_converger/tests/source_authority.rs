@@ -144,6 +144,48 @@ async fn evpn_source_authority_follows_generation_bridge_adoption() {
     }
 }
 
+/// The EVPN apply path uses the roots resolved when the config was accepted:
+/// a nested root swapped for a symlink afterwards is not followed.
+#[tokio::test]
+async fn evpn_source_authority_keeps_the_roots_resolved_at_accept() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let (policy, outside) = (base.join("policy"), base.join("outside"));
+    let lib = policy.join("lib");
+    for root in [&policy, &lib, &outside] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("edge.rpol"),
+            "policy edge-in { term rest { accept } }\n",
+        )
+        .unwrap();
+    }
+    let path = base.join("config.toml");
+    std::fs::write(
+        &path,
+        crate::test_support::tier_authorized_uds_test_config(&format!(
+            "{}\n[policy]\nrpol_roots = [{:?}, {:?}]\n",
+            minimal_runtime_candidate_toml(),
+            policy.display().to_string(),
+            lib.display().to_string(),
+        )),
+    )
+    .unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(Arc::clone(&accepted));
+    let apply = EvpnRuntimeReloadApply::new(
+        empty_evpn_runtime_coordinator(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        accepted.config(),
+    )
+    .with_accepted_source(Some(accepted_rx));
+    assert_source_admission(&apply, &lib.join("edge.rpol"), &outside.join("edge.rpol")).await;
+    std::fs::rename(&lib, policy.join("lib.old")).unwrap();
+    std::os::unix::fs::symlink(&outside, &lib).unwrap();
+    assert_source_admission(&apply, &policy.join("edge.rpol"), &lib.join("edge.rpol")).await;
+}
+
 async fn adopt_through_bridge(
     apply: &EvpnRuntimeReloadApply,
     accepted_tx: watch::Sender<Arc<AcceptedConfigSnapshot>>,
