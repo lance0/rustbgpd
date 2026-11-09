@@ -62,6 +62,7 @@ SHARDS = {
                 "mrt_real_differential",
                 "outbound_prefix_limits",
                 "peer_scoped_views_unknown_peer",
+                "policy_check_diagnostics",
                 "quickstart_dynamic_neighbor",
                 "rbgp_mtls",
                 "reloadstall_scenario_emitted_check",

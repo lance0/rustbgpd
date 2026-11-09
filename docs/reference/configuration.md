@@ -845,23 +845,37 @@ Changing the path or enabling/disabling token auth remains restart-required.
 **Credential file permissions.** The same rules apply to every listener's
 `token_file`, `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file` at
 config load, at startup, on every SIGHUP credential reload, in both `--check`
-modes, and in `rbgp doctor`. Symlinks are followed and their target is judged.
+modes, and in `rbgp doctor`. The same refusal checks and 4 MiB cap cover
+gNMI dial-out targets' `tls_ca_file`, `tls_cert_file`, and `tls_key_file`,
+including each reconnect. Config load and both `--check` modes enforce
+these refusals. Doctor reports nonfatal dial-out permission warnings, and
+connection attempts log each one once per target until the target next
+connects or the file's mode or owner changes.
+Credential reads are capped at 4 MiB. The primary TOML file is capped at
+64 MiB and must be a regular file. Canonical persisted documents must also
+fit 64 MiB before a candidate is accepted or written. Restricted API
+candidates can reuse only the running config's listener and dial-out
+credential paths. Symlinks are followed and their target is judged.
 
 | Condition | Files | Result |
 |---|---|---|
-| The target is not a regular file (directory, FIFO, device) | all four | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
-| World-writable | `token_file`, `tls_key_file` | Refused |
+| The target is not a regular file (directory, FIFO, device) | all listener credential files; dial-out `tls_ca_file`, `tls_cert_file`, `tls_key_file` | Refused: config load and startup fail, and a reload keeps the last-known-good generation |
+| World-writable | all listener and dial-out credential files | Refused |
 | Readable by every local user | `token_file`, `tls_key_file` | Accepted with a warning |
 | Owned by someone other than the daemon user or root | `token_file`, `tls_key_file` | Accepted with a warning |
 | Readable or writable by a group other than the daemon's | `token_file`, `tls_key_file` | Accepted with a warning |
 
 Mode `0600` owned by the daemon user, or `0640` owned by `root:<daemon group>`
 (the packaged config pattern, `root:rustbgpd`), passes silently. A warning
-names the file, its mode and owner, and the remedy. It is logged once per
-load or reload as `grpc_credential_file_permissions`, never per request. It
-counts as a `--check` warning, so `--check --strict` exits 1, and `rbgp doctor`
-reports it as `credentials.<listener>.<field>`. Certificates and CA bundles are
-public and are checked only as regular files. Warnings rather than refusals
+names the file, its mode and owner, and the remedy. Listener warnings are
+logged once per load or reload as `grpc_credential_file_permissions` and
+count toward `--check --strict`, which exits 1 on a warning. Doctor names
+listener checks `credentials.<listener>.<field>` and dial-out checks
+`credentials.gnmi_dialout.targets[i].<field>`. Dial-out permission warnings
+are reported by doctor and connection reads; they do not count toward
+`--check --strict`. Certificates and CA bundles are
+public and are checked for regular-file type, world-writable mode, and size.
+Warnings rather than refusals
 keep existing deployments that mount a shared token, such as the lab and
 Compose examples, running while they are tightened.
 
@@ -4869,6 +4883,13 @@ the file takes effect on the next (re)connect without a reload.
 checks a dial-in `Subscribe` request would get — an unsupported path,
 a mixed SAMPLE/ON_CHANGE list, or an ON_CHANGE-unsupported leaf is
 rejected before the daemon starts (or before a SIGHUP reload is applied).
+The same load, SIGHUP preflight, both `--check` modes, and API config
+candidates also read `tls_ca_file`, `tls_cert_file`, and `tls_key_file`: a
+file that is missing, empty, not UTF-8, without a PEM block of the expected
+kind, larger than 4 MiB, not a regular file, or world-writable is refused
+(see [credential file permissions](#grpc-credential-file-permissions)).
+A file that later disappears or fails these checks only fails that target's next
+connection attempt, which retries with backoff.
 
 **Robustness.** A collector that is down (at startup or any time later)
 never affects BGP operation: each target retries independently with capped
@@ -6149,13 +6170,24 @@ link carrying only a `rustbgpd:bridge:...` stamp — is also reported
 Protected attributes are: bridge `vlan_filtering`; fixed-VNI VXLAN `vni`,
 `local`, `dstport`, `learning`, `collect-metadata`, `vnifilter`, and `bridge`
 attachment; SVD VXLAN fixed-VNI absence, optional `local`, `dstport`,
-`learning`, `collect-metadata`, `vnifilter`, `bridge` attachment, and
-bridge VLAN/tunnel mappings; VLAN upper `bridge`, `vlan`, and link-up state;
+`learning`, `collect-metadata`, `vnifilter`, and `bridge` attachment;
+VLAN upper `bridge`, `vlan`, and link-up state;
 VRF `table_id`; and L3VXLAN `vni`, `local`, `dstport`, `learning`,
 `collect-metadata`, `vnifilter`, `vrf` master, and `router_mac`. The bounded Prometheus gauge
 `evpn_managed_netdev_state{class,name,desired,state}` mirrors the latest
 reported state for alerting; detailed reason text is available through
 `ListManagedNetdevs` / `rbgp evpn managed-netdevs`.
+
+On an exactly owned SVD, VLAN membership and tunnel bindings are reconciled
+to the configured set, including during startup adoption. Re-keying removes
+the old tunnel mapping before adding the new VNI. Removed bindings also remove
+their bridge-self VLAN when no other bridge port uses it. Unrelated bridge-self
+VLANs and all foreign-port VLANs are preserved. Binding drift makes the SVD
+incomplete and triggers repair rather than protected-attribute rejection.
+While that repair is converging, including the one-time removal of the kernel's
+default VLAN 1 from an existing managed SVD after upgrade, status reports
+`owned-unsafe` and the `managed-netdev fail-closed state observed` warning is
+logged until the bindings match.
 
 Reaping is equally conservative. When the owner token stays but a bridge,
 fixed-VNI VXLAN, SVD VXLAN, VLAN upper, VRF, or L3VXLAN row is removed, only

@@ -446,19 +446,22 @@ impl AcceptedConfigSnapshot {
         // Stat the open file before reading it, so the mtime describes these
         // bytes even if the operator saves again (in place or by rename)
         // while the load or the reload that follows is still running.
-        let (bytes, read_mtime, source_file_target) =
-            rustbgpd_policy::datasets::SourceFileTarget::open(path)
-                .and_then(|(mut file, target)| {
-                    let mtime = file
-                        .metadata()
-                        .and_then(|meta| meta.modified())
-                        .ok()
-                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-                    let mut bytes = Vec::new();
-                    std::io::Read::read_to_end(&mut file, &mut bytes)?;
-                    Ok((bytes, mtime, target))
-                })
-                .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
+        let (bytes, read_mtime, source_file_target) = super::open_config_file(path)
+            .and_then(|(mut file, target)| {
+                let mtime = file
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+                let mut bytes = Vec::new();
+                rustbgpd_api::credential_file::read_bounded(
+                    &mut file,
+                    super::MAX_CONFIG_FILE_BYTES,
+                    &mut bytes,
+                )?;
+                Ok((bytes, mtime, target))
+            })
+            .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
         let read_sha256 = Some(Sha256::digest(&bytes).into());
         let content = String::from_utf8(bytes)
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;

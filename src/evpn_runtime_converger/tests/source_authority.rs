@@ -46,9 +46,9 @@ async fn assert_source_admission(
         )),
         validate_only: true,
     };
-    apply.apply_request(&request(admitted)).await.unwrap();
+    apply.apply_request(&request(admitted), None).await.unwrap();
     assert!(matches!(
-        apply.apply_request(&request(refused)).await,
+        apply.apply_request(&request(refused), None).await,
         Err(GrpcEvpnRuntimeApplyError::InvalidArgument(_))
     ));
 }

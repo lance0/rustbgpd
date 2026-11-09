@@ -82,7 +82,13 @@ impl SourceFileTarget {
         let expected = std::fs::metadata(&canonical)?;
         let (file, parent) = open_canonical(&canonical)?;
         let metadata = file.metadata()?;
-        if !metadata.is_file() || !same_file(&expected, &metadata) {
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "config target is not a regular file",
+            ));
+        }
+        if !same_file(&expected, &metadata) {
             return Err(denied());
         }
         let target = Self::from_parent(canonical, &parent)?;

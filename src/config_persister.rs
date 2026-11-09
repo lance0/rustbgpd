@@ -459,9 +459,8 @@ impl ConfigPersister {
             }
         }
         let bytes = if let Some(directory) = directory {
-            use std::io::Read as _;
             (|| {
-                let mut file = std::fs::File::from(
+                let file = std::fs::File::from(
                     nix::fcntl::openat(
                         directory,
                         path.file_name()
@@ -478,11 +477,18 @@ impl ConfigPersister {
                     return Err(std::io::Error::other("config target is not a regular file"));
                 }
                 let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
+                rustbgpd_api::credential_file::read_bounded(
+                    file,
+                    crate::config::MAX_CONFIG_FILE_BYTES,
+                    &mut bytes,
+                )?;
                 Ok(bytes)
             })()
         } else {
-            std::fs::read(path)
+            rustbgpd_policy::datasets::read_regular_file_bounded(
+                path,
+                crate::config::MAX_CONFIG_FILE_BYTES,
+            )
         };
         let current = match bytes {
             Ok(bytes) => Some(sha256_of(&bytes)),
@@ -1632,6 +1638,72 @@ log_format = "json"
             assert_eq!(std::fs::read_to_string(&path).unwrap(), *replacement_bytes);
             assert!(!retained.join("config.toml.tmp").exists());
         }
+    }
+
+    #[tokio::test]
+    async fn fifo_config_fence_refuses_without_wedging_persister() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            crate::test_support::tier_authorized_uds_test_config(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n",
+            ),
+        )
+        .unwrap();
+        let booted = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
+        let (tx, rx) = mpsc::channel(4);
+        let handle = tokio::spawn(
+            ConfigPersister::new_accepted(rx, path.clone(), Arc::clone(&booted), None)
+                .run(boot_permit()),
+        );
+        std::fs::remove_file(&path).unwrap();
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let fifo = path.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            if done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_err()
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                let _writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+                    .open(fifo);
+            }
+        });
+        assert!(
+            Config::load_with_diagnostics(path.to_str().unwrap())
+                .unwrap_err()
+                .contains("not a regular file")
+        );
+        assert!(
+            AcceptedConfigSnapshot::load(&path, None)
+                .err()
+                .unwrap()
+                .contains("not a regular file")
+        );
+        let started = std::time::Instant::now();
+        let (ack, staged) = oneshot::channel();
+        tx.send(ConfigMutation::StageConfigAck(Arc::clone(&booted), ack))
+            .await
+            .unwrap();
+        let error = staged.await.unwrap().unwrap_err();
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        watchdog.join().unwrap();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "fence stalled {elapsed:?}"
+        );
+        assert!(error.contains("not a regular file"), "{error}");
+        assert_eq!(
+            inspect_current(&tx).await.normalized_toml(),
+            booted.normalized_toml()
+        );
+        drop(tx);
+        handle.await.unwrap();
     }
 
     /// An operator edit that lands between stage and commit, the window a
