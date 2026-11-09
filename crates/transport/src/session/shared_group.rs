@@ -440,9 +440,8 @@ pub(super) fn encode_shared_unicast_slice<'r>(
             return None;
         }
         let nh_override = next_hop_override.get(i).and_then(Option::as_ref);
-        let attrs = export
-            .prepared_unicast_attributes_cached(cache, route, local_ipv4, nh_override)
-            .clone();
+        let attrs =
+            export.prepared_unicast_attributes_cached(cache, route, local_ipv4, nh_override);
         // `finish_unicast_candidate` picks IPv4-body vs MP_REACH from the
         // profile's Extended Next Hop state itself, so this match covers
         // both per-session grouping branches without re-deriving the mode.

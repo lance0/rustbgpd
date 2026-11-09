@@ -137,15 +137,15 @@ impl PendingSlice {
         let index = self.source_start + row;
         let attrs = match self.phase {
             OutboundPhase::Announce => {
-                let attrs = export.prepare_unicast_attribute_bundle(
+                let mut attrs = export.prepare_unicast_attribute_bundle(
                     &update.announce[index],
                     export.local_ipv4(),
                     update.next_hop_override.get(index).and_then(Option::as_ref),
                 );
                 return if matches!(group.wire, GroupWire::Ipv4Body) {
-                    attrs.with_next_hop
+                    attrs.into_with_next_hop()
                 } else {
-                    attrs.without_next_hop
+                    attrs.without_next_hop()
                 };
             }
             OutboundPhase::FlowspecAnnounce => {
@@ -2079,14 +2079,12 @@ impl PeerSession {
             let mut v4_mp_index = AttrGroupIndex::default();
             let mut v4_mp_groups: Vec<MpGroup> = Vec::new();
             for (route, nh_override, source) in &v4_routes {
-                let cached_attrs = export
-                    .prepared_unicast_attributes_cached(
-                        &mut prepared_attr_cache,
-                        route,
-                        local_ipv4,
-                        *nh_override,
-                    )
-                    .clone();
+                let cached_attrs = export.prepared_unicast_attributes_cached(
+                    &mut prepared_attr_cache,
+                    route,
+                    local_ipv4,
+                    *nh_override,
+                );
                 match export.finish_unicast_candidate(route, *nh_override, cached_attrs) {
                     Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
                         dropped_ipv6_next_hops.note_ipv4_body(*nh_override, entry.prefix);
@@ -2210,14 +2208,12 @@ impl PeerSession {
         let mut v6_groups: Vec<MpGroup> = Vec::new();
         for (route, nh_override_ref, source) in &v6_routes {
             let nh_override = *nh_override_ref;
-            let cached_attrs = export
-                .prepared_unicast_attributes_cached(
-                    &mut prepared_attr_cache,
-                    route,
-                    local_ipv4,
-                    nh_override,
-                )
-                .clone();
+            let cached_attrs = export.prepared_unicast_attributes_cached(
+                &mut prepared_attr_cache,
+                route,
+                local_ipv4,
+                nh_override,
+            );
             let prepared = match export.finish_unicast_candidate(route, nh_override, cached_attrs) {
                 Ok(PreparedUnicastCandidate::Mp {
                     next_hop,
