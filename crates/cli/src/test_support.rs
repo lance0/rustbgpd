@@ -273,9 +273,6 @@ pub(crate) struct MockState {
     pub(crate) list_dynamic_neighbors_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_list_fib: Mutex<Option<server_proto::ListFibRoutesRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
-    // Canned ListBgpLsRoutes response — when set, served verbatim so the
-    // decode-ceiling tests can push multi-MiB listings through loopback.
-    pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
     // Every ListBgpLsRibRoutes request, in order; canned pages are served by
     // request index, and an empty list serves one sample row.
     pub(crate) bgpls_page_requests: Mutex<Vec<server_proto::ListBgpLsRibRoutesRequest>>,
@@ -283,6 +280,22 @@ pub(crate) struct MockState {
     pub(crate) list_conditional_response:
         Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
     pub(crate) family_page_error: Mutex<Option<(Code, String)>>,
+    // Canned best tables for the plain `rib vpn|labeled|rtc` and `evpn`
+    // listings. A non-empty table is paged by its bounded RPC, at most
+    // `FAMILY_TABLE_PAGE_ROWS` rows per page, with every request logged. The
+    // whole-table RPC serves the same rows in one response, so a CLI that
+    // still calls it can be compared with one that walks the pages.
+    pub(crate) vpn_table: Mutex<Vec<server_proto::VpnRouteEntry>>,
+    pub(crate) vpn_page_requests: Mutex<Vec<server_proto::ListVpnRibRoutesRequest>>,
+    pub(crate) labeled_table: Mutex<Vec<server_proto::LabeledRouteEntry>>,
+    pub(crate) labeled_page_requests: Mutex<Vec<server_proto::ListLabeledRibRoutesRequest>>,
+    pub(crate) rtc_table: Mutex<Vec<server_proto::RtcRouteEntry>>,
+    pub(crate) rtc_page_requests: Mutex<Vec<server_proto::ListRtcRibRoutesRequest>>,
+    pub(crate) evpn_table: Mutex<Vec<server_proto::EvpnRouteEntry>>,
+    pub(crate) evpn_page_requests: Mutex<Vec<server_proto::ListBestEvpnRoutesRequest>>,
+    // Fail every continuation of a canned-table walk with the daemon's
+    // ABORTED, as when the table changes between two pages.
+    pub(crate) family_table_changes_mid_walk: AtomicBool,
     pub(crate) last_list_vpn_page: Mutex<Option<server_proto::ListVpnRibRoutesRequest>>,
     pub(crate) list_vpn_page_response: Mutex<server_proto::ListVpnRibRoutesResponse>,
     pub(crate) last_list_labeled_page: Mutex<Option<server_proto::ListLabeledRibRoutesRequest>>,
@@ -292,7 +305,6 @@ pub(crate) struct MockState {
     pub(crate) last_list_evpn_page: Mutex<Option<server_proto::ListBestEvpnRoutesRequest>>,
     pub(crate) list_evpn_page_response: Mutex<server_proto::ListBestEvpnRoutesResponse>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
-    pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) list_flowspec_response: Mutex<server_proto::ListFlowSpecResponse>,
@@ -389,6 +401,44 @@ fn consume_failure(counter: &AtomicUsize) -> bool {
             remaining.checked_sub(1)
         })
         .is_ok()
+}
+
+/// Rows per page of a canned family table: small, so a fixture of a few rows
+/// spans several pages whatever page size the CLI asks for.
+pub(crate) const FAMILY_TABLE_PAGE_ROWS: usize = 2;
+
+/// One page of a canned family table and its continuation token, which names
+/// the offset of the next row.
+fn family_table_page<T: Clone>(
+    state: &MockState,
+    rows: &[T],
+    page_size: u32,
+    page_token: &str,
+) -> Result<(Vec<T>, String), Status> {
+    let start = if page_token.is_empty() {
+        0
+    } else if state.family_table_changes_mid_walk.load(Ordering::SeqCst) {
+        return Err(Status::aborted(
+            "route table changed during pagination; restart with an empty page_token",
+        ));
+    } else {
+        page_token
+            .strip_prefix("after-")
+            .and_then(|offset| offset.parse::<usize>().ok())
+            .filter(|offset| *offset < rows.len())
+            .ok_or_else(|| Status::invalid_argument("invalid family page_token"))?
+    };
+    let size = match page_size {
+        0 => FAMILY_TABLE_PAGE_ROWS,
+        size => (size as usize).min(FAMILY_TABLE_PAGE_ROWS),
+    };
+    let end = rows.len().min(start + size);
+    let next = if end < rows.len() {
+        format!("after-{end}")
+    } else {
+        String::new()
+    };
+    Ok((rows[start..end].to_vec(), next))
 }
 
 fn canonical_ip_or_original(address: &str) -> String {
@@ -2402,9 +2452,6 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListBgpLsResponse>, Status> {
         let request = request.into_inner();
         *self.state.last_list_bgpls.lock().await = Some(request.clone());
-        if let Some(canned) = self.state.list_bgpls_response.lock().await.clone() {
-            return Ok(Response::new(canned));
-        }
         Ok(Response::new(server_proto::ListBgpLsResponse {
             routes: vec![sample_bgpls_route(&request.peer_filter)],
         }))
@@ -2438,8 +2485,11 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListVpnRoutesResponse>, Status> {
         let request = request.into_inner();
         *self.state.last_list_vpn.lock().await = Some(request.clone());
-        if let Some(response) = self.state.list_vpn_response.lock().await.clone() {
-            return Ok(Response::new(response));
+        let table = self.state.vpn_table.lock().await.clone();
+        if !table.is_empty() {
+            return Ok(Response::new(server_proto::ListVpnRoutesResponse {
+                routes: table,
+            }));
         }
         Ok(Response::new(server_proto::ListVpnRoutesResponse {
             routes: vec![server_proto::VpnRouteEntry {
@@ -2471,6 +2521,12 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListLabeledRoutesResponse>, Status> {
         let request = request.into_inner();
         *self.state.last_list_labeled.lock().await = Some(request.clone());
+        let table = self.state.labeled_table.lock().await.clone();
+        if !table.is_empty() {
+            return Ok(Response::new(server_proto::ListLabeledRoutesResponse {
+                routes: table,
+            }));
+        }
         Ok(Response::new(server_proto::ListLabeledRoutesResponse {
             routes: vec![server_proto::LabeledRouteEntry {
                 afi_safi: "ipv4_labeled_unicast".to_string(),
@@ -2498,6 +2554,12 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListRtcRoutesResponse>, Status> {
         let request = request.into_inner();
         *self.state.last_list_rtc.lock().await = Some(request.clone());
+        let table = self.state.rtc_table.lock().await.clone();
+        if !table.is_empty() {
+            return Ok(Response::new(server_proto::ListRtcRoutesResponse {
+                routes: table,
+            }));
+        }
         Ok(Response::new(server_proto::ListRtcRoutesResponse {
             routes: vec![
                 server_proto::RtcRouteEntry {
@@ -2538,9 +2600,26 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListVpnRibRoutesRequest>,
     ) -> Result<Response<server_proto::ListVpnRibRoutesResponse>, Status> {
-        *self.state.last_list_vpn_page.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_vpn_page.lock().await = Some(request.clone());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
+        }
+        let table = self.state.vpn_table.lock().await.clone();
+        if !table.is_empty() {
+            self.state
+                .vpn_page_requests
+                .lock()
+                .await
+                .push(request.clone());
+            let (routes, next_page_token) =
+                family_table_page(&self.state, &table, request.page_size, &request.page_token)?;
+            return Ok(Response::new(server_proto::ListVpnRibRoutesResponse {
+                routes,
+                next_page_token,
+                total_count: table.len() as u64,
+                page_version: None,
+            }));
         }
         Ok(Response::new(
             self.state.list_vpn_page_response.lock().await.clone(),
@@ -2551,9 +2630,26 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListLabeledRibRoutesRequest>,
     ) -> Result<Response<server_proto::ListLabeledRibRoutesResponse>, Status> {
-        *self.state.last_list_labeled_page.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_labeled_page.lock().await = Some(request.clone());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
+        }
+        let table = self.state.labeled_table.lock().await.clone();
+        if !table.is_empty() {
+            self.state
+                .labeled_page_requests
+                .lock()
+                .await
+                .push(request.clone());
+            let (routes, next_page_token) =
+                family_table_page(&self.state, &table, request.page_size, &request.page_token)?;
+            return Ok(Response::new(server_proto::ListLabeledRibRoutesResponse {
+                routes,
+                next_page_token,
+                total_count: table.len() as u64,
+                page_version: None,
+            }));
         }
         Ok(Response::new(
             self.state.list_labeled_page_response.lock().await.clone(),
@@ -2564,9 +2660,26 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListRtcRibRoutesRequest>,
     ) -> Result<Response<server_proto::ListRtcRibRoutesResponse>, Status> {
-        *self.state.last_list_rtc_page.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_rtc_page.lock().await = Some(request.clone());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
+        }
+        let table = self.state.rtc_table.lock().await.clone();
+        if !table.is_empty() {
+            self.state
+                .rtc_page_requests
+                .lock()
+                .await
+                .push(request.clone());
+            let (routes, next_page_token) =
+                family_table_page(&self.state, &table, request.page_size, &request.page_token)?;
+            return Ok(Response::new(server_proto::ListRtcRibRoutesResponse {
+                routes,
+                next_page_token,
+                total_count: table.len() as u64,
+                page_version: None,
+            }));
         }
         Ok(Response::new(
             self.state.list_rtc_page_response.lock().await.clone(),
@@ -2577,9 +2690,28 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListBestEvpnRoutesRequest>,
     ) -> Result<Response<server_proto::ListBestEvpnRoutesResponse>, Status> {
-        *self.state.last_list_evpn_page.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_evpn_page.lock().await = Some(request.clone());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
+        }
+        let mut table = self.state.evpn_table.lock().await.clone();
+        if !table.is_empty() {
+            self.state
+                .evpn_page_requests
+                .lock()
+                .await
+                .push(request.clone());
+            let filter = request.route_type_filter;
+            table.retain(|route| filter == 0 || route.route_type == filter);
+            let (routes, next_page_token) =
+                family_table_page(&self.state, &table, request.page_size, &request.page_token)?;
+            return Ok(Response::new(server_proto::ListBestEvpnRoutesResponse {
+                routes,
+                next_page_token,
+                total_count: table.len() as u64,
+                page_version: None,
+            }));
         }
         Ok(Response::new(
             self.state.list_evpn_page_response.lock().await.clone(),
@@ -2774,6 +2906,13 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         let request = request.into_inner();
         *self.state.last_list_evpn.lock().await = Some(request.clone());
         let filter = request.route_type_filter;
+        let mut table = self.state.evpn_table.lock().await.clone();
+        if !table.is_empty() {
+            table.retain(|route| filter == 0 || route.route_type == filter);
+            return Ok(Response::new(server_proto::ListEvpnResponse {
+                routes: table,
+            }));
+        }
         let mut routes = Vec::new();
         if filter == 0 || filter == 2 {
             routes.push(mock_evpn_route(2));

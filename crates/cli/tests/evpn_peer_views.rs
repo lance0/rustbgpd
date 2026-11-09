@@ -128,12 +128,10 @@ async fn srv6_prefix_sid_survives_vpn_and_evpn_rpc_output() {
     let server = test_support::spawn_mock_server(None).await;
     let mut view = test_support::mock_prefix_sid();
     view.services[0].sids[0].reconstructed_sid = Some("fc00:0:1:0:1::".into());
-    *server.state.list_vpn_response.lock().await = Some(proto::ListVpnRoutesResponse {
-        routes: vec![proto::VpnRouteEntry {
-            prefix_sid: Some(Box::new(view.clone())),
-            ..Default::default()
-        }],
-    });
+    *server.state.vpn_table.lock().await = vec![proto::VpnRouteEntry {
+        prefix_sid: Some(Box::new(view.clone())),
+        ..Default::default()
+    }];
     *server.state.list_peer_evpn_response.lock().await = proto::ListPeerEvpnRoutesResponse {
         routes: vec![proto::EvpnRouteEntry {
             prefix_sid: Some(Box::new(view)),

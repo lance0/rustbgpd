@@ -277,9 +277,9 @@ rbgp rib blackholes
 rbgp rib fib
 rbgp rib fib --limit 500 [--page-token <token>]   # one bounded page; the older --page-size spelling still parses
 rbgp rib bgpls    # selected BGP-LS routes (RFC 9552), walking every bounded page
-rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
-rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
-rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
+rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128), walking every bounded page
+rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4), walking every bounded page
+rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132), walking every bounded page
 rbgp rib add <prefix> --next-hop <ip> [--origin <igp|egp|incomplete>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]   # --origin also accepts 0/1/2
 rbgp rib delete <prefix> [--path-id <n>] [--allow-missing] [--owner <name> | --override-owner]   # a leased (ADR-0141) route needs its owner, or the override
 rbgp diff snapshots <incumbent.ndjson> <rustbgpd.ndjson>   # offline BMP-to-BMP comparison, including RR attributes; exit 0/1/2
@@ -521,8 +521,8 @@ with configured and ready sources, the same value is a real uncovered-route
 verdict. Use `rbgp rpki caches` or `rbgp doctor` for validator readiness—the
 route field alone cannot prove it.
 
-The full unary listings (`rib vpn|labeled|rtc|blackholes`, `rib fib`
-without `--limit`, `flowspec`, `evpn|evpn diagnose`, `orr`) return the
+The full unary listings (`rib blackholes`, `rib fib` without `--limit`,
+`flowspec`, `orr`) return the
 whole table in one response and decode up to a finite 64 MiB ceiling (roughly
 0.7-1.3 million rows). A response above the ceiling still fails closed,
 currently as `out of range`. The ceiling is client-side compatibility headroom
@@ -538,11 +538,44 @@ default. `rib fib --limit N [--page-token T]` returns one bounded page instead;
 the older `--page-size` spelling remains a hidden alias.
 A `received`/`advertised` view, `--limit`, `--page-token`, `--prefix`
 (`vpn`, `labeled`), `--rd` (`vpn`), `--route-target` or `--origin-as` (`rtc`)
-selects the bounded `List*RibRoutes` query. Without one of them,
-`rib vpn|labeled|rtc` calls the deprecated whole-table `ListVpnRoutes`,
-`ListLabeledRoutes`, or `ListRtcRoutes` RPC (outside v1), even when `--family`
-or `--neighbor` is set; add `--limit N` to page a family-only or
-neighbor-only request.
+prints one bounded `List*RibRoutes` page with its total and continuation
+token.
+
+Without one of them, `rib vpn|labeled|rtc` and base `rbgp evpn` print the
+whole best table, as `rib bgpls` does. They walk every page of
+`ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` or
+`ListBestEvpnRoutes`, 1000 rows per request, and print one listing: a plain
+JSON array with `--json`. `--family` and `--neighbor`, and `--route-type` and
+`--rd` on `evpn`, go out with every page. No command calls a deprecated
+whole-table RPC, so the daemon must serve the bounded ones; an older daemon
+answers `not supported by this daemon`.
+
+These listings print rows in the daemon's ascending key order:
+
+| Command | Row order |
+| --- | --- |
+| `rib vpn` | Route Distinguisher (its 8 raw bytes, so RD type first), then prefix (IPv4 before IPv6, then address, then length), then source neighbor and path ID |
+| `rib labeled` | Prefix (IPv4 before IPv6, then address, then length), then source neighbor and path ID |
+| `rib rtc` | Origin AS, then Route Target (its 8 raw bytes), then prefix length, then source neighbor and path ID; the default membership comes first |
+| `evpn` | Route type (within Type 1, per-ES before per-EVI), then Route Distinguisher, then the type's remaining key fields, then source neighbor |
+
+Earlier releases printed the daemon's hash-table order, which no release
+promised and which changed with the table. The row set, each row's fields and
+the JSON shape are unchanged; a script that depended on the old order must
+sort the rows itself.
+
+A walk prints a consistent table or nothing. If the table changes between two
+pages the daemon answers `ABORTED`; the command exits 1 with
+`aborted: route table changed during pagination; restart with an empty
+page_token`, prints no rows and does not retry, exactly as `rib bgpls` does.
+A plain listing of a table that keeps changing can therefore abort every
+time: run it again, or read the table one page at a time with `--limit` and
+`--page-token`. Each page scans the table, so a plain listing costs about one
+scan per 1000 rows.
+
+`evpn diagnose` reads its Type 2 and Type 3 route counts from the
+`total_count` of one single-row `ListBestEvpnRoutes` page per type. It follows
+no continuation, so a changing table does not abort it.
 
 `--age` appends an `Age` column to the human best, received, or advertised
 route table. It is the age of the original RIB receive event, including in the

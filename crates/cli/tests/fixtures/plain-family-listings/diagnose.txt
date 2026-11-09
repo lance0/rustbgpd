@@ -1,0 +1,10 @@
+EVPN diagnose
+Instances: 1
+Originated local MACs: 2
+Current per-instance L2 apply failures: 0
+Host-wide L2 apply failures: 0 latest-permanent-error=[]
+Type 2 routes: 3 (present)
+Type 3 IMET routes: 2 (present)
+Key EVPN metrics:
+  evpn_local_originations_total{action="inject"} 1
+  evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2

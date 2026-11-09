@@ -3,6 +3,9 @@
 //! and by ingestion adapters.
 
 #![deny(unsafe_code)]
+// As in the binary: no deprecated item, and no local opt-out (see the
+// `connection.rs` test in the binary).
+#![deny(deprecated)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 

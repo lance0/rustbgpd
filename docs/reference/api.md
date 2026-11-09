@@ -2617,9 +2617,10 @@ rbgp evpn best --mac 00:11:22:33:44:55 --vni 100 --limit 100
 
 The new CLI pages print a JSON object with `view`, `neighbor` (nullable for
 unscoped best), `routes`, `total_count`, `next_page_token` and `page_version`.
-Existing unpaged list commands keep their JSON arrays. `--page-token`
-continues the selected page; `--page-size` aliases `--limit`. New per-peer
-views and filtered queries default to 100 rows and never request an old
+The plain list commands keep their JSON arrays and build them by walking
+every bounded page, so rows come out in the pages' key order. `--page-token`
+continues the selected page; `--page-size` aliases `--limit`. Per-peer
+views and filtered queries default to 100 rows. No CLI command requests an old
 whole-table RPC.
 
 ### Route Distinguisher identity
@@ -2703,7 +2704,8 @@ to resume, quoting the opaque token for the shell. `--json` returns a page
 object. For selected Loc-RIB pages, use `ListBestEvpnRoutes`: each example
 below returns one page, not the whole table. Repeat the same filters with the
 returned `next_page_token` until it is empty; after `ABORTED`, restart with an
-empty token. The legacy plain CLI listing retains its whole-table behavior.
+empty token. Plain `rbgp evpn` walks every page itself and prints one listing;
+after `ABORTED` it fails without retrying.
 
 ```bash
 # First Loc-RIB page across all supported types (outside the scoped v1 profile)

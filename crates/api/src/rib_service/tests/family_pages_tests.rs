@@ -359,6 +359,25 @@ async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib
         "2001:db8:200:0:1::".parse().unwrap(),
         80,
     ));
+    // Routes outside the filtered prefixes below, for the key-order walks at
+    // the end: a lower Route Distinguisher with a higher prefix, and an IPv4
+    // prefix, which sorts before every IPv6 prefix.
+    let mut vpn_lower_rd = vpn.clone();
+    vpn_lower_rd.nlri.route_distinguisher = "65000:99".parse().unwrap();
+    vpn_lower_rd.nlri.prefix =
+        rustbgpd_wire::VpnPrefix::v6("2001:db8:900::".parse().unwrap(), 64).unwrap();
+    let mut vpn_v4 = vpn.clone();
+    vpn_v4.nlri.prefix = rustbgpd_wire::VpnPrefix::v4("10.9.0.0".parse().unwrap(), 16).unwrap();
+    let mut labeled_lower = labeled.clone();
+    labeled_lower.nlri.prefix = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+        "2001:db8:100::".parse().unwrap(),
+        48,
+    ));
+    let mut labeled_v4 = labeled.clone();
+    labeled_v4.nlri.prefix = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        "10.9.0.0".parse().unwrap(),
+        16,
+    ));
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(1);
     let manager = rustbgpd_rib::RibManager::new(
@@ -373,7 +392,7 @@ async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib
     tx.send(RibUpdate::VpnRoutesReceived {
         peer: source,
         session_id: 0,
-        announced: vec![vpn, vpn_longer],
+        announced: vec![vpn_longer, vpn, vpn_v4, vpn_lower_rd],
         withdrawn: vec![],
     })
     .await
@@ -381,7 +400,7 @@ async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib
     tx.send(RibUpdate::LabeledRoutesReceived {
         peer: source,
         session_id: 0,
-        announced: vec![labeled, labeled_longer],
+        announced: vec![labeled_longer, labeled, labeled_lower, labeled_v4],
         withdrawn: vec![],
     })
     .await
@@ -491,6 +510,69 @@ async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib
             .into_inner()
             .total_count,
         0
+    );
+    // A best walk returns rows in ascending key order, which `rbgp rib vpn`
+    // and `rbgp rib labeled` print as is: Route Distinguisher, then prefix
+    // (IPv4 before IPv6, then address, then length) for VPN, and prefix alone
+    // for labeled unicast.
+    let mut walked = Vec::new();
+    let mut request = proto::ListVpnRibRoutesRequest {
+        view: proto::FamilyRouteView::Best as i32,
+        page_size: 3,
+        ..Default::default()
+    };
+    loop {
+        let page = service
+            .list_vpn_rib_routes(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        walked.extend(
+            page.routes
+                .into_iter()
+                .map(|route| (route.route_distinguisher_str, route.prefix)),
+        );
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    assert_eq!(
+        walked,
+        [
+            ("65000:99", "2001:db8:900::/64"),
+            ("65000:100", "10.9.0.0/16"),
+            ("65000:100", "2001:db8:100::/64"),
+            ("65000:100", "2001:db8:100:0:1::/80"),
+        ]
+        .map(|(rd, prefix)| (rd.to_string(), prefix.to_string()))
+    );
+    let mut walked = Vec::new();
+    let mut request = proto::ListLabeledRibRoutesRequest {
+        view: proto::FamilyRouteView::Best as i32,
+        page_size: 3,
+        ..Default::default()
+    };
+    loop {
+        let page = service
+            .list_labeled_rib_routes(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        walked.extend(page.routes.into_iter().map(|route| route.prefix));
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    assert_eq!(
+        walked,
+        [
+            "10.9.0.0/16",
+            "2001:db8:100::/48",
+            "2001:db8:200::/64",
+            "2001:db8:200:0:1::/80",
+        ]
     );
     drop(service);
     drop(tx);

@@ -1,0 +1,5 @@
+[mac-ip] rd=65000:100 tag=0 mac=02:aa:bb:cc:dd:01 label=10100 encap=vxlan via 192.0.2.1 from 192.0.2.1
+[mac-ip] rd=65000:100 tag=0 mac=02:aa:bb:cc:dd:02 ip=10.0.0.2 label=10100 encap=vxlan via 192.0.2.1 from 192.0.2.1
+[mac-ip] rd=65000:100 tag=0 mac=02:aa:bb:cc:dd:03 label=10100 encap=vxlan via 192.0.2.1 from 192.0.2.1
+[imet] rd=65000:100 tag=0 ip=10.0.0.1 label=10100 encap=vxlan via 192.0.2.1 from 192.0.2.1
+[imet] rd=65000:100 tag=0 ip=10.0.0.2 label=10100 encap=vxlan via 192.0.2.1 from 192.0.2.1

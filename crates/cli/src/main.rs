@@ -1,4 +1,8 @@
 #![deny(unsafe_code)]
+// The CLI calls no deprecated RPC: bounded page RPCs replace every deprecated
+// whole-table read. `forbid` would also refuse the `allow` that clap's derives
+// emit, so a test in `connection.rs` refuses a local `allow` or `expect`.
+#![deny(deprecated)]
 
 mod commands;
 mod connection;

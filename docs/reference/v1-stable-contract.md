@@ -298,10 +298,11 @@ bounded methods, and the whole-graph `ListTopologyNodes` and
 `ListOrrTopologyLinks`. The older calls are deprecated and outside v1, as is
 `ListEvpnRoutes`; `ListBestEvpnRoutes` is its bounded replacement. Every older
 method retains its signature and behavior. This change removes no RPC and sets
-no removal schedule. Existing plain CLI listings retain their JSON arrays;
-`rbgp rib bgpls`, `rbgp topology nodes` and `rbgp topology links` build their
-arrays by walking every bounded page, and the other plain listings keep their
-whole-table calls. Promoting the RPCs
+no removal schedule. Existing plain CLI listings retain their JSON arrays and
+build them by walking every bounded page: `rbgp rib bgpls`, `rbgp rib vpn`,
+`rbgp rib labeled`, `rbgp rib rtc`, base `rbgp evpn`, `rbgp topology nodes`
+and `rbgp topology links`. Their rows follow the pages' key order, and no CLI
+command calls a deprecated whole-table method. Promoting the RPCs
 does not promote additional CLI dimensions.
 
 ### EVPN route-reflector boundary
@@ -323,9 +324,10 @@ behavior.
 | Metrics | Names, types and label sets of the nine series in the inventory's `metrics.scoped_rr_only_series`, including `family="l2vpn_evpn"` on `bgp_rib_prefixes`, `bgp_rib_loc_prefixes`, `bgp_rib_adj_out_prefixes` and `bgp_route_refresh_stale_entries`. | The EVPN table gauges count the whole table, including any Type 6 routes. `bgp_gr_stale_routes` sums the routes a peer currently holds GR- or LLGR-stale across all families; it falls as routes are re-advertised, withdrawn or swept, and no per-route EVPN stale query exists. VTEP `evpn_*` series stay alpha. |
 
 `RibService.ListBestEvpnRoutes` supplies the bounded selected Loc-RIB view.
-The deprecated `RibService.ListEvpnRoutes` and base
-`rbgp evpn` are not paginated: they scan the EVPN table and clone every
-matching row, and a route-type filter bounds neither. They remain outside v1.
+The deprecated `RibService.ListEvpnRoutes` is not paginated: it scans the
+EVPN table and clones every matching row, and a route-type filter bounds
+neither. Base `rbgp evpn` prints the whole best table by walking every
+`ListBestEvpnRoutes` page. Both remain outside v1.
 `RibService.ExplainEvpnRoute` references a Type 6 selector and an optional
 SRv6 Argument companion, and EVPN events (`EventService.ListEvpnEvents` and
 the `BgpEvent.evpn` payload) remain alpha.
