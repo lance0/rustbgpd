@@ -320,7 +320,7 @@ impl AcceptedConfigSnapshot {
         config_path: &Path,
         target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
     ) -> Result<Arc<Self>, String> {
-        Self::load_retained_with_authority(content, config_path, target, || {})
+        Self::load_retained_with_authority(content, config_path, |_| Ok(target), || {})
     }
 
     /// Load a retained document that the caller writes to the
@@ -346,15 +346,25 @@ impl AcceptedConfigSnapshot {
         config_path: &Path,
         after_capture: impl FnOnce(),
     ) -> Result<Arc<Self>, String> {
-        let target = rustbgpd_policy::datasets::SourceFileTarget::resolve(config_path)
-            .map_err(|_| "accepted config target authority unavailable".to_string())?;
-        Self::load_retained_with_authority(content, config_path, Some(target), after_capture)
+        Self::load_retained_with_authority(
+            content,
+            config_path,
+            |path| {
+                rustbgpd_policy::datasets::SourceFileTarget::resolve(path)
+                    .map(Some)
+                    .map_err(|_| "accepted config target authority unavailable".to_string())
+            },
+            after_capture,
+        )
     }
 
     fn load_retained_with_authority(
         content: &str,
         config_path: &Path,
-        target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
+        target: impl FnOnce(
+            &Path,
+        )
+            -> Result<Option<rustbgpd_policy::datasets::SourceFileTarget>, String>,
         after_capture: impl FnOnce(),
     ) -> Result<Arc<Self>, String> {
         let config_path = absolute_config_path(config_path)?;
@@ -370,7 +380,7 @@ impl AcceptedConfigSnapshot {
             None,
             super::SourceRules::OnDisk,
         )?;
-        config.source_file_target = target.map(|target| target.fork());
+        config.source_file_target = target(&config_path)?.map(|target| target.fork());
         config.file_path = Some(config_path);
         after_capture();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
