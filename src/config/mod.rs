@@ -1145,10 +1145,11 @@ impl Config {
             roots: canonicalize(&limits.roots),
             credential_files: limits.credential_files.clone(),
             protected_files: canonicalize(&limits.protected_files),
-            config_file: limits
-                .config_file
-                .as_ref()
-                .and_then(|path| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))),
+            config_file: limits.config_file.as_ref().and_then(|path| {
+                path.canonicalize()
+                    .ok()
+                    .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
+            }),
             max_graph_bytes: limits.max_graph_bytes,
         });
         Self::load_candidate(

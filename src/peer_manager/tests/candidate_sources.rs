@@ -817,3 +817,64 @@ fn candidate_datasets_refuse_hardlinked_configs_and_backups() {
         }
     }
 }
+
+#[test]
+fn candidate_backups_follow_terminal_config_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let active = dir.path().join("active.toml");
+    let launch = dir.path().join("config.toml");
+    std::fs::write(&active, candidate(&[&edge], "")).unwrap();
+    std::os::unix::fs::symlink("active.toml", &launch).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&launch, None).unwrap();
+    assert_eq!(
+        accepted.config_ref().file_path.as_deref(),
+        Some(launch.as_path())
+    );
+    let limits = accepted.config_ref().candidate_source_limits();
+    // Boot revert saves beside the resolved target, not the launch symlink.
+    let backup = dir.path().join("active.toml.unconfirmed-0123456789abcdef");
+    std::fs::write(&backup, POLICY).unwrap();
+    let importer = dir.path().join("imports-target-backup.rpol");
+    std::fs::write(
+        &importer,
+        "import \"active.toml.unconfirmed-0123456789abcdef\"\n",
+    )
+    .unwrap();
+    for capture in [false, true] {
+        for source in [&backup, &importer] {
+            let toml = candidate(&[source], "");
+            assert!(
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+                "resolved-target backup admitted: {}",
+                source.display()
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+}
+
+#[test]
+fn candidate_backups_keep_protection_when_config_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let missing = dir.path().join("missing.toml");
+    assert!(!missing.exists());
+    manager.current_config.file_path = Some(missing);
+    let limits = manager.current_config.candidate_source_limits();
+    let backup = dir
+        .path()
+        .join("missing.toml.unconfirmed-0123456789abcdef.rpol");
+    std::fs::write(&backup, POLICY).unwrap();
+    for capture in [false, true] {
+        let toml = candidate(&[&backup], "");
+        assert!(
+            Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+            "missing-config backup admitted"
+        );
+        Config::load_rpc_candidate(&toml, "operator", capture, None)
+            .expect("operators retain access");
+    }
+}
