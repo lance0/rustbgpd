@@ -6313,6 +6313,7 @@ async fn run<T>(
         evpn_runtime_converger.clone(),
         config.clone(),
     )
+    .with_accepted_source(accepted_rx.clone())
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
     .with_core_isolation_publisher(Arc::new(core_isolation_tx))
@@ -13123,6 +13124,7 @@ peer_group = "plain"
             gnmi_dialout: None,
             mrt: None,
             file_path: None,
+            source_file_target: None,
             dynamic_neighbors: Vec::new(),
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),

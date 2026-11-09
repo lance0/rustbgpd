@@ -3410,6 +3410,7 @@ dependencies = [
  "criterion",
  "libc",
  "logos",
+ "nix 0.31.3",
  "regex",
  "rustbgpd-wire",
  "rustc-hash 2.1.3",

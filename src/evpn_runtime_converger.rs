@@ -289,11 +289,13 @@ pub(crate) struct EvpnRuntimeReloadApply {
     apply_lock: Arc<tokio::sync::Mutex<()>>,
     converger: Arc<dyn DaemonEvpnRuntimeConverger>,
     committed_config: Arc<Mutex<Config>>,
-    /// What an `ApplyEvpnRuntime` candidate may name. Taken from the config
-    /// the daemon started with and from each applied on-disk reload, never
-    /// from an applied API candidate: that has no config file of its own,
-    /// may name fewer credential files and asks its own graph budget.
+    /// Standalone/test fallback without the accepted-config watch. API
+    /// candidates never become source authority.
     source_limits: Arc<Mutex<crate::config::CandidateSourceLimits>>,
+    /// Production source authority advances only when the config bridge
+    /// publishes its accepted snapshot, including generation reloads.
+    accepted_source:
+        Option<tokio::sync::watch::Receiver<Arc<crate::config::AcceptedConfigSnapshot>>>,
     /// Admission for candidate loads, which read files on the blocking
     /// pool before the apply lock: at most [`MAX_EVPN_CANDIDATE_LOADS`].
     candidate_loads: Arc<tokio::sync::Semaphore>,
@@ -344,6 +346,7 @@ impl EvpnRuntimeReloadApply {
             apply_lock,
             converger,
             source_limits: Arc::new(Mutex::new(committed_config.candidate_source_limits())),
+            accepted_source: None,
             candidate_loads: Arc::new(tokio::sync::Semaphore::new(MAX_EVPN_CANDIDATE_LOADS)),
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
@@ -356,6 +359,14 @@ impl EvpnRuntimeReloadApply {
             auto_lacp_before_lock: None,
             metrics: BgpMetrics::new(),
         }
+    }
+
+    pub(crate) fn with_accepted_source(
+        mut self,
+        accepted: Option<tokio::sync::watch::Receiver<Arc<crate::config::AcceptedConfigSnapshot>>>,
+    ) -> Self {
+        self.accepted_source = accepted;
+        self
     }
 
     /// Resolve `auto-lacp` segments through the probe's table.
@@ -431,6 +442,9 @@ impl EvpnRuntimeReloadApply {
     /// Take later `ApplyEvpnRuntime` source limits from `config`, a reload's
     /// on-disk config: the source authority, unlike an applied API candidate.
     fn set_source_limits(&self, config: &Config) {
+        if self.accepted_source.is_some() {
+            return;
+        }
         *self
             .source_limits
             .lock()
@@ -537,14 +551,25 @@ impl EvpnRuntimeReloadApply {
                     "{MAX_EVPN_CANDIDATE_LOADS} EVPN runtime candidates are already loading; retry"
                 ))
             })?;
-        let limits = self
-            .source_limits
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        // Pin one accepted generation before the blocking read; release the
+        // watch borrow before awaiting or deriving filesystem protection.
+        let accepted = self
+            .accepted_source
+            .as_ref()
+            .map(|source| Arc::clone(&source.borrow()));
+        let fallback = Arc::clone(&self.source_limits);
         let candidate_toml = request.candidate_toml.clone();
         let candidate = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let limits = accepted.map_or_else(
+                || {
+                    fallback
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                },
+                |accepted| accepted.config_ref().candidate_source_limits(),
+            );
             Config::load_rpc_candidate(
                 &candidate_toml,
                 "candidate EVPN runtime config",

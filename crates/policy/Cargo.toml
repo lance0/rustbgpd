@@ -31,6 +31,7 @@ tracing.workspace = true
 # `O_NONBLOCK` for the external-source reader: opening a FIFO must not
 # wait for a writer.
 libc.workspace = true
+nix = { workspace = true, features = ["dir"] }
 
 [dev-dependencies]
 criterion.workspace = true

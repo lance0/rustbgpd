@@ -916,3 +916,191 @@ fn candidate_backups_fail_closed_for_a_dangling_config_symlink() {
         }
     }
 }
+
+#[test]
+fn accepted_target_backups_survive_launch_retarget_and_unlink() {
+    for unlink in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let edge = dir.path().join("edge.rpol");
+        std::fs::write(&edge, POLICY).unwrap();
+        let active = dir.path().join("active.toml");
+        let alternate = dir.path().join("alternate.toml");
+        let launch = dir.path().join("config.toml");
+        std::fs::write(&active, candidate(&[&edge], "")).unwrap();
+        std::fs::write(&alternate, candidate(&[&edge], "")).unwrap();
+        std::os::unix::fs::symlink(&active, &launch).unwrap();
+        let accepted = crate::config::AcceptedConfigSnapshot::load(&launch, None).unwrap();
+        let backup = dir.path().join("active.toml.unconfirmed-old.rpol");
+        let alias = dir.path().join("innocent.rpol");
+        let importer = dir.path().join("importer.rpol");
+        std::fs::write(&backup, POLICY).unwrap();
+        std::fs::hard_link(&backup, &alias).unwrap();
+        std::fs::write(&importer, "import \"innocent.rpol\"\n").unwrap();
+        std::fs::remove_file(&launch).unwrap();
+        if !unlink {
+            std::os::unix::fs::symlink(&alternate, &launch).unwrap();
+        }
+        let declaring = dir.path().join("declaring.rpol");
+        std::fs::write(&declaring, "dataset asn-set customers\npolicy uses { term t { if route.origin-as in customers { accept } } }\n").unwrap();
+        let asn_backup = dir.path().join("active.toml.unconfirmed-asns");
+        let asn_alias = dir.path().join("customers.list");
+        std::fs::write(&asn_backup, "64500\n").unwrap();
+        std::fs::hard_link(asn_backup, &asn_alias).unwrap();
+        let runtime =
+            Config::load_toml_with_diagnostics(&candidate(&[&edge], ""), "runtime").unwrap();
+        let derived = accepted.derive_config(runtime).unwrap();
+        let restored = crate::config::AcceptedConfigSnapshot::load_retained_with_target(
+            accepted.normalized_toml(),
+            &launch,
+            accepted.config_ref().source_file_target.clone(),
+        )
+        .unwrap();
+        for snapshot in [&accepted, derived.as_ref(), restored.as_ref()] {
+            let limits = snapshot.config_ref().candidate_source_limits();
+            for capture in [false, true] {
+                for source in [&backup, &alias, &importer] {
+                    assert!(
+                        Config::load_rpc_candidate(
+                            &candidate(&[source], ""),
+                            "candidate",
+                            capture,
+                            Some(&limits)
+                        )
+                        .is_err()
+                    );
+                    Config::load_rpc_candidate(
+                        &candidate(&[source], ""),
+                        "operator",
+                        capture,
+                        None,
+                    )
+                    .unwrap();
+                }
+                Config::load_rpc_candidate(
+                    &candidate(&[&edge], ""),
+                    "candidate",
+                    capture,
+                    Some(&limits),
+                )
+                .unwrap();
+                let dataset = format!(
+                    "[policy.datasets.customers]\npath = {:?}\n",
+                    asn_alias.display().to_string()
+                );
+                let datasets_toml = candidate(&[&declaring], &dataset);
+                assert!(
+                    Config::load_rpc_candidate(&datasets_toml, "candidate", capture, Some(&limits))
+                        .is_err()
+                );
+                Config::load_rpc_candidate(&datasets_toml, "operator", capture, None).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn derived_and_retained_snapshots_own_distinct_published_inodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, candidate(&[], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let original_alias = dir.path().join("original.rpol");
+    std::fs::hard_link(&config_path, &original_alias).unwrap();
+    let derived = accepted.derive_config(accepted.config()).unwrap();
+    let retained = crate::config::AcceptedConfigSnapshot::load_retained_with_target(
+        accepted.normalized_toml(),
+        &config_path,
+        accepted.config_ref().source_file_target.clone(),
+    )
+    .unwrap();
+    let mut aliases = vec![original_alias];
+    for (index, snapshot) in [derived.as_ref(), retained.as_ref()]
+        .into_iter()
+        .enumerate()
+    {
+        let stage = dir.path().join(format!("stage-{index}"));
+        let alias = dir.path().join(format!("alias-{index}.rpol"));
+        std::fs::write(&stage, POLICY).unwrap();
+        let file = std::fs::File::open(&stage).unwrap();
+        std::fs::rename(stage, &config_path).unwrap();
+        std::fs::hard_link(&config_path, &alias).unwrap();
+        snapshot.record_published_file(file);
+        aliases.push(alias);
+        assert!(
+            accepted
+                .config_ref()
+                .source_file_target
+                .as_ref()
+                .unwrap()
+                .verify_target()
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .config_ref()
+                .source_file_target
+                .as_ref()
+                .unwrap()
+                .verify_target()
+                .is_ok()
+        );
+        if index == 0 {
+            assert!(
+                retained
+                    .config_ref()
+                    .source_file_target
+                    .as_ref()
+                    .unwrap()
+                    .verify_target()
+                    .is_err()
+            );
+        }
+    }
+    let unrelated = dir.path().join("unrelated");
+    std::fs::write(&unrelated, "unrelated").unwrap();
+    std::fs::rename(unrelated, &config_path).unwrap();
+    for snapshot in [&accepted, derived.as_ref(), retained.as_ref()] {
+        assert!(
+            rustbgpd_policy::datasets::SourceFileProtection::new(
+                vec![config_path.clone()],
+                Some(config_path.clone()),
+            )
+            .snapshot(snapshot.config_ref().source_file_target.as_ref())
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn candidate_admission_uses_the_accepted_watch_file_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    manager.replace_current_config(accepted.config());
+    let next = accepted.derive_config(accepted.config()).unwrap();
+    let stage = dir.path().join("stage");
+    let alias = dir.path().join("published.rpol");
+    std::fs::write(&stage, POLICY).unwrap();
+    let file = std::fs::File::open(&stage).unwrap();
+    std::fs::rename(stage, &config_path).unwrap();
+    std::fs::hard_link(&config_path, &alias).unwrap();
+    next.record_published_file(file);
+    let (_accepted_tx, accepted_rx) = tokio::sync::watch::channel(next);
+    let manager = manager.with_accepted_identity(accepted_rx);
+    Config::load_rpc_candidate(
+        &candidate(&[&edge], ""),
+        "healthy published generation",
+        false,
+        Some(&manager.candidate_source_limits()),
+    )
+    .unwrap();
+    let unrelated = dir.path().join("unrelated");
+    std::fs::write(&unrelated, "unrelated").unwrap();
+    std::fs::rename(unrelated, &config_path).unwrap();
+    let error = diff_error(manager, candidate(&[&alias], "")).await;
+    assert!(error.contains("unavailable or changed"), "{error}");
+}

@@ -481,6 +481,7 @@ impl<'a> CanonicalConfig<'a> {
             apply_bum_enforcement,
             inbound_admission,
             file_path: _,
+            source_file_target: _,
         } = config;
         let posture = config.rfc8212_posture();
         let mut canonical_global = global.clone();

@@ -253,7 +253,7 @@ impl PeerManager {
         self.diff_loaded_runtime_config(&load_runtime_candidate(
             candidate_toml,
             false,
-            Some(&self.current_config.candidate_source_limits()),
+            Some(&self.candidate_source_limits()),
         ))
     }
 
@@ -279,7 +279,7 @@ impl PeerManager {
         let mut candidate = load_runtime_candidate(
             candidate_toml,
             verify_external_inputs,
-            Some(&self.current_config.candidate_source_limits()),
+            Some(&self.candidate_source_limits()),
         );
         self.plan_loaded_config_transaction(&mut candidate, expected_runtime_snapshot_token)
             .await

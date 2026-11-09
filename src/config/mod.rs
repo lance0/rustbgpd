@@ -299,10 +299,7 @@ enum SourceRules<'a> {
 impl SourceRules<'_> {
     fn protection(self) -> rustbgpd_policy::datasets::SourceFileProtection {
         match self {
-            Self::Api(Some(limits)) => rustbgpd_policy::datasets::SourceFileProtection {
-                files: limits.protected_files.clone(),
-                config_file: limits.config_file.clone(),
-            },
+            Self::Api(Some(limits)) => limits.source_protection.clone(),
             _ => rustbgpd_policy::datasets::SourceFileProtection::default(),
         }
     }
@@ -324,6 +321,8 @@ pub(crate) struct CandidateSourceLimits {
     protected_files: Vec<PathBuf>,
     /// Running config path, used to refuse adjacent unconfirmed backups.
     config_file: Option<PathBuf>,
+    source_file_target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
+    source_protection: rustbgpd_policy::datasets::SourceFileProtection,
     /// The running config's `[policy] rpol_max_graph_bytes`; a candidate
     /// cannot raise its own read budget.
     max_graph_bytes: usize,
@@ -1061,6 +1060,8 @@ impl Config {
         CandidateSourceLimits {
             roots,
             config_file: self.file_path.clone(),
+            source_file_target: self.source_file_target.clone(),
+            source_protection: rustbgpd_policy::datasets::SourceFileProtection::default(),
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
             // The gNMI dial-out TLS files are read only when a target
             // connects, so a candidate never names them, but they are the
@@ -1143,31 +1144,44 @@ impl Config {
         };
         let canonical = limits
             .map(|limits| -> Result<CandidateSourceLimits, String> {
-                let config_file = match limits.config_file.as_ref() {
-                    Some(path) => match path.canonicalize() {
-                        Ok(target) => Some(target),
-                        Err(_)
-                            if path
-                                .symlink_metadata()
-                                .is_ok_and(|metadata| metadata.file_type().is_symlink()) =>
-                        {
-                            return Err(
-                                "error: the accepted config's symlink target is unavailable; \
-                                 refusing confined candidate sources"
-                                    .to_string(),
-                            );
-                        }
-                        Err(_) => path.parent().and_then(|parent| {
-                            Some(parent.canonicalize().ok()?.join(path.file_name()?))
-                        }),
-                    },
-                    None => None,
+                let target = match (&limits.config_file, &limits.source_file_target) {
+                    (Some(_), Some(target)) => {
+                        target.verify_target().map_err(|_| {
+                            "error: accepted config symlink target is unavailable or changed"
+                                .to_string()
+                        })?;
+                        Some(target.clone())
+                    }
+                    (Some(launch), None) => Some(
+                        rustbgpd_policy::datasets::SourceFileTarget::resolve(launch).map_err(
+                            |_| {
+                                "error: accepted config symlink target is unavailable or changed"
+                                    .to_string()
+                            },
+                        )?,
+                    ),
+                    (None, _) => None,
                 };
+                let config_file = target.as_ref().map(|target| target.path().to_path_buf());
+                let mut protected_files = canonicalize(&limits.protected_files);
+                if let Some(path) = &config_file {
+                    protected_files.push(path.clone());
+                }
+                let source_protection = rustbgpd_policy::datasets::SourceFileProtection::new(
+                    protected_files.clone(),
+                    config_file.clone(),
+                )
+                .snapshot(target.as_ref())
+                .map_err(|_| {
+                    "error: protected config source inventory is unavailable or changed".to_string()
+                })?;
                 Ok(CandidateSourceLimits {
                     roots: canonicalize(&limits.roots),
                     credential_files: limits.credential_files.clone(),
-                    protected_files: canonicalize(&limits.protected_files),
+                    protected_files,
                     config_file,
+                    source_file_target: target,
+                    source_protection,
                     max_graph_bytes: limits.max_graph_bytes,
                 })
             })
@@ -1238,10 +1252,12 @@ impl Config {
         path: &str,
         prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
     ) -> Result<Self, String> {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => return Err(format!("error: failed to read {path}: {e}")),
-        };
+        let (mut source, source_file_target) =
+            rustbgpd_policy::datasets::SourceFileTarget::open(std::path::Path::new(path))
+                .map_err(|e| format!("error: failed to read {path}: {e}"))?;
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut source, &mut content)
+            .map_err(|e| format!("error: failed to read {path}: {e}"))?;
         let file_path = absolute_config_path(std::path::Path::new(path))?;
         let mut config = Self::load_from_toml_source_with_datasets(
             &content,
@@ -1251,6 +1267,7 @@ impl Config {
             DatasetBindMode::Apply,
         )?;
         config.file_path = Some(file_path);
+        config.source_file_target = Some(source_file_target);
         Ok(config)
     }
 
@@ -1263,7 +1280,11 @@ impl Config {
         path: &str,
         prior_datasets: &rustbgpd_policy::datasets::DatasetBindings,
     ) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
+        let (mut source, source_file_target) =
+            rustbgpd_policy::datasets::SourceFileTarget::open(std::path::Path::new(path))
+                .map_err(|error| format!("error: failed to read {path}: {error}"))?;
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut source, &mut content)
             .map_err(|error| format!("error: failed to read {path}: {error}"))?;
         let file_path = absolute_config_path(std::path::Path::new(path))?;
         let mut config = Self::load_from_toml_source_with_datasets(
@@ -1274,6 +1295,7 @@ impl Config {
             DatasetBindMode::Stage,
         )?;
         config.file_path = Some(file_path);
+        config.source_file_target = Some(source_file_target);
         Ok(config)
     }
 

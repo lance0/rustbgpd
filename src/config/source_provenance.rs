@@ -310,26 +310,51 @@ impl AcceptedConfigSnapshot {
     /// external inputs relative to the daemon's real config path. The retained
     /// TOML bytes are already pinned by the history reader; this performs the
     /// one detached external-source capture used by provenance-aware restore.
+    #[cfg(test)]
     pub(crate) fn load_retained(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
         Self::load_retained_with_hook(content, config_path, || {})
     }
 
-    /// [`Self::load_retained`] for a document the caller writes to the
+    pub(crate) fn load_retained_with_target(
+        content: &str,
+        config_path: &Path,
+        target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
+    ) -> Result<Arc<Self>, String> {
+        Self::load_retained_with_authority(content, config_path, target, || {})
+    }
+
+    /// Load a retained document that the caller writes to the
     /// config file itself (a commit-confirm boot revert's restore). The
     /// snapshot records `content` as the file's bytes, so the persister's
     /// stale-source fence is armed from boot rather than off until the
     /// daemon's first write or SIGHUP.
-    pub(crate) fn load_restored(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
-        let mut snapshot = Self::load_retained(content, config_path)?;
+    pub(crate) fn load_restored(
+        content: &str,
+        config_path: &Path,
+        target: rustbgpd_policy::datasets::SourceFileTarget,
+    ) -> Result<Arc<Self>, String> {
+        let mut snapshot = Self::load_retained_with_target(content, config_path, Some(target))?;
         if let Some(fresh) = Arc::get_mut(&mut snapshot) {
             fresh.read_sha256 = Some(Sha256::digest(content.as_bytes()).into());
         }
         Ok(snapshot)
     }
 
+    #[cfg(test)]
     fn load_retained_with_hook(
         content: &str,
         config_path: &Path,
+        after_capture: impl FnOnce(),
+    ) -> Result<Arc<Self>, String> {
+        let target = rustbgpd_policy::datasets::SourceFileTarget::resolve(config_path)
+            .map_err(|_| "accepted config target authority unavailable".to_string())?;
+        Self::load_retained_with_authority(content, config_path, Some(target), after_capture)
+    }
+
+    fn load_retained_with_authority(
+        content: &str,
+        config_path: &Path,
+        target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
         after_capture: impl FnOnce(),
     ) -> Result<Arc<Self>, String> {
         let config_path = absolute_config_path(config_path)?;
@@ -345,6 +370,7 @@ impl AcceptedConfigSnapshot {
             None,
             super::SourceRules::OnDisk,
         )?;
+        config.source_file_target = target.map(|target| target.fork());
         config.file_path = Some(config_path);
         after_capture();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
@@ -410,18 +436,19 @@ impl AcceptedConfigSnapshot {
         // Stat the open file before reading it, so the mtime describes these
         // bytes even if the operator saves again (in place or by rename)
         // while the load or the reload that follows is still running.
-        let (bytes, read_mtime) = std::fs::File::open(path)
-            .and_then(|mut file| {
-                let mtime = file
-                    .metadata()
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-                let mut bytes = Vec::new();
-                std::io::Read::read_to_end(&mut file, &mut bytes)?;
-                Ok((bytes, mtime))
-            })
-            .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
+        let (bytes, read_mtime, source_file_target) =
+            rustbgpd_policy::datasets::SourceFileTarget::open(path)
+                .and_then(|(mut file, target)| {
+                    let mtime = file
+                        .metadata()
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+                    Ok((bytes, mtime, target))
+                })
+                .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
         let read_sha256 = Some(Sha256::digest(&bytes).into());
         let content = String::from_utf8(bytes)
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
@@ -439,6 +466,7 @@ impl AcceptedConfigSnapshot {
             super::SourceRules::OnDisk,
         )?;
         config.file_path = Some(file_path);
+        config.source_file_target = Some(source_file_target);
         after_capture();
         if let Some(prior) = prior {
             config
@@ -466,8 +494,20 @@ impl AcceptedConfigSnapshot {
         })
     }
 
+    pub(crate) fn record_published_file(&self, file: std::fs::File) {
+        if let Some(target) = &self.config.source_file_target {
+            target.record_published_file(file);
+        }
+    }
+
     pub(crate) fn derive_config(&self, mut config: Config) -> Result<Arc<Self>, String> {
         self.require_same_external_roster(&config)?;
+        config.file_path.clone_from(&self.config.file_path);
+        config.source_file_target = self
+            .config
+            .source_file_target
+            .as_ref()
+            .map(rustbgpd_policy::datasets::SourceFileTarget::fork);
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
         let normalized_toml = Arc::new(
             persisted_config_document_bounded(&mut config)
@@ -497,6 +537,9 @@ impl AcceptedConfigSnapshot {
             toml::from_str(content).map_err(|error| format!("invalid {source_name}: {error}"))?;
         self.require_same_external_roster(&config)?;
         config.file_path.clone_from(&self.config.file_path);
+        config
+            .source_file_target
+            .clone_from(&self.config.source_file_target);
         config.policy.rpol.clone_from(&self.config.policy.rpol);
         config.policy.dataset_bindings = self.config.policy.dataset_bindings.detached_clone();
         config.policy.dataset_events = self.config.policy.dataset_events.clone();
@@ -521,6 +564,9 @@ impl AcceptedConfigSnapshot {
             );
         }
         config.file_path.clone_from(&self.config.file_path);
+        config
+            .source_file_target
+            .clone_from(&self.config.source_file_target);
         config.policy.rpol = rpol;
         config.policy.dataset_bindings = live_bindings.clone();
         config
@@ -550,6 +596,9 @@ impl AcceptedConfigSnapshot {
             );
         }
         config.file_path.clone_from(&self.config.file_path);
+        config
+            .source_file_target
+            .clone_from(&self.config.source_file_target);
         Ok(config)
     }
 

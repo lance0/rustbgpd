@@ -145,10 +145,7 @@ impl RpolFile {
             path,
             roots,
             max_graph_bytes,
-            &crate::datasets::SourceFileProtection {
-                files: excluded.to_vec(),
-                config_file: None,
-            },
+            &crate::datasets::SourceFileProtection::new(excluded.to_vec(), None),
         )
     }
 

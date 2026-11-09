@@ -299,6 +299,7 @@ fn make_dynamic_manager_config() -> Config {
         gnmi_dialout: None,
         mrt: None,
         file_path: None,
+        source_file_target: None,
         evpn_instances: Vec::new(),
         ethernet_segments: Vec::new(),
         evpn_core_isolation: None,

@@ -494,64 +494,10 @@ pub fn load_dataset_file_protected(
     crate::rpol::parse_dataset_text(&text, kind)
 }
 
-/// Files forbidden as policy inputs, including config-adjacent boot backups.
 #[doc(hidden)]
-#[derive(Debug, Clone, Default)]
-pub struct SourceFileProtection {
-    /// Protected config and credential paths.
-    pub files: Vec<PathBuf>,
-    /// Running config path whose `.unconfirmed-*` siblings are protected.
-    pub config_file: Option<PathBuf>,
-}
-
-impl SourceFileProtection {
-    /// Whether a canonical source names a protected file or boot backup.
-    #[must_use]
-    pub fn protects_path(&self, path: &Path) -> bool {
-        // shortcut: backups match sibling names; enumerate backup inodes if aliases need protection.
-        self.files.iter().any(|file| file == path)
-            || self.config_file.as_ref().is_some_and(|config| {
-                config.parent() == path.parent()
-                    && config
-                        .file_name()
-                        .zip(path.file_name())
-                        .is_some_and(|(config, name)| {
-                            let mut prefix = config.as_encoded_bytes().to_vec();
-                            prefix.extend_from_slice(b".unconfirmed-");
-                            name.as_encoded_bytes().starts_with(&prefix)
-                        })
-            })
-    }
-
-    fn check_opened(&self, path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
-        let denied = || {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "is not an admissible policy source",
-            )
-        };
-        if self.protects_path(path) {
-            return Err(denied());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            for protected in &self.files {
-                match std::fs::metadata(protected) {
-                    Ok(other) if (metadata.dev(), metadata.ino()) == (other.dev(), other.ino()) => {
-                        return Err(denied());
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = metadata;
-        Ok(())
-    }
-}
+pub use crate::source_file::{
+    MAX_BACKUP_DIRECTORY_ENTRIES, SourceFileProtection, SourceFileTarget,
+};
 
 /// Read a whole regular file holding at most `max_bytes`.
 ///
@@ -594,7 +540,9 @@ pub fn read_regular_file_bounded_protected(
             format!("larger than the {max_bytes}-byte bound"),
         )
     };
-    if !std::fs::metadata(path)?.is_file() {
+    crate::source_file::mark_stat();
+    let expected = std::fs::metadata(path)?;
+    if !expected.is_file() {
         return Err(not_regular());
     }
     #[cfg(test)]
@@ -606,8 +554,13 @@ pub fn read_regular_file_bounded_protected(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options.open(path)?;
-    let meta = file.metadata()?;
+    let (file, meta) = if protection.is_active() {
+        SourceFileProtection::open_checked(path, &expected)?
+    } else {
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        (file, metadata)
+    };
     if !meta.is_file() {
         return Err(not_regular());
     }
@@ -616,8 +569,10 @@ pub fn read_regular_file_bounded_protected(
         return Err(too_large());
     }
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    crate::source_file::mark_read();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
+    protection.check_directory()?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(too_large());
     }
@@ -732,12 +687,59 @@ mod tests {
                 std::fs::rename(&replacement, &swapped_source).unwrap();
             }));
         });
-        let protection = SourceFileProtection {
-            files: vec![credential],
-            config_file: None,
-        };
+        let protection = SourceFileProtection::new(vec![credential], None);
         let error = read_regular_file_bounded_protected(&source, 1024, &protection).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_source_refuses_backup_symlink_swaps_after_stat() {
+        for ancestor in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("config.toml");
+            std::fs::write(&config, "accepted").unwrap();
+            let (_, target) = SourceFileTarget::open(&config).unwrap();
+            let safe_dir = dir.path().join("safe");
+            let secret_dir = dir.path().join("secrets");
+            std::fs::create_dir(&safe_dir).unwrap();
+            std::fs::create_dir(&secret_dir).unwrap();
+            let source = safe_dir.join("source.rpol");
+            std::fs::write(&source, "safe").unwrap();
+            let backup = dir.path().join("config.toml.unconfirmed-old");
+            std::fs::write(&backup, "secret").unwrap();
+            std::fs::hard_link(&backup, secret_dir.join("source.rpol")).unwrap();
+            let protection = SourceFileProtection::new(vec![config.clone()], Some(config))
+                .snapshot(Some(&target))
+                .unwrap();
+            let swapped_source = source.clone();
+            AFTER_STAT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    if ancestor {
+                        std::fs::rename(&safe_dir, safe_dir.with_extension("old")).unwrap();
+                        std::os::unix::fs::symlink(secret_dir, safe_dir).unwrap();
+                    } else {
+                        std::fs::remove_file(&swapped_source).unwrap();
+                        std::os::unix::fs::symlink(backup, swapped_source).unwrap();
+                    }
+                }));
+            });
+            crate::source_file::take_work();
+            assert!(read_regular_file_bounded_protected(&source, 1024, &protection).is_err());
+            let work = crate::source_file::take_work();
+            assert_eq!(work.enumeration_probes, 0);
+            assert_eq!(work.entries, 0);
+            assert_eq!(work.backup_opens, 0);
+            assert_eq!(work.backup_stats, 0);
+            assert_eq!(work.retained_identities, 0);
+            assert!(work.component_inspections <= source.components().count());
+            assert!(work.directory_opens <= source.components().count());
+            assert_eq!(work.source_opens, usize::from(!ancestor));
+            assert_eq!(work.source_stats, 1);
+            assert_eq!(work.fixed_stats, 0);
+            assert_eq!(work.directory_checks, 0);
+            assert_eq!(work.reads, 0);
+        }
     }
 
     /// Run `load` on its own thread and wait at most five seconds, so a

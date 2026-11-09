@@ -1187,6 +1187,7 @@ impl PeerManager {
                 gnmi_dialout: None,
                 mrt: None,
                 file_path: None,
+                source_file_target: None,
                 dynamic_neighbors: Vec::new(),
                 evpn_instances: Vec::new(),
                 ethernet_segments: Vec::new(),
@@ -1267,6 +1268,9 @@ impl PeerManager {
         // daemon's config file stays the one later candidates may not read.
         if config.file_path.is_none() {
             config.file_path.clone_from(&self.current_config.file_path);
+            config
+                .source_file_target
+                .clone_from(&self.current_config.source_file_target);
         }
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
@@ -1794,6 +1798,13 @@ impl PeerManager {
         command
     }
 
+    fn candidate_source_limits(&self) -> crate::config::CandidateSourceLimits {
+        self.accepted_rx.as_ref().map_or_else(
+            || self.current_config.candidate_source_limits(),
+            |source| source.borrow().config_ref().candidate_source_limits(),
+        )
+    }
+
     /// Load a diff or plan candidate on the blocking pool; the request
     /// resumes in [`Self::finish_candidate_load`]. Beyond
     /// [`MAX_CANDIDATE_LOADS`] in flight the request is refused. Unless
@@ -1821,7 +1832,7 @@ impl PeerManager {
             }
             return;
         }
-        let limits = (!operator_sources).then(|| self.current_config.candidate_source_limits());
+        let limits = (!operator_sources).then(|| self.candidate_source_limits());
         self.candidate_loads
             .spawn_blocking(move || LoadedCandidate {
                 candidate: reconcile::load_runtime_candidate(
