@@ -964,7 +964,7 @@ mod tests {
 
         let bgp_event = route_event_to_bgp_event(event);
 
-        assert_eq!(bgp_event.timestamp, "123");
+        assert_eq!(bgp_event.timestamp_unix_ms, 123_000);
         assert_eq!(bgp_event.category, proto::EventCategory::Route as i32);
         assert_eq!(
             bgp_event.event_type,
@@ -1029,7 +1029,7 @@ mod tests {
             Some(peer1),
         ));
 
-        assert_eq!(bgp_event.timestamp, "123");
+        assert_eq!(bgp_event.timestamp_unix_ms, 123_000);
         assert_eq!(bgp_event.category, proto::EventCategory::Evpn as i32);
         assert_eq!(
             bgp_event.event_type,
@@ -1344,7 +1344,6 @@ mod tests {
 
     fn bfd_bgp_event(event_type: proto::BgpEventType, peer: &str) -> proto::BgpEvent {
         proto::BgpEvent {
-            timestamp: "0".to_string(),
             timestamp_unix_ms: 0,
             category: proto::EventCategory::Bfd as i32,
             event_type: event_type as i32,
@@ -1360,7 +1359,7 @@ mod tests {
                 event_type: event_type as i32,
                 peer_address: peer.to_string(),
                 peer_interface: String::new(),
-                timestamp: "0".to_string(),
+                timestamp_unix_ms: 0,
                 old_state: proto::BfdSessionState::Down as i32,
                 new_state: proto::BfdSessionState::Up as i32,
                 diagnostic: "none".to_string(),
@@ -1515,12 +1514,14 @@ mod tests {
     /// actors enabled. SMET adds 16 B per slot instead of 160 B unboxed.
     /// Removing the envelope `event_id` took 16 B back out of each slot, and
     /// the envelope's typed `timestamp_unix_ms` added 8 B.
-    /// The two event-time EVPN interface strings add 48 B per slot.
+    /// The two event-time EVPN interface strings add 48 B per slot. Removing
+    /// the envelope and payload decimal-string `timestamp` fields (each
+    /// payload gaining an 8 B `timestamp_unix_ms` instead) took 40 B out.
     /// Populated views allocate their boxes and retained attribute data
     /// outside this payload.
     #[test]
     fn watch_events_ring_slot_payload_size_pin() {
-        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 1016);
+        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 976);
     }
 
     #[test]

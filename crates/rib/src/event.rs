@@ -199,13 +199,6 @@ pub fn unix_time_ms(time: SystemTime) -> i64 {
     })
 }
 
-/// Renders an event time for the deprecated decimal-string `timestamp`
-/// fields: whole Unix epoch seconds, truncated.
-#[must_use]
-pub fn unix_seconds_string(timestamp_unix_ms: i64) -> String {
-    timestamp_unix_ms.div_euclid(1000).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -213,25 +206,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn events_in_one_second_get_distinct_ordered_ms_and_the_same_seconds_string() {
+    fn events_in_one_second_get_distinct_ordered_ms() {
         let second = UNIX_EPOCH + Duration::from_secs(1_783_915_201);
         let first = unix_time_ms(second + Duration::from_millis(120));
         let next = unix_time_ms(second + Duration::from_millis(870));
         assert_eq!(first, 1_783_915_201_120);
         assert_eq!(next, 1_783_915_201_870);
         assert!(first < next);
-        // The deprecated string keeps whole, truncated seconds.
-        assert_eq!(unix_seconds_string(first), "1783915201");
-        assert_eq!(unix_seconds_string(next), "1783915201");
-        assert_eq!(unix_seconds_string(1_783_915_200_999), "1783915200");
-        assert_eq!(unix_seconds_string(1_783_915_201_000), "1783915201");
     }
 
     #[test]
     fn unix_time_ms_clamps_out_of_range_times() {
         assert_eq!(unix_time_ms(UNIX_EPOCH), 0);
         assert_eq!(unix_time_ms(UNIX_EPOCH - Duration::from_secs(1)), 0);
-        assert_eq!(unix_seconds_string(0), "0");
         assert!(unix_time_ms_now() > 1_700_000_000_000);
     }
 }

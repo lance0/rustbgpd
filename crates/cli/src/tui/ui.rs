@@ -300,7 +300,7 @@ fn draw_events(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 let color = theme.event_color(&e.event_type);
                 Line::from(vec![
                     Span::styled(
-                        format!("[{}] ", event_time(&e.timestamp)),
+                        format!("[{}] ", event_time(e.timestamp_unix_ms)),
                         Style::default().fg(theme.text_dim),
                     ),
                     Span::styled(format!("{:<10}", e.event_type), Style::default().fg(color)),
@@ -315,14 +315,13 @@ fn draw_events(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 }
 
 /// The events pane is width-bound, so it shows only the time of day from the
-/// same UTC rendering `rbgp events` prints (`03:05:14Z`). A value that is not
-/// integer seconds, or is past what that rendering covers, is shown as
-/// received.
-fn event_time(raw: &str) -> String {
-    crate::commands::watch::timestamp_unix_seconds(raw)
+/// same UTC rendering `rbgp events` prints (`03:05:14Z`). A time outside what
+/// that rendering covers is shown as whole Unix seconds.
+fn event_time(timestamp_unix_ms: i64) -> String {
+    crate::commands::watch::timestamp_unix_seconds(timestamp_unix_ms)
         .and_then(crate::commands::config::format_unix_utc)
         .and_then(|utc| utc.split_once('T').map(|(_, time)| time.to_string()))
-        .unwrap_or_else(|| raw.to_string())
+        .unwrap_or_else(|| crate::commands::watch::unix_seconds_string(timestamp_unix_ms))
 }
 
 fn route_event_context(event: &RouteEventEntry) -> String {
@@ -1396,7 +1395,7 @@ mod tests {
         )));
         let lag = |missed_count| RouteEventEntry {
             kind: RouteEventKind::StreamLag,
-            timestamp: "12:00:01".into(),
+            timestamp_unix_ms: 1_790_132_715_250,
             event_type: "stream_lagged".into(),
             prefix: String::new(),
             peer_address: String::new(),
@@ -1410,7 +1409,7 @@ mod tests {
         app.on_route_event(crate::tui::data::RouteEventUpdate::Event(lag(0)));
         app.on_route_event(crate::tui::data::RouteEventUpdate::Event(RouteEventEntry {
             kind: RouteEventKind::Route,
-            timestamp: "1790132714".into(),
+            timestamp_unix_ms: 1_790_132_714_999,
             event_type: "policy_filtered".into(),
             prefix: "203.0.113.0/24".into(),
             peer_address: "192.0.2.1".into(),
@@ -1440,10 +1439,10 @@ mod tests {
         assert!(rendered.contains("missed=0 reason=receiver_lagged"));
         assert!(rendered.contains("[03:05:14Z] policy_filtered"));
         assert!(!rendered.contains("1790132714"));
-        assert!(rendered.contains("[12:00:01] stream_lagged"));
-        assert_eq!(event_time("253402300799"), "23:59:59Z");
-        assert_eq!(event_time("253402300800"), "253402300800");
-        assert_eq!(event_time(&u64::MAX.to_string()), u64::MAX.to_string());
+        assert!(rendered.contains("[03:05:15Z] stream_lagged"));
+        assert_eq!(event_time(253_402_300_799_999), "23:59:59Z");
+        assert_eq!(event_time(253_402_300_800_000), "253402300800");
+        assert_eq!(event_time(-1), "-1");
     }
 
     fn snapshot(neighbors: Vec<NeighborState>, freshness: Freshness) -> DataSnapshot {

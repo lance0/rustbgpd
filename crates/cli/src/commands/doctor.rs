@@ -9124,14 +9124,14 @@ paths = ["x"]
         *server.state.list_neighbors_response.lock().await = vec![slow];
         *server.state.session_events.lock().await = vec![
             rustbgpd_api::proto::BgpEvent {
-                timestamp: now_unix_seconds().to_string(),
+                timestamp_unix_ms: i64::try_from(now_unix_seconds()).unwrap() * 1000,
                 peer_address: "10.0.0.2".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::SessionLost as i32,
                 summary: "recent session loss".to_string(),
                 ..Default::default()
             },
             rustbgpd_api::proto::BgpEvent {
-                timestamp: now_unix_seconds().to_string(),
+                timestamp_unix_ms: i64::try_from(now_unix_seconds()).unwrap() * 1000,
                 peer_address: "10.0.0.2".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
                 summary: "peer disabled after loss".to_string(),
@@ -9877,7 +9877,7 @@ paths = ["x"]
         *server.state.list_neighbors_response.lock().await = vec![disabled];
         *server.state.session_events.lock().await = vec![
             rustbgpd_api::proto::BgpEvent {
-                timestamp: "1".to_string(),
+                timestamp_unix_ms: 1000,
                 peer_address: "fe80::1%eth0".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
                 summary: "peer disabled".to_string(),
@@ -9886,7 +9886,7 @@ paths = ["x"]
             // A later ordinary FSM event must not erase the administrative
             // state retained immediately above.
             rustbgpd_api::proto::BgpEvent {
-                timestamp: "2".to_string(),
+                timestamp_unix_ms: 2000,
                 peer_address: "fe80::1%eth0".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::SessionStateChanged as i32,
                 summary: "transitioned to Idle".to_string(),
@@ -9950,7 +9950,7 @@ paths = ["x"]
         *server.state.policy_events.lock().await = ["eth0", "eth1"]
             .into_iter()
             .map(|interface| rustbgpd_api::proto::BgpEvent {
-                timestamp: "200".to_string(),
+                timestamp_unix_ms: 200_000,
                 peer_address: "fe80::1".to_string(),
                 summary: "policy evidence survives".to_string(),
                 payload: Some(rustbgpd_api::proto::bgp_event::Payload::Policy(
@@ -10030,7 +10030,7 @@ paths = ["x"]
         *server.state.policy_events_error.lock().await =
             Some((Code::Unavailable, "policy source unavailable".to_string()));
         *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
-            timestamp: "100".to_string(),
+            timestamp_unix_ms: 100_000,
             peer_address: "10.0.0.2".to_string(),
             summary: "session evidence survives".to_string(),
             ..Default::default()
@@ -10308,21 +10308,21 @@ paths = ["x"]
         *server.state.list_neighbors_response.lock().await = vec![stuck];
         *server.state.session_events.lock().await = vec![
             rustbgpd_api::proto::BgpEvent {
-                timestamp: "1".to_string(),
+                timestamp_unix_ms: 1000,
                 peer_address: "10.0.0.9".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
                 summary: "old incarnation disabled".to_string(),
                 ..Default::default()
             },
             rustbgpd_api::proto::BgpEvent {
-                timestamp: "1".to_string(),
+                timestamp_unix_ms: 1000,
                 peer_address: "10.0.0.9".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::PeerEnabled as i32,
                 summary: "replacement incarnation added enabled".to_string(),
                 ..Default::default()
             },
             rustbgpd_api::proto::BgpEvent {
-                timestamp: "1".to_string(),
+                timestamp_unix_ms: 1000,
                 peer_address: "10.0.0.9".to_string(),
                 event_type: rustbgpd_api::proto::BgpEventType::SessionStateChanged as i32,
                 summary: "old transition".to_string(),
@@ -10413,7 +10413,7 @@ paths = ["x"]
             &format!("md5_password={MD5_SECRET} for this peer"),
         )];
         *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
-            timestamp: "100".to_string(),
+            timestamp_unix_ms: 100_000,
             peer_address: "192.0.2.2".to_string(),
             summary: format!("peer offered bearer {BEARER_SECRET}"),
             ..Default::default()
@@ -11068,7 +11068,7 @@ paths = ["x"]
         disabled.config.as_mut().unwrap().interface = "eth0".to_string();
         *server.state.list_neighbors_response.lock().await = vec![disabled];
         *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
-            timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             peer_address: "fe80::1%eth0".to_string(),
             event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
             summary: "peer disabled".to_string(),

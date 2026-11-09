@@ -376,7 +376,7 @@ pub enum Freshness {
 
 pub struct RouteEventEntry {
     pub kind: RouteEventKind,
-    pub timestamp: String,
+    pub timestamp_unix_ms: i64,
     pub event_type: String,
     pub prefix: String,
     pub peer_address: String,
@@ -729,7 +729,7 @@ fn route_event_entry(event: BgpEvent) -> Option<RouteEventEntry> {
         bgp_event::Payload::StreamLag(lag) if event_type == BgpEventType::StreamLagged => {
             Some(RouteEventEntry {
                 kind: RouteEventKind::StreamLag,
-                timestamp: event.timestamp,
+                timestamp_unix_ms: event.timestamp_unix_ms,
                 event_type: format_event_type(event_type).to_string(),
                 prefix: String::new(),
                 peer_address: String::new(),
@@ -755,7 +755,7 @@ fn route_entry(event_type: &str, mut event: RouteEvent) -> RouteEventEntry {
     scope_address(&mut event.target_peer_address, &event.target_peer_interface);
     RouteEventEntry {
         kind: RouteEventKind::Route,
-        timestamp: event.timestamp,
+        timestamp_unix_ms: event.timestamp_unix_ms,
         event_type: event_type.to_string(),
         prefix: format!("{}/{}", event.prefix, event.prefix_length),
         peer_address: event.peer_address,
@@ -1232,7 +1232,7 @@ mod tests {
 
     fn policy_event(summary: &str) -> rustbgpd_api::proto::BgpEvent {
         rustbgpd_api::proto::BgpEvent {
-            timestamp: "2026-08-03T12:00:00Z".into(),
+            timestamp_unix_ms: 1_785_758_400_000,
             category: EventCategory::Route as i32,
             event_type: BgpEventType::RoutePolicyFiltered as i32,
             summary: summary.into(),
@@ -1244,7 +1244,7 @@ mod tests {
                     peer_address: "192.0.2.1".into(),
                     previous_peer_address: "192.0.2.2".into(),
                     target_peer_address: "192.0.2.3".into(),
-                    timestamp: "2026-08-03T12:00:00Z".into(),
+                    timestamp_unix_ms: 1_785_758_400_000,
                     path_id: 77,
                     reason: "policy_denied".into(),
                     ..Default::default()
@@ -1256,7 +1256,7 @@ mod tests {
 
     fn lag_event(summary: &str) -> rustbgpd_api::proto::BgpEvent {
         rustbgpd_api::proto::BgpEvent {
-            timestamp: "2026-08-03T12:00:01Z".into(),
+            timestamp_unix_ms: 1_785_758_401_000,
             category: EventCategory::Route as i32,
             event_type: BgpEventType::StreamLagged as i32,
             summary: summary.into(),

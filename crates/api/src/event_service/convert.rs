@@ -60,7 +60,6 @@ pub fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEv
     };
 
     proto::BgpEvent {
-        timestamp: route.timestamp.clone(),
         timestamp_unix_ms: route.timestamp_unix_ms,
         category: proto::EventCategory::Route as i32,
         event_type: event_type as i32,
@@ -106,7 +105,7 @@ pub fn evpn_event_to_bgp_event(event: &rustbgpd_rib::EvpnRouteEvent) -> proto::B
         event_type: event_type as i32,
         peer_address: peer_address.clone(),
         previous_peer_address: previous_peer_address.clone(),
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         route_type,
         rd,
         route_key,
@@ -126,7 +125,6 @@ pub fn evpn_event_to_bgp_event(event: &rustbgpd_rib::EvpnRouteEvent) -> proto::B
     };
 
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         timestamp_unix_ms: event.timestamp_unix_ms,
         category: proto::EventCategory::Evpn as i32,
         event_type: event_type as i32,
@@ -218,7 +216,7 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
     let session = proto::SessionEvent {
         event_type: event_type as i32,
         peer_address: peer_address.clone(),
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         old_state,
         new_state,
         session_role,
@@ -239,7 +237,6 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
     };
 
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         timestamp_unix_ms: event.timestamp_unix_ms,
         category: proto::EventCategory::Session as i32,
         event_type: event_type as i32,
@@ -267,7 +264,7 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
     let notification = proto::NotificationEvent {
         event_type: event_type as i32,
         peer_address: peer_address.clone(),
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         direction: direction.to_string(),
         code: u32::from(event.code),
         subcode: u32::from(event.subcode),
@@ -279,7 +276,6 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
     };
 
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         timestamp_unix_ms: event.timestamp_unix_ms,
         category: proto::EventCategory::Session as i32,
         event_type: event_type as i32,
@@ -307,7 +303,6 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
         timestamp_unix_ms,
         reason,
     } = event;
-    let timestamp = rustbgpd_rib::event::unix_seconds_string(timestamp_unix_ms);
     // Bare address plus interface, the identity shape of route events.
     let peer_address = peer.map_or_else(String::new, |peer| peer.to_string());
     let peer_interface = PeerKey::label_interface(peer_label.as_deref()).to_string();
@@ -318,13 +313,12 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
         target,
         peer_address: peer_address.clone(),
         affected_peer_count: u32::try_from(affected_peer_count).unwrap_or(u32::MAX),
-        timestamp: timestamp.clone(),
         reason: reason.clone(),
+        timestamp_unix_ms,
         peer_interface,
     };
 
     proto::BgpEvent {
-        timestamp,
         timestamp_unix_ms,
         category: proto::EventCategory::Policy as i32,
         event_type: proto::BgpEventType::PolicyChanged as i32,
@@ -356,7 +350,6 @@ pub(crate) fn stream_lag_bgp_event(
     let summary = format!("{source} event stream lagged; missed {missed_count} event(s)");
     let timestamp_unix_ms = rustbgpd_rib::event::unix_time_ms_now();
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_seconds_string(timestamp_unix_ms),
         timestamp_unix_ms,
         category: source_category as i32,
         event_type: proto::BgpEventType::StreamLagged as i32,
@@ -394,7 +387,6 @@ pub(super) fn dataplane_summary_to_bgp_event(
     };
     let timestamp_unix_ms = rustbgpd_rib::event::unix_time_ms_now();
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_seconds_string(timestamp_unix_ms),
         timestamp_unix_ms,
         category: proto::EventCategory::Dataplane as i32,
         event_type: proto::BgpEventType::DataplaneStatusChanged as i32,
@@ -495,16 +487,14 @@ mod tests {
             peer,
         );
         // A route withdrawal and the session teardown that caused it, 750 ms
-        // apart within one second: the typed field orders them, while the
-        // deprecated string fields keep whole truncated seconds.
+        // apart within one second: the typed field orders them, on both the
+        // envelope and the payload.
         route.timestamp_unix_ms = 1_783_915_200_120;
         let event = route_event_to_bgp_event(route);
-        assert_eq!(event.timestamp, "1783915200");
         assert_eq!(event.timestamp_unix_ms, 1_783_915_200_120);
         let Some(proto::bgp_event::Payload::Route(payload)) = event.payload else {
             panic!("expected route payload");
         };
-        assert_eq!(payload.timestamp, "1783915200");
         assert_eq!(payload.timestamp_unix_ms, 1_783_915_200_120);
 
         let event = session_event_to_bgp_event(SessionEvent::Lifecycle(SessionLifecycleEvent {
@@ -517,13 +507,31 @@ mod tests {
             session_role: None,
             reason: String::new(),
         }));
-        assert_eq!(event.timestamp, "1783915200");
         assert_eq!(event.timestamp_unix_ms, 1_783_915_200_870);
         assert!(payload.timestamp_unix_ms < event.timestamp_unix_ms);
         let Some(proto::bgp_event::Payload::Session(session)) = event.payload else {
             panic!("expected session payload");
         };
-        assert_eq!(session.timestamp, "1783915200");
+        assert_eq!(session.timestamp_unix_ms, 1_783_915_200_870);
+
+        let event =
+            session_event_to_bgp_event(SessionEvent::Notification(SessionNotificationEvent {
+                event_type: SessionNotificationEventType::Received,
+                peer,
+                peer_label: None,
+                timestamp_unix_ms: 1_783_915_200_871,
+                code: 6,
+                subcode: 2,
+                description: String::new(),
+                session_role: None,
+                shutdown_reason: None,
+                reason: String::new(),
+            }));
+        assert_eq!(event.timestamp_unix_ms, 1_783_915_200_871);
+        let Some(proto::bgp_event::Payload::Notification(notification)) = event.payload else {
+            panic!("expected notification payload");
+        };
+        assert_eq!(notification.timestamp_unix_ms, 1_783_915_200_871);
 
         let event = policy_event_to_bgp_event(PolicyEvent {
             operation: "set",
@@ -535,18 +543,13 @@ mod tests {
             timestamp_unix_ms: 1_783_915_201_999,
             reason: String::new(),
         });
-        assert_eq!(event.timestamp, "1783915201");
         assert_eq!(event.timestamp_unix_ms, 1_783_915_201_999);
         let Some(proto::bgp_event::Payload::Policy(policy)) = event.payload else {
             panic!("expected policy payload");
         };
-        assert_eq!(policy.timestamp, "1783915201");
+        assert_eq!(policy.timestamp_unix_ms, 1_783_915_201_999);
 
         let event = stream_lag_bgp_event(proto::EventCategory::Route, 1);
-        assert_eq!(
-            event.timestamp,
-            (event.timestamp_unix_ms / 1000).to_string()
-        );
         assert!(event.timestamp_unix_ms > 0);
     }
 

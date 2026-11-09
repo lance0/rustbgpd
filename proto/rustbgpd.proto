@@ -3376,8 +3376,9 @@ message RouteEvent {
   uint32 prefix_length = 3;
   string peer_address = 4;
   AddressFamily afi_safi = 5;
-  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
-  string timestamp = 6;
+  // 6 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 6;
+  reserved "timestamp";
   string previous_peer_address = 7;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
   uint32 path_id = 8;
@@ -3389,8 +3390,7 @@ message RouteEvent {
   // Stable operator-facing reason, e.g. "policy_denied".
   string reason = 11;
   // Event time in Unix epoch milliseconds, captured when the event is
-  // recorded. The deprecated timestamp string is this value truncated to
-  // whole seconds.
+  // recorded.
   int64 timestamp_unix_ms = 12;
   // Interfaces of the scoped (IPv6 link-local) neighbors named by
   // peer_address, previous_peer_address and target_peer_address; empty
@@ -3556,8 +3556,9 @@ message ListPolicyEventsResponse {
 message SessionEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
+  // 3 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 3;
+  reserved "timestamp";
   // Lowercase BGP FSM state names from the transport layer (`idle`, `connect`,
   // `active`, `open_sent`, `open_confirm`, `established`). PeerAdded has
   // empty old_state and `idle` new_state; PeerRemoved and peer
@@ -3574,6 +3575,9 @@ message SessionEvent {
   // one. peer_address is the bare IP literal; the pair identifies the
   // neighbor, as on RouteEvent.
   string peer_interface = 8;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 9;
 }
 
 message StreamLagEvent {
@@ -3589,8 +3593,9 @@ message StreamLagEvent {
 message NotificationEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
+  // 3 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 3;
+  reserved "timestamp";
   // "sent" or "received".
   string direction = 4;
   // BGP NOTIFICATION error code and subcode (RFC 4271 section 4.5).
@@ -3609,6 +3614,9 @@ message NotificationEvent {
   // one. peer_address is the bare IP literal; the pair identifies the
   // neighbor, as on RouteEvent.
   string peer_interface = 11;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 12;
 }
 
 message PolicyEvent {
@@ -3625,14 +3633,18 @@ message PolicyEvent {
   string peer_address = 5;
   // Number of currently managed peers the runtime mutation touched.
   uint32 affected_peer_count = 6;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 7;
+  // 7 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 7;
+  reserved "timestamp";
   // Stable operator-facing reason/summary string for this event.
   string reason = 8;
   // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
   // one. peer_address is the bare IP literal; the pair identifies the
   // neighbor, as on RouteEvent.
   string peer_interface = 9;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 10;
 }
 
 message DataplaneEvent {
@@ -3659,21 +3671,26 @@ message DataplaneRouteEvent {
   uint32 prefix_length = 7;
   string next_hop = 8;
   string peer_address = 9;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 10;
+  // 10 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 10;
+  reserved "timestamp";
   // Stable operator-facing reason/summary string for this event.
   string reason = 11;
   // Interface of the scoped (IPv6 link-local) neighbor named by
   // peer_address; empty for a numbered neighbor, as on FibRouteStatus.
   string peer_interface = 12;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 13;
 }
 
 message EvpnRouteEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
   string previous_peer_address = 3;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 4;
+  // 4 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 4;
+  reserved "timestamp";
   // Supported EVPN route type (1..=6).
   uint32 route_type = 5;
   // Lossless RD text; small-ASN Type 2 RDs use 0x plus 16 hex digits.
@@ -3691,13 +3708,17 @@ message EvpnRouteEvent {
   // Empty for numbered or absent peers, independent of the current roster.
   string peer_interface = 11;
   string previous_peer_interface = 12;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 13;
 }
 
 message BfdSessionEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
+  // 3 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 3;
+  reserved "timestamp";
   BfdSessionState old_state = 4;
   BfdSessionState new_state = 5;
   // Local diagnostic for this transition (RFC 5880 section 4.1), as a stable
@@ -3708,14 +3729,17 @@ message BfdSessionEvent {
   // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
   // one, as on BfdSession.
   string peer_interface = 8;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 9;
 }
 
 message BgpEvent {
-  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
-  string timestamp = 1;
+  // 1 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 1;
+  reserved "timestamp";
   // Event time in Unix epoch milliseconds, captured when the event is
-  // recorded. The deprecated timestamp string is this value truncated to
-  // whole seconds.
+  // recorded.
   int64 timestamp_unix_ms = 23;
   // Common fields are duplicated from the category-specific payload on purpose:
   // category-agnostic consumers can filter/render without unpacking the oneof,
