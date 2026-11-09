@@ -2104,7 +2104,7 @@ message TestPolicyRequest {
   // version-fenced walk in canonical (prefix, peer, path_id) order.
   uint32 limit = 6;
   // Maximum before/after attribute diffs to return (routes the policy
-  // accepted with modifications). 0 = none.
+  // accepted with modifications), up to 1,000. 0 = none.
   uint32 show_changes = 7;
   // Candidate dataset file contents supplied by the client, matched to
   // declarations in rpol_source. At most 16 bindings; missing, duplicate,
