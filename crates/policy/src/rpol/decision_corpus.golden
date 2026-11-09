@@ -1,4 +1,4 @@
-# rpol decision corpus: 273 programs, 2036 cases. Regenerate with
+# rpol decision corpus: 276 programs, 2036 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -351,6 +351,9 @@ docs/artifacts/soak/soak-rs-flagship-20261027T050805Z/scenario/member.rpol = doc
 docs/artifacts/soak/soak-rs-flagship-20261101T061310Z/scenario/gen-a.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol
 docs/artifacts/soak/soak-rs-flagship-20261101T061310Z/scenario/gen-b.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol
 docs/artifacts/soak/soak-rs-flagship-20261101T061310Z/scenario/member.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol
+docs/artifacts/soak/soak-rs-flagship-20261108T172214Z/scenario/gen-a.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol
+docs/artifacts/soak/soak-rs-flagship-20261108T172214Z/scenario/gen-b.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol
+docs/artifacts/soak/soak-rs-flagship-20261108T172214Z/scenario/member.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol
 docs/perf/artifacts/explain-cache-opt-in-2026-07/gen-a.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol
 docs/perf/artifacts/explain-cache-opt-in-2026-07/gen-b.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol
 docs/perf/artifacts/explain-cache-opt-in-2026-07/member.rpol = docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol
