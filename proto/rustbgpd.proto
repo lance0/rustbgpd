@@ -4349,7 +4349,11 @@ message FlowSpecTrafficAction {
   bool terminal = 2;
 }
 
+// Traffic-marking (RFC 8955 §7.5, type 0x8009).
 message FlowSpecTrafficMarking {
+  // DSCP to set, 0 to 63. A larger value is refused with INVALID_ARGUMENT.
+  // A listing reports the six DSCP bits of a received community; its two
+  // reserved bits are ignored here and retained in the raw list.
   uint32 dscp = 1;
 }
 

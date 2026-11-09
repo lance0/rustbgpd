@@ -2421,6 +2421,14 @@ send each action once, typed or raw. The new `redirect_ip` rejects any raw
 target-IP action in either list when a typed target-IP action is also present,
 even if the targets or copy bits differ. Raw-only lists remain lossless.
 
+`traffic_marking: { dscp: 46 }` originates the traffic-marking community
+`0x8009` ([RFC 8955 §7.5](https://www.rfc-editor.org/rfc/rfc8955.html#section-7.5)).
+`dscp` must be 0 to 63: `AddFlowSpec`, `AddLeasedFlowSpec` and
+`AddGuardedFlowSpec` return `INVALID_ARGUMENT` for a larger value before
+mutation, on every FlowSpec family. A raw `0x8009` value
+is advertised as supplied; the typed projection ignores the two reserved bits
+above the DSCP of a raw or received community and the raw list retains them.
+
 `redirect_ip: { address: "192.0.2.10", copy: false }` originates the direct
 IPv4 target community `0x010c`. An IPv6 literal originates `0x000c` in the
 20-octet IPv6 Address Specific Extended Communities attribute (type 25).
