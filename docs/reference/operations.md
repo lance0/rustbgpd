@@ -2264,6 +2264,18 @@ rejection, non-negotiated `MP_REACH_NLRI` and scoped-peer body NLRI have no
 counter: `warning_updates` shows them only to power-of-two resolution, and
 `rbgp rib received <peer> --rejected` lists retained next-hop rejections.
 
+Ignored ROUTE-REFRESH messages use the same schedule, with an independent
+per-connection count for each "ignoring …" class: a peer without the Route
+Refresh capability, an unknown AFI/SAFI, an unnegotiated family, BoRR or EoRR
+from a peer without Enhanced Route Refresh, BoRR before End-of-RIB from a
+Graceful Restart peer, an unknown or unsupported subtype (one shared class),
+and ORF entries for a family where ORF was not negotiated. Each class logs at
+counts 1, 2, 4, 8, ... and includes its count of ignored messages on the
+current TCP connection as `warning_messages`. Reconnect re-arms every class.
+Only `bgp_messages_received_total{type="route_refresh"}` counts these messages;
+there is no per-reason counter, so `warning_messages` shows each reason only to
+power-of-two resolution.
+
 Malformed UPDATE cause reasons are bounded to `attribute_list`,
 `unrecognized_well_known`, `missing_well_known`, `attribute_flags`,
 `attribute_length`, `invalid_origin`, `invalid_next_hop`, `optional_attribute`,
