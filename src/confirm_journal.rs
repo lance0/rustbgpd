@@ -165,6 +165,11 @@ impl StagedWrite {
         &self.tmp
     }
 
+    /// Retain the exact staged inode before publication can consume the stage.
+    pub(crate) fn retained_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
     /// Apply migration-only ownership and mode after payload validation.
     pub(crate) fn preserve_metadata(&mut self, uid: u32, gid: u32, mode: u32) -> io::Result<()> {
         #[cfg(debug_assertions)]
@@ -764,5 +769,45 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"accepted");
         assert_eq!(fs::read(&tmp).unwrap(), b"substitute");
         assert_eq!(fs::read(&owned).unwrap(), b"candidate");
+    }
+    #[test]
+    fn retained_stage_file_identifies_durable_and_ambiguous_published_inode() {
+        for durable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("config.toml");
+            fs::write(&target, b"accepted").unwrap();
+            let stage = stage_atomic(&target, b"candidate").unwrap();
+            let retained = stage.retained_file().unwrap();
+            let outcome = if durable {
+                stage.commit()
+            } else {
+                stage.commit_with_dir_fsync(|_| Err(io::Error::other("injected fsync failure")))
+            };
+            if durable {
+                outcome.unwrap();
+            } else {
+                assert!(matches!(
+                    outcome,
+                    Err(AtomicPublishError::PublicationAmbiguous(_))
+                ));
+            }
+            let alias = dir.path().join("published-alias");
+            fs::hard_link(&target, &alias).unwrap();
+            let replacement = dir.path().join("replacement");
+            fs::write(&replacement, b"benign replacement").unwrap();
+            fs::rename(&replacement, &target).unwrap();
+            let retained = retained.metadata().unwrap();
+            let published = fs::metadata(&alias).unwrap();
+            let replaced = fs::metadata(&target).unwrap();
+            assert_eq!(
+                (retained.dev(), retained.ino()),
+                (published.dev(), published.ino())
+            );
+            assert_ne!(
+                (retained.dev(), retained.ino()),
+                (replaced.dev(), replaced.ino())
+            );
+            assert_eq!(fs::read(alias).unwrap(), b"candidate");
+        }
     }
 }

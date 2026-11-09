@@ -470,12 +470,34 @@ impl fmt::Display for MissingDatasets {
 /// or the first parse errors with line numbers). Callers keep the
 /// prior snapshot on error.
 pub fn load_dataset_file(path: &Path, kind: DatasetKind) -> Result<DatasetData, String> {
-    let bytes = read_regular_file_bounded(path, MAX_DATASET_BYTES)
+    load_dataset_file_protected(path, kind, &SourceFileProtection::default())
+}
+
+/// Read a dataset while refusing protected source files before reading bytes.
+///
+/// # Errors
+///
+/// As [`load_dataset_file`], or a protected-source refusal.
+#[doc(hidden)]
+pub fn load_dataset_file_protected(
+    path: &Path,
+    kind: DatasetKind,
+    protection: &SourceFileProtection,
+) -> Result<DatasetData, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    let bytes = read_regular_file_bounded_protected(&path, MAX_DATASET_BYTES, protection)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let text =
         String::from_utf8(bytes).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     crate::rpol::parse_dataset_text(&text, kind)
 }
+
+#[doc(hidden)]
+pub use crate::source_file::{
+    MAX_BACKUP_DIRECTORY_ENTRIES, SourceFileProtection, SourceFileTarget,
+};
 
 /// Read a whole regular file holding at most `max_bytes`.
 ///
@@ -495,6 +517,20 @@ pub fn load_dataset_file(path: &Path, kind: DatasetKind) -> Result<DatasetData, 
 /// [`std::io::ErrorKind::FileTooLarge`] for a file over the bound.
 #[doc(hidden)]
 pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    read_regular_file_bounded_protected(path, max_bytes, &SourceFileProtection::default())
+}
+
+/// Bounded regular-file read, checking the opened descriptor before reading.
+///
+/// # Errors
+///
+/// As [`read_regular_file_bounded`], or `PermissionDenied` for a protected source.
+#[doc(hidden)]
+pub fn read_regular_file_bounded_protected(
+    path: &Path,
+    max_bytes: u64,
+    protection: &SourceFileProtection,
+) -> std::io::Result<Vec<u8>> {
     use std::io::{Error, ErrorKind};
 
     let not_regular = || Error::new(ErrorKind::InvalidInput, "not a regular file");
@@ -504,7 +540,9 @@ pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result
             format!("larger than the {max_bytes}-byte bound"),
         )
     };
-    if !std::fs::metadata(path)?.is_file() {
+    crate::source_file::mark_stat();
+    let expected = std::fs::metadata(path)?;
+    if !expected.is_file() {
         return Err(not_regular());
     }
     #[cfg(test)]
@@ -516,17 +554,25 @@ pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options.open(path)?;
-    let meta = file.metadata()?;
+    let (file, meta) = if protection.is_active() {
+        SourceFileProtection::open_checked(path, &expected)?
+    } else {
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        (file, metadata)
+    };
     if !meta.is_file() {
         return Err(not_regular());
     }
+    protection.check_opened(path, &meta)?;
     if meta.len() > max_bytes {
         return Err(too_large());
     }
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    crate::source_file::mark_read();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
+    protection.check_directory()?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(too_large());
     }
@@ -623,6 +669,78 @@ mod tests {
         }
         let read = read.expect("the open must not block on the swapped-in FIFO");
         assert_eq!(read, Err(std::io::ErrorKind::InvalidInput));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_source_checks_the_opened_inode_after_a_path_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let source = base.join("source.rpol");
+        let credential = base.join("credential.key");
+        let replacement = base.join("replacement.rpol");
+        std::fs::write(&source, "safe").unwrap();
+        std::fs::write(&credential, "secret").unwrap();
+        std::fs::hard_link(&credential, &replacement).unwrap();
+        let swapped_source = source.clone();
+        AFTER_STAT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&replacement, &swapped_source).unwrap();
+            }));
+        });
+        let protection = SourceFileProtection::new(vec![credential], None);
+        let error = read_regular_file_bounded_protected(&source, 1024, &protection).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_source_refuses_backup_symlink_swaps_after_stat() {
+        for ancestor in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().canonicalize().unwrap();
+            let config = base.join("config.toml");
+            std::fs::write(&config, "accepted").unwrap();
+            let (_, target) = SourceFileTarget::open(&config).unwrap();
+            let safe_dir = base.join("safe");
+            let secret_dir = base.join("secrets");
+            std::fs::create_dir(&safe_dir).unwrap();
+            std::fs::create_dir(&secret_dir).unwrap();
+            let source = safe_dir.join("source.rpol");
+            std::fs::write(&source, "safe").unwrap();
+            let backup = base.join("config.toml.unconfirmed-old");
+            std::fs::write(&backup, "secret").unwrap();
+            std::fs::hard_link(&backup, secret_dir.join("source.rpol")).unwrap();
+            let protection = SourceFileProtection::new(vec![config.clone()], Some(config))
+                .snapshot(Some(&target))
+                .unwrap();
+            let swapped_source = source.clone();
+            AFTER_STAT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    if ancestor {
+                        std::fs::rename(&safe_dir, safe_dir.with_extension("old")).unwrap();
+                        std::os::unix::fs::symlink(secret_dir, safe_dir).unwrap();
+                    } else {
+                        std::fs::remove_file(&swapped_source).unwrap();
+                        std::os::unix::fs::symlink(backup, swapped_source).unwrap();
+                    }
+                }));
+            });
+            crate::source_file::take_work();
+            assert!(read_regular_file_bounded_protected(&source, 1024, &protection).is_err());
+            let work = crate::source_file::take_work();
+            assert_eq!(work.enumeration_probes, 0);
+            assert_eq!(work.entries, 0);
+            assert_eq!(work.backup_stats, 0);
+            assert_eq!(work.retained_identities, 0);
+            assert!(work.component_inspections <= source.components().count());
+            assert!(work.directory_opens <= source.components().count());
+            assert_eq!(work.source_opens, usize::from(!ancestor));
+            assert_eq!(work.source_stats, 1);
+            assert_eq!(work.fixed_stats, 0);
+            assert_eq!(work.directory_checks, 0);
+            assert_eq!(work.reads, 0);
+        }
     }
 
     /// Run `load` on its own thread and wait at most five seconds, so a

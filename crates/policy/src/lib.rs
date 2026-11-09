@@ -15,6 +15,7 @@ pub mod datasets;
 pub mod ir;
 pub mod rpol;
 pub mod sets;
+mod source_file;
 
 mod eval;
 

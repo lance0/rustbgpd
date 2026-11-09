@@ -473,8 +473,27 @@ Exact binding consumption is role-agnostic.
 
 V2 JSON history, ignored retained TOML, the commit-confirm v3 raw prior, and
 retired v1/v2 `commit-confirm-journal.json` contain normalized TOML with
-credentials/keys; redacted history/status output does not make these files
-safe to publish. The
+credentials/keys. Config-adjacent `<config>.unconfirmed-*` boot-revert backups
+use the resolved config target's name, including for a terminal launch symlink,
+and also hold the full saved config, including inline secrets. Operator callers
+retain their exemption. The accepted target remains authoritative if
+the launch symlink is retargeted or removed. A missing or replaced physical
+accepted target refuses confined source reads until a reload (SIGHUP) or another
+accepted generation re-accepts the file; a candidate that names no `.rpol` or
+dataset file reads no source and is not refused.
+A confined candidate load that reads a source inventories the accepted target
+directory once, with a limit of 4096 total entries (including dot entries) and
+one overflow probe. The inventory needs read permission on that directory only;
+ancestors need search permission, and backups are identified without being
+opened. An unavailable, unsafe, or oversized directory refuses the load. A
+directory change during the load, such as a concurrent config save, returns
+`UNAVAILABLE`, and a retry can succeed.
+Each source read rechecks the accepted file and parent identity, including when
+an ancestor directory is replaced, without repeating the backup inventory.
+Candidate-source confinement below `operator_only` refuses these backups, their
+hardlink aliases, and hardlinks to the running config or its credential files.
+Redacted history/status output does not
+make these files safe to publish. The
 fixed `commit-confirm-v3-metadata.json` and config-adjacent
 `commit-confirm-locator.json` contain no raw TOML but remain confidential
 because they carry paths, digests, provenance, and file identities. All pending

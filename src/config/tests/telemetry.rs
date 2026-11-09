@@ -422,7 +422,8 @@ fn restricted_dialout_candidates_check_each_credential_before_reading() {
         super::credential_read_probe::arm(outside, entered, held);
         let error =
             Config::load_rpc_candidate(&candidate, "unaccepted credentials", false, Some(&limits))
-                .unwrap_err();
+                .unwrap_err()
+                .to_string();
         assert!(
             error.contains("is not one the running config uses"),
             "{error}"

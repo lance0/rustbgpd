@@ -182,8 +182,13 @@ impl LaunchIdentity {
         let target = Entry::pin(&recorded_target)?;
         let raw_toml = std::str::from_utf8(&raw_bytes).map_err(invalid)?;
         // `target.replace` below writes exactly `raw_toml`.
-        let accepted = AcceptedConfigSnapshot::load_restored(raw_toml, &recorded_target)
-            .map_err(|_| invalid("journaled prior sources are unavailable or changed"))?;
+        let source_target = rustbgpd_policy::datasets::SourceFileTarget::from_parent(
+            recorded_target.clone(),
+            &target.directory.file,
+        )?;
+        let accepted =
+            AcceptedConfigSnapshot::load_restored(raw_toml, &recorded_target, source_target)
+                .map_err(|_| invalid("journaled prior sources are unavailable or changed"))?;
         verify_snapshot(&accepted, raw_toml, &metadata_wire)?;
 
         super::refuse_retired_journal(&super::journal_path(
@@ -197,7 +202,8 @@ impl LaunchIdentity {
         step(BootStep::CandidateSave)?;
         save_candidate_aside(&target, &backup_name, &backup_suffix, raw_toml.as_bytes())?;
         step(BootStep::ConfigRestore)?;
-        target.replace(raw_toml.as_bytes())?;
+        let (_, restored_file) = target.replace_retaining_file(raw_toml.as_bytes())?;
+        accepted.record_published_file(restored_file);
 
         step(BootStep::LocatorUnlink)?;
         locator.remove_matching(locator_identity)?;
@@ -1131,6 +1137,11 @@ impl Entry {
     }
 
     fn replace(&self, bytes: &[u8]) -> io::Result<FileIdentity> {
+        self.replace_retaining_file(bytes)
+            .map(|(identity, _)| identity)
+    }
+
+    fn replace_retaining_file(&self, bytes: &[u8]) -> io::Result<(FileIdentity, File)> {
         use nix::fcntl::{OFlag, openat, renameat};
         use nix::sys::stat::{Mode, fchmod};
 
@@ -1148,7 +1159,6 @@ impl Entry {
         let identity = FileIdentity::from_metadata(&file.metadata()?);
         file.write_all(bytes)?;
         file.sync_all()?;
-        drop(file);
         renameat(
             &self.directory.file,
             Path::new(&stage),
@@ -1157,7 +1167,7 @@ impl Entry {
         )
         .map_err(errno)?;
         self.directory.file.sync_all()?;
-        Ok(identity)
+        Ok((identity, file))
     }
 
     fn cleanup_stage(&self) -> io::Result<()> {
@@ -2318,6 +2328,37 @@ log_format = "json"
         let reverted = fixture.launch.boot_revert_check().unwrap().unwrap();
         let restored: [u8; 32] = Sha256::digest(fs::read(&fixture.config).unwrap()).into();
         assert_eq!(reverted.accepted.read_sha256(), Some(restored));
+    }
+
+    #[test]
+    fn boot_restored_config_alias_remains_protected_after_replacement() {
+        let fixture = fixture();
+        fixture
+            .launch
+            .publish(&fixture.state, "restore-alias", 9, &fixture.prior)
+            .unwrap();
+        fs::write(&fixture.config, b"candidate").unwrap();
+        let reverted = fixture.launch.boot_revert_check().unwrap().unwrap();
+        let alias = fixture.config.with_extension("alias");
+        fs::hard_link(&fixture.config, &alias).unwrap();
+        let replacement = fixture.config.with_extension("replacement");
+        fs::write(&replacement, b"new operator config").unwrap();
+        fs::rename(replacement, &fixture.config).unwrap();
+        let target = reverted
+            .accepted
+            .config_ref()
+            .source_file_target
+            .as_ref()
+            .unwrap();
+        assert!(
+            rustbgpd_policy::datasets::SourceFileProtection::new(
+                vec![fixture.config.clone()],
+                Some(fixture.config.clone()),
+            )
+            .snapshot(Some(target))
+            .is_err()
+        );
+        assert!(rustbgpd_policy::datasets::read_regular_file_bounded(&alias, 1024 * 1024).is_ok());
     }
 
     #[test]

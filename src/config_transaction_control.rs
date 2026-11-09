@@ -543,6 +543,7 @@ impl ConfigTransactionController {
         &self,
         payload: crate::config_history::RollbackPayload,
         config_path: &std::path::Path,
+        config_target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
         expected_runtime_snapshot_token: String,
         read_coordinator: Option<rustbgpd_api::server::RuntimeConfigCoordinator>,
     ) -> Result<(String, PlannedTransactionConfig), ConfigTransactionApplyError> {
@@ -552,7 +553,9 @@ impl ConfigTransactionController {
                 manifest,
                 source_sha256,
             } => {
-                let snapshot = AcceptedConfigSnapshot::load_retained(&normalized_toml, config_path)
+                let snapshot = AcceptedConfigSnapshot::load_retained_with_target(
+                    &normalized_toml, config_path, config_target,
+                )
                     .map_err(|_| {
                         ConfigTransactionApplyError::FailedPrecondition(
                             "cannot restore retained external-source snapshot: a declared external source is missing, unreadable, or changed"
@@ -1702,12 +1705,13 @@ impl ConfigTransactionController {
                         validate_confirm_timeout_seconds(request.confirm_timeout_seconds)?;
                     }
                 }
-                let config_path = self_.rollback_config_path()?;
+                let (config_path, config_target) = self_.rollback_config_source()?;
                 let (candidate_toml, preloaded) = before_pre_effect_deadline(
                     progress.pre_effect_deadline(),
                     self_.prepare_rollback_payload(
                         payload,
                         &config_path,
+                        config_target,
                         request.expected_runtime_snapshot_token.clone(),
                         None,
                     ),
@@ -1811,23 +1815,32 @@ impl ConfigTransactionController {
         Ok((entry.clone(), payload))
     }
 
-    fn rollback_config_path(&self) -> Result<std::path::PathBuf, ConfigTransactionApplyError> {
+    fn rollback_config_source(
+        &self,
+    ) -> Result<
+        (
+            std::path::PathBuf,
+            Option<rustbgpd_policy::datasets::SourceFileTarget>,
+        ),
+        ConfigTransactionApplyError,
+    > {
         let accepted = self.accepted_rx.as_ref().ok_or_else(|| {
             ConfigTransactionApplyError::Unavailable(
                 "accepted-config authority unavailable".to_string(),
             )
         })?;
-        let config_path = accepted
-            .borrow()
-            .config_ref()
-            .file_path
-            .clone()
-            .ok_or_else(|| {
-                ConfigTransactionApplyError::FailedPrecondition(
-                    "cannot restore external provenance without a daemon config path".to_string(),
-                )
-            })?;
-        Ok(config_path)
+        // The lexical path and its retained target belong to one accepted
+        // generation; neither may be re-resolved after an actor await.
+        let accepted = accepted.borrow().clone();
+        let config_path = accepted.config_ref().file_path.clone().ok_or_else(|| {
+            ConfigTransactionApplyError::FailedPrecondition(
+                "cannot restore external provenance without a daemon config path".to_string(),
+            )
+        })?;
+        Ok((
+            config_path,
+            accepted.config_ref().source_file_target.clone(),
+        ))
     }
 
     async fn preview_rollback(
@@ -1840,7 +1853,7 @@ impl ConfigTransactionController {
                 "rollback preview index must be >= 1".into(),
             ));
         }
-        let (payload, config_path) = {
+        let (payload, (config_path, config_target)) = {
             let _permit = tokio::time::timeout(
                 CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,
                 self.deps.lock.acquire(),
@@ -1855,12 +1868,13 @@ impl ConfigTransactionController {
             // Release mutation admission before source loading or actor waits;
             // planning then has the same as-of semantics as ordinary Plan.
             let (_, payload) = self.rollback_payload(index)?;
-            (payload, self.rollback_config_path()?)
+            (payload, self.rollback_config_source()?)
         };
         let (_, prepared) = self
             .prepare_rollback_payload(
                 payload,
                 &config_path,
+                config_target,
                 String::new(),
                 Some(self.deps.lock.clone()),
             )
@@ -2626,7 +2640,14 @@ async fn apply_config_transaction_locked_with_preloaded(
                 "config candidate load failed: {error}; nothing was applied"
             ))
         })?
-        .map_err(ConfigTransactionApplyError::InvalidArgument)?;
+        .map_err(|error| match error {
+            crate::config::CandidateLoadError::Invalid(message) => {
+                ConfigTransactionApplyError::InvalidArgument(message)
+            }
+            crate::config::CandidateLoadError::Unavailable(message) => {
+                ConfigTransactionApplyError::Unavailable(message)
+            }
+        })?;
         let plan = before_pre_effect_deadline(
             progress.pre_effect_deadline(),
             plan_candidate(

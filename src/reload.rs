@@ -590,6 +590,9 @@ fn tcp_ao_awaiting_peer_outcome(
     match marker {
         ReloadDispatch::Replied(Ok(())) => {
             runtime.file_path = desired_file_path.cloned();
+            runtime
+                .source_file_target
+                .clone_from(&desired.config_ref().source_file_target);
             acknowledge_partial(
                 progress,
                 runtime,
@@ -1571,6 +1574,13 @@ pub(crate) struct AcceptedBridgeReplacement {
 
 #[cfg(test)]
 impl AcceptedBridgeReplacement {
+    pub(crate) fn for_test(
+        snapshot: Arc<AcceptedConfigSnapshot>,
+        adopted: oneshot::Sender<ReloadDispatch<(), String>>,
+    ) -> Self {
+        Self { snapshot, adopted }
+    }
+
     pub(crate) fn into_adoption_reply(self) -> oneshot::Sender<ReloadDispatch<(), String>> {
         self.adopted
     }
@@ -3138,6 +3148,9 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     working_config
         .file_path
         .clone_from(&desired_config.file_path);
+    working_config
+        .source_file_target
+        .clone_from(&desired_config.source_file_target);
     // EVPN runtime edits are applied before the staged peer-manager/FIB
     // sequence. Carry their accepted-or-pinned state into partial snapshots
     // returned by authoritative partial receipts.

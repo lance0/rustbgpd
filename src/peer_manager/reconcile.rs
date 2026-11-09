@@ -28,7 +28,7 @@ pub(super) fn load_runtime_candidate(
     candidate_toml: &str,
     capture_external_inputs: bool,
     limits: Option<&crate::config::CandidateSourceLimits>,
-) -> Result<Config, String> {
+) -> Result<Config, crate::config::CandidateLoadError> {
     #[cfg(test)]
     load_latch::hold_if_marked(candidate_toml);
     Config::load_rpc_candidate(
@@ -253,18 +253,16 @@ impl PeerManager {
         self.diff_loaded_runtime_config(&load_runtime_candidate(
             candidate_toml,
             false,
-            Some(&self.current_config.candidate_source_limits()),
+            Some(&self.candidate_source_limits()),
         ))
     }
 
     /// Diff a candidate loaded off the actor by [`load_runtime_candidate`].
     pub(super) fn diff_loaded_runtime_config(
         &self,
-        candidate: &Result<Config, String>,
+        candidate: &Result<Config, crate::config::CandidateLoadError>,
     ) -> Result<RuntimeConfigDiff, RuntimeConfigDiffError> {
-        let candidate = candidate
-            .as_ref()
-            .map_err(|error| RuntimeConfigDiffError::InvalidCandidate(error.clone()))?;
+        let candidate = candidate.as_ref().map_err(Clone::clone)?;
         let diff = crate::config::diff_config(&self.current_config, candidate);
         runtime_config_diff_from_config_diff(&diff, None).map_err(RuntimeConfigDiffError::Internal)
     }
@@ -279,7 +277,7 @@ impl PeerManager {
         let mut candidate = load_runtime_candidate(
             candidate_toml,
             verify_external_inputs,
-            Some(&self.current_config.candidate_source_limits()),
+            Some(&self.candidate_source_limits()),
         );
         self.plan_loaded_config_transaction(&mut candidate, expected_runtime_snapshot_token)
             .await
@@ -290,15 +288,13 @@ impl PeerManager {
     /// The candidate is borrowed so the caller can drop it off the actor.
     pub(super) async fn plan_loaded_config_transaction(
         &mut self,
-        candidate: &mut Result<Config, String>,
+        candidate: &mut Result<Config, crate::config::CandidateLoadError>,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
-        let candidate = candidate
-            .as_mut()
-            .map_err(|error| RuntimeConfigTransactionPlanError::InvalidCandidate(error.clone()))?;
+        let candidate = candidate.as_mut().map_err(|error| error.clone())?;
         let external_inputs = self.verified_external_inputs(candidate);
         let materialization = crate::config::materialize_rfc8212_transaction_candidate(
             &self.current_config,

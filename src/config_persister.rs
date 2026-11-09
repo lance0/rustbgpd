@@ -344,9 +344,18 @@ impl ConfigPersister {
                 "no staged config write to commit".to_string(),
             );
         };
+        let retained_file = match staged.retained_file() {
+            Ok(file) => file,
+            Err(error) => {
+                return ConfigPersistCommitOutcome::NotPublished(format!(
+                    "failed to retain staged config file: {error}"
+                ));
+            }
+        };
         let written = sha256_of(config.normalized_toml());
         match staged.commit_if(|directory, target| self.verify_on_disk(target, Some(directory))) {
             Ok(()) => {
+                config.record_published_file(retained_file);
                 self.current = config;
                 self.on_disk = Some(written);
                 self.record_current_history(None);
@@ -361,6 +370,7 @@ impl ConfigPersister {
                 ConfigPersistCommitOutcome::NotPublished(error.to_string())
             }
             Err(crate::confirm_journal::AtomicPublishError::PublicationAmbiguous(error)) => {
+                config.record_published_file(retained_file);
                 self.current = config;
                 self.on_disk = Some(written);
                 error!(
@@ -397,9 +407,18 @@ impl ConfigPersister {
             Ok(staged) => staged,
             Err(error) => return ConfigPersistCommitOutcome::NotPublished(error.to_string()),
         };
+        let retained_file = match staged.retained_file() {
+            Ok(file) => file,
+            Err(error) => {
+                return ConfigPersistCommitOutcome::NotPublished(format!(
+                    "failed to retain staged config file: {error}"
+                ));
+            }
+        };
         let written = sha256_of(self.current.normalized_toml());
         match staged.commit_if(|directory, target| self.verify_on_disk(target, Some(directory))) {
             Ok(()) => {
+                self.current.record_published_file(retained_file);
                 self.on_disk = Some(written);
                 self.record_current_history(None);
                 ConfigPersistCommitOutcome::PublishedDurable
@@ -408,6 +427,7 @@ impl ConfigPersister {
                 ConfigPersistCommitOutcome::NotPublished(error.to_string())
             }
             Err(crate::confirm_journal::AtomicPublishError::PublicationAmbiguous(error)) => {
+                self.current.record_published_file(retained_file);
                 self.on_disk = Some(written);
                 ConfigPersistCommitOutcome::PublicationAmbiguous(error.to_string())
             }
@@ -1909,5 +1929,82 @@ log_format = "json"
         drop(run);
         assert_eq!(acked.try_recv(), Err(oneshot::error::TryRecvError::Closed));
         assert_eq!(std::fs::read(&path).unwrap(), original, "nothing published");
+    }
+    #[test]
+    fn persisted_replacement_retains_published_inode_without_mutating_prior_snapshot() {
+        use rustbgpd_policy::datasets::{
+            SourceFileProtection, read_regular_file_bounded_protected,
+        };
+        for staged in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().canonicalize().unwrap();
+            let path = base.join("config.toml");
+            let raw = crate::test_support::tier_authorized_uds_test_config(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n",
+            );
+            std::fs::write(&path, raw).unwrap();
+            let prior = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
+            let old_alias = base.join("old-alias.rpol");
+            std::fs::hard_link(&path, &old_alias).unwrap();
+            let allowed = base.join("allowed.rpol");
+            std::fs::write(&allowed, "allowed").unwrap();
+            let protection = |snapshot: &Arc<AcceptedConfigSnapshot>| {
+                SourceFileProtection::new(vec![path.clone()], Some(path.clone()))
+                    .snapshot(snapshot.config_ref().source_file_target.as_ref())
+            };
+            let initial = protection(&prior).unwrap();
+            assert!(
+                read_regular_file_bounded_protected(&old_alias, 1024 * 1024, &initial).is_err()
+            );
+            assert_eq!(
+                read_regular_file_bounded_protected(&allowed, 1024, &initial).unwrap(),
+                b"allowed"
+            );
+            let mut changed = prior.config();
+            changed.global.asn = 65002;
+            let candidate = prior.derive_config(changed).unwrap();
+            let observer = Arc::clone(&candidate);
+            let (_tx, rx) = mpsc::channel(1);
+            let mut persister =
+                ConfigPersister::new_accepted(rx, path.clone(), Arc::clone(&prior), None);
+            let outcome = if staged {
+                persister.stage(candidate).unwrap();
+                persister.commit_staged()
+            } else {
+                persister.replace_ack(candidate)
+            };
+            assert_eq!(outcome, ConfigPersistCommitOutcome::PublishedDurable);
+            let published_alias = base.join("published-alias.rpol");
+            std::fs::hard_link(&path, &published_alias).unwrap();
+            assert_eq!(
+                std::fs::read(&published_alias).unwrap(),
+                observer.normalized_toml().as_bytes()
+            );
+            // Candidate Arc clones see the exact published FD; old Arc clones
+            // retain their own FD and fail closed on the changed target.
+            assert!(protection(&prior).is_err());
+            let published = protection(&observer).unwrap();
+            assert_eq!(
+                read_regular_file_bounded_protected(&allowed, 1024, &published).unwrap(),
+                b"allowed"
+            );
+            assert!(
+                read_regular_file_bounded_protected(&published_alias, 1024 * 1024, &published)
+                    .is_err()
+            );
+            let replacement = base.join("replacement");
+            std::fs::write(&replacement, "benign replacement").unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            assert!(protection(&observer).is_err());
+            assert!(protection(&prior).is_err());
+            assert!(
+                read_regular_file_bounded_protected(&published_alias, 1024 * 1024, &initial)
+                    .is_err()
+            );
+            assert!(
+                read_regular_file_bounded_protected(&published_alias, 1024 * 1024, &published)
+                    .is_err()
+            );
+        }
     }
 }

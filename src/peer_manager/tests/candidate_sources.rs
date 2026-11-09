@@ -710,3 +710,514 @@ async fn held_loads_leave_the_actor_free_and_operators_admitted() {
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     task.await.unwrap();
 }
+
+#[test]
+fn candidate_sources_refuse_unconfirmed_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let running = dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, "# accepted config\n").unwrap();
+    manager.current_config.file_path = Some(running);
+    let limits = manager.current_config.candidate_source_limits();
+    let backup = dir
+        .path()
+        .join("rustbgpd.toml.unconfirmed-0123456789abcdef.rpol");
+    std::fs::write(&backup, POLICY).unwrap();
+    let importer = dir.path().join("imports-backup.rpol");
+    std::fs::write(
+        &importer,
+        "import \"rustbgpd.toml.unconfirmed-0123456789abcdef.rpol\"\n",
+    )
+    .unwrap();
+    for capture in [false, true] {
+        for source in [&backup, &importer] {
+            let toml = candidate(&[source], "");
+            assert!(
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+                "backup admitted: {}",
+                source.display()
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+    let unrelated = dir
+        .path()
+        .join("other.toml.unconfirmed-0123456789abcdef.rpol");
+    std::fs::write(&unrelated, POLICY).unwrap();
+    Config::load_rpc_candidate(
+        &candidate(&[&unrelated], ""),
+        "candidate",
+        false,
+        Some(&limits),
+    )
+    .expect("only the running config's backups are protected");
+}
+
+#[test]
+fn candidate_sources_refuse_hardlinked_protected_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let running = dir.path().join("rustbgpd.toml");
+    // Valid policy bytes make successful parsing evidence of an unintended read.
+    std::fs::write(&running, POLICY).unwrap();
+    manager.current_config.file_path = Some(running.clone());
+    let limits = manager.current_config.candidate_source_limits();
+    let linked = dir.path().join("linked.rpol");
+    std::fs::hard_link(&running, &linked).unwrap();
+    let importer = dir.path().join("imports-hardlink.rpol");
+    std::fs::write(&importer, "import \"linked.rpol\"\n").unwrap();
+    for capture in [false, true] {
+        for source in [&linked, &importer] {
+            let toml = candidate(&[source], "");
+            let error = Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("not an admissible policy source")
+                    || error.contains("compile failed"),
+                "{error}"
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+}
+
+#[test]
+fn candidate_datasets_refuse_hardlinked_configs_and_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let running = dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, "64500\n").unwrap();
+    manager.current_config.file_path = Some(running.clone());
+    let linked = dir.path().join("linked.list");
+    std::fs::hard_link(&running, &linked).unwrap();
+    let backup = dir
+        .path()
+        .join("rustbgpd.toml.unconfirmed-0123456789abcdef");
+    std::fs::write(&backup, "64500\n").unwrap();
+    let declaring = dir.path().join("declaring.rpol");
+    std::fs::write(&declaring, "dataset asn-set customers\npolicy uses { term t { if route.origin-as in customers { accept } } }\n").unwrap();
+    let limits = manager.current_config.candidate_source_limits();
+    for capture in [false, true] {
+        for source in [&linked, &backup] {
+            let toml = candidate(
+                &[&declaring],
+                &format!(
+                    "[policy.datasets.customers]\npath = {:?}\n",
+                    source.display().to_string()
+                ),
+            );
+            assert!(
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+                "protected dataset admitted"
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+}
+
+#[test]
+fn candidate_backups_follow_terminal_config_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let active = dir.path().join("active.toml");
+    let launch = dir.path().join("config.toml");
+    std::fs::write(&active, candidate(&[&edge], "")).unwrap();
+    std::os::unix::fs::symlink("active.toml", &launch).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&launch, None).unwrap();
+    assert_eq!(
+        accepted.config_ref().file_path.as_deref(),
+        Some(launch.as_path())
+    );
+    let limits = accepted.config_ref().candidate_source_limits();
+    // Boot revert saves beside the resolved target, not the launch symlink.
+    let backup = dir.path().join("active.toml.unconfirmed-0123456789abcdef");
+    std::fs::write(&backup, POLICY).unwrap();
+    let importer = dir.path().join("imports-target-backup.rpol");
+    std::fs::write(
+        &importer,
+        "import \"active.toml.unconfirmed-0123456789abcdef\"\n",
+    )
+    .unwrap();
+    for capture in [false, true] {
+        for source in [&backup, &importer] {
+            let toml = candidate(&[source], "");
+            assert!(
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+                "resolved-target backup admitted: {}",
+                source.display()
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+}
+
+#[test]
+fn candidate_backups_keep_protection_when_config_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let missing = dir.path().join("missing.toml");
+    assert!(!missing.exists());
+    manager.current_config.file_path = Some(missing);
+    let limits = manager.current_config.candidate_source_limits();
+    let backup = dir
+        .path()
+        .join("missing.toml.unconfirmed-0123456789abcdef.rpol");
+    std::fs::write(&backup, POLICY).unwrap();
+    let ordinary = candidate(&[&dir.path().join("edge.rpol")], "");
+    for capture in [false, true] {
+        let toml = candidate(&[&backup], "");
+        assert!(
+            Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+            "missing-config backup admitted"
+        );
+        Config::load_rpc_candidate(&toml, "operator", capture, None)
+            .expect("operators retain access");
+        Config::load_rpc_candidate(&ordinary, "candidate", capture, Some(&limits))
+            .expect("a missing regular config still admits ordinary confined sources");
+    }
+}
+
+#[test]
+fn candidate_backups_fail_closed_for_a_dangling_config_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let active = dir.path().join("active.toml");
+    let launch = dir.path().join("config.toml");
+    std::fs::write(&active, candidate(&[&edge], "")).unwrap();
+    std::os::unix::fs::symlink("active.toml", &launch).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&launch, None).unwrap();
+    let backup = dir.path().join("active.toml.unconfirmed-0123456789abcdef");
+    std::fs::write(&backup, POLICY).unwrap();
+    let importer = dir.path().join("imports-dangling-target-backup.rpol");
+    std::fs::write(
+        &importer,
+        "import \"active.toml.unconfirmed-0123456789abcdef\"\n",
+    )
+    .unwrap();
+    std::fs::remove_file(&active).unwrap();
+    assert!(launch.symlink_metadata().unwrap().file_type().is_symlink());
+    let limits = accepted.config_ref().candidate_source_limits();
+    for capture in [false, true] {
+        for source in [&backup, &importer, &edge] {
+            let toml = candidate(&[source], "");
+            let error = Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits))
+                .expect_err("an unresolved terminal symlink must fail closed")
+                .to_string();
+            assert!(error.contains("replaced or removed on disk"), "{error}");
+            assert!(!error.contains(dir.path().to_str().unwrap()), "{error}");
+            assert!(!error.contains(POLICY), "{error}");
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access when the accepted target disappears");
+        }
+    }
+}
+
+#[test]
+fn accepted_target_backups_survive_launch_retarget_and_unlink() {
+    for unlink in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let edge = dir.path().join("edge.rpol");
+        std::fs::write(&edge, POLICY).unwrap();
+        let active = dir.path().join("active.toml");
+        let alternate = dir.path().join("alternate.toml");
+        let launch = dir.path().join("config.toml");
+        std::fs::write(&active, candidate(&[&edge], "")).unwrap();
+        std::fs::write(&alternate, candidate(&[&edge], "")).unwrap();
+        std::os::unix::fs::symlink(&active, &launch).unwrap();
+        let accepted = crate::config::AcceptedConfigSnapshot::load(&launch, None).unwrap();
+        let backup = dir.path().join("active.toml.unconfirmed-old.rpol");
+        let alias = dir.path().join("innocent.rpol");
+        let importer = dir.path().join("importer.rpol");
+        std::fs::write(&backup, POLICY).unwrap();
+        std::fs::hard_link(&backup, &alias).unwrap();
+        std::fs::write(&importer, "import \"innocent.rpol\"\n").unwrap();
+        std::fs::remove_file(&launch).unwrap();
+        if !unlink {
+            std::os::unix::fs::symlink(&alternate, &launch).unwrap();
+        }
+        let declaring = dir.path().join("declaring.rpol");
+        std::fs::write(&declaring, "dataset asn-set customers\npolicy uses { term t { if route.origin-as in customers { accept } } }\n").unwrap();
+        let asn_backup = dir.path().join("active.toml.unconfirmed-asns");
+        let asn_alias = dir.path().join("customers.list");
+        std::fs::write(&asn_backup, "64500\n").unwrap();
+        std::fs::hard_link(asn_backup, &asn_alias).unwrap();
+        let runtime =
+            Config::load_toml_with_diagnostics(&candidate(&[&edge], ""), "runtime").unwrap();
+        let derived = accepted.derive_config(runtime).unwrap();
+        let restored = crate::config::AcceptedConfigSnapshot::load_retained_with_target(
+            accepted.normalized_toml(),
+            &launch,
+            accepted.config_ref().source_file_target.clone(),
+        )
+        .unwrap();
+        for snapshot in [&accepted, derived.as_ref(), restored.as_ref()] {
+            let limits = snapshot.config_ref().candidate_source_limits();
+            for capture in [false, true] {
+                for source in [&backup, &alias, &importer] {
+                    assert!(
+                        Config::load_rpc_candidate(
+                            &candidate(&[source], ""),
+                            "candidate",
+                            capture,
+                            Some(&limits)
+                        )
+                        .is_err()
+                    );
+                    Config::load_rpc_candidate(
+                        &candidate(&[source], ""),
+                        "operator",
+                        capture,
+                        None,
+                    )
+                    .unwrap();
+                }
+                Config::load_rpc_candidate(
+                    &candidate(&[&edge], ""),
+                    "candidate",
+                    capture,
+                    Some(&limits),
+                )
+                .unwrap();
+                let dataset = format!(
+                    "[policy.datasets.customers]\npath = {:?}\n",
+                    asn_alias.display().to_string()
+                );
+                let datasets_toml = candidate(&[&declaring], &dataset);
+                assert!(
+                    Config::load_rpc_candidate(&datasets_toml, "candidate", capture, Some(&limits))
+                        .is_err()
+                );
+                Config::load_rpc_candidate(&datasets_toml, "operator", capture, None).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn derived_and_retained_snapshots_own_distinct_published_inodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, candidate(&[], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let original_alias = dir.path().join("original.rpol");
+    std::fs::hard_link(&config_path, &original_alias).unwrap();
+    let derived = accepted.derive_config(accepted.config()).unwrap();
+    let retained = crate::config::AcceptedConfigSnapshot::load_retained_with_target(
+        accepted.normalized_toml(),
+        &config_path,
+        accepted.config_ref().source_file_target.clone(),
+    )
+    .unwrap();
+    let mut aliases = vec![original_alias];
+    for (index, snapshot) in [derived.as_ref(), retained.as_ref()]
+        .into_iter()
+        .enumerate()
+    {
+        let stage = dir.path().join(format!("stage-{index}"));
+        let alias = dir.path().join(format!("alias-{index}.rpol"));
+        std::fs::write(&stage, POLICY).unwrap();
+        let file = std::fs::File::open(&stage).unwrap();
+        std::fs::rename(stage, &config_path).unwrap();
+        std::fs::hard_link(&config_path, &alias).unwrap();
+        snapshot.record_published_file(file);
+        aliases.push(alias);
+        assert!(
+            accepted
+                .config_ref()
+                .source_file_target
+                .as_ref()
+                .unwrap()
+                .verify_target()
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .config_ref()
+                .source_file_target
+                .as_ref()
+                .unwrap()
+                .verify_target()
+                .is_ok()
+        );
+        if index == 0 {
+            assert!(
+                retained
+                    .config_ref()
+                    .source_file_target
+                    .as_ref()
+                    .unwrap()
+                    .verify_target()
+                    .is_err()
+            );
+        }
+    }
+    let unrelated = dir.path().join("unrelated");
+    std::fs::write(&unrelated, "unrelated").unwrap();
+    std::fs::rename(unrelated, &config_path).unwrap();
+    for snapshot in [&accepted, derived.as_ref(), retained.as_ref()] {
+        assert!(
+            rustbgpd_policy::datasets::SourceFileProtection::new(
+                vec![config_path.clone()],
+                Some(config_path.clone()),
+            )
+            .snapshot(snapshot.config_ref().source_file_target.as_ref())
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn candidate_admission_uses_the_accepted_watch_file_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    manager.replace_current_config(accepted.config());
+    let next = accepted.derive_config(accepted.config()).unwrap();
+    let stage = dir.path().join("stage");
+    let alias = dir.path().join("published.rpol");
+    std::fs::write(&stage, POLICY).unwrap();
+    let file = std::fs::File::open(&stage).unwrap();
+    std::fs::rename(stage, &config_path).unwrap();
+    std::fs::hard_link(&config_path, &alias).unwrap();
+    next.record_published_file(file);
+    let (_accepted_tx, accepted_rx) = tokio::sync::watch::channel(next);
+    let manager = manager.with_accepted_identity(accepted_rx);
+    Config::load_rpc_candidate(
+        &candidate(&[&edge], ""),
+        "healthy published generation",
+        false,
+        Some(&manager.candidate_source_limits()),
+    )
+    .unwrap();
+    // Any rename-replace of the config (an editor save, a ConfigMap swap).
+    let unrelated = dir.path().join("unrelated");
+    std::fs::write(&unrelated, "unrelated").unwrap();
+    std::fs::rename(unrelated, &config_path).unwrap();
+    let limits = manager.candidate_source_limits();
+    Config::load_rpc_candidate(&candidate(&[], ""), "source-free", false, Some(&limits))
+        .expect("a candidate naming no source file needs no backup inventory");
+    for source in [&edge, &alias] {
+        let error = Config::load_rpc_candidate(
+            &candidate(&[source], ""),
+            "names a source",
+            false,
+            Some(&limits),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, crate::config::CandidateLoadError::Invalid(message)
+                if message.contains("replaced or removed on disk")
+                    && message.contains("SIGHUP")),
+            "{error:?}"
+        );
+    }
+    let error = diff_error(manager, candidate(&[&edge], "")).await;
+    assert!(error.contains("replaced or removed on disk"), "{error}");
+}
+
+#[test]
+fn config_directory_change_during_a_candidate_load_is_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    let limits = accepted.config_ref().candidate_source_limits();
+    let toml = candidate(&[&edge], "");
+    Config::load_rpc_candidate(&toml, "quiet directory", false, Some(&limits)).unwrap();
+    let stage = dir.path().join(".persister-stage");
+    crate::config::AFTER_INVENTORY.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || std::fs::write(stage, "x").unwrap()));
+    });
+    let error =
+        Config::load_rpc_candidate(&toml, "busy directory", false, Some(&limits)).unwrap_err();
+    assert!(
+        matches!(&error, crate::config::CandidateLoadError::Unavailable(message)
+            if message.contains("retry")),
+        "{error:?}"
+    );
+    // The next attempt sees a settled directory.
+    Config::load_rpc_candidate(&toml, "retry", false, Some(&limits)).unwrap();
+}
+
+#[test]
+fn candidate_load_errors_map_to_retryable_and_final_statuses() {
+    use crate::config::CandidateLoadError;
+    use rustbgpd_api::evpn_service::EvpnRuntimeApplyError;
+    use rustbgpd_api::peer_types::{RuntimeConfigDiffError, RuntimeConfigTransactionPlanError};
+    let busy = || CandidateLoadError::Unavailable("busy".to_string());
+    let refused = || CandidateLoadError::Invalid("refused".to_string());
+    assert!(matches!(
+        RuntimeConfigDiffError::from(busy()),
+        RuntimeConfigDiffError::Unavailable(message) if message == "busy"
+    ));
+    assert!(matches!(
+        RuntimeConfigDiffError::from(refused()),
+        RuntimeConfigDiffError::InvalidCandidate(message) if message == "refused"
+    ));
+    assert!(matches!(
+        RuntimeConfigTransactionPlanError::from(busy()),
+        RuntimeConfigTransactionPlanError::Unavailable(message) if message == "busy"
+    ));
+    assert!(matches!(
+        RuntimeConfigTransactionPlanError::from(refused()),
+        RuntimeConfigTransactionPlanError::InvalidCandidate(message) if message == "refused"
+    ));
+    assert!(matches!(
+        EvpnRuntimeApplyError::from(busy()),
+        EvpnRuntimeApplyError::Unavailable(message) if message == "busy"
+    ));
+    assert!(matches!(
+        EvpnRuntimeApplyError::from(refused()),
+        EvpnRuntimeApplyError::InvalidArgument(message) if message == "refused"
+    ));
+}
+
+/// Search permission on an ancestor is enough to load the config: boot,
+/// `--check` and SIGHUP never list the directories above it.
+#[test]
+fn config_under_a_search_only_ancestor_loads() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ancestor = dir.path().join("search-only");
+    let parent = ancestor.join("etc");
+    std::fs::create_dir_all(&parent).unwrap();
+    let edge = parent.join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let config_path = parent.join("config.toml");
+    std::fs::write(&config_path, candidate(&[&edge], "")).unwrap();
+    std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let _restore = Restore(ancestor.clone());
+    if std::fs::read_dir(&ancestor).is_ok() {
+        eprintln!("skipped: this process bypasses directory read permission");
+        return;
+    }
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+    let limits = accepted.config_ref().candidate_source_limits();
+    Config::load_rpc_candidate(
+        &candidate(&[&edge], ""),
+        "below operator",
+        false,
+        Some(&limits),
+    )
+    .unwrap();
+}

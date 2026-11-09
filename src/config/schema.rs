@@ -200,6 +200,10 @@ pub struct Config {
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+    /// Descriptor-pinned target of the accepted config, separate from its lexical launch path.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub source_file_target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
 }
 
 /// Startup-only `FlowSpec` receive-side feasibility validation.

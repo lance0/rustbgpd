@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use rustbgpd_policy::datasets::{
     DatasetData, DatasetFileFingerprint, DatasetHandle, DatasetKind, DatasetSnapshot,
-    MAX_DATASET_BYTES, read_regular_file_bounded,
+    MAX_DATASET_BYTES, SourceFileProtection, read_regular_file_bounded_protected,
 };
 use rustbgpd_policy::rpol::RpolFile;
 use sha2::{Digest, Sha256};
@@ -191,6 +191,7 @@ pub(super) fn load_dataset_captured(
     existing: Option<&Arc<DatasetHandle>>,
     accepted: Option<&Arc<DatasetHandle>>,
     prior_manifest: Option<&SourceManifest>,
+    protection: &SourceFileProtection,
 ) -> Result<CapturedDatasetRead, CapturedDatasetError> {
     let failure = |reason| CapturedDatasetError {
         reason,
@@ -200,7 +201,7 @@ pub(super) fn load_dataset_captured(
     let canonical_path = path
         .canonicalize()
         .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
-    let bytes = read_regular_file_bounded(&canonical_path, MAX_DATASET_BYTES)
+    let bytes = read_regular_file_bounded_protected(&canonical_path, MAX_DATASET_BYTES, protection)
         .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
     let source = DatasetFileFingerprint {
         canonical_path,
@@ -309,26 +310,61 @@ impl AcceptedConfigSnapshot {
     /// external inputs relative to the daemon's real config path. The retained
     /// TOML bytes are already pinned by the history reader; this performs the
     /// one detached external-source capture used by provenance-aware restore.
+    #[cfg(test)]
     pub(crate) fn load_retained(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
         Self::load_retained_with_hook(content, config_path, || {})
     }
 
-    /// [`Self::load_retained`] for a document the caller writes to the
+    pub(crate) fn load_retained_with_target(
+        content: &str,
+        config_path: &Path,
+        target: Option<rustbgpd_policy::datasets::SourceFileTarget>,
+    ) -> Result<Arc<Self>, String> {
+        Self::load_retained_with_authority(content, config_path, |_| Ok(target), || {})
+    }
+
+    /// Load a retained document that the caller writes to the
     /// config file itself (a commit-confirm boot revert's restore). The
     /// snapshot records `content` as the file's bytes, so the persister's
     /// stale-source fence is armed from boot rather than off until the
     /// daemon's first write or SIGHUP.
-    pub(crate) fn load_restored(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
-        let mut snapshot = Self::load_retained(content, config_path)?;
+    pub(crate) fn load_restored(
+        content: &str,
+        config_path: &Path,
+        target: rustbgpd_policy::datasets::SourceFileTarget,
+    ) -> Result<Arc<Self>, String> {
+        let mut snapshot = Self::load_retained_with_target(content, config_path, Some(target))?;
         if let Some(fresh) = Arc::get_mut(&mut snapshot) {
             fresh.read_sha256 = Some(Sha256::digest(content.as_bytes()).into());
         }
         Ok(snapshot)
     }
 
+    #[cfg(test)]
     fn load_retained_with_hook(
         content: &str,
         config_path: &Path,
+        after_capture: impl FnOnce(),
+    ) -> Result<Arc<Self>, String> {
+        Self::load_retained_with_authority(
+            content,
+            config_path,
+            |path| {
+                rustbgpd_policy::datasets::SourceFileTarget::resolve(path)
+                    .map(Some)
+                    .map_err(|_| "accepted config target authority unavailable".to_string())
+            },
+            after_capture,
+        )
+    }
+
+    fn load_retained_with_authority(
+        content: &str,
+        config_path: &Path,
+        target: impl FnOnce(
+            &Path,
+        )
+            -> Result<Option<rustbgpd_policy::datasets::SourceFileTarget>, String>,
         after_capture: impl FnOnce(),
     ) -> Result<Arc<Self>, String> {
         let config_path = absolute_config_path(config_path)?;
@@ -344,6 +380,7 @@ impl AcceptedConfigSnapshot {
             None,
             super::SourceRules::OnDisk,
         )?;
+        config.source_file_target = target(&config_path)?.map(|target| target.fork());
         config.file_path = Some(config_path);
         after_capture();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
@@ -409,8 +446,8 @@ impl AcceptedConfigSnapshot {
         // Stat the open file before reading it, so the mtime describes these
         // bytes even if the operator saves again (in place or by rename)
         // while the load or the reload that follows is still running.
-        let (bytes, read_mtime) = super::open_config_file(path)
-            .and_then(|file| {
+        let (bytes, read_mtime, source_file_target) = super::open_config_file(path)
+            .and_then(|(mut file, target)| {
                 let mtime = file
                     .metadata()
                     .and_then(|meta| meta.modified())
@@ -418,11 +455,11 @@ impl AcceptedConfigSnapshot {
                     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
                 let mut bytes = Vec::new();
                 rustbgpd_api::credential_file::read_bounded(
-                    file,
+                    &mut file,
                     super::MAX_CONFIG_FILE_BYTES,
                     &mut bytes,
                 )?;
-                Ok((bytes, mtime))
+                Ok((bytes, mtime, target))
             })
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
         let read_sha256 = Some(Sha256::digest(&bytes).into());
@@ -442,6 +479,7 @@ impl AcceptedConfigSnapshot {
             super::SourceRules::OnDisk,
         )?;
         config.file_path = Some(file_path);
+        config.source_file_target = Some(source_file_target);
         after_capture();
         if let Some(prior) = prior {
             config
@@ -469,8 +507,20 @@ impl AcceptedConfigSnapshot {
         })
     }
 
+    pub(crate) fn record_published_file(&self, file: std::fs::File) {
+        if let Some(target) = &self.config.source_file_target {
+            target.record_published_file(file);
+        }
+    }
+
     pub(crate) fn derive_config(&self, mut config: Config) -> Result<Arc<Self>, String> {
         self.require_same_external_roster(&config)?;
+        config.file_path.clone_from(&self.config.file_path);
+        config.source_file_target = self
+            .config
+            .source_file_target
+            .as_ref()
+            .map(rustbgpd_policy::datasets::SourceFileTarget::fork);
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
         let normalized_toml = Arc::new(
             persisted_config_document_bounded(&mut config)
@@ -500,6 +550,9 @@ impl AcceptedConfigSnapshot {
             toml::from_str(content).map_err(|error| format!("invalid {source_name}: {error}"))?;
         self.require_same_external_roster(&config)?;
         config.file_path.clone_from(&self.config.file_path);
+        config
+            .source_file_target
+            .clone_from(&self.config.source_file_target);
         config.policy.rpol.clone_from(&self.config.policy.rpol);
         config.policy.dataset_bindings = self.config.policy.dataset_bindings.detached_clone();
         config.policy.dataset_events = self.config.policy.dataset_events.clone();
@@ -524,6 +577,9 @@ impl AcceptedConfigSnapshot {
             );
         }
         config.file_path.clone_from(&self.config.file_path);
+        config
+            .source_file_target
+            .clone_from(&self.config.source_file_target);
         config.policy.rpol = rpol;
         config.policy.dataset_bindings = live_bindings.clone();
         config
@@ -553,6 +609,9 @@ impl AcceptedConfigSnapshot {
             );
         }
         config.file_path.clone_from(&self.config.file_path);
+        config
+            .source_file_target
+            .clone_from(&self.config.source_file_target);
         Ok(config)
     }
 
@@ -816,6 +875,7 @@ import_policy_chain = ["inbound"]
             Some(&handle),
             Some(&handle),
             Some(&prior),
+            &SourceFileProtection::default(),
         )
         .unwrap();
         assert!(exact.source_rebound);
@@ -836,7 +896,8 @@ import_policy_chain = ["inbound"]
                 DatasetKind::Asn,
                 Some(&handle),
                 Some(&handle),
-                Some(&prior)
+                Some(&prior),
+                &SourceFileProtection::default(),
             )
             .unwrap()
             .load,
@@ -850,6 +911,7 @@ import_policy_chain = ["inbound"]
             Some(&handle),
             Some(&handle),
             Some(&prior),
+            &SourceFileProtection::default(),
         )
         .unwrap();
         assert!(changed_path.source_rebound);
@@ -863,7 +925,8 @@ import_policy_chain = ["inbound"]
                 DatasetKind::Asn,
                 Some(&handle),
                 Some(&handle),
-                Some(&prior)
+                Some(&prior),
+                &SourceFileProtection::default(),
             )
             .unwrap()
             .load,
@@ -876,6 +939,7 @@ import_policy_chain = ["inbound"]
             Some(&handle),
             Some(&handle),
             Some(&prior),
+            &SourceFileProtection::default(),
         )
         .expect_err("kind mismatch must parse as the candidate kind");
         assert!(kind_mismatch.source.is_some());

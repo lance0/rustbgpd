@@ -1,3 +1,5 @@
+mod source_authority;
+
 use std::time::{Duration, Instant as StdInstant};
 
 use rustbgpd_evpn::runtime_plan_shape::{
@@ -4204,12 +4206,16 @@ async fn applied_api_candidate_does_not_become_the_source_authority() {
         "test baseline",
     );
     baseline.file_path = Some(running.clone());
+    let (_accepted_tx, accepted_rx) = watch::channel(
+        crate::config::AcceptedConfigSnapshot::from_config_for_test(baseline.clone()),
+    );
     let apply = EvpnRuntimeReloadApply::new(
         empty_evpn_runtime_coordinator(),
         Arc::new(tokio::sync::Mutex::new(())),
         Arc::new(TestRuntimeConverger::ok()),
         baseline,
-    );
+    )
+    .with_accepted_source(Some(accepted_rx));
     let request = |rpol: &std::path::Path, validate_only| proto::ApplyEvpnRuntimeRequest {
         candidate_toml: crate::test_support::tier_authorized_uds_test_config(&with_rpol(
             l2vni_runtime_candidate_toml(),

@@ -115,9 +115,14 @@ fn digest_hex(digest: &[u8; 32]) -> String {
 
 /// Read one module of at most `budget` bytes. `Ok(None)` means the file
 /// is larger than `budget`: the caller reports the graph budget.
-fn read_source(path: &Path, budget: usize) -> std::io::Result<Option<(String, u64, [u8; 32])>> {
+fn read_source(
+    path: &Path,
+    budget: usize,
+    protection: &crate::datasets::SourceFileProtection,
+) -> std::io::Result<Option<(String, u64, [u8; 32])>> {
     let budget = u64::try_from(budget).unwrap_or(u64::MAX);
-    let bytes = match crate::datasets::read_regular_file_bounded(path, budget) {
+    let bytes = match crate::datasets::read_regular_file_bounded_protected(path, budget, protection)
+    {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => return Ok(None),
         Err(error) => return Err(error),
@@ -254,13 +259,13 @@ pub(super) struct ModuleFingerprint {
 /// `max_graph_bytes` is the total-source-byte budget for the whole
 /// graph ([`DEFAULT_MAX_GRAPH_BYTES`] when no configuration provides
 /// one). Returns the resolved graph, or an error for unreadable
-/// inputs / resolution and parse diagnostics. A module whose canonical path
-/// is in `excluded` is refused like one outside the roots.
+/// inputs / resolution and parse diagnostics. Protected paths, opened file
+/// identities and config backups are refused before reading source bytes.
 pub(super) fn resolve(
     main_path: &Path,
     roots: &[PathBuf],
     max_graph_bytes: usize,
-    excluded: &[PathBuf],
+    excluded: &crate::datasets::SourceFileProtection,
 ) -> Result<ResolvedGraph, LoadError> {
     let io = |path: &Path, reason: String| LoadError::Io {
         path: path.display().to_string(),
@@ -269,7 +274,7 @@ pub(super) fn resolve(
     let main_canon = main_path
         .canonicalize()
         .map_err(|e| io(main_path, format!("failed to read: {e}")))?;
-    if excluded.contains(&main_canon) {
+    if excluded.protects_path(&main_canon) {
         return Err(io(
             main_path,
             "is not an admissible policy source".to_string(),
@@ -306,7 +311,7 @@ pub(super) fn resolve(
         max_graph_bytes,
         diags: Vec::new(),
     };
-    let Some((text, raw_len, raw_sha256)) = read_source(&main_canon, max_graph_bytes)
+    let Some((text, raw_len, raw_sha256)) = read_source(&main_canon, max_graph_bytes, excluded)
         .map_err(|e| io(main_path, format!("failed to read: {e}")))?
     else {
         return Err(LoadError::Compile {
@@ -357,8 +362,8 @@ pub(super) fn resolve(
 struct Resolver<'e> {
     /// Canonicalized confinement roots (main dir + configured roots).
     confine: Vec<PathBuf>,
-    /// Canonical paths refused even under a root.
-    excluded: &'e [PathBuf],
+    /// Source files refused even under a root.
+    excluded: &'e crate::datasets::SourceFileProtection,
     /// Per-module metadata, indexed by module (`file`) id.
     modules: Vec<ModuleSource>,
     /// Same-read lossless identities, indexed by module id.
@@ -496,7 +501,7 @@ impl Resolver<'_> {
         };
         // An excluded file reads exactly like one outside the roots.
         if !self.confine.iter().any(|root| canon.starts_with(root))
-            || self.excluded.contains(&canon)
+            || self.excluded.protects_path(&canon)
         {
             self.diags.push(
                 Diagnostic::coded(
@@ -549,7 +554,7 @@ impl Resolver<'_> {
             return None;
         }
         let remaining = self.max_graph_bytes.saturating_sub(self.total_bytes);
-        let (text, raw_len, raw_sha256) = match read_source(&canon, remaining) {
+        let (text, raw_len, raw_sha256) = match read_source(&canon, remaining, self.excluded) {
             Ok(Some(source)) => source,
             Ok(None) => {
                 self.diags
