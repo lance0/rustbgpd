@@ -106,6 +106,55 @@ fn grpc_listener_access_mode_is_rejected_as_unknown_field() {
     }
 }
 
+/// Load-bearing: the loader still fails closed on `access_mode`, and the
+/// retired-key hook replaces the bare unknown-field error with the exact
+/// non-widening replacement for each listener table.
+#[test]
+fn grpc_listener_access_mode_rejection_names_the_replacement() {
+    let cases: &[(&str, Option<&str>, &str)] = &[
+        (
+            "read_only",
+            None,
+            "delete access_mode and set max_tier = \"sensitive_read\" (the stricter of \"sensitive_read\" and any existing max_tier)",
+        ),
+        (
+            "read_only",
+            Some("operator_only"),
+            "delete access_mode and set max_tier = \"sensitive_read\"",
+        ),
+        (
+            "read_only",
+            Some("read"),
+            "delete access_mode and keep max_tier = \"read\"",
+        ),
+        (
+            "read_write",
+            None,
+            "delete access_mode; without max_tier the listener serves every tier",
+        ),
+        (
+            "read_write",
+            Some("mutating"),
+            "delete access_mode and keep max_tier = \"mutating\"",
+        ),
+    ];
+    for (uds, table) in [(false, "grpc_tcp"), (true, "grpc_uds")] {
+        for &(mode, max_tier, fix) in cases {
+            let mut keys = vec![("access_mode", mode)];
+            keys.extend(max_tier.map(|tier| ("max_tier", tier)));
+            let err = Config::load_toml_with_diagnostics(&listener_toml(uds, &keys), "access_mode")
+                .expect_err("access_mode must not load");
+            assert!(
+                err.starts_with(&format!(
+                    "error: global.telemetry.{table}.access_mode was removed; max_tier is the only listener ceiling: "
+                )),
+                "{table} {mode} {max_tier:?}: {err}"
+            );
+            assert!(err.contains(fix), "{table} {mode} {max_tier:?}: {err}");
+        }
+    }
+}
+
 #[test]
 fn grpc_listener_max_tier_parses() {
     let toml_str = format!(

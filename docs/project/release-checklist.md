@@ -514,7 +514,7 @@ confirm both audit surfaces move:
   --token-file /tmp/rustbgpd-token health
 
 # Logs should include target="grpc_authz" with path, tier, result, authn,
-# access_mode, max_tier, and principal fields.
+# max_tier, and principal fields.
 
 # Metrics should expose bounded-label decision counters, with no method path or
 # principal labels:

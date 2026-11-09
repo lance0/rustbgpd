@@ -1529,7 +1529,7 @@ impl BgpMetrics {
                 "bgp_grpc_authz_decisions_total",
                 "ADR-0064 gRPC authorization tier decisions by bounded listener and decision labels.",
             ),
-            &["tier", "result", "authn", "access_mode"],
+            &["tier", "result", "authn", "listener_max_tier"],
         )
         .expect("valid metric definition");
         let grpc_tls_handshake_failures = IntCounterVec::new(
@@ -5387,11 +5387,11 @@ impl BgpMetrics {
         tier: &str,
         result: &str,
         authn: &str,
-        access_mode: &str,
+        listener_max_tier: &str,
     ) {
         self.0
             .grpc_authz_decisions
-            .with_label_values(&[tier, result, authn, access_mode])
+            .with_label_values(&[tier, result, authn, listener_max_tier])
             .inc();
     }
 
@@ -8814,12 +8814,12 @@ mod tests {
     #[test]
     fn grpc_authz_decision_counter_uses_bounded_labels() {
         let m = BgpMetrics::new();
-        m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "read_write");
-        m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "read_write");
+        m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "operator_only");
+        m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "operator_only");
 
         assert_eq!(
             m.0.grpc_authz_decisions
-                .with_label_values(&["operator_only", "audit_forward", "mtls", "read_write"])
+                .with_label_values(&["operator_only", "audit_forward", "mtls", "operator_only"])
                 .get(),
             2
         );

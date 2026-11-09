@@ -4382,10 +4382,10 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// The handler belt and the audit `access_mode` label both follow the
-    /// listener ceiling: read-only exactly when it is below `Mutating`.
+    /// The handler belt follows the listener ceiling: read-only exactly
+    /// when it is below `Mutating`.
     #[test]
-    fn read_only_belt_and_label_follow_the_listener_ceiling() {
+    fn read_only_belt_follows_the_listener_ceiling() {
         for (tier, read_only) in [
             (AuthTier::Read, true),
             (AuthTier::SensitiveRead, true),
@@ -4396,10 +4396,6 @@ mod tests {
                 read_only_rejection(tier).map(|status| status.code()),
                 read_only.then_some(tonic::Code::PermissionDenied),
                 "{tier:?}"
-            );
-            assert_eq!(
-                tier.access_mode_label(),
-                if read_only { "read_only" } else { "read_write" }
             );
         }
     }

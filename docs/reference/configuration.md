@@ -822,19 +822,22 @@ bearer-token listeners first authenticate the request so missing or invalid
 tokens still return `UNAUTHENTICATED` without exposing tier-cap details.
 Omitting `max_tier` serves every tier (`operator_only`).
 
-A read-only listener sets `max_tier = "sensitive_read"` (or `"read"`). It
+A read-only listener sets `max_tier = "sensitive_read"`. It
 permits query and watch RPCs but rejects mutating RPCs such as neighbor
 add/delete, route injection, policy changes, peer-group changes, shutdown, and
 MRT trigger requests with `PERMISSION_DENIED`. The mutating handlers also
 refuse the call themselves whenever the listener ceiling is below `mutating`,
 as a second check behind the tier layer. This is intended for monitoring or
 dashboard listeners that should not expose control plane writes.
+`max_tier = "read"` is a liveness-only ceiling: the only `read`-tier method is
+`ControlService/CheckLiveness`, so a monitoring client that queries or watches
+daemon state needs `sensitive_read`.
 
-The former `access_mode` key was removed; a config that still sets it fails
-to load with an unknown-field error. `access_mode = "read_only"` becomes
-`max_tier = "sensitive_read"`, or keeps an existing stricter `max_tier =
-"read"`; `access_mode = "read_write"` is deleted. The
-[changelog](../../CHANGELOG.md) upgrade notes give the exact mapping.
+The former `access_mode` key was removed. A config that still sets it fails
+to load, and the error names the replacement: `access_mode = "read_only"`
+becomes `max_tier` set to the stricter of `"sensitive_read"` and any existing
+`max_tier`, and `access_mode = "read_write"` is deleted. Neither change widens
+a listener.
 
 **Token file lifecycle:** When `token_file` is configured, the file must exist
 and contain a non-empty token at daemon startup. SIGHUP re-reads the bytes behind

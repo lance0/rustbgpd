@@ -770,9 +770,8 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [docs
   maps authenticated principals to role ceilings. `"tier"` has been the
   default since v0.24.0 and is now the only accepted value —
   `GrpcEnforcementConfig` has a single variant, and the `"legacy"` mode and
-  its validation branch are gone. The former per-listener `access_mode`
-  setting was removed, so `max_tier` is the only listener ceiling across
-  the twelve-service split.
+  its validation branch are gone. `max_tier` is the only listener ceiling
+  across the twelve-service split.
 
 ---
 

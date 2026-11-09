@@ -39,17 +39,6 @@ impl AuthTier {
     pub const fn is_read_only_ceiling(self) -> bool {
         matches!(self, Self::Read | Self::SensitiveRead)
     }
-
-    /// Bounded `access_mode` label of `grpc_authz` audit records and
-    /// `bgp_grpc_authz_decisions_total`, derived from a listener ceiling.
-    #[must_use]
-    pub const fn access_mode_label(self) -> &'static str {
-        if self.is_read_only_ceiling() {
-            "read_only"
-        } else {
-            "read_write"
-        }
-    }
 }
 
 /// Request extension set by the authorization layer: the highest tier the

@@ -303,7 +303,7 @@ async fn audit_layer_records_metric_and_forwards_request() {
     assert!(text.contains("tier=\"sensitive_read\""));
     assert!(text.contains("result=\"handler_ok\""));
     assert!(text.contains("authn=\"bearer_token\""));
-    assert!(text.contains("access_mode=\"read_write\""));
+    assert!(text.contains("listener_max_tier=\"operator_only\""));
 }
 
 #[tokio::test]
@@ -430,7 +430,12 @@ async fn sensitive_read_listener_denies_every_mutating_and_operator_only_method(
             line.starts_with("bgp_grpc_authz_decisions_total{")
                 && line.contains("result=\"listener_tier_denied\"")
         })
-        .inspect(|line| assert!(line.contains("access_mode=\"read_only\""), "{line}"))
+        .inspect(|line| {
+            assert!(
+                line.contains("listener_max_tier=\"sensitive_read\""),
+                "{line}"
+            );
+        })
         .map(|line| line.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
         .sum();
     assert_eq!(listener_denied, u64::try_from(denied).unwrap());

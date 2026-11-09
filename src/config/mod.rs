@@ -2284,6 +2284,10 @@ enforcement = \"tier\"\n\
 
 fn retired_key_error(content: &str) -> Option<String> {
     let document: toml::Value = toml::from_str(content).ok()?;
+    legacy_grpc_enforcement_error(&document).or_else(|| retired_access_mode_error(&document))
+}
+
+fn legacy_grpc_enforcement_error(document: &toml::Value) -> Option<String> {
     (document
         .get("security")?
         .get("grpc")?
@@ -2291,6 +2295,53 @@ fn retired_key_error(content: &str) -> Option<String> {
         .as_str()?
         == "legacy")
         .then(|| LEGACY_GRPC_ENFORCEMENT_MIGRATION.to_string())
+}
+
+fn retired_access_mode_error(document: &toml::Value) -> Option<String> {
+    let telemetry = document.get("global")?.get("telemetry")?;
+    ["grpc_tcp", "grpc_uds"].into_iter().find_map(|table| {
+        let listener = telemetry.get(table)?;
+        let access_mode = listener.get("access_mode")?;
+        Some(retired_access_mode_migration(
+            table,
+            access_mode.as_str(),
+            listener.get("max_tier").and_then(toml::Value::as_str),
+        ))
+    })
+}
+
+/// Migration for the removed listener `access_mode`: `read_only` becomes
+/// the stricter of `sensitive_read` and any existing `max_tier`;
+/// `read_write` is deleted. The effective ceiling never widens.
+fn retired_access_mode_migration(
+    table: &str,
+    access_mode: Option<&str>,
+    max_tier: Option<&str>,
+) -> String {
+    let fix = match (access_mode, max_tier) {
+        (Some("read_only"), Some("read")) => {
+            "delete access_mode and keep max_tier = \"read\"".to_string()
+        }
+        (Some("read_only"), _) => {
+            "delete access_mode and set max_tier = \"sensitive_read\" (the stricter of \
+             \"sensitive_read\" and any existing max_tier)"
+                .to_string()
+        }
+        (Some("read_write"), Some(tier)) => {
+            format!("delete access_mode and keep max_tier = {tier:?}")
+        }
+        (Some("read_write"), None) => {
+            "delete access_mode; without max_tier the listener serves every tier".to_string()
+        }
+        _ => "with access_mode = \"read_only\", delete it and set max_tier to the stricter of \
+              \"sensitive_read\" and any existing max_tier; with access_mode = \"read_write\", \
+              delete it and keep any existing max_tier"
+            .to_string(),
+    };
+    format!(
+        "global.telemetry.{table}.access_mode was removed; max_tier is the only listener \
+         ceiling: {fix} (migration: docs/reference/configuration.md [global.telemetry.{table}])"
+    )
 }
 
 fn grpc_max_tier(configured: Option<GrpcMaxTierConfig>) -> GrpcMaxTier {

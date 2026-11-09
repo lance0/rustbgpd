@@ -168,15 +168,17 @@ gnmic \
   capabilities
 ```
 
-A listener with `max_tier = "sensitive_read"` (or `"read"`) rejects mutating
+A listener with `max_tier = "sensitive_read"` rejects mutating
 RPCs (neighbor add/delete, route injection, policy changes, peer-group
 changes, shutdown, MRT trigger) with `PERMISSION_DENIED`. Use this
 on a dedicated monitoring listener that exposes the read surface
 without the mutating control plane.
 
 Each configured listener sets its own `max_tier`; omitting it serves every
-tier. A listener capped below `mutating` allows query and watch RPCs but
-rejects all mutating RPCs with `PERMISSION_DENIED`.
+tier. A listener capped at `sensitive_read` allows query and watch RPCs but
+rejects all mutating RPCs with `PERMISSION_DENIED`. `read` is a liveness-only
+ceiling: the only `read`-tier method is `ControlService/CheckLiveness`, so
+monitoring clients that query or watch daemon state need `sensitive_read`.
 
 ### Listener Access Matrix
 
@@ -191,10 +193,9 @@ automation that needs to mutate daemon state.
 machine-readable export for auditors and generated clients; the Rust `authz`
 tests verify it against the source-of-truth matrix. The runtime records tier
 decisions for every RPC via structured `grpc_authz` logs and
-`bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. The
-`access_mode` label (and log field) is `read_only` when the listener's
-`max_tier` is below `mutating` and `read_write` otherwise. Listener
-`max_tier` caps are always enforced. The same runtime layer also enforces the
+`bgp_grpc_authz_decisions_total{tier,result,authn,listener_max_tier}`, where
+`tier` is the method's tier and `listener_max_tier` is the serving listener's
+`max_tier` ceiling. Listener `max_tier` caps are always enforced. The same runtime layer also enforces the
 authenticated principal's configured role ceiling before the handler runs —
 unconditionally: `"tier"` has been the default since v0.24.0 and is the only
 mode since v0.63.0. The former `"legacy"` migration mode (roles recorded as

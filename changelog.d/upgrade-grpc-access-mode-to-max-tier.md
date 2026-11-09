@@ -9,3 +9,10 @@
   effective ceiling unchanged. Scripts and benchmark or lab harnesses outside
   this repository that generate listener tables need the same edit. Run
   `rustbgpd --check` on the new config before restarting.
+- Rewrite Prometheus queries, alerts and dashboards that use the
+  `access_mode` label of `bgp_grpc_authz_decisions_total` to use
+  `listener_max_tier`. Select read-only listeners with
+  `listener_max_tier=~"read|sensitive_read"` and listeners that admit
+  mutations with `listener_max_tier=~"mutating|operator_only"`. Log
+  pipelines that read the `access_mode` field of `grpc_authz` records
+  should read `max_tier` instead.

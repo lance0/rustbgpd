@@ -150,9 +150,11 @@ Preferred posture:
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. On a listener capped
   below `mutating`, every mutating handler also refuses the call itself, as a
-  second check behind the tier layer. The former `access_mode` key was
-  removed; `access_mode = "read_only"` corresponds to `max_tier =
-  "sensitive_read"`.
+  second check behind the tier layer. `max_tier = "read"` admits only
+  `ControlService/CheckLiveness`; monitoring clients need `sensitive_read`.
+  The former `access_mode` key was removed: replace `access_mode =
+  "read_only"` with `max_tier` set to the stricter of `"sensitive_read"` and
+  any existing `max_tier`, and delete `access_mode = "read_write"`.
 - gRPC `grpc_authz` audit records are result-aware for forwarded calls and use
   bounded result labels such as `handler_ok`, `handler_invalid_argument`, and
   `listener_tier_denied`. Credential-bearing request summaries are masked:
