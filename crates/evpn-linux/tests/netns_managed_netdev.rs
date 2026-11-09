@@ -231,6 +231,14 @@ async fn managed_svd_vxlan_create_adopt_and_reap_round_trip_inner() {
                 vni: 100,
             },
             ManagedSvdVxlanBinding {
+                bridge_vlan: 11,
+                vni: 101,
+            },
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 12,
+                vni: 102,
+            },
+            ManagedSvdVxlanBinding {
                 bridge_vlan: 20,
                 vni: 200,
             },
@@ -375,6 +383,186 @@ async fn managed_svd_vxlan_create_adopt_and_reap_round_trip_inner() {
         err.to_string().contains("ownership stamp"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn managed_svd_vxlan_restart_prunes_removed_binding() {
+    managed_svd_binding_change(false).await;
+}
+
+#[tokio::test]
+async fn managed_svd_vxlan_restart_rekeys_binding() {
+    managed_svd_binding_change(true).await;
+}
+
+async fn managed_svd_binding_change(rekey: bool) {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+    let test_name = if rekey {
+        "managed_svd_vxlan_restart_rekeys_binding"
+    } else {
+        "managed_svd_vxlan_restart_prunes_removed_binding"
+    };
+    if std::env::var("RUSTBGPD_NETNS_INNER").as_deref() != Ok(test_name) {
+        let ns = NetnsFixture::create("svd-change");
+        let status = Command::new("ip")
+            .args(["netns", "exec", &ns.name])
+            .arg(std::env::current_exe().expect("self-exe"))
+            .args(["--exact", "--nocapture", test_name])
+            .env("RUSTBGPD_NETNS_INNER", test_name)
+            .env("EVPN_LINUX_NETNS", "1")
+            .status()
+            .expect("spawn inner");
+        assert!(status.success(), "inner test invocation failed");
+        return;
+    }
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "brsvd",
+            "type",
+            "bridge",
+            "vlan_filtering",
+            "1",
+        ],
+    );
+    run("ip", &["link", "set", "brsvd", "up"]);
+    let mut spec = ManagedSvdVxlanNetdevSpec {
+        local_ip: Some("10.0.0.1".parse().unwrap()),
+        dstport: 4789,
+        bridge: "brsvd".to_string(),
+        bindings: vec![
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 10,
+                vni: 100,
+            },
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 20,
+                vni: 200,
+            },
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 21,
+                vni: 201,
+            },
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 22,
+                vni: 202,
+            },
+        ],
+    };
+    let create = |spec| DataplaneOp::CreateManagedSvdVxlan {
+        name: "vxsvd".to_string(),
+        spec,
+        ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxsvd".to_string(),
+    };
+    let mut dp = LinuxDataplane::connect().await.expect("connect");
+    dp.apply(&create(spec.clone()))
+        .await
+        .expect("initial create");
+    // Unrelated bridge-self and foreign-port memberships must survive adoption.
+    run(
+        "bridge",
+        &["vlan", "add", "dev", "brsvd", "vid", "30", "self"],
+    );
+    run("ip", &["link", "add", "foreign0", "type", "dummy"]);
+    run("ip", &["link", "set", "foreign0", "master", "brsvd"]);
+    run("bridge", &["vlan", "add", "dev", "foreign0", "vid", "40"]);
+    run(
+        "bridge",
+        &["vlan", "add", "dev", "brsvd", "vid", "40", "self"],
+    );
+    // A stale binding that also has a foreign member does not own bridge-self.
+    run("bridge", &["vlan", "add", "dev", "vxsvd", "vid", "40"]);
+    run(
+        "bridge",
+        &[
+            "vlan",
+            "add",
+            "dev",
+            "vxsvd",
+            "vid",
+            "40",
+            "tunnel_info",
+            "id",
+            "400",
+        ],
+    );
+    drop(dp);
+    if rekey {
+        spec.bindings.truncate(2);
+        spec.bindings[1].vni = 300;
+    } else {
+        spec.bindings.truncate(1);
+    }
+    let mut restarted = LinuxDataplane::connect().await.expect("restart connect");
+    restarted
+        .apply(&create(spec.clone()))
+        .await
+        .expect("convergent restart adoption");
+    let snapshot = restarted.dump_snapshot().await.expect("snapshot");
+    let bridge = snapshot.links.get("brsvd").expect("bridge");
+    let ifindex = snapshot.vxlans["vxsvd"].ifindex;
+    let port = bridge
+        .port_vlan_inventory
+        .iter()
+        .find(|port| port.ifindex == ifindex)
+        .expect("SVD port");
+    let mut observed: Vec<_> = port
+        .vlan_tunnels
+        .iter()
+        .map(|row| (row.vid.unwrap(), row.tunnel_id.unwrap()))
+        .collect();
+    observed.sort_unstable();
+    let expected = if rekey {
+        vec![(10, 100), (20, 300)]
+    } else {
+        vec![(10, 100)]
+    };
+    assert_eq!(observed, expected, "exact tunnel set after restart");
+    let mut port_vids: Vec<_> = port.vlans.iter().map(|row| row.vid).collect();
+    port_vids.sort_unstable();
+    assert_eq!(
+        port_vids,
+        expected.iter().map(|(vid, _)| *vid).collect::<Vec<_>>()
+    );
+    assert_eq!(bridge.vlans.iter().any(|row| row.vid == 20), rekey);
+    assert!(
+        bridge.vlans.iter().any(|row| row.vid == 30),
+        "untraced bridge VLAN preserved"
+    );
+    assert!(
+        bridge.vlans.iter().any(|row| row.vid == 40),
+        "shared bridge VLAN preserved"
+    );
+    let foreign = bridge
+        .port_vlan_inventory
+        .iter()
+        .find(|port| port.name.as_deref() == Some("foreign0"))
+        .expect("foreign port");
+    assert!(
+        foreign.vlans.iter().any(|row| row.vid == 40),
+        "foreign port preserved"
+    );
+    let (vni, vid) = if rekey { (300, 20) } else { (100, 10) };
+    let instances = one_instance_table(
+        instance(vni, Some("brsvd"), "10.0.0.1")
+            .with_bridge_vlan(Some(BridgeVlan::new(vid).unwrap())),
+    );
+    assert_eq!(
+        restarted
+            .probe(&instances)
+            .await
+            .get(EvpnInstanceId::new(vni).unwrap()),
+        Some(&InstanceProbe::Ready)
+    );
+    restarted
+        .apply(&create(spec))
+        .await
+        .expect("idempotent adoption");
 }
 
 #[tokio::test]

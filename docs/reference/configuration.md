@@ -6149,13 +6149,20 @@ link carrying only a `rustbgpd:bridge:...` stamp — is also reported
 Protected attributes are: bridge `vlan_filtering`; fixed-VNI VXLAN `vni`,
 `local`, `dstport`, `learning`, `collect-metadata`, `vnifilter`, and `bridge`
 attachment; SVD VXLAN fixed-VNI absence, optional `local`, `dstport`,
-`learning`, `collect-metadata`, `vnifilter`, `bridge` attachment, and
-bridge VLAN/tunnel mappings; VLAN upper `bridge`, `vlan`, and link-up state;
+`learning`, `collect-metadata`, `vnifilter`, and `bridge` attachment;
+VLAN upper `bridge`, `vlan`, and link-up state;
 VRF `table_id`; and L3VXLAN `vni`, `local`, `dstport`, `learning`,
 `collect-metadata`, `vnifilter`, `vrf` master, and `router_mac`. The bounded Prometheus gauge
 `evpn_managed_netdev_state{class,name,desired,state}` mirrors the latest
 reported state for alerting; detailed reason text is available through
 `ListManagedNetdevs` / `rbgp evpn managed-netdevs`.
+
+On an exactly owned SVD, VLAN membership and tunnel bindings are reconciled
+to the configured set, including during startup adoption. Re-keying removes
+the old tunnel mapping before adding the new VNI. Removed bindings also remove
+their bridge-self VLAN when no other bridge port uses it. Unrelated bridge-self
+VLANs and all foreign-port VLANs are preserved. Binding drift makes the SVD
+incomplete and triggers repair rather than protected-attribute rejection.
 
 Reaping is equally conservative. When the owner token stays but a bridge,
 fixed-VNI VXLAN, SVD VXLAN, VLAN upper, VRF, or L3VXLAN row is removed, only

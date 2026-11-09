@@ -6449,12 +6449,21 @@ fn svd_vlan_bindings_present(
     }) else {
         return false;
     };
+    let Some(observed) = crate::snapshot::svd_tunnel_bindings(&port.vlan_tunnels) else {
+        return false;
+    };
+    if observed.len() != bindings.len()
+        || (1..=4094).any(|vid| {
+            vlan_rows_contain(&port.vlans, vid)
+                != bindings.iter().any(|binding| binding.bridge_vlan == vid)
+        })
+    {
+        return false;
+    }
     bindings.iter().all(|binding| {
         vlan_rows_contain(&bridge.vlans, binding.bridge_vlan)
             && vlan_rows_contain(&port.vlans, binding.bridge_vlan)
-            && port.vlan_tunnels.iter().any(|row| {
-                row.vid == Some(binding.bridge_vlan) && row.tunnel_id == Some(binding.vni)
-            })
+            && observed.contains(binding)
     })
 }
 
@@ -8700,6 +8709,52 @@ mod managed_netdev_tests {
     use crate::snapshot::{
         KernelLinkInfo, KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo,
     };
+
+    #[test]
+    fn svd_bindings_require_exact_port_inventory() {
+        use crate::snapshot::{
+            KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
+            KernelBridgeVlanTunnelInfo,
+        };
+        let vlan = |vid| KernelBridgeVlanInfo {
+            vid,
+            flags: KernelBridgeVlanFlags::default(),
+        };
+        let tunnel = |vid, vni| KernelBridgeVlanTunnelInfo {
+            vid: Some(vid),
+            tunnel_id: Some(vni),
+            flags: KernelBridgeVlanFlags::default(),
+        };
+        let bindings = [ManagedSvdVxlanBinding {
+            bridge_vlan: 10,
+            vni: 100,
+        }];
+        let mut bridge = KernelLinkInfo {
+            vlans: vec![vlan(10), vlan(30)],
+            port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                ifindex: 42,
+                name: Some("vxsvd".to_string()),
+                is_vxlan: true,
+                vlans: vec![vlan(10)],
+                vlan_tunnels: vec![tunnel(10, 100)],
+            }],
+            ..Default::default()
+        };
+        assert!(svd_vlan_bindings_present(&bridge, 42, "vxsvd", &bindings));
+        bridge.port_vlan_inventory[0]
+            .vlan_tunnels
+            .push(tunnel(20, 200));
+        assert!(!svd_vlan_bindings_present(&bridge, 42, "vxsvd", &bindings));
+        bridge.port_vlan_inventory[0].vlan_tunnels.pop();
+        bridge.port_vlan_inventory[0].vlans.push(vlan(20));
+        assert!(!svd_vlan_bindings_present(&bridge, 42, "vxsvd", &bindings));
+        bridge.port_vlan_inventory[0].vlans.pop();
+        bridge.port_vlan_inventory[0].vlan_tunnels[0] = tunnel(10, 200);
+        assert!(!svd_vlan_bindings_present(&bridge, 42, "vxsvd", &bindings));
+        bridge.port_vlan_inventory[0].vlan_tunnels[0] = tunnel(10, 100);
+        bridge.vlans.retain(|row| row.vid != 10);
+        assert!(!svd_vlan_bindings_present(&bridge, 42, "vxsvd", &bindings));
+    }
 
     fn link(name: &str, ifindex: u32, vlan_filtering: bool, altnames: Vec<&str>) -> KernelLinkInfo {
         KernelLinkInfo {

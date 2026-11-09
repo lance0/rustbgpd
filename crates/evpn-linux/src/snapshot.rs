@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
+use rustbgpd_evpn::{EvpnInstanceId, MacAddress, ManagedSvdVxlanBinding};
 
 /// `RTPROT_BGP` (186) — the daemon's kernel ownership identity, shared
 /// with every route we install (`rtm_protocol`) and, per ADR-0082, the
@@ -206,6 +206,45 @@ pub struct KernelBridgeVlanTunnelInfo {
     pub vid: Option<u16>,
     /// Kernel flags for this tunnel row.
     pub flags: KernelBridgeVlanFlags,
+}
+
+/// Expand the kernel's compressed VID/VNI ranges before comparing or pruning.
+pub(crate) fn svd_tunnel_bindings(
+    rows: &[KernelBridgeVlanTunnelInfo],
+) -> Option<Vec<ManagedSvdVxlanBinding>> {
+    let mut bindings = Vec::new();
+    let mut start = None;
+    for row in rows {
+        let (vid, vni) = (row.vid?, row.tunnel_id?);
+        if !(1..=4094).contains(&vid) {
+            return None;
+        }
+        if row.flags.range_begin {
+            if row.flags.range_end || start.replace((vid, vni)).is_some() {
+                return None;
+            }
+        } else if row.flags.range_end {
+            let (first_vid, first_vni) = start.take()?;
+            if vid < first_vid || first_vni.checked_add(u32::from(vid - first_vid))? != vni {
+                return None;
+            }
+            for bridge_vlan in first_vid..=vid {
+                bindings.push(ManagedSvdVxlanBinding {
+                    bridge_vlan,
+                    vni: first_vni + u32::from(bridge_vlan - first_vid),
+                });
+            }
+        } else {
+            if start.is_some() {
+                return None;
+            }
+            bindings.push(ManagedSvdVxlanBinding {
+                bridge_vlan: vid,
+                vni,
+            });
+        }
+    }
+    start.is_none().then_some(bindings)
 }
 
 /// VLAN inventory observed on one bridge-member link.
@@ -1070,6 +1109,46 @@ mod tests {
     }
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn svd_tunnel_bindings_expands_ranges_and_refuses_incomplete_inventory() {
+        let row = |vid, vni, range_begin, range_end| KernelBridgeVlanTunnelInfo {
+            vid: Some(vid),
+            tunnel_id: Some(vni),
+            flags: KernelBridgeVlanFlags {
+                range_begin,
+                range_end,
+                ..Default::default()
+            },
+        };
+        let begin = row(10, 100, true, false);
+        let end = row(12, 102, false, true);
+        assert_eq!(
+            svd_tunnel_bindings(&[begin.clone(), end]),
+            Some(vec![
+                ManagedSvdVxlanBinding {
+                    bridge_vlan: 10,
+                    vni: 100
+                },
+                ManagedSvdVxlanBinding {
+                    bridge_vlan: 11,
+                    vni: 101
+                },
+                ManagedSvdVxlanBinding {
+                    bridge_vlan: 12,
+                    vni: 102
+                },
+            ])
+        );
+        assert_eq!(svd_tunnel_bindings(std::slice::from_ref(&begin)), None);
+        assert_eq!(
+            svd_tunnel_bindings(&[begin.clone(), row(12, 103, false, true)]),
+            None
+        );
+        assert_eq!(svd_tunnel_bindings(&[row(12, 102, false, true)]), None);
+        assert_eq!(svd_tunnel_bindings(&[begin, row(9, 99, false, true)]), None);
+        assert_eq!(svd_tunnel_bindings(&[row(0, 100, false, false)]), None);
     }
 
     #[test]
