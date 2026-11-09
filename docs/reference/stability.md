@@ -42,8 +42,9 @@ In particular:
   filter. The older whole-table `ListVpnRoutes`, `ListLabeledRoutes`,
   `ListRtcRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`
   and `ListEvpnRoutes` remain functional but are deprecated and outside v1;
-  use their bounded replacements for new integrations. This does not change
-  plain CLI output.
+  use their bounded replacements for new integrations. The plain CLI listings
+  walk the bounded pages: their JSON arrays and rows are unchanged, in the
+  pages' key order.
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.

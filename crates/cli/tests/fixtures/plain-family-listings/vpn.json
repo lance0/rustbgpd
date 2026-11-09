@@ -1,0 +1,67 @@
+[
+  {
+    "afi_safi": "l3vpn_ipv4_unicast",
+    "route_distinguisher": "65000:1",
+    "route_distinguisher_bytes": "0000fde800000001",
+    "prefix": "10.1.0.0/24",
+    "labels": [
+      24001
+    ],
+    "next_hop": "192.0.2.1",
+    "peer_address": "fe80::1%eth0",
+    "as_path": [
+      64512,
+      64513
+    ],
+    "communities": [
+      "64512:100"
+    ],
+    "extended_communities": [
+      "RT:65000:1"
+    ]
+  },
+  {
+    "afi_safi": "l3vpn_ipv4_unicast",
+    "route_distinguisher": "65000:1",
+    "route_distinguisher_bytes": "0000fde800000001",
+    "prefix": "10.2.0.0/24",
+    "labels": [
+      24001
+    ],
+    "next_hop": "192.0.2.1",
+    "peer_address": "fe80::1%eth0",
+    "as_path": [
+      64512,
+      64513
+    ],
+    "communities": [
+      "64512:100"
+    ],
+    "extended_communities": [
+      "RT:65000:1"
+    ],
+    "path_id": 7,
+    "stale": true
+  },
+  {
+    "afi_safi": "l3vpn_ipv4_unicast",
+    "route_distinguisher": "65000:2",
+    "route_distinguisher_bytes": "0000fde800000002",
+    "prefix": "10.1.0.0/24",
+    "labels": [
+      24002
+    ],
+    "next_hop": "192.0.2.1",
+    "peer_address": "fe80::1%eth0",
+    "as_path": [
+      64512,
+      64513
+    ],
+    "communities": [
+      "64512:100"
+    ],
+    "extended_communities": [
+      "RT:65000:2"
+    ]
+  }
+]

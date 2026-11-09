@@ -1,0 +1,16 @@
+{
+  "apply_failed_instances": [],
+  "current_apply_failure_count": 0,
+  "instance_count": 1,
+  "key_metrics": [
+    "evpn_local_originations_total{action=\"inject\"} 1",
+    "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 2"
+  ],
+  "latest_unscoped_permanent_apply_error": "",
+  "originated_local_macs_count": 2,
+  "type2_present": true,
+  "type2_route_count": 3,
+  "type3_present": true,
+  "type3_route_count": 2,
+  "unscoped_apply_failure_count": 0
+}

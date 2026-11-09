@@ -1,0 +1,36 @@
+[
+  {
+    "is_default": true,
+    "origin_as": 0,
+    "route_target": "",
+    "prefix_len": 0,
+    "next_hop": "0.0.0.0",
+    "peer_address": "0.0.0.0",
+    "as_path": [],
+    "communities": []
+  },
+  {
+    "is_default": false,
+    "origin_as": 65001,
+    "route_target": "RT:65001:100",
+    "prefix_len": 96,
+    "next_hop": "192.0.2.1",
+    "peer_address": "192.0.2.1",
+    "as_path": [
+      64512
+    ],
+    "communities": []
+  },
+  {
+    "is_default": false,
+    "origin_as": 65002,
+    "route_target": "RT:65001:100",
+    "prefix_len": 96,
+    "next_hop": "192.0.2.1",
+    "peer_address": "192.0.2.1",
+    "as_path": [
+      64512
+    ],
+    "communities": []
+  }
+]

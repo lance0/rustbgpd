@@ -1,4 +1,5 @@
 use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
+use crate::commands::rib::{ROUTE_PAGE_SIZE, check_page_token};
 use crate::connection::{Connection, MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
@@ -8,12 +9,13 @@ use crate::proto::{
     AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
     EthernetSegmentState, EvpnInstanceReadinessState, EvpnInstanceState, EvpnRuntimeLifecycle,
     EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest, GetIpVrfRequest,
-    IpVrfReadinessState, IpVrfState, ListDuplicateMacQuarantinesRequest,
+    IpVrfReadinessState, IpVrfState, ListBestEvpnRoutesRequest, ListDuplicateMacQuarantinesRequest,
     ListEthernetSegmentsRequest, ListEthernetSegmentsResponse, ListEvpnInstancesRequest,
-    ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, ListManagedNetdevsRequest,
-    ManagedNetdevClass, ManagedNetdevLifecycleState, ManagedNetdevState, MetricsRequest,
+    ListEvpnNexthopsRequest, ListIpVrfsRequest, ListManagedNetdevsRequest, ManagedNetdevClass,
+    ManagedNetdevLifecycleState, ManagedNetdevState, MetricsRequest,
     SetEthernetSegmentDrainRequest,
 };
+use std::collections::HashSet;
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
     "evpn_local_originations_total",
@@ -69,10 +71,7 @@ pub async fn list_best_page(
     Ok(())
 }
 
-#[expect(
-    deprecated,
-    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
-)]
+/// Plain best listing: every bounded page, in the daemon's key order.
 pub async fn list(
     connection: Connection,
     route_type: Option<u32>,
@@ -80,22 +79,36 @@ pub async fn list(
     rd: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
+    let mut request = ListBestEvpnRoutesRequest {
+        route_type_filter: route_type.unwrap_or(0),
+        source_peer_filter: peer.clone().unwrap_or_default(),
+        rd_filter: rd.unwrap_or_default(),
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
+    };
     let mut client = connection.rib_listing_client();
-    let mut resp = read_rpc(
-        "ListEvpnRoutes",
-        client.list_evpn_routes(ListEvpnRequest {
-            route_type_filter: route_type.unwrap_or(0),
-            peer_filter: peer.as_deref().unwrap_or_default().to_string(),
-            rd_filter: rd.unwrap_or_default(),
-        }),
-    )
-    .await?
-    .into_inner();
-    for route in &mut resp.routes {
+    let mut routes = Vec::new();
+    let mut seen_tokens = HashSet::new();
+    // Walk every page; a failed page stops the walk without retrying its token.
+    loop {
+        let page = read_rpc(
+            "ListBestEvpnRoutes",
+            client.list_best_evpn_routes(request.clone()),
+        )
+        .await?
+        .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
+        routes.extend(page.routes);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    for route in &mut routes {
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
 
-    print_routes(&resp.routes, json)
+    print_routes(&routes, json)
 }
 
 fn routes_to_json(routes: &[crate::proto::EvpnRouteEntry]) -> Vec<serde_json::Value> {
@@ -1815,8 +1828,8 @@ fn format_ip_vrf_human(vrf: &IpVrfState) -> String {
 fn diagnose_json(
     instance_count: usize,
     originated_local_macs: u64,
-    type2_route_count: usize,
-    type3_route_count: usize,
+    type2_route_count: u64,
+    type3_route_count: u64,
     key_metrics: &[String],
     failed_instances: &[&EvpnInstanceState],
     unscoped: (u64, &str),
@@ -1841,10 +1854,6 @@ fn diagnose_json(
 }
 
 /// Read-only EVPN alpha health summary.
-#[expect(
-    deprecated,
-    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
-)]
 pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut evpn_client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1856,29 +1865,24 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
     .into_inner();
     let instances = &instance_response.instances;
 
+    // `total_count` covers every best route of the type whatever the page
+    // size, so one smallest page per type answers without a walk.
     let mut rib_client = connection.rib_listing_client();
-    let type2_routes = read_rpc(
-        "ListEvpnRoutes",
-        rib_client.list_evpn_routes(ListEvpnRequest {
-            route_type_filter: 2,
-            peer_filter: String::new(),
-            rd_filter: String::new(),
-        }),
-    )
-    .await?
-    .into_inner()
-    .routes;
-    let type3_routes = read_rpc(
-        "ListEvpnRoutes",
-        rib_client.list_evpn_routes(ListEvpnRequest {
-            route_type_filter: 3,
-            peer_filter: String::new(),
-            rd_filter: String::new(),
-        }),
-    )
-    .await?
-    .into_inner()
-    .routes;
+    let mut type_counts = [0u64; 2];
+    for (count, route_type_filter) in type_counts.iter_mut().zip([2, 3]) {
+        *count = read_rpc(
+            "ListBestEvpnRoutes",
+            rib_client.list_best_evpn_routes(ListBestEvpnRoutesRequest {
+                route_type_filter,
+                page_size: 1,
+                ..Default::default()
+            }),
+        )
+        .await?
+        .into_inner()
+        .total_count;
+    }
+    let [type2_route_count, type3_route_count] = type_counts;
 
     let mut control_client = connection.metrics_client();
     let metrics = read_rpc("GetMetrics", control_client.get_metrics(MetricsRequest {}))
@@ -1900,8 +1904,8 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         output::print_json_pretty(&diagnose_json(
             instances.len(),
             originated_local_macs,
-            type2_routes.len(),
-            type3_routes.len(),
+            type2_route_count,
+            type3_route_count,
             &key_metrics,
             &failed_instances,
             (
@@ -1942,8 +1946,8 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         )?;
         outln!(
             "Type 2 routes: {} ({})",
-            type2_routes.len(),
-            if type2_routes.is_empty() {
+            type2_route_count,
+            if type2_route_count == 0 {
                 "missing"
             } else {
                 "present"
@@ -1951,8 +1955,8 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         )?;
         outln!(
             "Type 3 IMET routes: {} ({})",
-            type3_routes.len(),
-            if type3_routes.is_empty() {
+            type3_route_count,
+            if type3_route_count == 0 {
                 "missing"
             } else {
                 "present"
@@ -2177,7 +2181,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let request = server.state.last_list_evpn.lock().await.clone().unwrap();
+        let request = server
+            .state
+            .last_list_evpn_page
+            .lock()
+            .await
+            .clone()
+            .unwrap();
         assert_eq!(request.route_type_filter, 6);
         assert_eq!(request.rd_filter, "65000:100");
         for received in [true, false] {
@@ -2964,12 +2974,15 @@ mod tests {
 
         let request = server
             .state
-            .last_list_evpn
+            .last_list_evpn_page
             .lock()
             .await
             .clone()
             .expect("EVPN request captured");
-        assert_eq!(request.peer_filter, "fe80:0:0:0:0:0:0:2%eth0");
+        assert_eq!(request.source_peer_filter, "fe80:0:0:0:0:0:0:2%eth0");
+        assert_eq!(request.route_type_filter, 2);
+        assert_eq!(request.page_size, crate::commands::rib::ROUTE_PAGE_SIZE);
+        assert!(server.state.last_list_evpn.lock().await.is_none());
     }
 
     #[tokio::test]

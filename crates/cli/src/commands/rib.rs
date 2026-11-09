@@ -16,9 +16,9 @@ use crate::proto::{
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
     ExplainDecision, ExportGateVerdict, FibRouteState, LabeledRouteEntry,
     ListBgpLsRibRoutesRequest, ListBlackholeDiscardsRequest, ListFibRoutesRequest,
-    ListFibRoutesResponse, ListLabeledRoutesRequest, ListRejectedRoutesRequest,
-    ListRejectedRoutesResponse, ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest,
-    LookupBestPathRequest, Route, RtcRouteEntry, VpnRouteEntry,
+    ListFibRoutesResponse, ListLabeledRibRoutesRequest, ListRejectedRoutesRequest,
+    ListRejectedRoutesResponse, ListRoutesRequest, ListRtcRibRoutesRequest,
+    ListVpnRibRoutesRequest, LookupBestPathRequest, Route, RtcRouteEntry, VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -590,10 +590,13 @@ pub(crate) fn parse_vpn_rib_family(family: Option<&str>) -> Result<i32, CliError
 fn make_vpn_request(
     family: Option<&str>,
     peer: Option<String>,
-) -> Result<ListVpnRoutesRequest, CliError> {
-    Ok(ListVpnRoutesRequest {
-        afi_safi: parse_vpn_family(family)?,
-        peer_filter: peer.as_deref().unwrap_or_default().to_string(),
+) -> Result<ListVpnRibRoutesRequest, CliError> {
+    Ok(ListVpnRibRoutesRequest {
+        view: crate::proto::FamilyRouteView::Best as i32,
+        afi_safi: parse_vpn_rib_family(family)?,
+        source_peer_filter: peer.unwrap_or_default(),
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
     })
 }
 
@@ -624,10 +627,13 @@ pub(crate) fn parse_labeled_rib_family(family: Option<&str>) -> Result<i32, CliE
 fn make_labeled_request(
     family: Option<&str>,
     peer: Option<String>,
-) -> Result<ListLabeledRoutesRequest, CliError> {
-    Ok(ListLabeledRoutesRequest {
-        afi_safi: parse_labeled_family(family)?,
-        peer_filter: peer.as_deref().unwrap_or_default().to_string(),
+) -> Result<ListLabeledRibRoutesRequest, CliError> {
+    Ok(ListLabeledRibRoutesRequest {
+        view: crate::proto::FamilyRouteView::Best as i32,
+        afi_safi: parse_labeled_rib_family(family)?,
+        source_peer_filter: peer.unwrap_or_default(),
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
     })
 }
 
@@ -2389,10 +2395,7 @@ pub async fn rtc_page(
     Ok(())
 }
 
-#[expect(
-    deprecated,
-    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
-)]
+/// Plain best listing: every bounded page, in the daemon's key order.
 pub async fn vpn(
     connection: Connection,
     family: Option<&str>,
@@ -2400,23 +2403,32 @@ pub async fn vpn(
     json: bool,
 ) -> Result<(), CliError> {
     let requested_peer = peer.clone();
+    let mut request = make_vpn_request(family, peer)?;
     let mut client = connection.rib_listing_client();
-    let mut resp = read_rpc(
-        "ListVpnRoutes",
-        client.list_vpn_routes(make_vpn_request(family, peer)?),
-    )
-    .await?
-    .into_inner();
-    for route in &mut resp.routes {
+    let mut routes = Vec::new();
+    let mut seen_tokens = HashSet::new();
+    // Walk every page; a failed page stops the walk without retrying its token.
+    loop {
+        let page = read_rpc(
+            "ListVpnRibRoutes",
+            client.list_vpn_rib_routes(request.clone()),
+        )
+        .await?
+        .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
+        routes.extend(page.routes);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    for route in &mut routes {
         restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
     }
-    print_vpn_routes(&resp.routes, json)
+    print_vpn_routes(&routes, json)
 }
 
-#[expect(
-    deprecated,
-    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
-)]
+/// Plain best listing: every bounded page, in the daemon's key order.
 pub async fn labeled(
     connection: Connection,
     family: Option<&str>,
@@ -2424,37 +2436,61 @@ pub async fn labeled(
     json: bool,
 ) -> Result<(), CliError> {
     let requested_peer = peer.clone();
+    let mut request = make_labeled_request(family, peer)?;
     let mut client = connection.rib_listing_client();
-    let mut resp = read_rpc(
-        "ListLabeledRoutes",
-        client.list_labeled_routes(make_labeled_request(family, peer)?),
-    )
-    .await?
-    .into_inner();
-    for route in &mut resp.routes {
+    let mut routes = Vec::new();
+    let mut seen_tokens = HashSet::new();
+    // Walk every page; a failed page stops the walk without retrying its token.
+    loop {
+        let page = read_rpc(
+            "ListLabeledRibRoutes",
+            client.list_labeled_rib_routes(request.clone()),
+        )
+        .await?
+        .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
+        routes.extend(page.routes);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    for route in &mut routes {
         restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
     }
-    print_labeled_routes(&resp.routes, json)
+    print_labeled_routes(&routes, json)
 }
 
-#[expect(
-    deprecated,
-    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
-)]
+/// Plain best listing: every bounded page, in the daemon's key order.
 pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
+    let mut request = ListRtcRibRoutesRequest {
+        view: crate::proto::FamilyRouteView::Best as i32,
+        source_peer_filter: peer.clone().unwrap_or_default(),
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
+    };
     let mut client = connection.rib_listing_client();
-    let mut resp = read_rpc(
-        "ListRtcRoutes",
-        client.list_rtc_routes(ListRtcRoutesRequest {
-            peer_filter: peer.as_deref().unwrap_or_default().to_string(),
-        }),
-    )
-    .await?
-    .into_inner();
-    for route in &mut resp.routes {
+    let mut routes = Vec::new();
+    let mut seen_tokens = HashSet::new();
+    // Walk every page; a failed page stops the walk without retrying its token.
+    loop {
+        let page = read_rpc(
+            "ListRtcRibRoutes",
+            client.list_rtc_rib_routes(request.clone()),
+        )
+        .await?
+        .into_inner();
+        check_page_token(&mut seen_tokens, &page.next_page_token)?;
+        routes.extend(page.routes);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    for route in &mut routes {
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
-    print_rtc_routes(&resp.routes, json)
+    print_rtc_routes(&routes, json)
 }
 
 pub async fn received(
@@ -3947,13 +3983,23 @@ mod tests {
 
         let req = server
             .state
-            .last_list_labeled
+            .last_list_labeled_page
             .lock()
             .await
             .clone()
             .expect("labeled request captured");
-        assert_eq!(req.afi_safi, "ipv4_labeled_unicast");
-        assert_eq!(req.peer_filter, "fe80::1%eth0");
+        assert_eq!(
+            req.encode_to_vec(),
+            ListLabeledRibRoutesRequest {
+                view: crate::proto::FamilyRouteView::Best as i32,
+                afi_safi: AddressFamily::Ipv4LabeledUnicast as i32,
+                source_peer_filter: "fe80::1%eth0".into(),
+                page_size: ROUTE_PAGE_SIZE,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        );
+        assert!(server.state.last_list_labeled.lock().await.is_none());
     }
 
     #[test]
@@ -3991,13 +4037,23 @@ mod tests {
 
         let req = server
             .state
-            .last_list_vpn
+            .last_list_vpn_page
             .lock()
             .await
             .clone()
             .expect("VPN request captured");
-        assert_eq!(req.afi_safi, "l3vpn_ipv4_unicast");
-        assert_eq!(req.peer_filter, "fe80::1%eth0");
+        assert_eq!(
+            req.encode_to_vec(),
+            ListVpnRibRoutesRequest {
+                view: crate::proto::FamilyRouteView::Best as i32,
+                afi_safi: AddressFamily::L3vpnIpv4Unicast as i32,
+                source_peer_filter: "fe80::1%eth0".into(),
+                page_size: ROUTE_PAGE_SIZE,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        );
+        assert!(server.state.last_list_vpn.lock().await.is_none());
     }
 
     #[tokio::test]
@@ -4011,12 +4067,22 @@ mod tests {
 
         let req = server
             .state
-            .last_list_rtc
+            .last_list_rtc_page
             .lock()
             .await
             .clone()
             .expect("RTC request captured");
-        assert_eq!(req.peer_filter, "fe80::1%eth0");
+        assert_eq!(
+            req.encode_to_vec(),
+            ListRtcRibRoutesRequest {
+                view: crate::proto::FamilyRouteView::Best as i32,
+                source_peer_filter: "fe80::1%eth0".into(),
+                page_size: ROUTE_PAGE_SIZE,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        );
+        assert!(server.state.last_list_rtc.lock().await.is_none());
 
         // Row rendering: the default row shows `default` and the locally
         // originated entry (peer 0.0.0.0) renders FROM-PEER as `local`.

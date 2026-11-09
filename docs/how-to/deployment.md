@@ -1714,7 +1714,8 @@ with `ListBgpLsRibRoutes` and `view = BEST`; its old `peer_filter` becomes
 `ListOrrTopologyNodes` and `ListOrrTopologyLinks`. Replace `ListEvpnRoutes`
 with `ListBestEvpnRoutes`; select each of Types 1–5 separately for the scoped
 EVPN role. The seven whole-table methods remain functional but are deprecated
-and outside v1. No RPC is removed and plain CLI JSON arrays are unchanged.
+and outside v1. No RPC is removed. Plain CLI JSON arrays keep their shape;
+`rbgp` builds them from the bounded pages, in the pages' key order.
 
 Follow `next_page_token` until empty. A table mutation returns `ABORTED`;
 restart the walk with an empty token. Page size 0 defaults to 100; values above

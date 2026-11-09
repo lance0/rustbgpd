@@ -1103,13 +1103,13 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::Unauthenticated, "{error}");
     }
 
-    /// A valid BGP-LS listing response whose encoded size is driven by
+    /// A valid BGP-LS page whose encoded size is driven by
     /// `route_count` x `payload_len` — the loopback fixture for the
     /// decode-ceiling tests.
     fn bgpls_listing_fixture(
         route_count: usize,
         payload_len: usize,
-    ) -> server_proto::ListBgpLsResponse {
+    ) -> server_proto::ListBgpLsRibRoutesResponse {
         let route = server_proto::BgpLsRouteEntry {
             afi_safi: server_proto::AddressFamily::BgpLs as i32,
             family: "bgp_ls".to_string(),
@@ -1122,8 +1122,9 @@ mod tests {
             as_path: vec![64512],
             ..Default::default()
         };
-        server_proto::ListBgpLsResponse {
+        server_proto::ListBgpLsRibRoutesResponse {
             routes: vec![route; route_count],
+            ..Default::default()
         }
     }
 
@@ -1131,10 +1132,6 @@ mod tests {
     // response larger than tonic's 4 MiB client default, end to end over
     // a real TCP loopback server.
     #[tokio::test]
-    #[expect(
-        deprecated,
-        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
-    )]
     async fn listing_client_decodes_response_over_default_ceiling() {
         let handle = crate::test_support::spawn_mock_server(None).await;
         let resp = bgpls_listing_fixture(2200, 2048);
@@ -1144,12 +1141,12 @@ mod tests {
             resp.encoded_len()
         );
         let count = resp.routes.len();
-        *handle.state.list_bgpls_response.lock().await = Some(resp);
+        *handle.state.bgpls_pages.lock().await = vec![resp];
 
         let connection = connect(&handle.addr, None).await.unwrap();
         let got = connection
             .rib_listing_client()
-            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .list_bgp_ls_rib_routes(crate::proto::ListBgpLsRibRoutesRequest::default())
             .await
             .expect("bounded listing client must decode a >4 MiB listing")
             .into_inner();
@@ -1160,13 +1157,9 @@ mod tests {
     // >4 MiB listing must fail with OutOfRange. This pins both the defect
     // and that ordinary RIB clients stay at the default.
     #[tokio::test]
-    #[expect(
-        deprecated,
-        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
-    )]
     async fn default_generated_client_fails_out_of_range_over_default_ceiling() {
         let handle = crate::test_support::spawn_mock_server(None).await;
-        *handle.state.list_bgpls_response.lock().await = Some(bgpls_listing_fixture(2200, 2048));
+        *handle.state.bgpls_pages.lock().await = vec![bgpls_listing_fixture(2200, 2048)];
 
         let connection = connect(&handle.addr, None).await.unwrap();
         let mut client = crate::proto::rib_service_client::RibServiceClient::with_interceptor(
@@ -1174,7 +1167,7 @@ mod tests {
             connection.interceptor(),
         );
         let err = client
-            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .list_bgp_ls_rib_routes(crate::proto::ListBgpLsRibRoutesRequest::default())
             .await
             .expect_err("default client must reject a >4 MiB listing");
         assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
@@ -1184,20 +1177,16 @@ mod tests {
     // with a 1 KiB cap must reject a response just over 1 KiB with
     // OutOfRange.
     #[tokio::test]
-    #[expect(
-        deprecated,
-        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
-    )]
     async fn listing_client_ceiling_is_enforced() {
         let handle = crate::test_support::spawn_mock_server(None).await;
         let resp = bgpls_listing_fixture(2, 1024);
         assert!(resp.encoded_len() > 1024);
-        *handle.state.list_bgpls_response.lock().await = Some(resp);
+        *handle.state.bgpls_pages.lock().await = vec![resp];
 
         let connection = connect(&handle.addr, None).await.unwrap();
         let err = connection
             .rib_client_with_decode_limit(1024)
-            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .list_bgp_ls_rib_routes(crate::proto::ListBgpLsRibRoutesRequest::default())
             .await
             .expect_err("a 1 KiB cap must reject a >1 KiB listing");
         assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
@@ -1207,10 +1196,6 @@ mod tests {
     // bearer token still reaches a server that enforces it, and a
     // connection without the token is still rejected.
     #[tokio::test]
-    #[expect(
-        deprecated,
-        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
-    )]
     async fn listing_client_carries_bearer_token() {
         let handle = crate::test_support::spawn_mock_server(Some("listing-secret")).await;
         let dir = tempfile::tempdir().unwrap();
@@ -1222,14 +1207,14 @@ mod tests {
             .unwrap();
         connection
             .rib_listing_client()
-            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .list_bgp_ls_rib_routes(crate::proto::ListBgpLsRibRoutesRequest::default())
             .await
             .expect("authenticated listing call must succeed");
 
         let bare = connect(&handle.addr, None).await.unwrap();
         let err = bare
             .rib_listing_client()
-            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .list_bgp_ls_rib_routes(crate::proto::ListBgpLsRibRoutesRequest::default())
             .await
             .expect_err("server must reject the tokenless client");
         assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
@@ -1473,7 +1458,9 @@ mod tests {
     // RPC invocation must be reachable only through the bounded
     // constructor: adding a new listing call on a raw generated client,
     // or reverting an inventoried command to one, changes a count and
-    // fails here. Counts cover non-test code only.
+    // fails here. Counts cover non-test code only. The whole-table family
+    // RPCs stay in the list so a call that returns is counted; the crate's
+    // `deny(deprecated)` already refuses to compile one.
     #[test]
     fn listing_surface_inventory_uses_bounded_client() {
         const LISTING_RPCS: &[&str] = &[
@@ -1503,7 +1490,7 @@ mod tests {
         // (file, source, bounded constructor sites, listing RPC invocations)
         let surfaces = [
             ("commands/rib.rs", include_str!("commands/rib.rs"), 9, 9),
-            ("commands/evpn.rs", include_str!("commands/evpn.rs"), 5, 7),
+            ("commands/evpn.rs", include_str!("commands/evpn.rs"), 5, 6),
             (
                 "commands/flowspec.rs",
                 include_str!("commands/flowspec.rs"),
@@ -1549,7 +1536,51 @@ mod tests {
             total_rpcs += rpcs;
         }
         assert_eq!(total_ctors, 19, "inventoried constructor sites");
-        assert_eq!(total_rpcs, 21, "inventoried listing RPC invocations");
+        assert_eq!(total_rpcs, 20, "inventoried listing RPC invocations");
+    }
+
+    // `deny(deprecated)` at the crate roots refuses to compile a call to a
+    // deprecated RPC. A local `allow`, `expect` or `warn` is the only way
+    // around it, so no source file of the package may carry one.
+    #[test]
+    fn no_source_file_opts_out_of_the_deprecated_lint() {
+        fn visit(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, hits);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source: String = fs::read_to_string(&path)
+                        .unwrap()
+                        .split_whitespace()
+                        .collect();
+                    for level in ["allow", "expect", "warn"] {
+                        let opted_out = source.split(&format!("{level}(")).skip(1).any(|rest| {
+                            rest.split(')').next().is_some_and(|lints| {
+                                lints.split(',').any(|lint| lint == "deprecated")
+                            })
+                        });
+                        if opted_out {
+                            hits.push(format!("{}: {level}(deprecated)", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut hits = Vec::new();
+        for dir in ["src", "tests"] {
+            visit(&package.join(dir), &mut hits);
+        }
+        assert!(hits.is_empty(), "{hits:#?}");
+        for root in ["src/main.rs", "src/lib.rs"] {
+            assert!(
+                fs::read_to_string(package.join(root))
+                    .unwrap()
+                    .contains("\n#![deny(deprecated)]\n"),
+                "{root} must deny deprecated items"
+            );
+        }
     }
 
     // Budget rationale for the 64 MiB ceiling: it must hold at least
