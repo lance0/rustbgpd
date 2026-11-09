@@ -1,6 +1,5 @@
 //! Atomic management-plane credential generations.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +17,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
 use crate::authz_runtime::BearerAuthSecret;
-use crate::credential_file::{CredentialKind, DaemonIdentity, open_credential};
+use crate::credential_file::{CredentialKind, DaemonIdentity, read_credential};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CredentialSource {
@@ -314,19 +313,20 @@ struct Files<'a> {
 }
 
 impl Files<'_> {
-    fn open(
+    fn read(
         &mut self,
         label: &str,
         kind: CredentialKind,
         path: &Path,
-    ) -> Result<std::fs::File, String> {
-        let (file, warning) = open_credential(path, label, kind, self.daemon)
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
+        let mut bytes = Zeroizing::new(Vec::new());
+        let warning = read_credential(path, label, kind, self.daemon, &mut bytes)
             .map_err(|e| format!("listener {}: {e}", self.index))?;
         if let Some(warning) = warning {
             self.warnings
                 .push(format!("listener {}: {warning}", self.index));
         }
-        Ok(file)
+        Ok(bytes)
     }
 }
 
@@ -341,16 +341,13 @@ fn stage_listener(
         .map(|path| {
             // Zeroizing scrubs this transient read when it drops; the
             // retained copy inside `BearerAuthSecret` scrubs on its own drop.
-            let mut raw = Zeroizing::new(String::new());
-            files
-                .open("token", CredentialKind::Secret, path)?
-                .read_to_string(&mut raw)
-                .map_err(|e| {
-                    format!(
-                        "listener {index}: failed to read token file {}: {e}",
-                        path.display()
-                    )
-                })?;
+            let raw = files.read("token", CredentialKind::Secret, path)?;
+            let raw = std::str::from_utf8(&raw).map_err(|e| {
+                format!(
+                    "listener {index}: invalid token file {}: {e}",
+                    path.display()
+                )
+            })?;
             let token = raw.trim_end();
             if token.is_empty() {
                 return Err(format!(
@@ -386,16 +383,7 @@ fn read_file(
     path: &Path,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
     let index = files.index;
-    let mut bytes = Zeroizing::new(Vec::new());
-    files
-        .open(label, kind, path)?
-        .read_to_end(&mut bytes)
-        .map_err(|e| {
-            format!(
-                "listener {index}: failed to read {label} file {}: {e}",
-                path.display()
-            )
-        })?;
+    let bytes = files.read(label, kind, path)?;
     if bytes.is_empty() {
         return Err(format!(
             "listener {index}: {label} file {} is empty",
@@ -761,6 +749,60 @@ mod tests {
             expiry_metrics(&registry)["server_leaf"],
             new_expiry.server_leaf.unwrap()
         );
+    }
+
+    #[test]
+    fn oversized_credentials_refused_on_stage_and_reload() {
+        let token = token_file("old\n");
+        let source = CredentialSource {
+            token_file: Some(token.path().to_path_buf()),
+            tls: None,
+        };
+        let store = CredentialStore::stage(vec![source.clone()]).unwrap();
+        token
+            .as_file()
+            .set_len(crate::credential_file::MAX_CREDENTIAL_FILE_BYTES + 1)
+            .unwrap();
+        assert!(
+            CredentialStore::stage(vec![source])
+                .unwrap_err()
+                .contains("larger than")
+        );
+        assert!(store.reload().unwrap_err().contains("larger than"));
+        assert_eq!(store.load().sequence(), 1);
+    }
+
+    #[test]
+    fn oversized_tls_files_refused_on_stage_and_reload() {
+        let bundle = tls_bundle("bounded reads");
+        for which in 0..3 {
+            let files = [
+                token_file(&bundle.server_pem),
+                token_file(&bundle.server_key_pem),
+                token_file(&bundle.ca_pem),
+            ];
+            let source = CredentialSource {
+                token_file: None,
+                tls: Some(TlsSource {
+                    cert_file: files[0].path().into(),
+                    key_file: files[1].path().into(),
+                    client_ca_file: files[2].path().into(),
+                    client_crl_file: None,
+                }),
+            };
+            let store = CredentialStore::stage(vec![source.clone()]).unwrap();
+            files[which]
+                .as_file()
+                .set_len(crate::credential_file::MAX_CREDENTIAL_FILE_BYTES + 1)
+                .unwrap();
+            assert!(
+                CredentialStore::stage(vec![source])
+                    .unwrap_err()
+                    .contains("larger than")
+            );
+            assert!(store.reload().unwrap_err().contains("larger than"));
+            assert_eq!(store.load().sequence(), 1);
+        }
     }
 
     /// Load-bearing: load and reload apply the shared file rules. A shared

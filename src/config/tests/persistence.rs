@@ -1455,3 +1455,50 @@ md5_password = "hunter2"
     let err = Config::load_toml_with_diagnostics(&rendered, "effective.toml").unwrap_err();
     assert!(err.contains("md5_password"), "{err}");
 }
+
+#[test]
+fn config_load_refuses_oversized_document() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file()
+        .set_len(super::MAX_CONFIG_FILE_BYTES + 1)
+        .unwrap();
+    let diagnostic = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap_err();
+    assert!(diagnostic.contains("larger than"), "{diagnostic}");
+    let error = super::AcceptedConfigSnapshot::load(file.path(), None)
+        .err()
+        .unwrap();
+    assert!(error.contains("larger than"), "{error}");
+}
+
+#[test]
+fn normalized_config_limit_applies_before_snapshot_derivation() {
+    let mut config = parse(valid_toml()).unwrap();
+    config.neighbors[0].description = Some(String::new());
+    let accepted = AcceptedConfigSnapshot::from_config_for_test(config.clone());
+    let overhead = persisted_config_document_bounded(&mut config)
+        .unwrap()
+        .len();
+    let limit = usize::try_from(super::MAX_CONFIG_FILE_BYTES).unwrap();
+    config.neighbors[0].description = Some("x".repeat(limit - overhead));
+    assert_eq!(
+        config.neighbors[0].description.as_ref().unwrap().len(),
+        limit - overhead
+    );
+    let exact = persisted_config_document_bounded(&mut config).unwrap();
+    assert_eq!(exact.len(), limit);
+    drop(exact);
+    config.neighbors[0].description.as_mut().unwrap().push('x');
+    let Err(error) = persisted_config_document_bounded(&mut config) else {
+        panic!("oversized normalized document was accepted");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("normalized config is larger than")
+    );
+    let Err(error) = accepted.derive_config(config) else {
+        panic!("oversized candidate reached an accepted snapshot");
+    };
+    assert!(error.contains("normalized config is larger than"));
+    assert!(accepted.normalized_toml().len() < limit);
+}

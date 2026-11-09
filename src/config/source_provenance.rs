@@ -409,15 +409,19 @@ impl AcceptedConfigSnapshot {
         // Stat the open file before reading it, so the mtime describes these
         // bytes even if the operator saves again (in place or by rename)
         // while the load or the reload that follows is still running.
-        let (bytes, read_mtime) = std::fs::File::open(path)
-            .and_then(|mut file| {
+        let (bytes, read_mtime) = super::open_config_file(path)
+            .and_then(|file| {
                 let mtime = file
                     .metadata()
                     .and_then(|meta| meta.modified())
                     .ok()
                     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
                 let mut bytes = Vec::new();
-                std::io::Read::read_to_end(&mut file, &mut bytes)?;
+                rustbgpd_api::credential_file::read_bounded(
+                    file,
+                    super::MAX_CONFIG_FILE_BYTES,
+                    &mut bytes,
+                )?;
                 Ok((bytes, mtime))
             })
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
