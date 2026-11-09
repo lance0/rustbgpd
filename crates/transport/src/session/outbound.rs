@@ -143,7 +143,7 @@ impl PendingSlice {
                     update.next_hop_override.get(index).and_then(Option::as_ref),
                 );
                 return if matches!(group.wire, GroupWire::Ipv4Body) {
-                    attrs.into_with_next_hop()
+                    attrs.with_next_hop()
                 } else {
                     attrs.without_next_hop()
                 };
