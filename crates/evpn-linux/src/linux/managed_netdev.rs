@@ -656,7 +656,7 @@ async fn ensure_svd_binding(
         .execute()
         .await
         .map_err(|err| classify_link_apply_error(&err, "managed SVD VXLAN VLAN add"))?;
-    match handle
+    let added = handle
         .link()
         .set(
             LinkBridgeVlan::new(vxlan_ifindex)
@@ -668,11 +668,27 @@ async fn ensure_svd_binding(
                 .build(),
         )
         .execute()
-        .await
-    {
+        .await;
+    settle_svd_tunnel_add(added, binding, || {
+        super::vlan_tunnel::dump_port_vlans(vxlan_ifindex)
+    })
+    .await
+}
+
+/// `EEXIST` on a tunnel-mapping add is success only when a fresh
+/// target-scoped dump shows the exact desired (vid, vni).
+async fn settle_svd_tunnel_add<Dump>(
+    added: Result<(), rtnetlink::Error>,
+    binding: ManagedSvdVxlanBinding,
+    dump: impl FnOnce() -> Dump,
+) -> Result<(), DataplaneError>
+where
+    Dump: std::future::Future<Output = Result<Vec<super::vlan_tunnel::VlanEntry>, DataplaneError>>,
+{
+    match added {
         Ok(()) => Ok(()),
         Err(err) if is_errno(&err, ERRNO_EEXIST) => {
-            let entries = super::vlan_tunnel::dump_port_vlans(vxlan_ifindex).await?;
+            let entries = dump().await?;
             if super::vlan_tunnel::entries_map_vlan_to_tunnel(
                 &entries,
                 binding.bridge_vlan,
@@ -1925,6 +1941,59 @@ fn unsafe_managed_vlan_upper(message: String) -> DataplaneError {
 
 #[cfg(test)]
 mod tests {
+    use crate::linux::vlan_tunnel::VlanEntry;
+
+    fn netlink_error(errno: i32) -> rtnetlink::Error {
+        let mut message = netlink_packet_core::ErrorMessage::default();
+        message.code = std::num::NonZeroI32::new(-errno);
+        rtnetlink::Error::NetlinkError(message)
+    }
+
+    // A re-key that loses a race to a conflicting mapping (20 -> 200) must
+    // not report the desired 20 -> 300 as programmed.
+    #[tokio::test]
+    async fn svd_tunnel_add_eexist_requires_exact_fresh_mapping() {
+        let binding = super::ManagedSvdVxlanBinding {
+            bridge_vlan: 20,
+            vni: 300,
+        };
+        let entry = |vid_start, vid_end, tunnel_start| VlanEntry {
+            vid_start,
+            vid_end,
+            tunnel_start,
+        };
+        let settle = |entries: Vec<VlanEntry>| {
+            super::settle_svd_tunnel_add(Err(netlink_error(libc::EEXIST)), binding, move || {
+                std::future::ready(Ok(entries))
+            })
+        };
+
+        let conflicting = settle(vec![entry(20, 20, Some(200))]).await;
+        assert!(
+            matches!(&conflicting, Err(crate::error::DataplaneError::Other(msg))
+                if msg.contains("EEXIST without the desired binding")),
+            "{conflicting:?}"
+        );
+        assert!(settle(vec![entry(20, 20, None)]).await.is_err());
+        assert!(settle(Vec::new()).await.is_err());
+        settle(vec![entry(20, 20, Some(300))]).await.unwrap();
+        settle(vec![entry(19, 21, Some(299))]).await.unwrap();
+        assert!(
+            super::settle_svd_tunnel_add(Ok(()), binding, || async {
+                unreachable!("a successful add needs no confirmation dump")
+            })
+            .await
+            .is_ok()
+        );
+        assert!(
+            super::settle_svd_tunnel_add(Err(netlink_error(libc::EINVAL)), binding, || async {
+                unreachable!("only EEXIST is confirmed")
+            })
+            .await
+            .is_err()
+        );
+    }
+
     // LAN-2909 L-E4 review: only the link that was stamped is ever rolled
     // back. A same-name link with another ifindex is a replacement, and
     // deleting it would destroy someone else's device.
