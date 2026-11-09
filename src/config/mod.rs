@@ -377,15 +377,20 @@ thread_local! {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CandidateSourceLimits {
     /// Canonical directories every `.rpol`, policy-root and dataset path
-    /// must resolve under, resolved once when the config was accepted. A
-    /// root that is a regular file admits only that file.
+    /// must resolve under, resolved once when the config was accepted.
     roots: Vec<PathBuf>,
+    /// Canonical roots that were not directories when the config was
+    /// accepted. Each admits exactly that path, never what lies beneath or
+    /// beside it, even if a directory later takes its place.
+    root_files: Vec<PathBuf>,
     /// The gRPC credential files (TLS material, tokens) the candidate may
     /// name. Validation reads them, so a candidate may not name others.
     credential_files: Vec<String>,
     /// Files no source may resolve to even inside a root: the running
     /// config file (it can hold inline secrets) and its credential files.
     /// The packaged layout keeps them in the same directory as the policy.
+    /// Canonical as of accept; each load adds what `credential_files`
+    /// resolve to by then ([`Self::for_load`]).
     protected_files: Vec<PathBuf>,
     /// Running config path, used to refuse adjacent unconfirmed backups.
     config_file: Option<PathBuf>,
@@ -400,6 +405,31 @@ pub(crate) struct CandidateSourceLimits {
 }
 
 impl CandidateSourceLimits {
+    /// These limits for one candidate load: a fresh backup inventory, and
+    /// the credential paths resolved again. A credential symlink rotated
+    /// since the config was accepted then protects its new target as well as
+    /// the accepted one. Unlike a root, a deny list resolved again can only
+    /// add refusals.
+    fn for_load(&self) -> Self {
+        let mut limits = Self {
+            inventory: std::sync::OnceLock::new(),
+            ..self.clone()
+        };
+        for path in &self.credential_files {
+            if let Ok(canonical) = std::path::Path::new(path).canonicalize()
+                && !limits.protected_files.contains(&canonical)
+            {
+                limits.protected_files.push(canonical);
+            }
+        }
+        limits
+    }
+
+    /// Whether `dir` is, or lies under, a root accepted as a directory.
+    fn admits_dir(&self, dir: &std::path::Path) -> bool {
+        self.roots.iter().any(|root| dir.starts_with(root))
+    }
+
     /// Verify the accepted config target and take the backup inventory, once
     /// per load. A candidate that names no source file never gets here, so a
     /// replaced config file does not block it.
@@ -454,6 +484,11 @@ impl CandidateSourceLimits {
 /// the checked canonical path: the caller reads that path, never `path` again,
 /// so a symlink retargeted after this check cannot redirect the read.
 ///
+/// A file (`as_root` false) must sit in a directory under a root, so a
+/// directory root later replaced by a file admits nothing; a policy root
+/// (`as_root`) may also be the root directory itself. Either may instead be
+/// exactly a root accepted as a file.
+///
 /// Every refusal is the same message, whatever stopped the path: missing,
 /// unreadable, not a directory, outside every root, or protected. A caller
 /// learns only that the path is not an admissible source, never whether
@@ -462,12 +497,19 @@ impl CandidateSourceLimits {
 fn confined_source_path(
     path: &std::path::Path,
     limits: &CandidateSourceLimits,
+    as_root: bool,
 ) -> Result<PathBuf, String> {
+    let admitted = |canonical: &std::path::Path| {
+        let dir = if as_root {
+            Some(canonical)
+        } else {
+            canonical.parent()
+        };
+        dir.is_some_and(|dir| limits.admits_dir(dir))
+            || limits.root_files.iter().any(|file| file == canonical)
+    };
     match path.canonicalize() {
-        Ok(canonical)
-            if limits.roots.iter().any(|root| canonical.starts_with(root))
-                && !limits.protected_files.contains(&canonical) =>
-        {
+        Ok(canonical) if admitted(&canonical) && !limits.protected_files.contains(&canonical) => {
             Ok(canonical)
         }
         _ => Err(format!(
@@ -763,11 +805,16 @@ impl Config {
                 path = base.join(path);
             }
             if let SourceRules::Api(Some(limits)) = sources {
-                confined_roots.push(confined_source_path(&path, limits).map_err(|reason| {
+                let canonical = confined_source_path(&path, limits, true).map_err(|reason| {
                     ConfigError::InvalidPolicyEntry {
                         reason: format!("[policy] rpol_roots: {reason}"),
                     }
-                })?);
+                })?;
+                // A root accepted as a file stays nameable, but is never a
+                // directory imports resolve from or into.
+                if limits.admits_dir(&canonical) {
+                    confined_roots.push(canonical);
+                }
             }
             *root = path.display().to_string();
         }
@@ -784,17 +831,16 @@ impl Config {
             let display = path.display().to_string();
             let checked = match sources {
                 SourceRules::Api(Some(limits)) => {
-                    let canonical = confined_source_path(&path, limits).map_err(|reason| {
-                        ConfigError::InvalidRpolFile {
-                            path: display.clone(),
-                            reason,
-                        }
-                    })?;
+                    let canonical =
+                        confined_source_path(&path, limits, false).map_err(|reason| {
+                            ConfigError::InvalidRpolFile {
+                                path: display.clone(),
+                                reason,
+                            }
+                        })?;
                     // An entry admitted as a root that is itself a file does
                     // not admit the rest of its directory.
-                    let dir_admitted = canonical
-                        .parent()
-                        .is_some_and(|dir| limits.roots.iter().any(|root| dir.starts_with(root)));
+                    let dir_admitted = canonical.parent().is_some_and(|dir| limits.admits_dir(dir));
                     Some((canonical, dir_admitted))
                 }
                 _ => None,
@@ -987,13 +1033,13 @@ impl Config {
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
             let checked = match sources {
-                SourceRules::Api(Some(limits)) => {
-                    Some(confined_source_path(&path, limits).map_err(|reason| {
+                SourceRules::Api(Some(limits)) => Some(
+                    confined_source_path(&path, limits, false).map_err(|reason| {
                         ConfigError::InvalidPolicyEntry {
                             reason: format!("dataset {name:?}: {reason}"),
                         }
-                    })?)
-                }
+                    })?,
+                ),
                 _ => None,
             };
             #[cfg(test)]
@@ -1216,11 +1262,12 @@ impl Config {
     /// does not resolve is left out. Build the limits when a config is
     /// accepted ([`AcceptedConfigSnapshot::candidate_source_limits`]), not per
     /// candidate: resolving a root again would follow a symlink swapped in
-    /// after the operator accepted the config.
+    /// after the operator accepted the config. Whether each root is a
+    /// directory is recorded here too, for the same reason.
     pub(crate) fn candidate_source_limits(&self) -> CandidateSourceLimits {
         let parent = |path: &str| std::path::Path::new(path).parent().map(PathBuf::from);
         let canonical = |path: PathBuf| path.canonicalize().ok();
-        let roots = self
+        let (roots, root_files): (Vec<PathBuf>, Vec<PathBuf>) = self
             .policy
             .rpol_roots
             .iter()
@@ -1238,9 +1285,10 @@ impl Config {
                     .filter_map(|dataset| parent(&dataset.path)),
             )
             .filter_map(canonical)
-            .collect();
+            .partition(|root| root.is_dir());
         CandidateSourceLimits {
             roots,
+            root_files,
             config_file: self.file_path.clone(),
             source_file_target: self.source_file_target.clone(),
             inventory: std::sync::OnceLock::new(),
@@ -1322,12 +1370,8 @@ impl Config {
         capture_external_inputs: bool,
         limits: Option<&CandidateSourceLimits>,
     ) -> Result<Self, CandidateLoadError> {
-        // The roots were resolved when the config was accepted; each load
-        // takes its own backup inventory.
-        let canonical = limits.map(|limits| CandidateSourceLimits {
-            inventory: std::sync::OnceLock::new(),
-            ..limits.clone()
-        });
+        // The roots were resolved when the config was accepted.
+        let canonical = limits.map(CandidateSourceLimits::for_load);
         Self::load_candidate(
             content,
             source_name,

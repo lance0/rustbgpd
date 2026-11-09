@@ -549,6 +549,9 @@ impl AcceptedConfigSnapshot {
         // when it was accepted rather than following a later symlink swap.
         let mut source_limits = config.candidate_source_limits();
         source_limits.roots.clone_from(&self.source_limits.roots);
+        source_limits
+            .root_files
+            .clone_from(&self.source_limits.root_files);
         Ok(Arc::new(Self {
             source_limits,
             config: Arc::new(config),

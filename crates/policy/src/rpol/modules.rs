@@ -289,6 +289,8 @@ pub(super) fn resolve(
 ///
 /// The entry's directory joins the confinement only with `entry_dir_admitted`:
 /// an entry admitted as an exact file, not under a directory, leaves it out.
+/// A directory outside the confinement is not searched for imports, and an
+/// import must sit in a directory under it, not merely equal a root.
 pub(super) fn resolve_canonical(
     main_canon: &Path,
     roots: &[PathBuf],
@@ -349,6 +351,7 @@ fn resolve_from(
     let mut resolver = Resolver {
         confine,
         roots: search,
+        confined: entry_dir_admitted.is_some(),
         excluded,
         modules: Vec::new(),
         fingerprints: Vec::new(),
@@ -414,6 +417,10 @@ struct Resolver<'e> {
     confine: Vec<PathBuf>,
     /// Canonicalized configured roots, in declaration order.
     roots: Vec<PathBuf>,
+    /// A confined load neither searches nor admits a directory outside
+    /// `confine`; an on-disk load always starts at the importer's directory
+    /// and admits a root that is itself the imported file.
+    confined: bool,
     /// Source files refused even under a root.
     excluded: &'e crate::datasets::SourceFileProtection,
     /// Per-module metadata, indexed by module (`file`) id.
@@ -537,7 +544,13 @@ impl Resolver<'_> {
             .parent()
             .map(Path::to_path_buf)
             .expect("canonicalized module paths have parents");
-        let mut candidates = vec![importer_dir];
+        let admitted = |path: &Path| self.confine.iter().any(|root| path.starts_with(root));
+        // A confined load does not look in a directory it would not admit,
+        // so a failed import says nothing about what that directory holds.
+        let mut candidates = Vec::with_capacity(self.roots.len() + 1);
+        if !self.confined || admitted(&importer_dir) {
+            candidates.push(importer_dir);
+        }
         candidates.extend(self.roots.iter().cloned());
         let Some(canon) = candidates
             .iter()
@@ -552,9 +565,12 @@ impl Resolver<'_> {
             return None;
         };
         // An excluded file reads exactly like one outside the roots.
-        if !self.confine.iter().any(|root| canon.starts_with(root))
-            || self.excluded.protects_path(&canon)
-        {
+        let inside = if self.confined {
+            canon.parent().is_some_and(admitted)
+        } else {
+            admitted(&canon)
+        };
+        if !inside || self.excluded.protects_path(&canon) {
             self.diags.push(
                 Diagnostic::coded(
                     DiagnosticCode::Resolve,
@@ -716,6 +732,49 @@ mod tests {
         assert_eq!(file.modules()[1].imports, vec![2]);
         let mut store = SetStore::new();
         assert!(file.compile_policy("edge-in", &[], &mut store).is_ok());
+    }
+
+    /// A confined entry whose directory is not admitted: its imports skip
+    /// that directory, so a name that also exists under a root resolves
+    /// there, and one that exists only beside the entry reads as missing.
+    #[test]
+    fn confined_import_skips_an_unadmitted_entry_directory() {
+        let (entry_dir, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let entry_dir = entry_dir.path().canonicalize().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        write(
+            &entry_dir,
+            "bogons.rpol",
+            "prefix-set beside { 10.0.0.0/8 le 32 }",
+        );
+        write(&entry_dir, "only-beside.rpol", BOGONS);
+        write(&root, "bogons.rpol", BOGONS);
+        let load = |import: &str, entry_dir_admitted| {
+            write(&entry_dir, "main.rpol", &format!("import {import:?}\n"));
+            RpolFile::load_canonical(
+                &entry_dir.join("main.rpol"),
+                std::slice::from_ref(&root),
+                entry_dir_admitted,
+                DEFAULT_MAX_GRAPH_BYTES,
+                &crate::datasets::SourceFileProtection::default().confined(),
+            )
+        };
+        let file = load("bogons.rpol", false).expect("the root's copy resolves");
+        assert_eq!(
+            file.modules()[1].path,
+            root.join("bogons.rpol").display().to_string()
+        );
+        let error = match load("only-beside.rpol", false) {
+            Ok(_) => panic!("the unadmitted directory was searched"),
+            Err(error) => error.render(false),
+        };
+        assert!(error.contains("cannot resolve import"), "{error}");
+        // An admitted entry directory is still searched first.
+        let file = load("bogons.rpol", true).expect("the entry directory resolves");
+        assert_eq!(
+            file.modules()[1].path,
+            entry_dir.join("bogons.rpol").display().to_string()
+        );
     }
 
     #[test]
