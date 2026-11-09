@@ -482,6 +482,8 @@ accepted target refuses confined reads until a new generation is accepted.
 Each confined candidate load inventories the accepted target directory once, with
 a limit of 4096 total entries (including dot entries) and one overflow probe.
 An unavailable, changed, unsafe, or oversized directory refuses the load.
+Each source read rechecks the accepted file and parent identity, including when
+an ancestor directory is replaced, without repeating the backup inventory.
 Candidate-source confinement below `operator_only` refuses these backups, their
 hardlink aliases, and hardlinks to the running config or its credential files.
 Redacted history/status output does not

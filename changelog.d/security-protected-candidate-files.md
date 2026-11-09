@@ -10,3 +10,5 @@
   reject backup hardlink aliases and source-open symlink swaps, and use the
   accepted config at EVPN candidate admission. Below `operator_only`, fail closed
   when the config directory exceeds 4096 entries or changes during source reads.
+  Recheck accepted target and parent identities on each source read to reject
+  ancestor-directory replacement without repeating the backup inventory.

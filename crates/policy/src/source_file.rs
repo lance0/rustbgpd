@@ -241,6 +241,8 @@ impl DirectoryStamp {
 
 #[derive(Debug)]
 struct BackupSnapshot {
+    #[cfg(unix)]
+    target: SourceFileTarget,
     directory: Arc<File>,
     stamp: DirectoryStamp,
     #[cfg(unix)]
@@ -251,6 +253,10 @@ struct BackupSnapshot {
 impl BackupSnapshot {
     fn check(&self) -> io::Result<()> {
         count!(directory_checks);
+        #[cfg(unix)]
+        if self.accepted_file.is_some() {
+            self.target.verify_target()?;
+        }
         if DirectoryStamp::of(&self.directory.metadata()?) != self.stamp {
             return Err(denied());
         }
@@ -339,6 +345,7 @@ impl SourceFileProtection {
                 }
             }
             let snapshot = BackupSnapshot {
+                target: target.fork(),
                 directory: Arc::clone(&target.parent),
                 stamp,
                 accepted_file: target
@@ -348,9 +355,6 @@ impl SourceFileProtection {
                     .clone(),
                 identities,
             };
-            if snapshot.accepted_file.is_some() {
-                target.verify_target()?;
-            }
             snapshot.check()?;
             self_.backups = Some(Arc::new(snapshot));
         }
@@ -662,6 +666,56 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("config.toml.unconfirmed-new"), "secret").unwrap();
         assert!(protection.check_directory().is_err());
+    }
+
+    #[test]
+    fn protected_read_refuses_replaced_config_ancestor_without_rescanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let ancestor = dir.path().join("live");
+        let parent = ancestor.join("nested");
+        std::fs::create_dir_all(&parent).unwrap();
+        let config = parent.join("config.toml");
+        std::fs::write(&config, "accepted secret").unwrap();
+        let (_, target) = SourceFileTarget::open(&config).unwrap();
+        let replacement = dir.path().join("replacement");
+        let next_parent = replacement.join("nested");
+        std::fs::create_dir_all(&next_parent).unwrap();
+        // Keep the accepted leaf identity unchanged to isolate its parent authority.
+        std::fs::hard_link(&config, next_parent.join("config.toml")).unwrap();
+        let backup = next_parent.join("config.toml.unconfirmed-copy");
+        std::fs::copy(&config, &backup).unwrap();
+        std::fs::hard_link(&backup, next_parent.join("alias.rpol")).unwrap();
+        let protection = SourceFileProtection::new(vec![config.clone()], Some(config))
+            .snapshot(Some(&target))
+            .unwrap();
+        let before = DirectoryStamp::of(&target.parent.metadata().unwrap());
+        std::fs::rename(&ancestor, dir.path().join("retired")).unwrap();
+        std::fs::rename(replacement, &ancestor).unwrap();
+        assert_eq!(
+            DirectoryStamp::of(&target.parent.metadata().unwrap()),
+            before
+        );
+        let alias = parent.join("alias.rpol");
+        assert_eq!(std::fs::read(&alias).unwrap(), b"accepted secret");
+        take_work();
+        assert!(
+            crate::datasets::read_regular_file_bounded_protected(&alias, 1024, &protection)
+                .is_err()
+        );
+        let work = take_work();
+        assert_eq!(work.enumeration_probes, 0);
+        assert_eq!(work.entries, 0);
+        assert_eq!(work.backup_opens, 0);
+        assert_eq!(work.backup_stats, 0);
+        assert_eq!(work.retained_identities, 0);
+        let components = parent.components().count();
+        assert_eq!(work.component_inspections, 2 * components);
+        assert_eq!(work.directory_opens, 2 * components);
+        assert_eq!(work.source_opens, 1);
+        assert_eq!(work.source_stats, 2);
+        assert_eq!(work.fixed_stats, 2);
+        assert_eq!(work.directory_checks, 1);
+        assert_eq!(work.reads, 0);
     }
 
     #[test]
