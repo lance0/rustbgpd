@@ -1141,17 +1141,37 @@ impl Config {
                 .filter_map(|path| path.canonicalize().ok())
                 .collect()
         };
-        let canonical = limits.map(|limits| CandidateSourceLimits {
-            roots: canonicalize(&limits.roots),
-            credential_files: limits.credential_files.clone(),
-            protected_files: canonicalize(&limits.protected_files),
-            config_file: limits.config_file.as_ref().and_then(|path| {
-                path.canonicalize()
-                    .ok()
-                    .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
-            }),
-            max_graph_bytes: limits.max_graph_bytes,
-        });
+        let canonical = limits
+            .map(|limits| -> Result<CandidateSourceLimits, String> {
+                let config_file = match limits.config_file.as_ref() {
+                    Some(path) => match path.canonicalize() {
+                        Ok(target) => Some(target),
+                        Err(_)
+                            if path
+                                .symlink_metadata()
+                                .is_ok_and(|metadata| metadata.file_type().is_symlink()) =>
+                        {
+                            return Err(
+                                "error: the accepted config's symlink target is unavailable; \
+                                 refusing confined candidate sources"
+                                    .to_string(),
+                            );
+                        }
+                        Err(_) => path.parent().and_then(|parent| {
+                            Some(parent.canonicalize().ok()?.join(path.file_name()?))
+                        }),
+                    },
+                    None => None,
+                };
+                Ok(CandidateSourceLimits {
+                    roots: canonicalize(&limits.roots),
+                    credential_files: limits.credential_files.clone(),
+                    protected_files: canonicalize(&limits.protected_files),
+                    config_file,
+                    max_graph_bytes: limits.max_graph_bytes,
+                })
+            })
+            .transpose()?;
         Self::load_candidate(
             content,
             source_name,

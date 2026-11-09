@@ -868,6 +868,7 @@ fn candidate_backups_keep_protection_when_config_is_missing() {
         .path()
         .join("missing.toml.unconfirmed-0123456789abcdef.rpol");
     std::fs::write(&backup, POLICY).unwrap();
+    let ordinary = candidate(&[&dir.path().join("edge.rpol")], "");
     for capture in [false, true] {
         let toml = candidate(&[&backup], "");
         assert!(
@@ -876,5 +877,42 @@ fn candidate_backups_keep_protection_when_config_is_missing() {
         );
         Config::load_rpc_candidate(&toml, "operator", capture, None)
             .expect("operators retain access");
+        Config::load_rpc_candidate(&ordinary, "candidate", capture, Some(&limits))
+            .expect("a missing regular config still admits ordinary confined sources");
+    }
+}
+
+#[test]
+fn candidate_backups_fail_closed_for_a_dangling_config_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = dir.path().join("edge.rpol");
+    std::fs::write(&edge, POLICY).unwrap();
+    let active = dir.path().join("active.toml");
+    let launch = dir.path().join("config.toml");
+    std::fs::write(&active, candidate(&[&edge], "")).unwrap();
+    std::os::unix::fs::symlink("active.toml", &launch).unwrap();
+    let accepted = crate::config::AcceptedConfigSnapshot::load(&launch, None).unwrap();
+    let backup = dir.path().join("active.toml.unconfirmed-0123456789abcdef");
+    std::fs::write(&backup, POLICY).unwrap();
+    let importer = dir.path().join("imports-dangling-target-backup.rpol");
+    std::fs::write(
+        &importer,
+        "import \"active.toml.unconfirmed-0123456789abcdef\"\n",
+    )
+    .unwrap();
+    std::fs::remove_file(&active).unwrap();
+    assert!(launch.symlink_metadata().unwrap().file_type().is_symlink());
+    let limits = accepted.config_ref().candidate_source_limits();
+    for capture in [false, true] {
+        for source in [&backup, &importer, &edge] {
+            let toml = candidate(&[source], "");
+            let error = Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits))
+                .expect_err("an unresolved terminal symlink must fail closed");
+            assert!(error.contains("symlink target is unavailable"), "{error}");
+            assert!(!error.contains(dir.path().to_str().unwrap()), "{error}");
+            assert!(!error.contains(POLICY), "{error}");
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access when the accepted target disappears");
+        }
     }
 }

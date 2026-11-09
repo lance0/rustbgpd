@@ -475,8 +475,9 @@ V2 JSON history, ignored retained TOML, the commit-confirm v3 raw prior, and
 retired v1/v2 `commit-confirm-journal.json` contain normalized TOML with
 credentials/keys. Config-adjacent `<config>.unconfirmed-*` boot-revert backups
 use the resolved config target's name, including for a terminal launch symlink,
-and also hold the full prior config, including inline secrets. Candidate-source
-confinement below `operator_only` refuses these backups and hardlinks to the
+and also hold the full saved config, including inline secrets. A dangling terminal
+launch symlink refuses confined candidate loads until its target is restored;
+operator callers retain their exemption. Candidate-source confinement below `operator_only` refuses these backups and hardlinks to the
 running config or its credential files. Redacted history/status output does not
 make these files safe to publish. The
 fixed `commit-confirm-v3-metadata.json` and config-adjacent
