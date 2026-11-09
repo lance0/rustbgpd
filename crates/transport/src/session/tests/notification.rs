@@ -96,7 +96,10 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
         || validation_warn_metadata(metadata)
         || downstream_malformed_warn_metadata(metadata)
         || (*metadata.level() == tracing::Level::WARN
-            && metadata.target() == "rustbgpd_transport::session::inbound")
+            && matches!(
+                metadata.target(),
+                "rustbgpd_transport::session::inbound" | "rustbgpd_transport::session::io"
+            ))
         || (*metadata.level() == tracing::Level::WARN
             && ["peer", "family", "route_type", "discarded"]
                 .into_iter()
@@ -2952,4 +2955,143 @@ async fn start_in_idle_during_the_backoff_hold_connects_now() {
     assert_eq!(session.fsm.state(), SessionState::Connect);
     assert!(session.reconnect_timer.is_none());
     assert_eq!(session.notification_idle_failures, 0);
+}
+
+/// Every reachable ignored refresh shape is driven through the real decoder.
+/// The two unknown-subtype paths deliberately share one warning class.
+fn ignored_refresh_frame(session: &mut PeerSession, case: usize) -> (Bytes, &'static str) {
+    install_enhanced_refresh_session(session, vec![(Afi::Ipv4, Safi::Unicast)], case == 5);
+    let mut frame = rustbgpd_wire::encode_message(&Message::RouteRefresh(
+        RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast),
+    ))
+    .unwrap()
+    .to_vec();
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    let message = match case {
+        0 => {
+            negotiated.peer_route_refresh = false;
+            "ignoring ROUTE-REFRESH from peer without capability"
+        }
+        1 => {
+            frame[19..21].copy_from_slice(&u16::MAX.to_be_bytes());
+            "ignoring ROUTE-REFRESH for unknown AFI/SAFI"
+        }
+        2 => {
+            frame[19..21].copy_from_slice(&2_u16.to_be_bytes());
+            "ignoring ROUTE-REFRESH for unnegotiated family"
+        }
+        3 => {
+            negotiated.peer_enhanced_route_refresh = false;
+            frame[21] = 1;
+            "ignoring BoRR from peer without Enhanced Route Refresh"
+        }
+        4 => {
+            negotiated.peer_enhanced_route_refresh = false;
+            frame[21] = 2;
+            "ignoring EoRR from peer without Enhanced Route Refresh"
+        }
+        5 => {
+            frame[21] = 1;
+            "ignoring BoRR before End-of-RIB from Graceful Restart peer"
+        }
+        6 | 7 => {
+            negotiated.peer_enhanced_route_refresh = case == 6;
+            frame[21] = 3;
+            "ignoring ROUTE-REFRESH with unknown subtype"
+        }
+        8 => {
+            frame = rustbgpd_wire::encode_message(&Message::RouteRefresh(orf_rr(
+                OrfType::AddressPrefix,
+                one_permit_entry(),
+            )))
+            .unwrap()
+            .to_vec();
+            "ignoring ORF entries — ORF not negotiated for this family"
+        }
+        _ => unreachable!(),
+    };
+    (Bytes::from(frame), message)
+}
+
+fn ignored_refresh_events(
+    fixture: &mut PeerWarningFixture,
+    frame: &Bytes,
+) -> Vec<SessionLogFields> {
+    fixture.session.read_buf.buf.extend_from_slice(frame);
+    let events = capture_session_logs(|| {
+        fixture
+            .runtime
+            .block_on(fixture.session.process_read_buffer());
+    });
+    assert_eq!(fixture.session.fsm.state(), SessionState::Established);
+    assert!(fixture.session.read_buf.buf.is_empty());
+    rfc7606_drain(&mut fixture.rib_rx);
+    events
+}
+
+#[test]
+fn ignored_refresh_warnings_follow_schedule_and_reconnect_reset() {
+    use super::super::inbound::InboundWarningClass as Class;
+    let classes = [
+        Class::RefreshNotNegotiated,
+        Class::RefreshUnknownFamily,
+        Class::RefreshUnnegotiatedFamily,
+        Class::BorrNotNegotiated,
+        Class::EorrNotNegotiated,
+        Class::BorrBeforeEor,
+        Class::RefreshUnknownSubtype,
+        Class::RefreshUnknownSubtype,
+        Class::OrfNotNegotiated,
+    ];
+    for (case, class) in classes.into_iter().enumerate() {
+        let mut fixture = PeerWarningFixture::new();
+        let (frame, message) = ignored_refresh_frame(&mut fixture.session, case);
+        for count in 1_u64..=16 {
+            let events = ignored_refresh_events(&mut fixture, &frame);
+            assert_eq!(
+                events.len(),
+                usize::from(count.is_power_of_two()),
+                "case {case}, message {count}"
+            );
+            for event in events {
+                assert_eq!(event.get("message").map(String::as_str), Some(message));
+                assert_eq!(event.get("warning_messages"), Some(&count.to_string()));
+            }
+            // Pin every work counter: no other class may consume this stream.
+            for (index, actual) in fixture.session.inbound_warning_updates.iter().enumerate() {
+                assert_eq!(
+                    *actual,
+                    if index == class as usize { count } else { 0 },
+                    "case {case}, counter {index}"
+                );
+            }
+            let samples = counter_samples(&fixture.session.metrics, "bgp_messages_received_total");
+            let refresh = samples
+                .iter()
+                .find(|(labels, _)| labels.get("type").map(String::as_str) == Some("route_refresh"))
+                .unwrap();
+            assert!((refresh.1 - f64::from(u32::try_from(count).unwrap())).abs() < f64::EPSILON);
+            assert_eq!(
+                fixture.session.config.neighbor_counters.updates_received(),
+                0
+            );
+        }
+        for tcp_failure in [false, true] {
+            fixture.reconnect(tcp_failure);
+            for actual in fixture.session.inbound_warning_updates {
+                assert_eq!(actual, 0);
+            }
+            let (frame, _) = ignored_refresh_frame(&mut fixture.session, case);
+            for expected in [1, 1, 0] {
+                assert_eq!(
+                    ignored_refresh_events(&mut fixture, &frame).len(),
+                    expected,
+                    "case {case}, reconnect {tcp_failure}"
+                );
+            }
+            for (index, actual) in fixture.session.inbound_warning_updates.iter().enumerate() {
+                assert_eq!(*actual, if index == class as usize { 3 } else { 0 });
+            }
+        }
+    }
 }

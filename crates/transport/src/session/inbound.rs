@@ -35,12 +35,20 @@ pub(super) enum InboundWarningClass {
     ForeignNextHop,
     UnverifiedLinkLocalCompanion,
     UnscopedLinkLocal,
-    /// Must stay the last variant: `COUNT` derives from it.
     OtcPolicy,
+    RefreshNotNegotiated,
+    RefreshUnknownFamily,
+    RefreshUnnegotiatedFamily,
+    BorrNotNegotiated,
+    EorrNotNegotiated,
+    BorrBeforeEor,
+    RefreshUnknownSubtype,
+    /// Must stay the last variant: `COUNT` derives from it.
+    OrfNotNegotiated,
 }
 
 impl InboundWarningClass {
-    pub(super) const COUNT: usize = Self::OtcPolicy as usize + 1;
+    pub(super) const COUNT: usize = Self::OrfNotNegotiated as usize + 1;
 
     fn next_hop_ownership(reason: NextHopOwnershipBlockReason) -> Self {
         match reason {
@@ -863,7 +871,7 @@ impl PeerSession {
     }
 
     /// Count each warning class separately without gating its metrics.
-    fn inbound_warning_due(&mut self, class: InboundWarningClass) -> (bool, u64) {
+    pub(super) fn inbound_warning_due(&mut self, class: InboundWarningClass) -> (bool, u64) {
         let count = &mut self.inbound_warning_updates[class as usize];
         *count = count.saturating_add(1);
         (count.is_power_of_two(), *count)
