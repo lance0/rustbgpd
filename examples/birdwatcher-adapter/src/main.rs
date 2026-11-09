@@ -3665,7 +3665,6 @@ mod tests {
             origin: 2,
             as_path: vec![65010, 65020],
             local_pref: 200,
-            med: 50,
             med_attr: Some(50),
             communities: vec![community(65001, 100)],
             large_communities: vec!["65001:1:2".to_string()],
@@ -5168,7 +5167,6 @@ mod tests {
             prefix: network.to_string(),
             prefix_length: 24,
             path_id,
-            med,
             med_attr: Some(med),
             ..Default::default()
         };
@@ -5208,7 +5206,6 @@ mod tests {
             prefix: "192.0.2.0".to_string(),
             prefix_length: 24,
             peer_address: peer.to_string(),
-            med,
             med_attr: Some(med),
             ..Default::default()
         };
@@ -5316,7 +5313,7 @@ mod tests {
         insert(&mut bad, winner.clone(), false, 1).unwrap();
         assert!(insert(&mut bad, winner.clone(), false, 1).is_err());
         let mut conflict = winner;
-        conflict.med += 1;
+        conflict.med_attr = Some(conflict.med_attr.unwrap() + 1);
         assert!(insert(&mut bad, conflict, true, 1).is_err());
         assert_eq!(
             insert(&mut bad, inactive, false, 1).unwrap_err().0,
