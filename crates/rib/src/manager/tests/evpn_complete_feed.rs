@@ -1346,9 +1346,23 @@ fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
 }
 
 /// An owned refresh replays the group's own table. Loc-RIB rows outside it
-/// add no per-row work: only private staging inventories Loc-RIB keys.
+/// add no per-row work and leave the replayed data and its terminal markers
+/// unchanged: only private staging inventories Loc-RIB keys.
 #[test]
 fn owned_refresh_does_not_inventory_loc_rib_rows_outside_the_group_table() {
+    // Everything a receiver can observe in one envelope of the replay.
+    let content = |update: &OutboundRouteUpdate| {
+        (
+            update
+                .evpn_announce
+                .iter()
+                .map(|route| (route.key(), route.attributes.clone()))
+                .collect::<Vec<_>>(),
+            update.evpn_withdraw.clone(),
+            update.refresh_markers.clone(),
+            update.end_of_rib.clone(),
+        )
+    };
     let replay = |outside: u8| {
         let (mut manager, peer, gid, mut output) = fixture();
         let route = received(100);
@@ -1368,7 +1382,18 @@ fn owned_refresh_does_not_inventory_loc_rib_rows_outside_the_group_table() {
         let data = output.try_recv().map(delivered).unwrap();
         assert_eq!(data.evpn_announce.len(), 1);
         assert_eq!(data.evpn_announce[0].key(), route.key());
-        work
+        assert_eq!(
+            data.refresh_markers,
+            [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
+        );
+        // The terminal markers follow in their own envelope, and nothing else.
+        let markers = output.try_recv().map(delivered).unwrap();
+        assert_eq!(
+            markers.refresh_markers,
+            [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+        );
+        assert!(output.try_recv().map(delivered).is_err());
+        (work, content(&data), content(&markers))
     };
     assert_eq!(replay(0), replay(64));
 }
