@@ -388,9 +388,9 @@ impl RibManager {
         self.end_eor_grace(&target);
     }
 
-    /// Remove `target`'s window with its neighbor. A session the window
-    /// still covered (a retired binding whose handle outlives the stanza)
-    /// gets the markers it held now, not at a later unrelated event.
+    /// Remove `target`'s window with its neighbor. The daemon tears a bound
+    /// peer down first, so the window normally covers no session by now;
+    /// if one is still registered, it gets the markers the window held.
     fn end_eor_grace(&mut self, target: &EorGraceTarget) {
         let Some(grace) = self.eor_grace.remove(target) else {
             return;

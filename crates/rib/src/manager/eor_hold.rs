@@ -47,7 +47,8 @@ pub(super) enum EorHold {
     OrfTable,
     /// The peer's complete EVPN feed is not current.
     EvpnFeed,
-    /// A dirty or forced resync of the peer's table has not been admitted.
+    /// A dirty resync of the peer's table has not been admitted, or a
+    /// forced one is still to run.
     Resync,
     /// The family owes keys that must be absorbed ahead of the marker.
     OwedKeys,
@@ -300,8 +301,14 @@ impl RibManager {
                         || self.has_private_evpn_handoff(peer))
                     && !self.evpn_feed_is_current(peer)
             }
+            // A force bit kept only for a family a selection gate still
+            // defers is not a pending resync: the forced pass already ran
+            // for everything else (`selection_partial_caught_up`), and the
+            // gate's release runs the rest.
             EorHold::Resync => {
-                self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer)
+                self.dirty_peers.contains(&peer)
+                    || (self.force_outbound_peers.contains(&peer)
+                        && !self.selection_partial_caught_up(peer))
             }
             EorHold::OwedKeys => self.owes(peer, family),
         }
@@ -511,6 +518,19 @@ impl RibManager {
     /// sends the marker; inside another operation, or refused, the marker
     /// stays owed and the owed-key drain retries it.
     pub(super) fn settle_eor(&mut self, peer: PeerId, trigger: EorTrigger<'_>) {
+        self.settle_eor_as(peer, trigger, false);
+    }
+
+    /// A release from inside other outbound work (a pass that cancelled a
+    /// family's last owed key, a refresh answer that absorbed them and was
+    /// then deferred): send the markers nothing holds, and start nothing
+    /// else. A family that still owes keys waits for the owed-key drain, and
+    /// a refused marker for the tick's marker retry, with no resync.
+    pub(super) fn settle_free_eor(&mut self, peer: PeerId) {
+        self.settle_eor_as(peer, EorTrigger::Release, true);
+    }
+
+    fn settle_eor_as(&mut self, peer: PeerId, trigger: EorTrigger<'_>, plain: bool) {
         let (offer, operation) = match trigger {
             EorTrigger::Release => (Offer::Release, None),
             EorTrigger::Table(operation) => (Offer::Table, Some(operation)),
@@ -519,8 +539,13 @@ impl RibManager {
                 evpn_covered,
             } => (Offer::InitialTable { evpn_covered }, operation),
         };
-        // Owed keys do not keep a marker out: this call absorbs them.
-        let owed_keys = HoldSet::EMPTY.with(EorHold::OwedKeys);
+        // Owed keys do not keep a marker out: this call absorbs them,
+        // unless it must start no operation of its own.
+        let owed_keys = if plain {
+            HoldSet::EMPTY
+        } else {
+            HoldSet::EMPTY.with(EorHold::OwedKeys)
+        };
         let mut ready: Vec<(Afi, Safi)> = self
             .eor
             .families(peer)
@@ -599,7 +624,7 @@ impl RibManager {
                 warn!(%peer, "outbound channel full — `EoR` still deferred");
             }
             self.metrics.record_outbound_eor_deferral(&peer.label());
-            if !marker_only {
+            if !plain && !marker_only {
                 self.mark_outbound_dirty(peer);
             }
         }

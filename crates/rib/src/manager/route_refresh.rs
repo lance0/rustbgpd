@@ -858,11 +858,15 @@ impl RibManager {
         let slot = operation.slot().ok_or_else(|| {
             RibCommandError::internal("outbound replay terminal envelope could not be admitted")
         })?;
+        let replayed = families.clone();
         slot.send(OutboundRouteUpdate {
             end_of_rib: families,
             replay: Some(std::sync::Arc::clone(replay)),
             ..OutboundRouteUpdate::default()
         });
+        // The terminal is each family's End-of-RIB behind its whole table,
+        // owed keys included: a marker the session still owed is that one.
+        self.eor_discharged(peer, &replayed);
         Ok(())
     }
 
@@ -1052,12 +1056,20 @@ impl RibManager {
             // are absorbed into this operation ahead of the table. A refusal
             // leaves them owed and defers the answer.
             Some(operation) => {
-                if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
-                    && self.absorb_owed_family(peer, family, operation).is_err()
-                {
+                let refresh = matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. });
+                if refresh && self.absorb_owed_family(peer, family, operation).is_err() {
                     None
+                } else if let Some(slot) = operation.slot() {
+                    Some((Some(operation), Some(slot)))
                 } else {
-                    operation.slot().map(|slot| (Some(operation), Some(slot)))
+                    // The absorption took the last slot, and the answer is
+                    // deferred with no resync. A marker that waited only for
+                    // those keys is offered now; a full writer leaves it to
+                    // the marker retry, as the deferral leaves the answer.
+                    if refresh {
+                        self.settle_free_eor(peer);
+                    }
+                    None
                 }
             }
         };

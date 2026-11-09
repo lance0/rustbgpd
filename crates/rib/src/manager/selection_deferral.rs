@@ -1750,6 +1750,21 @@ impl RibManager {
         self.retire_settled_selection_admission();
     }
 
+    /// A forced resync that ran while a selection gate deferred one of the
+    /// peer's families kept its force bit for that family. Nothing else
+    /// drives a force-only peer, so the staging or release of the gate runs
+    /// the rest here, in an empty pass ahead of the family's own changes
+    /// (a grouped forced resync may not share a pass with them).
+    fn run_deferred_forced_resyncs(&mut self) {
+        if self
+            .force_outbound_peers
+            .iter()
+            .any(|&peer| !self.selection_partial_caught_up(peer))
+        {
+            self.distribute_changes(&HashSet::new(), &HashSet::new());
+        }
+    }
+
     /// Selection may release an empty or unchanged inventory. Its complete
     /// producer still has to establish coverage before marker-only retries.
     fn complete_selection_evpn_feeds(&mut self) {
@@ -1824,6 +1839,7 @@ impl RibManager {
             }
         }
         self.release_conditional_advertisement_family(family);
+        self.run_deferred_forced_resyncs();
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);

@@ -15,6 +15,7 @@ use crate::{
 
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
 const V4: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
 const SOURCE: PeerId = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 const TARGET: PeerId = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 const WINDOW: Duration = Duration::from_secs(10);
@@ -32,12 +33,21 @@ fn connect(
     session_id: u64,
     family: (Afi, Safi),
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    connect_with(manager, peer, session_id, vec![family])
+}
+
+fn connect_with(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer,
         session_id,
         peer_restart_state: false,
         peer_gr_helper: true,
-        peer_gr_families: vec![family],
+        peer_gr_families: families.clone(),
         peer_enhanced_refresh: true,
         peer_llgr_families: vec![],
         local_llgr_stale_time: 0,
@@ -50,7 +60,7 @@ fn connect(
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx,
         export_policy: None,
-        sendable_families: vec![family],
+        sendable_families: families,
         is_ebgp: false,
         route_reflector_client: false,
         orr_vantage: None,
@@ -258,28 +268,166 @@ fn the_end_of_turn_check_rejects_a_ready_unsent_marker() {
     });
 }
 
-/// A forced resync holds the markers a release finds behind it, and its
-/// admission sends them on the slot it reserved. Before, only the resync
-/// tick sent a marker left behind a force-only resync.
-#[test]
-fn a_forced_resync_sends_the_marker_it_held() {
+fn plain_manager() -> RibManager {
     let (_tx, rx) = mpsc::channel(8);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let mut output = connect(&mut manager, TARGET, 2, V4);
+    RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+}
+
+fn v4_prefix(octet: u8) -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32))
+}
+
+fn announce(manager: &mut RibManager, source: PeerId, session_id: u64, octet: u8) {
+    let mut route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    route.peer = source;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+/// A marker a release found behind a pending forced resync, then that
+/// resync's pass. Returns what the pass delivered, in order.
+fn forced_resync_with_marker(
+    manager: &mut RibManager,
+    output: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> Vec<OutboundRouteUpdate> {
     while output.try_recv().is_ok() {}
     manager.owe_eor(TARGET, V4);
     manager.force_outbound_peers.insert(TARGET);
     manager.settle_eor_now(TARGET);
     assert!(output.try_recv().is_err(), "the forced resync comes first");
     assert!(manager.eor_holds(TARGET, V4).contains(EorHold::Resync));
-
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     assert!(!manager.force_outbound_peers.contains(&TARGET));
+    assert!(!manager.eor.owes(TARGET, V4));
+    assert!(!manager.resync_tick_pending());
+    std::iter::from_fn(|| output.try_recv().ok()).collect()
+}
+
+/// A forced resync holds the markers a release finds behind it, and its
+/// admission sends them on the slot it reserved. Before, only the resync
+/// tick sent a marker left behind a force-only resync. This is the exit of
+/// a resync whose view is empty.
+#[test]
+fn a_forced_resync_sends_the_marker_it_held() {
+    let mut manager = plain_manager();
+    let mut output = connect(&mut manager, TARGET, 2, V4);
+    let sent = forced_resync_with_marker(&mut manager, &mut output);
+    let markers: Vec<_> = sent.iter().flat_map(|update| &update.end_of_rib).collect();
+    assert_eq!(markers, [&V4]);
+}
+
+/// The same through the exit that commits routes: the marker follows the
+/// forced resync's re-announcement in the delivered order.
+#[test]
+fn a_forced_resync_sends_the_marker_behind_the_routes_it_commits() {
+    let mut manager = plain_manager();
+    std::mem::forget(connect(&mut manager, SOURCE, 1, V4));
+    let mut output = connect(&mut manager, TARGET, 2, V4);
+    announce(&mut manager, SOURCE, 1, 7);
+    let sent = forced_resync_with_marker(&mut manager, &mut output);
+    let routes = sent
+        .iter()
+        .position(|update| {
+            update
+                .announce
+                .iter()
+                .any(|route| route.prefix == v4_prefix(7))
+        })
+        .expect("the forced resync re-announces the route");
+    let marker = sent
+        .iter()
+        .position(|update| update.end_of_rib.contains(&V4))
+        .expect("the marker is sent in the same pass");
+    assert!(routes < marker, "the marker follows the forced table");
+    assert_eq!(sent.iter().flat_map(|update| &update.end_of_rib).count(), 1);
+}
+
+/// The same through the exit that finds nothing to send: the only route is
+/// the receiver's own, so the forced resync is unchanged and the marker is
+/// all it delivers.
+#[test]
+fn a_forced_resync_with_nothing_to_send_still_sends_the_marker() {
+    let mut manager = plain_manager();
+    let mut output = connect(&mut manager, TARGET, 2, V4);
+    announce(&mut manager, TARGET, 2, 9);
+    let sent = forced_resync_with_marker(&mut manager, &mut output);
+    assert!(sent.iter().all(|update| update.announce.is_empty()));
+    let markers: Vec<_> = sent.iter().flat_map(|update| &update.end_of_rib).collect();
+    assert_eq!(markers, [&V4]);
+}
+
+/// A forced resync that runs while a selection gate defers one of the
+/// peer's families keeps its force bit for that family. The bit is not a
+/// pending resync for the rest: another family's marker leaves in the turn
+/// its own hold ends, with no tick. The gate's release then runs the
+/// deferred forced resync itself; nothing else drives a force-only peer.
+#[tokio::test(start_paused = true)]
+async fn a_force_bit_kept_for_a_deferred_family_holds_no_other_marker() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_mins(2),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: SOURCE.into(),
+                families: vec![V4],
+            }],
+        })
+        .with_eor_grace(EorGraceConfig {
+            peers: vec![EorGracePeerConfig {
+                peer: TARGET.into(),
+                deadline: tokio::time::Instant::now() + WINDOW,
+                families: vec![V6],
+            }],
+            replay_owners: vec![],
+        });
+    // The receiver joins while the gate is dormant; the waiter arms it.
+    let mut output = connect_with(&mut manager, TARGET, 2, vec![V4, V6]);
+    std::mem::forget(connect(&mut manager, SOURCE, 1, V4));
+    assert!(manager.selection_resync_held(TARGET));
+    assert!(!manager.dirty_peers.contains(&TARGET));
+    while output.try_recv().is_ok() {}
+    assert_eq!(manager.eor_pending(TARGET), HashSet::from([V6]));
+
+    let (reply, _response) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound {
+        peer: TARGET,
+        reply,
+    });
+    assert!(
+        manager.force_outbound_peers.contains(&TARGET),
+        "kept for IPv4"
+    );
+    assert!(manager.selection_partial_caught_up(TARGET));
+    assert!(!manager.dirty_peers.contains(&TARGET));
+    while output.try_recv().is_ok() {}
+
+    // The grace window ends on a static table: no pass, no tick.
+    manager.expire_eor_holds(tokio::time::Instant::now() + WINDOW);
     let sent: Vec<_> = std::iter::from_fn(|| output.try_recv().ok())
         .flat_map(|update| update.end_of_rib)
         .collect();
-    assert_eq!(sent, [V4]);
-    assert!(!manager.eor.owes(TARGET, V4));
+    assert_eq!(sent, [V6], "the IPv6 marker leaves with its own release");
+    assert!(manager.force_outbound_peers.contains(&TARGET));
+
+    manager.expire_selection_deferral();
+    assert!(
+        !manager.force_outbound_peers.contains(&TARGET),
+        "the gate's release runs the deferred forced resync"
+    );
+    assert!(!manager.dirty_peers.contains(&TARGET));
     assert!(!manager.resync_tick_pending());
 }
 

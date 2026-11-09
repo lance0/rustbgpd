@@ -1377,10 +1377,11 @@ async fn interface_grace_survives_binding_retirement_but_ends_on_neighbor_deleti
     assert!(new.release());
 }
 
-/// An interface-only neighbor leaves the configuration while a session of
-/// its bound handle is still up: the window goes with it, and the
-/// End-of-RIB it held leaves with that event. It used to stay queued until
-/// the resync tick found it.
+/// A defensive path: the daemon deletes a bound neighbor's peer before it
+/// retires the interface's window, and an unbound window names no peer, so
+/// no production sequence is known to retire a window that still covers a
+/// live session. Should one do so, the End-of-RIB the window held leaves
+/// with the retirement and is not left for the resync tick.
 #[tokio::test(start_paused = true)]
 async fn interface_grace_retired_under_a_live_session_releases_its_held_end_of_rib() {
     let mut manager = manager_from(interface_grace_config(), &BgpMetrics::new());

@@ -1939,6 +1939,30 @@ fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
     );
 }
 
+/// A dirty resync that completes an owned EVPN feed sends the EVPN
+/// End-of-RIB the session owes in its own operation, behind the feed. The
+/// resync envelope cannot carry that marker (its coverage is only known
+/// after admission), so the settle after the commit is what sends it;
+/// without it the marker would wait for the feed ledger's tick retry.
+#[test]
+fn dirty_resync_sends_the_evpn_marker_behind_the_feed_it_completes() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &received(100));
+    manager.owe_eor(peer, EVPN);
+    assert!(!manager.evpn_feed_is_current(peer));
+    manager.mark_outbound_dirty_inner(peer, false);
+    manager.resync_dirty_peers_bounded();
+    let sent: Vec<_> = std::iter::from_fn(|| output.try_recv().map(delivered).ok()).collect();
+    assert_eq!(
+        sent.last().map(|update| update.end_of_rib.as_slice()),
+        Some([EVPN].as_slice()),
+        "the marker closes the resync's own operation"
+    );
+    assert!(manager.eor_pending(peer).is_empty());
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.resync_tick_pending());
+}
+
 #[test]
 fn review_ready_unicast_marker_does_not_wait_for_held_evpn() {
     let (mut manager, peer, gid, mut output) = fixture();

@@ -916,7 +916,21 @@ impl RibManager {
                 self.note_owing_whole(peer, family);
             }
         }
+        // A cancellation may have been a family's last owed key: a marker
+        // that waited only for those keys leaves with it.
+        let settled = self.eor.owes_peer(peer)
+            && OwedFamily::ALL.into_iter().any(|family| {
+                touched & family.bit() != 0
+                    && !owing.owes(family)
+                    && family
+                        .afi_safis()
+                        .iter()
+                        .any(|&afi_safi| self.eor.owes(peer, afi_safi))
+            });
         self.put_owing(peer, owing);
+        if settled {
+            self.settle_free_eor(peer);
+        }
     }
 
     /// Re-insert keys a drain popped and did not stage: they were owed.
@@ -1557,6 +1571,8 @@ impl RibManager {
                     OwingDrain::keyed(peer, family, usize::MAX, keys)
                 };
                 drain.close = true;
+                // No End-of-RIB is settled here: the session gets its Cease
+                // next, so a marker these keys held no longer matters.
                 let popped: Vec<OwedKey> = drain_keys(&drain);
                 self.distribute_owing_drain(&mut drain);
                 match drain.outcome {
