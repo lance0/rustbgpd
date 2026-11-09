@@ -170,6 +170,9 @@ impl RpolFile {
     /// into any of them after the check. Pass `protection` built with
     /// [`crate::datasets::SourceFileProtection::confined`].
     ///
+    /// Imports may resolve into the entry's own directory only with
+    /// `entry_dir_admitted`; otherwise they must stay under `canonical_roots`.
+    ///
     /// # Errors
     ///
     /// As [`Self::load`].
@@ -177,12 +180,14 @@ impl RpolFile {
     pub fn load_canonical(
         canonical_path: &Path,
         canonical_roots: &[PathBuf],
+        entry_dir_admitted: bool,
         max_graph_bytes: usize,
         protection: &crate::datasets::SourceFileProtection,
     ) -> Result<Self, LoadError> {
         Self::from_graph(modules::resolve_canonical(
             canonical_path,
             canonical_roots,
+            entry_dir_admitted,
             max_graph_bytes,
             protection,
         )?)

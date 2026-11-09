@@ -276,6 +276,7 @@ pub(super) fn resolve(
         main_canon,
         roots,
         Path::canonicalize,
+        None,
         max_graph_bytes,
         excluded,
     )
@@ -285,9 +286,13 @@ pub(super) fn resolve(
 /// and checked. Neither is resolved again: re-canonicalizing would follow a
 /// symlink swapped into a checked component afterwards, while reading the
 /// checked path itself walks it with `O_NOFOLLOW` and refuses such a swap.
+///
+/// The entry's directory joins the confinement only with `entry_dir_admitted`:
+/// an entry admitted as an exact file, not under a directory, leaves it out.
 pub(super) fn resolve_canonical(
     main_canon: &Path,
     roots: &[PathBuf],
+    entry_dir_admitted: bool,
     max_graph_bytes: usize,
     excluded: &crate::datasets::SourceFileProtection,
 ) -> Result<ResolvedGraph, LoadError> {
@@ -296,6 +301,7 @@ pub(super) fn resolve_canonical(
         main_canon.to_path_buf(),
         roots,
         |root| Ok(root.to_path_buf()),
+        Some(entry_dir_admitted),
         max_graph_bytes,
         excluded,
     )
@@ -306,6 +312,8 @@ fn resolve_from(
     main_canon: PathBuf,
     roots: &[PathBuf],
     root_path: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    // Whether the entry's directory joins the confinement (`None`: as always).
+    entry_dir_admitted: Option<bool>,
     max_graph_bytes: usize,
     excluded: &crate::datasets::SourceFileProtection,
 ) -> Result<ResolvedGraph, LoadError> {
@@ -324,18 +332,23 @@ fn resolve_from(
         .map(Path::to_path_buf)
         .ok_or_else(|| io(main_path, "file has no parent directory".to_string()))?;
 
-    // Confinement roots: the main file's directory plus every
-    // configured root, canonicalized. A configured root that does not
-    // exist is a load error — a silently dropped root would quietly
-    // change which file an import resolves to.
-    let mut confine: Vec<PathBuf> = vec![main_dir];
+    // Confinement roots: the main file's directory (unless a confined
+    // caller did not admit it) plus every configured root, canonicalized.
+    // A configured root that does not exist is a load error — a silently
+    // dropped root would quietly change which file an import resolves to.
+    let mut search = Vec::with_capacity(roots.len());
     for root in roots {
-        confine
+        search
             .push(root_path(root).map_err(|e| io(root, format!("policy root is unusable: {e}")))?);
+    }
+    let mut confine = search.clone();
+    if entry_dir_admitted != Some(false) {
+        confine.insert(0, main_dir);
     }
 
     let mut resolver = Resolver {
         confine,
+        roots: search,
         excluded,
         modules: Vec::new(),
         fingerprints: Vec::new(),
@@ -397,8 +410,10 @@ fn resolve_from(
 }
 
 struct Resolver<'e> {
-    /// Canonicalized confinement roots (main dir + configured roots).
+    /// Canonicalized confinement roots (admitted main dir + configured roots).
     confine: Vec<PathBuf>,
+    /// Canonicalized configured roots, in declaration order.
+    roots: Vec<PathBuf>,
     /// Source files refused even under a root.
     excluded: &'e crate::datasets::SourceFileProtection,
     /// Per-module metadata, indexed by module (`file`) id.
@@ -523,7 +538,7 @@ impl Resolver<'_> {
             .map(Path::to_path_buf)
             .expect("canonicalized module paths have parents");
         let mut candidates = vec![importer_dir];
-        candidates.extend(self.confine[1..].iter().cloned());
+        candidates.extend(self.roots.iter().cloned());
         let Some(canon) = candidates
             .iter()
             .find_map(|dir| dir.join(rel).canonicalize().ok())

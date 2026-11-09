@@ -376,8 +376,9 @@ thread_local! {
 /// running config by [`Config::candidate_source_limits`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CandidateSourceLimits {
-    /// Directories every `.rpol`, policy-root and dataset path must
-    /// resolve under.
+    /// Canonical directories every `.rpol`, policy-root and dataset path
+    /// must resolve under, resolved once when the config was accepted. A
+    /// root that is a regular file admits only that file.
     roots: Vec<PathBuf>,
     /// The gRPC credential files (TLS material, tokens) the candidate may
     /// name. Validation reads them, so a candidate may not name others.
@@ -783,12 +784,18 @@ impl Config {
             let display = path.display().to_string();
             let checked = match sources {
                 SourceRules::Api(Some(limits)) => {
-                    Some(confined_source_path(&path, limits).map_err(|reason| {
+                    let canonical = confined_source_path(&path, limits).map_err(|reason| {
                         ConfigError::InvalidRpolFile {
                             path: display.clone(),
                             reason,
                         }
-                    })?)
+                    })?;
+                    // An entry admitted as a root that is itself a file does
+                    // not admit the rest of its directory.
+                    let dir_admitted = canonical
+                        .parent()
+                        .is_some_and(|dir| limits.roots.iter().any(|root| dir.starts_with(root)));
+                    Some((canonical, dir_admitted))
                 }
                 _ => None,
             };
@@ -803,9 +810,13 @@ impl Config {
             // without resolving them again.
             let excluded = sources.protection()?;
             let loaded = match &checked {
-                Some(canonical) => {
-                    RpolFile::load_canonical(canonical, &confined_roots, max_graph_bytes, &excluded)
-                }
+                Some((canonical, dir_admitted)) => RpolFile::load_canonical(
+                    canonical,
+                    &confined_roots,
+                    *dir_admitted,
+                    max_graph_bytes,
+                    &excluded,
+                ),
                 None => RpolFile::load_protected(&path, &roots, max_graph_bytes, &excluded),
             };
             let file = match loaded {
@@ -1200,8 +1211,15 @@ impl Config {
     /// running config: policy sources under its `[policy] rpol_roots` and
     /// the directories of its `.rpol` and dataset files, and only the gRPC
     /// credential files it already uses. See [`Self::load_rpc_candidate`].
+    ///
+    /// Roots and protected files are canonicalized here, once; a path that
+    /// does not resolve is left out. Build the limits when a config is
+    /// accepted ([`AcceptedConfigSnapshot::candidate_source_limits`]), not per
+    /// candidate: resolving a root again would follow a symlink swapped in
+    /// after the operator accepted the config.
     pub(crate) fn candidate_source_limits(&self) -> CandidateSourceLimits {
         let parent = |path: &str| std::path::Path::new(path).parent().map(PathBuf::from);
+        let canonical = |path: PathBuf| path.canonicalize().ok();
         let roots = self
             .policy
             .rpol_roots
@@ -1219,6 +1237,7 @@ impl Config {
                     .values()
                     .filter_map(|dataset| parent(&dataset.path)),
             )
+            .filter_map(canonical)
             .collect();
         CandidateSourceLimits {
             roots,
@@ -1231,6 +1250,12 @@ impl Config {
                 .iter()
                 .cloned()
                 .chain(self.grpc_credential_files().map(PathBuf::from))
+                .filter_map(canonical)
+                .chain(
+                    self.source_file_target
+                        .as_ref()
+                        .map(|target| target.path().to_path_buf()),
+                )
                 .collect(),
             max_graph_bytes: self.policy.rpol_max_graph_bytes,
         }
@@ -1297,26 +1322,11 @@ impl Config {
         capture_external_inputs: bool,
         limits: Option<&CandidateSourceLimits>,
     ) -> Result<Self, CandidateLoadError> {
-        let canonicalize = |paths: &[PathBuf]| -> Vec<PathBuf> {
-            paths
-                .iter()
-                .filter_map(|path| path.canonicalize().ok())
-                .collect()
-        };
-        let canonical = limits.map(|limits| {
-            let mut protected_files = canonicalize(&limits.protected_files);
-            if let Some(target) = &limits.source_file_target {
-                protected_files.push(target.path().to_path_buf());
-            }
-            CandidateSourceLimits {
-                roots: canonicalize(&limits.roots),
-                credential_files: limits.credential_files.clone(),
-                protected_files,
-                config_file: limits.config_file.clone(),
-                source_file_target: limits.source_file_target.clone(),
-                inventory: std::sync::OnceLock::new(),
-                max_graph_bytes: limits.max_graph_bytes,
-            }
+        // The roots were resolved when the config was accepted; each load
+        // takes its own backup inventory.
+        let canonical = limits.map(|limits| CandidateSourceLimits {
+            inventory: std::sync::OnceLock::new(),
+            ..limits.clone()
         });
         Self::load_candidate(
             content,

@@ -309,6 +309,9 @@ pub(crate) struct AcceptedConfigSnapshot {
     /// SHA-256 of the config file bytes this snapshot was read from (boot,
     /// SIGHUP); `None` for snapshots not read from the config file.
     read_sha256: Option<[u8; 32]>,
+    /// What candidates below `operator_only` may name, resolved once when
+    /// this config was accepted.
+    source_limits: super::CandidateSourceLimits,
 }
 
 impl AcceptedConfigSnapshot {
@@ -402,6 +405,7 @@ impl AcceptedConfigSnapshot {
         let manifest = capture.finish(sha256);
         let source_sha256 = manifest.source_sha256();
         Ok(Arc::new(Self {
+            source_limits: config.candidate_source_limits(),
             config: Arc::new(config),
             normalized_toml,
             manifest,
@@ -507,6 +511,7 @@ impl AcceptedConfigSnapshot {
         let manifest = capture.finish(sha256);
         let source_sha256 = manifest.source_sha256();
         Ok(Self {
+            source_limits: config.candidate_source_limits(),
             config: Arc::new(config),
             normalized_toml,
             manifest,
@@ -540,7 +545,12 @@ impl AcceptedConfigSnapshot {
         let mut manifest = self.manifest.clone();
         manifest.toml_sha256 = sha256;
         let source_sha256 = manifest.source_sha256();
+        // The external-source roster is unchanged, so keep the roots resolved
+        // when it was accepted rather than following a later symlink swap.
+        let mut source_limits = config.candidate_source_limits();
+        source_limits.roots.clone_from(&self.source_limits.roots);
         Ok(Arc::new(Self {
+            source_limits,
             config: Arc::new(config),
             normalized_toml,
             manifest,
@@ -646,6 +656,7 @@ impl AcceptedConfigSnapshot {
         let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
         let manifest = SourceCapture::default().finish(sha256);
         Arc::new(Self {
+            source_limits: config.candidate_source_limits(),
             config: Arc::new(config),
             normalized_toml,
             source_sha256: manifest.source_sha256(),
@@ -664,6 +675,11 @@ impl AcceptedConfigSnapshot {
 
     pub(crate) fn config_ref(&self) -> &Config {
         &self.config
+    }
+
+    /// The candidate source limits taken when this config was accepted.
+    pub(crate) fn candidate_source_limits(&self) -> super::CandidateSourceLimits {
+        self.source_limits.clone()
     }
 
     pub(crate) fn normalized_toml(&self) -> &str {
