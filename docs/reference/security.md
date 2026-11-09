@@ -473,8 +473,11 @@ Exact binding consumption is role-agnostic.
 
 V2 JSON history, ignored retained TOML, the commit-confirm v3 raw prior, and
 retired v1/v2 `commit-confirm-journal.json` contain normalized TOML with
-credentials/keys; redacted history/status output does not make these files
-safe to publish. The
+credentials/keys. Config-adjacent `<config>.unconfirmed-*` boot-revert backups
+also hold the full prior config, including inline secrets. Candidate-source
+confinement below `operator_only` refuses these backups and hardlinks to the
+running config or its credential files. Redacted history/status output does not
+make these files safe to publish. The
 fixed `commit-confirm-v3-metadata.json` and config-adjacent
 `commit-confirm-locator.json` contain no raw TOML but remain confidential
 because they carry paths, digests, provenance, and file identities. All pending

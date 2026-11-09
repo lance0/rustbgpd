@@ -296,12 +296,14 @@ enum SourceRules<'a> {
     Api(Option<&'a CandidateSourceLimits>),
 }
 
-impl<'a> SourceRules<'a> {
-    /// Canonical files no `.rpol` module may be, imports included.
-    fn protected_files(self) -> &'a [PathBuf] {
+impl SourceRules<'_> {
+    fn protection(self) -> rustbgpd_policy::datasets::SourceFileProtection {
         match self {
-            Self::Api(Some(limits)) => &limits.protected_files,
-            _ => &[],
+            Self::Api(Some(limits)) => rustbgpd_policy::datasets::SourceFileProtection {
+                files: limits.protected_files.clone(),
+                config_file: limits.config_file.clone(),
+            },
+            _ => rustbgpd_policy::datasets::SourceFileProtection::default(),
         }
     }
 }
@@ -320,6 +322,8 @@ pub(crate) struct CandidateSourceLimits {
     /// config file (it can hold inline secrets) and its credential files.
     /// The packaged layout keeps them in the same directory as the policy.
     protected_files: Vec<PathBuf>,
+    /// Running config path, used to refuse adjacent unconfirmed backups.
+    config_file: Option<PathBuf>,
     /// The running config's `[policy] rpol_max_graph_bytes`; a candidate
     /// cannot raise its own read budget.
     max_graph_bytes: usize,
@@ -664,8 +668,8 @@ impl Config {
             // (LAN-300) as one compilation unit — a missing or broken
             // import anywhere rejects the whole load.
             // Imports may not reach a protected file either.
-            let excluded = sources.protected_files();
-            let file = match RpolFile::load_excluding(&path, &roots, max_graph_bytes, excluded) {
+            let excluded = sources.protection();
+            let file = match RpolFile::load_protected(&path, &roots, max_graph_bytes, &excluded) {
                 Ok(file) => file,
                 Err(LoadError::Io { path, reason }) => {
                     return Err(ConfigError::InvalidRpolFile { path, reason });
@@ -750,9 +754,7 @@ impl Config {
         accepted_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         sources: SourceRules<'_>,
     ) -> Result<DatasetLoadSummary, ConfigError> {
-        use rustbgpd_policy::datasets::{
-            DatasetBindings, DatasetHandle, DatasetKind, load_dataset_file,
-        };
+        use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
 
         let mut summary = DatasetLoadSummary::default();
 
@@ -843,6 +845,7 @@ impl Config {
                     existing,
                     accepted,
                     prior_manifest,
+                    &sources.protection(),
                 ) {
                     Ok(read) => {
                         summary.hashed += 1;
@@ -876,7 +879,11 @@ impl Config {
                     }
                 }
             } else {
-                match load_dataset_file(&path, kind) {
+                match rustbgpd_policy::datasets::load_dataset_file_protected(
+                    &path,
+                    kind,
+                    &sources.protection(),
+                ) {
                     Ok(data) => {
                         summary.parsed += 1;
                         Ok(source_provenance::CapturedDatasetLoad::Parsed(data))
@@ -1053,6 +1060,7 @@ impl Config {
             .collect();
         CandidateSourceLimits {
             roots,
+            config_file: self.file_path.clone(),
             credential_files: self.grpc_credential_files().map(str::to_string).collect(),
             // The gNMI dial-out TLS files are read only when a target
             // connects, so a candidate never names them, but they are the
@@ -1137,6 +1145,10 @@ impl Config {
             roots: canonicalize(&limits.roots),
             credential_files: limits.credential_files.clone(),
             protected_files: canonicalize(&limits.protected_files),
+            config_file: limits
+                .config_file
+                .as_ref()
+                .and_then(|path| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))),
             max_graph_bytes: limits.max_graph_bytes,
         });
         Self::load_candidate(

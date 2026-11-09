@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use rustbgpd_policy::datasets::{
     DatasetData, DatasetFileFingerprint, DatasetHandle, DatasetKind, DatasetSnapshot,
-    MAX_DATASET_BYTES, read_regular_file_bounded,
+    MAX_DATASET_BYTES, SourceFileProtection, read_regular_file_bounded_protected,
 };
 use rustbgpd_policy::rpol::RpolFile;
 use sha2::{Digest, Sha256};
@@ -191,6 +191,7 @@ pub(super) fn load_dataset_captured(
     existing: Option<&Arc<DatasetHandle>>,
     accepted: Option<&Arc<DatasetHandle>>,
     prior_manifest: Option<&SourceManifest>,
+    protection: &SourceFileProtection,
 ) -> Result<CapturedDatasetRead, CapturedDatasetError> {
     let failure = |reason| CapturedDatasetError {
         reason,
@@ -200,7 +201,7 @@ pub(super) fn load_dataset_captured(
     let canonical_path = path
         .canonicalize()
         .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
-    let bytes = read_regular_file_bounded(&canonical_path, MAX_DATASET_BYTES)
+    let bytes = read_regular_file_bounded_protected(&canonical_path, MAX_DATASET_BYTES, protection)
         .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
     let source = DatasetFileFingerprint {
         canonical_path,
@@ -812,6 +813,7 @@ import_policy_chain = ["inbound"]
             Some(&handle),
             Some(&handle),
             Some(&prior),
+            &SourceFileProtection::default(),
         )
         .unwrap();
         assert!(exact.source_rebound);
@@ -832,7 +834,8 @@ import_policy_chain = ["inbound"]
                 DatasetKind::Asn,
                 Some(&handle),
                 Some(&handle),
-                Some(&prior)
+                Some(&prior),
+                &SourceFileProtection::default(),
             )
             .unwrap()
             .load,
@@ -846,6 +849,7 @@ import_policy_chain = ["inbound"]
             Some(&handle),
             Some(&handle),
             Some(&prior),
+            &SourceFileProtection::default(),
         )
         .unwrap();
         assert!(changed_path.source_rebound);
@@ -859,7 +863,8 @@ import_policy_chain = ["inbound"]
                 DatasetKind::Asn,
                 Some(&handle),
                 Some(&handle),
-                Some(&prior)
+                Some(&prior),
+                &SourceFileProtection::default(),
             )
             .unwrap()
             .load,
@@ -872,6 +877,7 @@ import_policy_chain = ["inbound"]
             Some(&handle),
             Some(&handle),
             Some(&prior),
+            &SourceFileProtection::default(),
         )
         .expect_err("kind mismatch must parse as the candidate kind");
         assert!(kind_mismatch.source.is_some());

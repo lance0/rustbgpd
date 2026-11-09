@@ -710,3 +710,110 @@ async fn held_loads_leave_the_actor_free_and_operators_admitted() {
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     task.await.unwrap();
 }
+
+#[test]
+fn candidate_sources_refuse_unconfirmed_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let running = dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, "# accepted config\n").unwrap();
+    manager.current_config.file_path = Some(running);
+    let limits = manager.current_config.candidate_source_limits();
+    let backup = dir
+        .path()
+        .join("rustbgpd.toml.unconfirmed-0123456789abcdef.rpol");
+    std::fs::write(&backup, POLICY).unwrap();
+    let importer = dir.path().join("imports-backup.rpol");
+    std::fs::write(
+        &importer,
+        "import \"rustbgpd.toml.unconfirmed-0123456789abcdef.rpol\"\n",
+    )
+    .unwrap();
+    for capture in [false, true] {
+        for source in [&backup, &importer] {
+            let toml = candidate(&[source], "");
+            assert!(
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+                "backup admitted: {}",
+                source.display()
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+    let unrelated = dir
+        .path()
+        .join("other.toml.unconfirmed-0123456789abcdef.rpol");
+    std::fs::write(&unrelated, POLICY).unwrap();
+    Config::load_rpc_candidate(
+        &candidate(&[&unrelated], ""),
+        "candidate",
+        false,
+        Some(&limits),
+    )
+    .expect("only the running config's backups are protected");
+}
+
+#[test]
+fn candidate_sources_refuse_hardlinked_protected_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let running = dir.path().join("rustbgpd.toml");
+    // Valid policy bytes make successful parsing evidence of an unintended read.
+    std::fs::write(&running, POLICY).unwrap();
+    manager.current_config.file_path = Some(running.clone());
+    let limits = manager.current_config.candidate_source_limits();
+    let linked = dir.path().join("linked.rpol");
+    std::fs::hard_link(&running, &linked).unwrap();
+    let importer = dir.path().join("imports-hardlink.rpol");
+    std::fs::write(&importer, "import \"linked.rpol\"\n").unwrap();
+    for capture in [false, true] {
+        for source in [&linked, &importer] {
+            let toml = candidate(&[source], "");
+            let error =
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).unwrap_err();
+            assert!(
+                error.contains("not an admissible policy source")
+                    || error.contains("compile failed"),
+                "{error}"
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+}
+
+#[test]
+fn candidate_datasets_refuse_hardlinked_configs_and_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager_with_policy_dir(dir.path());
+    let running = dir.path().join("rustbgpd.toml");
+    std::fs::write(&running, "64500\n").unwrap();
+    manager.current_config.file_path = Some(running.clone());
+    let linked = dir.path().join("linked.list");
+    std::fs::hard_link(&running, &linked).unwrap();
+    let backup = dir
+        .path()
+        .join("rustbgpd.toml.unconfirmed-0123456789abcdef");
+    std::fs::write(&backup, "64500\n").unwrap();
+    let declaring = dir.path().join("declaring.rpol");
+    std::fs::write(&declaring, "dataset asn-set customers\npolicy uses { term t { if route.origin-as in customers { accept } } }\n").unwrap();
+    let limits = manager.current_config.candidate_source_limits();
+    for capture in [false, true] {
+        for source in [&linked, &backup] {
+            let toml = candidate(
+                &[&declaring],
+                &format!(
+                    "[policy.datasets.customers]\npath = {:?}\n",
+                    source.display().to_string()
+                ),
+            );
+            assert!(
+                Config::load_rpc_candidate(&toml, "candidate", capture, Some(&limits)).is_err(),
+                "protected dataset admitted"
+            );
+            Config::load_rpc_candidate(&toml, "operator", capture, None)
+                .expect("operators retain access");
+        }
+    }
+}

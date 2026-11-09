@@ -470,11 +470,87 @@ impl fmt::Display for MissingDatasets {
 /// or the first parse errors with line numbers). Callers keep the
 /// prior snapshot on error.
 pub fn load_dataset_file(path: &Path, kind: DatasetKind) -> Result<DatasetData, String> {
-    let bytes = read_regular_file_bounded(path, MAX_DATASET_BYTES)
+    load_dataset_file_protected(path, kind, &SourceFileProtection::default())
+}
+
+/// Read a dataset while refusing protected source files before reading bytes.
+///
+/// # Errors
+///
+/// As [`load_dataset_file`], or a protected-source refusal.
+#[doc(hidden)]
+pub fn load_dataset_file_protected(
+    path: &Path,
+    kind: DatasetKind,
+    protection: &SourceFileProtection,
+) -> Result<DatasetData, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    let bytes = read_regular_file_bounded_protected(&path, MAX_DATASET_BYTES, protection)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let text =
         String::from_utf8(bytes).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     crate::rpol::parse_dataset_text(&text, kind)
+}
+
+/// Files forbidden as policy inputs, including config-adjacent boot backups.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct SourceFileProtection {
+    /// Protected config and credential paths.
+    pub files: Vec<PathBuf>,
+    /// Running config path whose `.unconfirmed-*` siblings are protected.
+    pub config_file: Option<PathBuf>,
+}
+
+impl SourceFileProtection {
+    /// Whether a canonical source names a protected file or boot backup.
+    #[must_use]
+    pub fn protects_path(&self, path: &Path) -> bool {
+        // shortcut: backups match sibling names; enumerate backup inodes if aliases need protection.
+        self.files.iter().any(|file| file == path)
+            || self.config_file.as_ref().is_some_and(|config| {
+                config.parent() == path.parent()
+                    && config
+                        .file_name()
+                        .zip(path.file_name())
+                        .is_some_and(|(config, name)| {
+                            let mut prefix = config.as_encoded_bytes().to_vec();
+                            prefix.extend_from_slice(b".unconfirmed-");
+                            name.as_encoded_bytes().starts_with(&prefix)
+                        })
+            })
+    }
+
+    fn check_opened(&self, path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+        let denied = || {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "is not an admissible policy source",
+            )
+        };
+        if self.protects_path(path) {
+            return Err(denied());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            for protected in &self.files {
+                match std::fs::metadata(protected) {
+                    Ok(other) if (metadata.dev(), metadata.ino()) == (other.dev(), other.ino()) => {
+                        return Err(denied());
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = metadata;
+        Ok(())
+    }
 }
 
 /// Read a whole regular file holding at most `max_bytes`.
@@ -495,6 +571,20 @@ pub fn load_dataset_file(path: &Path, kind: DatasetKind) -> Result<DatasetData, 
 /// [`std::io::ErrorKind::FileTooLarge`] for a file over the bound.
 #[doc(hidden)]
 pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    read_regular_file_bounded_protected(path, max_bytes, &SourceFileProtection::default())
+}
+
+/// Bounded regular-file read, checking the opened descriptor before reading.
+///
+/// # Errors
+///
+/// As [`read_regular_file_bounded`], or `PermissionDenied` for a protected source.
+#[doc(hidden)]
+pub fn read_regular_file_bounded_protected(
+    path: &Path,
+    max_bytes: u64,
+    protection: &SourceFileProtection,
+) -> std::io::Result<Vec<u8>> {
     use std::io::{Error, ErrorKind};
 
     let not_regular = || Error::new(ErrorKind::InvalidInput, "not a regular file");
@@ -521,6 +611,7 @@ pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result
     if !meta.is_file() {
         return Err(not_regular());
     }
+    protection.check_opened(path, &meta)?;
     if meta.len() > max_bytes {
         return Err(too_large());
     }
@@ -623,6 +714,30 @@ mod tests {
         }
         let read = read.expect("the open must not block on the swapped-in FIFO");
         assert_eq!(read, Err(std::io::ErrorKind::InvalidInput));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_source_checks_the_opened_inode_after_a_path_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.rpol");
+        let credential = dir.path().join("credential.key");
+        let replacement = dir.path().join("replacement.rpol");
+        std::fs::write(&source, "safe").unwrap();
+        std::fs::write(&credential, "secret").unwrap();
+        std::fs::hard_link(&credential, &replacement).unwrap();
+        let swapped_source = source.clone();
+        AFTER_STAT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&replacement, &swapped_source).unwrap();
+            }));
+        });
+        let protection = SourceFileProtection {
+            files: vec![credential],
+            config_file: None,
+        };
+        let error = read_regular_file_bounded_protected(&source, 1024, &protection).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     /// Run `load` on its own thread and wait at most five seconds, so a
