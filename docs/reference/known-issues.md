@@ -38,7 +38,10 @@ resolved.
   [v0.81.0 run](../soaks/soak-rs-flagship-24h-2026-11-01.md), which includes
   the session-free Established count, had the same result: 147 of 147
   `doctor` runs `ok` and no bad `/readyz` samples. Two clean runs are
-  consistent with the fix, not proof of it.
+  consistent with the fix, not proof of it. The
+  [v0.82.0 run](../soaks/soak-rs-flagship-24h-2026-11-08.md) had no bad
+  `/readyz` samples; one of its 147 `doctor` runs hit the runner's 5 s timeout
+  during a reload and left no report, so the slow component is not known.
   `bgp_readiness_probe_failures_total{reason}` names the failing component.
   Timing instrumentation supports investigation but does not establish that
   the underlying delay is fixed.
