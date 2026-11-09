@@ -389,8 +389,10 @@ pub(crate) struct CandidateSourceLimits {
     /// Files no source may resolve to even inside a root: the running
     /// config file (it can hold inline secrets) and its credential files.
     /// The packaged layout keeps them in the same directory as the policy.
-    /// Canonical as of accept; each load adds what `credential_files`
-    /// resolve to by then ([`Self::for_load`]).
+    /// Canonical as of accept and kept across API commits
+    /// ([`Self::inherit`]); each load adds what `credential_files` resolve to
+    /// by then ([`Self::for_load`]). Nothing removes an entry before the next
+    /// accepted reload.
     protected_files: Vec<PathBuf>,
     /// Running config path, used to refuse adjacent unconfirmed backups.
     config_file: Option<PathBuf>,
@@ -423,6 +425,21 @@ impl CandidateSourceLimits {
             }
         }
         limits
+    }
+
+    /// Carry what `accepted` resolved into limits rebuilt for an API commit
+    /// on top of it: its roots as they were, and every file it protected in
+    /// addition to those resolved now. A commit reloads no credential, so a
+    /// file the accepted config protected can still be the live one after
+    /// its symlink was rotated.
+    fn inherit(&mut self, accepted: &Self) {
+        self.roots.clone_from(&accepted.roots);
+        self.root_files.clone_from(&accepted.root_files);
+        for file in &accepted.protected_files {
+            if !self.protected_files.contains(file) {
+                self.protected_files.push(file.clone());
+            }
+        }
     }
 
     /// Whether `dir` is, or lies under, a root accepted as a directory.

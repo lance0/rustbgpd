@@ -7,9 +7,13 @@
   nested policy directory replaced by a symlink in between no longer extends
   the confinement to the symlink's target. Whether each `[policy] rpol_roots`
   entry is a directory or a file is fixed at the same time. An entry that is a
-  regular file admits only that file: a candidate may name it, but its
-  imports do not resolve into the surrounding directory, and a directory
-  later put in its place is not a policy directory. gRPC credential paths are
-  resolved again for every candidate, so a credential symlink rotated between
-  reloads keeps both its old and its new target out of candidate sources.
-  Operator, boot and SIGHUP loads are unchanged.
+  regular file admits only that file as a path a candidate names: another
+  module cannot import it, its own imports are looked up only under the
+  candidate's policy directories and not relative to its directory, and a
+  directory later put in its place is not a policy directory. The file each
+  gRPC credential path resolved to at boot or SIGHUP stays out of candidate
+  sources until the next accepted reload, across API commits, and so does
+  the file the path resolves to when a candidate is loaded; a credential
+  symlink rotated in between keeps both targets out. A credential file moved
+  aside by rename is not covered under its new name. Operator, boot and
+  SIGHUP loads are unchanged.

@@ -546,12 +546,10 @@ impl AcceptedConfigSnapshot {
         manifest.toml_sha256 = sha256;
         let source_sha256 = manifest.source_sha256();
         // The external-source roster is unchanged, so keep the roots resolved
-        // when it was accepted rather than following a later symlink swap.
+        // when it was accepted rather than following a later symlink swap,
+        // and keep every file protected then.
         let mut source_limits = config.candidate_source_limits();
-        source_limits.roots.clone_from(&self.source_limits.roots);
-        source_limits
-            .root_files
-            .clone_from(&self.source_limits.root_files);
+        source_limits.inherit(&self.source_limits);
         Ok(Arc::new(Self {
             source_limits,
             config: Arc::new(config),
