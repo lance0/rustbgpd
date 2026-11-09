@@ -672,14 +672,12 @@ async fn ensure_svd_binding(
     {
         Ok(()) => Ok(()),
         Err(err) if is_errno(&err, ERRNO_EEXIST) => {
-            let fresh = links::dump_links(handle).await?;
-            if fresh.bridges.values().any(|bridge| {
-                bridge.port_vlan_inventory.iter().any(|port| {
-                    port.ifindex == vxlan_ifindex
-                        && svd_tunnel_bindings(&port.vlan_tunnels)
-                            .is_some_and(|rows| rows.contains(&binding))
-                })
-            }) {
+            let entries = super::vlan_tunnel::dump_port_vlans(vxlan_ifindex).await?;
+            if super::vlan_tunnel::entries_map_vlan_to_tunnel(
+                &entries,
+                binding.bridge_vlan,
+                binding.vni,
+            ) {
                 Ok(())
             } else {
                 Err(transient_link_race(

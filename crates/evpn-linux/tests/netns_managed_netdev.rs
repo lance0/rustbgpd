@@ -406,7 +406,7 @@ async fn managed_svd_binding_change(rekey: bool) {
         "managed_svd_vxlan_restart_prunes_removed_binding"
     };
     if std::env::var("RUSTBGPD_NETNS_INNER").as_deref() != Ok(test_name) {
-        let ns = NetnsFixture::create("svd-change");
+        let ns = NetnsFixture::create(test_name);
         let status = Command::new("ip")
             .args(["netns", "exec", &ns.name])
             .arg(std::env::current_exe().expect("self-exe"))
