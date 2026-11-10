@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import qualify as Q
 import recovery as R
-from test_qualify import witness, metrics_text, set_provenance_peak
+from test_qualify import held, witness, metrics_text, set_provenance_peak
 
 
 def two_groups(generation="a"):
@@ -60,8 +60,9 @@ class RecoveryTests(unittest.TestCase):
             def build(command, **kwargs):
                 binary = command[command.index("--bin") + 1]
                 target = Path(kwargs["env"]["CARGO_TARGET_DIR"])
-                (target / "release").mkdir(parents=True, exist_ok=True)
-                (target / "release" / binary).write_text(binary + str(target))
+                profile = command[command.index("--profile") + 1] if "--profile" in command else "release"
+                (target / profile).mkdir(parents=True, exist_ok=True)
+                (target / profile / binary).write_text(binary + str(target))
                 return Mock(returncode=0)
             with patch.object(Q, "manifest_for"), patch.object(Q, "verify_export"), \
                  patch.object(Q.subprocess, "check_output", return_value="fixture version"), \
@@ -162,7 +163,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(row["seconds"])
 
     def test_private_bar_misses_do_not_abort_later_recovery_cells(self):
-        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+        with tempfile.TemporaryDirectory() as temporary, tempfile.NamedTemporaryFile() as lock:
             manifest = {"recovery": Q.RECOVERY_BARS}
             def cell(*args):
                 if args[2] == "private":
@@ -170,7 +171,7 @@ class RecoveryTests(unittest.TestCase):
             with patch.object(R.sys, "argv", ["recovery.py", "run", temporary]), \
                  patch.object(Q, "manifest_for", return_value=manifest), \
                  patch.object(Q, "verify_export"), \
-                 patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                 patch.dict(Q.os.environ, held(lock)), \
                  patch.object(R, "run_cell", side_effect=cell) as run, \
                  patch.object(R, "analyze") as analyze:
                 R.main()
@@ -181,14 +182,14 @@ class RecoveryTests(unittest.TestCase):
     def test_candidate_bar_and_private_invalid_still_abort_recovery_cells(self):
         for arm, error in (("candidate", Q.AcceptanceFailure("candidate bar miss")),
                            ("private", ValueError("technical failure"))):
-            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary, tempfile.NamedTemporaryFile() as lock:
                 def cell(*args, arm=arm, error=error):
                     if args[2] == arm:
                         raise error
                 with patch.object(R.sys, "argv", ["recovery.py", "run", temporary]), \
                      patch.object(Q, "manifest_for", return_value={"recovery": Q.RECOVERY_BARS}), \
                      patch.object(Q, "verify_export"), \
-                     patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                     patch.dict(Q.os.environ, held(lock)), \
                      patch.object(R, "run_cell", side_effect=cell) as run, \
                      patch.object(R, "analyze") as analyze:
                     with self.assertRaises(type(error)):
@@ -199,17 +200,31 @@ class RecoveryTests(unittest.TestCase):
     def test_control_bar_failure_summary_is_fail_not_invalid(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.analysis_fixture(root)
+            report = self.analysis_fixture(root)
             path = root / "recovery-01-private/result.json"
             row = json.loads(path.read_text())
             row.update(status="FAIL", error="readiness HTTP 503")
             Q.write_json(path, row)
-            with self.assertRaises(Q.AcceptanceFailure):
+            with patch.object(R, "check_wire", return_value=report), self.assertRaises(Q.AcceptanceFailure):
                 R.analyze(root)
             summary = json.loads((root / "recovery-summary.json").read_text())
             self.assertEqual(summary["status"], "FAIL")
             self.assertFalse(summary["terminal_only_qualified"])
             self.assertEqual(summary["failed_cells"][0]["arm"], "private")
+
+    def test_corrupt_complete_cell_outranks_a_recorded_control_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = self.analysis_fixture(root)
+            path = root / "recovery-01-private/result.json"
+            row = json.loads(path.read_text())
+            row.update(status="FAIL", error="readiness HTTP 503")
+            Q.write_json(path, row)
+            (root / "recovery-00-candidate/metrics.txt").write_text("")
+            with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
+                R.analyze(root)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+            self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
 
     def test_actual_group_membership_not_policy_names(self):
         a, b = two_groups(), two_groups("b")

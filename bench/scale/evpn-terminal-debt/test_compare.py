@@ -60,11 +60,13 @@ class Compare(unittest.TestCase):
         self.assertTrue(row["churn-applied-seconds"]["fail"])
         self.assertFalse(row["convergence-seconds"]["fail"])
 
-    def test_identical_owned_daemons_are_refused(self):
-        same = {"rustbgpd-candidate": "a" * 64}
-        with self.assertRaisesRegex(ValueError, "same binary"):
-            compare.require_distinct({"parent": same, "candidate": dict(same)})
-        compare.require_distinct({"parent": same, "candidate": {"rustbgpd-candidate": "b" * 64}})
+    def test_inputs_with_the_same_product_tree_are_refused(self):
+        parent = {"src/main.rs": b"a", "crates/rib/src/lib.rs": b"b", "bench/evpn-load/src/lib.rs": b"c"}
+        # A difference outside the product tree does not make two sides.
+        with self.assertRaisesRegex(ValueError, "same product tree"):
+            compare.require_distinct(parent, {**parent, "bench/evpn-load/src/lib.rs": b"d", "README.md": b"e"})
+        compare.require_distinct(parent, {**parent, "crates/rib/src/lib.rs": b"changed"})
+        compare.require_distinct(parent, {**parent, "src/new.rs": b""})
 
 
 if __name__ == "__main__":

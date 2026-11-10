@@ -1,11 +1,15 @@
 // Included only in the reviewed private export, inside impl RibManager.
-pub(in crate::manager) fn bench_terminal_debtors(&self) -> usize {
-    self.outbound_peers
-        .keys()
-        .filter(|peer| {
-            self.evpn_feed_is_current(**peer) && self.bench_evpn_owed_markers(**peer) != 0
-        })
-        .count()
+// A root renews only its own group's feeds, so only that group's debtors count.
+pub(in crate::manager) fn bench_terminal_debtors(&self, gid: usize) -> usize {
+    self.group_ribs.get(&gid).map_or(0, |group| {
+        group
+            .members
+            .iter()
+            .filter(|peer| {
+                self.evpn_feed_is_current(**peer) && self.bench_evpn_owed_markers(**peer) != 0
+            })
+            .count()
+    })
 }
 
 pub(in crate::manager) fn bench_terminal_event(&self, peer: PeerId, event: &str, rows: usize) {

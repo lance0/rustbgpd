@@ -23,7 +23,6 @@ refused-member pass.
 
 import argparse
 import json
-import os
 from pathlib import Path
 import statistics
 import subprocess
@@ -79,10 +78,16 @@ def ratios(cells):
     return result
 
 
-def require_distinct(identities):
-    """`identities`: {side: {binary name: sha256}} from each side's build receipt."""
-    check.require(identities["parent"]["rustbgpd-candidate"] != identities["candidate"]["rustbgpd-candidate"],
-                  "parent and candidate owned daemons are the same binary")
+def product(files):
+    """The product sources of one input: everything under `src/` and `crates/`."""
+    return {name: data for name, data in files.items() if name.startswith(("src/", "crates/"))}
+
+
+def require_distinct(parent, candidate):
+    """Each argument: {path: content} of one input. Binary digests cannot tell
+    the sides apart, because each daemon embeds its own build directory; the
+    two product trees must differ."""
+    check.require(product(parent) != product(candidate), "parent and candidate inputs carry the same product tree")
 
 
 def load(output):
@@ -91,6 +96,7 @@ def load(output):
     candidate = source.manifest(output / "candidate")
     files = source.archive_files(output / "candidate/qualification.tar")
     source.verify_tree(output / "candidate/input", files)
+    require_distinct(source.archive_files(output / "parent/qualification.tar"), files)
     for name in sorted((output / "parent/input/bench/scale/evpn-qualification").glob("*.py")):
         other = output / "candidate/input/bench/scale/evpn-qualification" / name.name
         check.require(other.read_bytes() == name.read_bytes(), "the two inputs carry different qualification harnesses")
@@ -112,6 +118,9 @@ def one_campaign(*arguments):
 def prepare(args):
     output = Path(args.output).resolve()
     check.require(not output.exists(), "comparison directory must be new")
+    trees = [source.git(Path(tree).resolve(), "rev-parse", "HEAD:src", "HEAD:crates")
+             for tree in (args.parent_input, args.candidate_input)]
+    check.require(trees[0] != trees[1], "parent and candidate inputs carry the same product tree")
     output.mkdir(parents=True)
     for side, tree in (("parent", args.parent_input), ("candidate", args.candidate_input)):
         window = ["--window-start", args.window_start, "--window-end", args.window_end] if args.window_start else []
@@ -133,7 +142,6 @@ def verify(output, built):
     report = {side: {"head": manifests[side]["head"], "input": manifests[side]["qualification_head"]} for side in SIDES}
     if built:
         identities = {side: source.verify_build(output / side, manifests[side], q) for side in SIDES}
-        require_distinct(identities)
         for side in SIDES:
             report[side]["binaries"] = identities[side]
     report["timing_window"] = manifests["parent"]["timing_window"]
@@ -155,10 +163,8 @@ def run(args):
     import terminal
     output = Path(args.output).resolve()
     manifests, q, r, wire = load(output)
-    lock = os.environ.get("RUSTBGPD_HOST_LOCK_FD")
-    check.require(lock is not None and Path(f"/proc/self/fd/{int(lock)}").exists(), "the launcher must hold the host lock")
+    q.require_host_lock()
     identities = {side: source.verify_build(output / side, manifests[side], q) for side in SIDES}
-    require_distinct(identities)
     check.require(not list(output.glob("*/terminal-*")) and not (output / "comparison.json").exists(),
                   "comparison already ran; no retry")
     schedule = CORRECTNESS_SCHEDULE if args.correctness_only else SCHEDULE

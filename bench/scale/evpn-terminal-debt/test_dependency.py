@@ -60,6 +60,10 @@ class DependencyChecks(unittest.TestCase):
     def test_anchor_drift_refuses_derivation(self):
         with self.assertRaisesRegex(ValueError, "anchor drift"):
             patches.once("anchor anchor", "anchor", "replacement")
+        for text in ("no match", "anchor anchor"):
+            with self.assertRaisesRegex(ValueError, "anchor drift"):
+                patches.split_once(text, "anchor")
+        self.assertEqual(patches.split_once("before anchor after", "anchor"), ["before ", " after"])
 
     def test_actual_run_cell_leaves_capture_directory_creation_to_the_driver(self):
         with tempfile.TemporaryDirectory() as directory:

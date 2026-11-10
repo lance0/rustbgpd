@@ -674,8 +674,7 @@ def run(args):
     output = Path(args.output).resolve()
     manifest, q, r, wire = source.load(output)
     check.require(manifest["bars"] == BARS, "predeclared bars changed")
-    lock = os.environ.get("RUSTBGPD_HOST_LOCK_FD")
-    check.require(lock is not None and Path(f"/proc/self/fd/{int(lock)}").exists(), "use run.sh to hold the host lock")
+    q.require_host_lock()
     schedule = BARS["correctness_schedule"] if args.correctness_only else BARS["schedule"]
     results = []
     q.write_json(output / "summary.json", {"status": "INVALID", "scope": SCOPE,

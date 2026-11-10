@@ -32,6 +32,12 @@ default jemalloc allocator; the live-heap metric must exist. The driver runs
 outside the daemon cgroup. Readiness samples and finish-handshake errors are
 retained. The smoke is not a performance receipt.
 
+A compiler or other competing process that starts while a measured cell is
+running is not detected in that cell: the quiet-host gate samples the host only
+before each cell, and the next cell's gate waits the intruder out. Keep the host
+hands-off for the whole window, or watch for competitors from the launcher and
+discard the campaign if one appears.
+
 Use a separate prepared campaign for measured runs, with explicit UTC
 `--window-start` and `--window-end` ISO-8601 arguments to `prepare`. There is no
 default timed interval. The runner takes the canonical host lock. Before every

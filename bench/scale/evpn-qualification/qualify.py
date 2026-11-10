@@ -8,6 +8,7 @@ exports have the same private observer. Neither patch changes normal builds.
 from __future__ import annotations
 
 import argparse
+import fcntl
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -55,6 +56,29 @@ class AcceptanceFailure(ValueError):
 def accept(condition, message):
     if not condition:
         raise AcceptanceFailure(message)
+
+
+def require_host_lock():
+    """The runner (run.sh) holds the canonical host lock on an inherited
+    descriptor. The descriptor must be the lock file, and the lock must be
+    held: a fresh open of the file cannot take it."""
+    path = Path(os.environ.get("RUSTBGPD_HOST_LOCK") or Path.home() / ".local/state/rustbgpd-host.lock")
+    descriptor = os.environ.get("RUSTBGPD_HOST_LOCK_FD", "")
+    message = "use run.sh to hold the host lock"
+    require(descriptor.isdigit(), message)
+    try:
+        same = os.path.samestat(os.fstat(int(descriptor)), os.stat(path))
+    except OSError:
+        same = False
+    require(same, message)
+    probe = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return
+    finally:
+        os.close(probe)
+    require(False, message)
 
 
 def manifest_for(output):
@@ -521,9 +545,7 @@ def run(args):
         verify_export(output, arm)
     require(args.correctness_only or manifest.get("source_kind", "committed") == "committed",
             "measured cells require a final committed source")
-    # Entry through run.sh holds the canonical descriptor across this process.
-    lock_fd = os.environ.get("RUSTBGPD_HOST_LOCK_FD")
-    require(lock_fd is not None and Path(f"/proc/self/fd/{int(lock_fd)}").exists(), "use run.sh to hold the host lock")
+    require_host_lock()
     shapes = [(3, 10)] if args.correctness_only else SHAPES
     schedule = ["candidate", "private"] if args.correctness_only else manifest["schedule"]
     index = 0
@@ -564,15 +586,11 @@ def analyze_results(args):
     require([(row["arm"], row["clients"], row["routes_per_client"]) for row in rows] == expected,
             "incomplete, repeated or reordered memory matrix")
     require(all(row["status"] in ("PASS", "FAIL") for row in rows), "invalid memory cell")
-    failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"]}
+    # A failed cell may be incomplete, so its evidence stays unvalidated.
+    failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"], "evidence": "unvalidated"}
                 for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
-    if failures:
-        write_json(output / "summary.json", {
-            "status": "FAIL", "correctness_only": correct, "scope": SCOPE,
-            "head": manifest["head"], "production_activation_qualified": False,
-            "cells": len(rows), "slopes": [], "failed_cells": failures})
-        accept(False, "recorded cell acceptance failures; see failed_cells")
-    for path, row in zip(paths, rows, strict=True):
+
+    def validate(path, row):
         leg = path.parent
         receipt((leg / "driver.log").read_text(), row["clients"], row["routes_per_client"])
         require(row["driver_exit"] == 0, "driver did not finish successfully")
@@ -597,6 +615,24 @@ def analyze_results(args):
             require(row["memory"] == {**cg, "jemalloc_allocated_bytes": heap["jemalloc_allocated_bytes"]},
                     "memory receipt differs from raw cgroup/heap observations")
             check_cgroup(cg)
+
+    # Every complete cell is validated before any acceptance failure is
+    # reported: missing or corrupt evidence makes the campaign INVALID.
+    missed = None
+    for path, row in zip(paths, rows, strict=True):
+        if row["status"] == "PASS":
+            try:
+                validate(path, row)
+            except AcceptanceFailure as error:
+                missed = missed or error
+    if failures:
+        write_json(output / "summary.json", {
+            "status": "FAIL", "correctness_only": correct, "scope": SCOPE,
+            "head": manifest["head"], "production_activation_qualified": False,
+            "cells": len(rows), "slopes": [], "failed_cells": failures})
+        accept(False, "recorded cell acceptance failures; see failed_cells")
+    if missed:
+        raise missed
     slopes = []
     if not correct:
         for low, high in ((SHAPES[0], SHAPES[1]), (SHAPES[2], SHAPES[3])):

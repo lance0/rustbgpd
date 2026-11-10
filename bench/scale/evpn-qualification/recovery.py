@@ -687,15 +687,11 @@ def analyze_results(output):
     Q.require([row["arm"] for row in rows] == schedule
               and all(row["correctness_only"] == correctness for row in rows), "incomplete/reordered recovery matrix")
     Q.require(all(row["status"] in ("PASS", "FAIL") for row in rows), "invalid recovery cell")
-    failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"]}
+    # A failed cell may be incomplete, so its evidence stays unvalidated.
+    failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"], "evidence": "unvalidated"}
                 for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
-    if failures:
-        Q.write_json(output / "recovery-summary.json", {
-            "status": "FAIL", "correctness_only": correctness, "scope": SCOPE,
-            "production_activation_qualified": False, "terminal_only_qualified": False,
-            "cells": len(rows), "medians": {}, "failed_cells": failures})
-        Q.accept(False, "recorded cell acceptance failures; see failed_cells")
-    for path, row in zip(paths, rows, strict=True):
+
+    def validate(path, row):
         leg, clients = path.parent, row["clients"]
         identities = json.loads((output / "binaries.json").read_text())
         Q.require(row["reload_client_sha256"] == identities["rbgp"] == Q.digest(output / "bin/rbgp"),
@@ -751,6 +747,24 @@ def analyze_results(output):
                   "readers resumed before the final actor-applied input barrier")
         for key, seconds in timings(events).items():
             Q.require(row[key] == (None if correctness else seconds), "timing receipt differs from raw events")
+
+    # Every complete cell is validated before any acceptance failure is
+    # reported: missing or corrupt evidence makes the campaign INVALID.
+    missed = None
+    for path, row in zip(paths, rows, strict=True):
+        if row["status"] == "PASS":
+            try:
+                validate(path, row)
+            except Q.AcceptanceFailure as error:
+                missed = missed or error
+    if failures:
+        Q.write_json(output / "recovery-summary.json", {
+            "status": "FAIL", "correctness_only": correctness, "scope": SCOPE,
+            "production_activation_qualified": False, "terminal_only_qualified": False,
+            "cells": len(rows), "medians": {}, "failed_cells": failures})
+        Q.accept(False, "recorded cell acceptance failures; see failed_cells")
+    if missed:
+        raise missed
     for candidate, private in zip(rows[::2], rows[1::2], strict=True):
         for phase in PHASES:
             for left, right in zip(candidate["wire"][phase], private["wire"][phase], strict=True):
@@ -782,8 +796,7 @@ def main():
     if args.command == "run":
         for arm in ("candidate", "private"):
             Q.verify_export(output, arm)
-        lock = os.environ.get("RUSTBGPD_HOST_LOCK_FD")
-        Q.require(lock is not None and Path(f"/proc/self/fd/{int(lock)}").exists(), "use run.sh for host lock")
+        Q.require_host_lock()
         Q.require(args.correctness_only or manifest.get("source_kind", "committed") == "committed",
                   "measured recovery requires committed source")
         for index, arm in enumerate(["candidate", "private"] if args.correctness_only else Q.SCHEDULE):

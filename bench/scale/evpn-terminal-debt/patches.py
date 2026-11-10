@@ -10,6 +10,12 @@ def once(text, old, new):
     return text.replace(old, new, 1)
 
 
+def split_once(text, anchor):
+    if text.count(anchor) != 1:
+        raise ValueError(f"private derivation anchor drift: {anchor!r}")
+    return text.split(anchor, 1)
+
+
 def instrument(files, here):
     original = files
     files = dict(files)
@@ -55,7 +61,7 @@ def instrument(files, here):
     # advances the group stamp; staging and everything after it stay put.
     edit(path, "        let mut stage = self.stage_group_evpn_keys(gid, keys);",
          "        let _terminal_work = super::super::terminal_debt::Scope::new(\n"
-         "            gid, keys.len(), self.bench_terminal_debtors());\n"
+         "            gid, keys.len(), self.bench_terminal_debtors(gid));\n"
          "        let terminal_members: Vec<PeerId> = self.group_ribs.get(&gid).into_iter()\n"
          "            .flat_map(|group| group.members.iter().copied()).collect();\n"
          "        for peer in terminal_members {\n"
@@ -63,8 +69,8 @@ def instrument(files, here):
          "        let mut stage = self.stage_group_evpn_keys(gid, keys);")
     # Restrict these edits to the actual root, without changing the staging callers.
     text = files[path].decode()
-    before, root = text.split("    fn distribute_owned_evpn_group(", 1)
-    root, after = root.split("    pub(in crate::manager) fn stage_group_evpn_keys(", 1)
+    before, root = split_once(text, "    fn distribute_owned_evpn_group(")
+    root, after = split_once(root, "    pub(in crate::manager) fn stage_group_evpn_keys(")
     # A current feed renewed from its delta payload walks no inventory; count
     # the renewal so a root without the full producer is still accounted for.
     root = once(root, "            let complete = if let Some(seal) = sparse {",
@@ -78,7 +84,7 @@ def instrument(files, here):
 
     path = manager + "update_groups/payload.rs"
     text = files[path].decode()
-    before, tail = text.split("pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(", 1)
+    before, tail = split_once(text, "pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(")
     tail = once(tail, "    for delta in deltas {\n        checkpoint();",
                 "    for delta in deltas {\n        super::super::terminal_debt::count(\"delta\", 1);\n        checkpoint();")
     files[path] = (before + "pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(" + tail).encode()
@@ -205,7 +211,8 @@ def instrument(files, here):
     edit("bench/evpn-load/Cargo.toml", "serde_json.workspace = true\n",
          "serde_json.workspace = true\nsocket2.workspace = true\n")
     lock = files["Cargo.lock"].decode()
-    before, load = lock.split('name = "rustbgpd-evpn-load"\n', 1)
+    before, load = split_once(lock, 'name = "rustbgpd-evpn-load"\n')
+    # The first following package header ends this entry; it is a delimiter, not an anchor.
     load, after = load.split("\n[[package]]", 1)
     load = once(load, ' "serde_json",\n', ' "serde_json",\n "socket2",\n')
     files["Cargo.lock"] = (before + 'name = "rustbgpd-evpn-load"\n' + load + "\n[[package]]" + after).encode()

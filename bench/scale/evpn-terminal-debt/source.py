@@ -131,7 +131,10 @@ def prepare(args, bars):
     # head supplies only its own directory. Both must carry the same
     # qualification harness and driver, or the two derivations would disagree.
     require(git(ROOT, "ls-tree", head, "--", PREFIX), "terminal harness is not committed at this head")
-    require(subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", pin, head, "--", *INPUT_PATHS]).returncode == 0,
+    # Tree ids, each read from its own repository: the input may be a separate
+    # clone whose commit this checkout does not have.
+    require(all(git(dependency, "rev-parse", f"{pin}:{path}") == git(ROOT, "rev-parse", f"{head}:{path}")
+                for path in INPUT_PATHS),
             "input commit and terminal head carry different qualification harnesses")
     output.mkdir(parents=True)
     for source, commit, name, paths in ((dependency, pin, "qualification", []),

@@ -235,14 +235,22 @@ python3 -B bench/scale/evpn-terminal-debt/compare.py prepare "$COMPARISON" \
   --window-start "$START" --window-end "$END"
 taskset -c 0-23,32-55 python3 -B "$COMPARISON/parent/sources/candidate/bench/scale/evpn-terminal-debt/compare.py" build "$COMPARISON"
 python3 -B "$COMPARISON/parent/sources/candidate/bench/scale/evpn-terminal-debt/compare.py" plan "$COMPARISON"
+bench/scale/evpn-terminal-debt/run.sh --compare "$COMPARISON"
 ```
 
 Each input is the product commit with this branch's qualification harness and
-driver. `build` refuses identical owned daemons. `run` needs the host lock held by
-its launcher and executes 30 timed overlap cells: ten A/A cells on the parent
+driver. `prepare` and every later step refuse two inputs whose `src/` and
+`crates/` trees are the same; binary digests are not compared, because each
+daemon embeds its own build directory. `run.sh --compare` takes the canonical
+host lock and holds it for the whole comparison; the runner refuses to start
+unless its inherited descriptor is that lock file and the lock is held. It
+executes 30 timed overlap cells: ten A/A cells on the parent
 binary, ten ABBA cells, ten confirmation cells; every timed cell passes the UTC
 window check and the quiet-host gate. A field (churn-applied, convergence) fails
 only when its ABBA ratio and its confirmation ratio both exceed
 max(1.02, its A/A ratio + 0.01). The first cell that is not PASS ends the
-comparison; nothing is retried. There are no report-only cells: no shape of this
+comparison; nothing is retried. As in every measured campaign of these harnesses,
+the quiet-host gate samples the host only before each cell: a compiler that
+starts during a cell is waited out by the next gate and does not invalidate the
+cell it ran beside, so the window must stay hands-off. There are no report-only cells: no shape of this
 harness isolates a clean-delta owned pass or a refused-member pass.

@@ -3,6 +3,7 @@
 
 import argparse
 import copy
+import fcntl
 import importlib.util
 import io
 import json
@@ -17,6 +18,12 @@ HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("evpn_qualification", HERE / "qualify.py")
 Q = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(Q)
+
+
+def held(lock):
+    """Environment of a runner that holds `lock`, as run.sh exports it."""
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    return {"RUSTBGPD_HOST_LOCK": lock.name, "RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}
 
 
 def metrics_text(allocated=100_000_000):
@@ -67,7 +74,7 @@ class TestQualification(unittest.TestCase):
             self.assertEqual(Q.probe_readiness(), {"status": 200, "http_error_code": None})
 
     def test_private_bar_misses_do_not_abort_later_memory_cells(self):
-        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+        with tempfile.TemporaryDirectory() as temporary, tempfile.NamedTemporaryFile() as lock:
             args = argparse.Namespace(output=temporary, correctness_only=False)
             manifest = {"schedule": Q.SCHEDULE}
             def cell(*args):
@@ -75,7 +82,7 @@ class TestQualification(unittest.TestCase):
                     raise Q.AcceptanceFailure("baseline bar miss")
             with patch.object(Q, "manifest_for", return_value=manifest), \
                  patch.object(Q, "verify_export"), \
-                 patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                 patch.dict(Q.os.environ, held(lock)), \
                  patch.object(Q, "run_cell", side_effect=cell) as run, \
                  patch.object(Q, "analyze") as analyze:
                 Q.run(args)
@@ -86,14 +93,14 @@ class TestQualification(unittest.TestCase):
     def test_candidate_bar_and_private_invalid_still_abort_memory_cells(self):
         for arm, error in (("candidate", Q.AcceptanceFailure("candidate bar miss")),
                            ("private", ValueError("technical failure"))):
-            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary, tempfile.NamedTemporaryFile() as lock:
                 args = argparse.Namespace(output=temporary, correctness_only=False)
                 def cell(*args, arm=arm, error=error):
                     if args[2] == arm:
                         raise error
                 with patch.object(Q, "manifest_for", return_value={"schedule": Q.SCHEDULE}), \
                      patch.object(Q, "verify_export"), \
-                     patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                     patch.dict(Q.os.environ, held(lock)), \
                      patch.object(Q, "run_cell", side_effect=cell) as run, \
                      patch.object(Q, "analyze") as analyze:
                     with self.assertRaises(type(error)):
@@ -134,6 +141,31 @@ class TestQualification(unittest.TestCase):
             self.assertEqual(summary["status"], "FAIL")
             self.assertEqual(summary["failed_cells"][0]["arm"], "private")
             self.assertEqual(summary["failed_cells"][0]["error"], "readiness HTTP 503")
+
+    def test_corrupt_complete_cell_outranks_a_recorded_control_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = self.make_campaign(root)
+            path = next(root.glob("memory-*-private-*/result.json"))
+            row = json.loads(path.read_text())
+            row.update(status="FAIL", error="readiness HTTP 503")
+            Q.write_json(path, row)
+            next(root.glob("memory-*-candidate-*/metrics.txt")).write_text("")
+            with self.assertRaises(Exception) as caught:
+                Q.analyze(args)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+            self.assertEqual(json.loads((root / "summary.json").read_text())["status"], "INVALID")
+
+    def test_host_lock_must_be_the_lock_file_and_held(self):
+        with tempfile.NamedTemporaryFile() as lock, tempfile.NamedTemporaryFile() as other:
+            unheld = {"RUSTBGPD_HOST_LOCK": lock.name, "RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}
+            for descriptor in ("", "1", str(other.fileno()), "999999", str(lock.fileno())):
+                with self.subTest(descriptor=descriptor), \
+                     patch.dict(Q.os.environ, {**unheld, "RUSTBGPD_HOST_LOCK_FD": descriptor}), \
+                     self.assertRaisesRegex(ValueError, "host lock"):
+                    Q.require_host_lock()
+            with patch.dict(Q.os.environ, held(lock)):
+                Q.require_host_lock()
 
     def test_cleanup_failure_still_attempts_both_children_and_retains_original_error(self):
         with tempfile.TemporaryDirectory() as temporary:
