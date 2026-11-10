@@ -689,6 +689,132 @@ fn deferred_flowspec_replay_work_is_linear() {
     );
 }
 
+/// One `FlowSpec` rule injected, duplicated by a peer, withdrawn by that
+/// peer and withdrawn locally, beside `size * ROUTES` stored rules of the
+/// same scope. Each step touches the one key, so selection reads that key's
+/// row in each rib; it must not read the stored table.
+fn flowspec_single_rule_churn(
+    size: usize,
+    rd: Option<rustbgpd_wire::RouteDistinguisher>,
+    validation: bool,
+) -> Work {
+    let (_tx, mut manager) = manager();
+    if validation {
+        manager = manager.with_flowspec_validation(RS_AS);
+    }
+    let rule = |source: usize, index: usize, from: PeerId| {
+        let mut rule = crate::test_support::make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+        rule.peer = from;
+        rule.rd = rd;
+        rule.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+            rustbgpd_wire::FlowSpecPrefix::V4(prefix(source, index)),
+        )];
+        rule
+    };
+    let received = |from: PeerId, announced: Vec<FlowSpecRoute>, withdrawn: Vec<_>| {
+        let mut update = routes_from(from, 0, 1, 0);
+        if let RibUpdate::RoutesReceived {
+            flowspec_announced,
+            flowspec_withdrawn,
+            ..
+        } = &mut update
+        {
+            *flowspec_announced = announced;
+            *flowspec_withdrawn = withdrawn;
+        }
+        update
+    };
+    let stored = (0..size * ROUTES)
+        .map(|index| rule(1, index, external()))
+        .collect();
+    manager.handle_update(received(external(), stored, vec![]));
+    while manager.process_next_route_chunk() {}
+    register_test_peer(&mut manager, member(0), 0);
+
+    let mut local = rule(2, 0, LOCAL_PEER);
+    local.origin_type = crate::route::RouteOrigin::Local;
+    let key = local.selection_key();
+    let work = checkpoints_in(|| {
+        let (reply, mut rx) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectFlowSpec {
+            route: local,
+            reply,
+        });
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap(),
+            crate::update::InjectOutcome::Created
+        );
+        manager.handle_update(received(member(0), vec![rule(2, 0, member(0))], vec![]));
+        while manager.process_next_route_chunk() {}
+        assert_eq!(
+            manager
+                .flowspec_validation
+                .selection_candidates(&key, &manager.ribs, &manager.loc_rib, &|| {})
+                .len(),
+            2,
+            "size {size}"
+        );
+        assert!(manager.loc_rib.get_flowspec(&key).is_some(), "size {size}");
+        manager.handle_update(received(member(0), vec![], vec![key.clone()]));
+        while manager.process_next_route_chunk() {}
+        assert!(manager.loc_rib.get_flowspec(&key).is_some(), "size {size}");
+        let (reply, mut rx) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawFlowSpec {
+            key: key.clone(),
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(rx.try_recv().unwrap().unwrap().removed);
+    });
+    assert!(manager.loc_rib.get_flowspec(&key).is_none(), "size {size}");
+    assert_eq!(
+        manager.ribs[&external()].iter_flowspec().count(),
+        size * ROUTES,
+        "size {size}"
+    );
+    work
+}
+
+/// Assert that one rule's churn passes the same checkpoints, stage for
+/// stage, whatever the number of stored rules.
+fn assert_flowspec_churn_ignores_stored_rules(
+    rd: Option<rustbgpd_wire::RouteDistinguisher>,
+    validation: bool,
+) {
+    let small = flowspec_single_rule_churn(SMALL, rd, validation);
+    let large = flowspec_single_rule_churn(LARGE, rd, validation);
+    assert!(
+        small
+            .get("selection_flowspec")
+            .is_some_and(|&count| count > 0),
+        "no selection work counted: {small:?}"
+    );
+    assert_eq!(
+        small,
+        large,
+        "single-rule FlowSpec churn (rd {rd:?}, validation {validation}) read more with {} \
+         stored rules than with {}",
+        LARGE * ROUTES,
+        SMALL * ROUTES,
+    );
+}
+
+#[test]
+fn flowspec_single_rule_churn_work_ignores_stored_rules() {
+    assert_flowspec_churn_ignores_stored_rules(None, false);
+}
+
+/// VPN rules stay outside RFC 9117 validation, so their churn reads no
+/// stored row with validation on either.
+#[test]
+fn vpn_flowspec_single_rule_churn_work_ignores_stored_rules() {
+    let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]);
+    assert_flowspec_churn_ignores_stored_rules(Some(rd), false);
+    assert_flowspec_churn_ignores_stored_rules(Some(rd), true);
+}
+
 fn deferred_unicast_manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
     let (tx, manager) = manager();
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {

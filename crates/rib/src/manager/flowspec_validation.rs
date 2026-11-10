@@ -150,13 +150,25 @@ impl ValidationState {
         // VPN keys never enter the validation index (ADR-0146), so their
         // candidates come straight from the Adj-RIBs-In, as without RFC 9117.
         if self.local_as.is_none() || key.rd.is_some() {
+            // A rib that never stored a non-zero Add-Path ID holds at most
+            // one row of the rule, under path ID 0: one keyed lookup. Only a
+            // rib that did is filtered row by row.
+            let single = key.route_key(0);
             return ribs
                 .values()
                 .inspect(|_| checkpoint())
-                .flat_map(AdjRibIn::iter_flowspec)
-                .inspect(|_| checkpoint())
-                .filter(|route| {
-                    route.afi == key.afi && route.rd == key.rd && route.rule == key.rule
+                .flat_map(|rib| {
+                    let (rows, row) = if rib.flowspec_add_path_seen() {
+                        let rows = rib.iter_flowspec().inspect(move |_| checkpoint()).filter(
+                            move |route| {
+                                route.afi == key.afi && route.rd == key.rd && route.rule == key.rule
+                            },
+                        );
+                        (Some(rows), None)
+                    } else {
+                        (None, rib.get_flowspec(&single))
+                    };
+                    rows.into_iter().flatten().chain(row)
                 })
                 .collect();
         }
@@ -246,8 +258,13 @@ impl ValidationState {
         let mut groups: HashMap<_, Vec<&FlowSpecRoute>> = affected
             .iter()
             .inspect(|_| checkpoint())
+            .filter(|key| key.rd.is_none())
             .map(|key| ((key.afi, &key.rule), Vec::new()))
             .collect();
+        if groups.is_empty() {
+            // A batch of VPN rules alone has nothing to inventory.
+            return;
+        }
         for route in ribs
             .values()
             .inspect(|_| checkpoint())
@@ -1429,8 +1446,15 @@ mod tests {
         assert!(disabled.candidates.is_empty());
     }
 
+    /// With validation off, a rib that never stored a non-zero Add-Path ID
+    /// is read with one keyed lookup per rule, however many rules it holds.
+    /// A rib that did store one is still filtered row by row, checkpointing
+    /// each row, and yields every path of the rule.
+    ///
+    /// Break-to-red: filtering every rib row by row reads 502 rows for each
+    /// key; probing only path ID 0 loses the second path.
     #[test]
-    fn flowspec_validation_disabled_selector_checkpoints_nonmatching_rows() {
+    fn flowspec_validation_disabled_selector_reads_one_row_per_rib() {
         use std::cell::Cell;
 
         use rustbgpd_wire::{FlowSpecComponent, NumericMatch};
@@ -1458,17 +1482,35 @@ mod tests {
         }
         let mut missing = flow.selection_key();
         missing.rule.components.push(port(501));
-        for (key, expected) in [(flow.selection_key(), 1), (missing, 0)] {
+        let read = |manager: &RibManager, key: &FlowSpecKey| {
             let visits = Cell::new(0);
-            let rows = manager.flowspec_validation.selection_candidates(
-                &key,
-                &manager.ribs,
-                &manager.loc_rib,
-                &|| visits.set(visits.get() + 1),
-            );
-            assert_eq!(rows.len(), expected);
-            assert_eq!(visits.get(), 502, "one peer plus every retained row");
-        }
+            let mut paths: Vec<u32> = manager
+                .flowspec_validation
+                .selection_candidates(key, &manager.ribs, &manager.loc_rib, &|| {
+                    visits.set(visits.get() + 1);
+                })
+                .into_iter()
+                .map(|route| route.path_id)
+                .collect();
+            paths.sort_unstable();
+            (paths, visits.get())
+        };
+        assert_eq!(read(&manager, &flow.selection_key()), (vec![0], 1));
+        assert_eq!(read(&manager, &missing), (vec![], 1));
+
+        let mut second = flow.clone();
+        second.path_id = 7;
+        manager
+            .ribs
+            .get_mut(&flow.peer)
+            .unwrap()
+            .insert_flowspec(second);
+        assert_eq!(
+            read(&manager, &flow.selection_key()),
+            (vec![0, 7], 503),
+            "one peer plus every retained row"
+        );
+        assert_eq!(read(&manager, &missing), (vec![], 503));
     }
 
     #[test]
