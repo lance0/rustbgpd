@@ -171,6 +171,9 @@ pub(super) struct EorObligations {
     /// A session owes a handful of families, so a list keeps the order an
     /// initial dump sends them in. Entries are never left empty.
     owed: HashMap<PeerId, OwedMarkers>,
+    /// Peers whose markers a member body freed; offered when the pass ends.
+    /// Empty between turns.
+    settle_after_pass: Vec<PeerId>,
     /// Peers under the [`EorHold::RtMembership`] hold, with its cap. Armed
     /// at `PeerUp` when the session starts with an empty membership; a peer
     /// with the Restart State bit set is never held.
@@ -422,6 +425,9 @@ impl RibManager {
         self.eor.owed.remove(&peer);
         self.eor.rt_membership.remove(&peer);
         self.eor.rt_membership_complete.remove(&peer);
+        self.eor
+            .settle_after_pass
+            .retain(|deferred| *deferred != peer);
     }
 
     /// `hold` no longer applies to `peer`: send every marker of the peer
@@ -454,6 +460,41 @@ impl RibManager {
             | EorHold::OwedKeys => {}
         }
         self.settle_eor(peer, trigger);
+    }
+
+    /// A resync of `peer` held by a selection gate for one family finished
+    /// for the rest. For a forced resync that is where the kept force bit
+    /// stops being a pending resync, so the markers it held follow now; a
+    /// dirty resync settled its markers at its own exit.
+    pub(super) fn forced_resync_caught_up(
+        &mut self,
+        peer: PeerId,
+        dirty: bool,
+        operation: Option<&mut OutboundOperation>,
+    ) {
+        self.set_selection_partial_caught_up(peer, true);
+        if !dirty {
+            self.resync_settles_eor(peer, operation);
+        }
+    }
+
+    /// A release that happened inside a member body (a pass cancelled the
+    /// last owed key of a family): the marker is offered once the pass is
+    /// over, so it cannot overtake rows the same pass still stages and the
+    /// completion hooks never run under an open body.
+    pub(super) fn defer_eor_settle(&mut self, peer: PeerId) {
+        if !self.eor.settle_after_pass.contains(&peer) {
+            self.eor.settle_after_pass.push(peer);
+        }
+    }
+
+    /// Offer the markers of every peer a pass deferred
+    /// ([`Self::defer_eor_settle`]). Runs at the end of a distribution pass
+    /// and at the end of every actor turn and resync tick.
+    pub(super) fn settle_eor_after_pass(&mut self) {
+        while let Some(peer) = self.eor.settle_after_pass.pop() {
+            self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
+        }
     }
 
     /// A dirty resync of `peer` was admitted (in `operation`, when it ran
@@ -525,11 +566,11 @@ impl RibManager {
         self.settle_eor_as(peer, trigger, false);
     }
 
-    /// A release from inside other outbound work (a pass that cancelled a
-    /// family's last owed key, a refresh answer that absorbed them and was
-    /// then deferred): send the markers nothing holds, and start nothing
-    /// else. A family that still owes keys waits for the owed-key drain, and
-    /// a refused marker for the tick's marker retry, with no resync.
+    /// A release from inside a refresh answer that absorbed a family's owed
+    /// keys and was then deferred: send the markers nothing holds, and start
+    /// nothing else. A family that still owes keys waits for the owed-key
+    /// drain, and a refused marker for the tick's marker retry, with no
+    /// resync.
     pub(super) fn settle_free_eor(&mut self, peer: PeerId) {
         self.settle_eor_as(peer, EorTrigger::Release, true);
     }

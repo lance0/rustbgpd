@@ -1033,6 +1033,15 @@ impl SelectionDeferral {
             .collect()
     }
 
+    /// A release selects the family before it ends the gate: selection is
+    /// no longer deferred, convergence (and the family's End-of-RIB) still
+    /// is, exactly as after a `Stage` transition.
+    fn stage_for_release(&mut self, family: (Afi, Safi)) {
+        if let Some(gate) = self.active.get_mut(&family) {
+            gate.selection_staged = true;
+        }
+    }
+
     fn release(
         &mut self,
         family: (Afi, Safi),
@@ -1616,11 +1625,23 @@ impl RibManager {
                     release_reason,
                 } => {
                     let armed = manager.selection_convergence_held(family);
+                    if armed && !already_staged {
+                        // The family's routes are selected and sent while
+                        // its gate is still armed, as on the staged path:
+                        // the gate holds the family's End-of-RIB until
+                        // they are admitted, whichever pass, resync or
+                        // owed-key event runs in between.
+                        if let Some(selection) = manager.selection_deferral.as_mut() {
+                            selection.stage_for_release(family);
+                        }
+                        manager.wake_selection_partial_recovery(family);
+                        manager.recompute_released_selection_family(family);
+                    }
                     if let Some(selection) = manager.selection_deferral.as_mut() {
                         selection.release(family, release_reason, &manager.metrics);
                     }
                     if armed {
-                        manager.complete_selection_family(family, already_staged, reason);
+                        manager.complete_selection_family(family, true, reason);
                     }
                 }
             }
@@ -1754,7 +1775,9 @@ impl RibManager {
     /// peer's families kept its force bit for that family. Nothing else
     /// drives a force-only peer, so the staging or release of the gate runs
     /// the rest here, in an empty pass ahead of the family's own changes
-    /// (a grouped forced resync may not share a pass with them).
+    /// (a grouped forced resync may not share a pass with them). The gate
+    /// is still armed at this point on both paths, so the pass cannot send
+    /// the family's End-of-RIB ahead of the routes selected after it.
     fn run_deferred_forced_resyncs(&mut self) {
         if self
             .force_outbound_peers

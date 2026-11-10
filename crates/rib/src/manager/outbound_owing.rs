@@ -917,7 +917,7 @@ impl RibManager {
             }
         }
         // A cancellation may have been a family's last owed key: a marker
-        // that waited only for those keys leaves with it.
+        // that waited only for those keys leaves once this pass is over.
         let settled = self.eor.owes_peer(peer)
             && OwedFamily::ALL.into_iter().any(|family| {
                 touched & family.bit() != 0
@@ -929,7 +929,7 @@ impl RibManager {
             });
         self.put_owing(peer, owing);
         if settled {
-            self.settle_free_eor(peer);
+            self.defer_eor_settle(peer);
         }
     }
 

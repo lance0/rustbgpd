@@ -1192,12 +1192,14 @@ fn refused_replay_leaves_owed_keys_and_accepted_replay_absorbs_them() {
     assert!(manager.owing(peer).is_none(), "absorbed");
 }
 
-/// An operator replay's terminal is each replayed family's End-of-RIB
-/// behind its whole table, owed keys included, so it is also the marker the
-/// session still owed: the obligation is discharged with it and no second
-/// End-of-RIB follows on a tick.
+/// An operator replay sends each replayed family's whole table, owed keys
+/// included, so it is what an End-of-RIB the session still owed was waiting
+/// for. That marker goes out as its own ordinary envelope behind the
+/// tables: the session writes the terminal's End-of-RIB only while the
+/// replay token is valid, so a terminal that is discarded (the token
+/// expired or was cancelled first) must not be the only copy.
 #[test]
-fn operator_replay_discharges_the_marker_its_terminal_sends() {
+fn operator_replay_sends_the_owed_marker_as_an_ordinary_envelope() {
     let mut manager = manager(8);
     let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
     let peer = peer_v4(Ipv4Addr::new(10, 0, 28, 1));
@@ -1216,20 +1218,44 @@ fn operator_replay_discharges_the_marker_its_terminal_sends() {
         peer,
         session_id: 0,
         families: vec![V4],
-        replay: token,
+        replay: Arc::clone(&token),
         reply: ack,
     });
     assert!(response.try_recv().expect("synchronous response").is_ok());
+    // The replay is cancelled before the session reaches the terminal, so
+    // the session will discard the terminal's own End-of-RIB.
+    token.cancel();
     let sent = send_all(&mut rx);
-    assert_eq!(sent.last().unwrap().end_of_rib, [V4], "the terminal");
+    let table = sent
+        .iter()
+        .position(|update| update.announce.iter().any(|r| r.prefix == route_prefix(0)))
+        .expect("the owed route is replayed");
+    let ordinary: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, update)| update.replay.is_none() && update.end_of_rib.contains(&V4))
+        .map(|(index, _)| index)
+        .collect();
+    let terminal = sent
+        .iter()
+        .position(|update| update.replay.is_some())
+        .expect("terminal");
+    assert_eq!(
+        ordinary.len(),
+        1,
+        "exactly one End-of-RIB that cannot be discarded"
+    );
+    assert!(table < ordinary[0] && ordinary[0] < terminal);
+    assert_eq!(terminal, sent.len() - 1);
+    assert!(!sent[terminal].replay.as_ref().unwrap().is_valid());
     assert!(manager.owing(peer).is_none(), "absorbed");
-    assert!(manager.eor_pending(peer).is_empty(), "discharged");
+    assert!(manager.eor_pending(peer).is_empty());
     manager.resync_dirty_peers_bounded();
     assert!(
         send_all(&mut rx)
             .iter()
             .all(|update| update.end_of_rib.is_empty()),
-        "no second End-of-RIB"
+        "nothing further"
     );
 }
 

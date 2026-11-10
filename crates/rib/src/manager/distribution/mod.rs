@@ -8761,6 +8761,8 @@ impl RibManager {
         } else {
             super::with_executor_handoff(|| pass(self, true));
         }
+        // No member body is open any more.
+        self.settle_eor_after_pass();
     }
 
     /// Whether shared staging refreshes a per-client-best group's denial
@@ -9927,7 +9929,7 @@ impl RibManager {
                             }
                         }
                         if resync && self.selection_resync_held(peer) {
-                            self.set_selection_partial_caught_up(peer, true);
+                            self.forced_resync_caught_up(peer, is_dirty, resync_operation.as_mut());
                         }
                         super::retire_hash_set(&mut effective_flowspec_rules, &mut || checkpoint());
                         super::retire_hash_set(&mut effective_evpn_keys, &mut || checkpoint());
@@ -11218,6 +11220,20 @@ impl RibManager {
                                         self.resync_settles_eor(peer, resync_operation.as_mut());
                                     }
                                 }
+                                // A forced resync a selection gate held for one
+                                // family is caught up for the rest, as at the
+                                // other two exits.
+                                if is_force
+                                    && !is_dirty
+                                    && evpn_covered
+                                    && self.selection_resync_held(peer)
+                                {
+                                    self.forced_resync_caught_up(
+                                        peer,
+                                        false,
+                                        resync_operation.as_mut(),
+                                    );
+                                }
                             }
                         } else if let Err(failure) = commit {
                             if let Some(drain) = drain.as_deref_mut() {
@@ -11287,7 +11303,11 @@ impl RibManager {
                                 }
                             }
                             if resync && evpn_covered && self.selection_resync_held(peer) {
-                                self.set_selection_partial_caught_up(peer, true);
+                                self.forced_resync_caught_up(
+                                    peer,
+                                    is_dirty,
+                                    resync_operation.as_mut(),
+                                );
                             }
                         }
                     }

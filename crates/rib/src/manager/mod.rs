@@ -4426,6 +4426,7 @@ impl RibManager {
         if let Some((peer, before)) = before {
             self.republish_gr_stale_routes_if_moved(peer, before);
         }
+        self.settle_eor_after_pass();
         #[cfg(test)]
         self.assert_stale_counters_match_scan();
         #[cfg(test)]
@@ -6995,6 +6996,7 @@ impl RibManager {
 
         loop {
             // Every timer and queued-work turn ends here too.
+            self.settle_eor_after_pass();
             #[cfg(test)]
             self.assert_eor_settled();
             if self.dampening_history.notice_failed() {

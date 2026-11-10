@@ -807,9 +807,11 @@ impl RibManager {
             ));
         }
         // One envelope per family, one per family whose owed keys are
-        // absorbed ahead of it (`outbound_owing`), and the terminal.
+        // absorbed ahead of it (`outbound_owing`), one for the End-of-RIB
+        // the session still owes for a replayed family, and the terminal.
         let absorbed = self.owed_absorptions(peer, &families);
-        let envelopes = families.len() + absorbed + 1;
+        let owed_marker = families.iter().any(|&family| self.eor.owes(peer, family));
+        let envelopes = families.len() + absorbed + usize::from(owed_marker) + 1;
         let mut operation =
             match self
                 .begin_outbound_operation(peer, envelopes)
@@ -855,18 +857,20 @@ impl RibManager {
                 ));
             }
         }
+        // The replayed tables, owed keys included, are what an End-of-RIB
+        // the session still owed was waiting for. It goes out as an ordinary
+        // marker on this operation: the session writes the terminal's own
+        // End-of-RIB only while the replay token is valid, so the terminal
+        // cannot stand in for it.
+        self.settle_eor(peer, EorTrigger::Table(&mut operation));
         let slot = operation.slot().ok_or_else(|| {
             RibCommandError::internal("outbound replay terminal envelope could not be admitted")
         })?;
-        let replayed = families.clone();
         slot.send(OutboundRouteUpdate {
             end_of_rib: families,
             replay: Some(std::sync::Arc::clone(replay)),
             ..OutboundRouteUpdate::default()
         });
-        // The terminal is each family's End-of-RIB behind its whole table,
-        // owed keys included: a marker the session still owed is that one.
-        self.eor_discharged(peer, &replayed);
         Ok(())
     }
 
