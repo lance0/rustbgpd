@@ -671,6 +671,9 @@ jobs:
           python3 -m unittest discover \
             -s bench/scale/evpn-qualification -p 'test_*.py'
           shellcheck -x bench/scale/evpn-qualification/run.sh
+          python3 -m unittest discover \
+            -s bench/scale/evpn-terminal-debt -p 'test_*.py'
+          shellcheck -x bench/scale/evpn-terminal-debt/run.sh
           shellcheck bench/scale/headline/run-campaign.sh
           python3 -m unittest -v bench/scale/headline/test_headline.py
           shellcheck -x bench/scale/rpki-cell/run-rpki-cell.sh

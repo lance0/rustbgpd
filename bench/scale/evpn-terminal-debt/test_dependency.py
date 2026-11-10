@@ -20,16 +20,20 @@ import terminal
 from test_check import feed as feed_fixture, fixture as debt_fixture
 
 
+# Any input commit id: these fixtures never resolve it.
+PIN = "c" * 40
+
+
 @unittest.skipUnless(os.environ.get("QUALIFICATION_SOURCE"), "supply the explicit pinned QUALIFICATION_SOURCE")
 class DependencyChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.dependency = Path(os.environ["QUALIFICATION_SOURCE"]).resolve()
-        if source.git(cls.dependency, "rev-parse", "HEAD") != source.PINNED or source.git(cls.dependency, "status", "--porcelain"):
+        if source.git(cls.dependency, "status", "--porcelain"):
             raise ValueError("tests require the clean pinned qualification input")
         cls.q, cls.r, cls.wire = source.helpers(cls.dependency)
         cls.fixture_wire = importlib.import_module("test_wire")
-        data = subprocess.check_output(["git", "-C", str(cls.dependency), "archive", source.PINNED])
+        data = subprocess.check_output(["git", "-C", str(cls.dependency), "archive", "HEAD"])
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             cls.files = {row.name: archive.extractfile(row).read() for row in archive if row.isfile()}
 
@@ -86,7 +90,7 @@ class DependencyChecks(unittest.TestCase):
                 raise ValueError("simulated early driver exit")
 
             controller = SimpleNamespace(ack=early_exit)
-            manifest = {"head": "a" * 40, "qualification_head": source.PINNED,
+            manifest = {"head": "a" * 40, "qualification_head": PIN,
                         "daemon_cpus": source.DAEMON_CPUS, "harness_cpus": source.HARNESS_CPUS}
             identities = {"rustbgpd-private": "private", "evpn-rr-soak": "driver"}
             with mock.patch.object(self.q, "cell_gate"), mock.patch.object(self.r, "scenario", side_effect=scenario), \
@@ -664,14 +668,14 @@ class DependencyChecks(unittest.TestCase):
                     self.assertEqual(isinstance(raised.exception, self.q.AcceptanceFailure), mode == "late-tick")
 
     def test_final_summary_reapplies_raw_work_bar_and_rejects_incomplete_pass_or_cleanup(self):
-        manifest = {"head": "a" * 40, "qualification_head": source.PINNED, "bars": terminal.BARS}
+        manifest = {"head": "a" * 40, "qualification_head": PIN, "bars": terminal.BARS}
         for defect, expected in (("positive-work", "FAIL"), ("private-partial-fail", "FAIL"),
                                   ("private-partial-pass", "INVALID"), ("private-cleanup", "INVALID")):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 output, rows = Path(directory), []
                 for index, (shape, arm) in enumerate(terminal.BARS["correctness_schedule"]):
                     row = {"status": "PASS", "shape": shape, "arm": arm, "correctness_only": True, "head": manifest["head"],
-                           "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
+                           "qualification_head": PIN, "scope": terminal.SCOPE, "production_activation": False,
                            "driver_exit": 0, "settled": {}, "evidence": {"work": {"inventory_visits": 0}},
                            "boot_id": "00000000-0000-0000-0000-000000000001",
                            "daemon_owner": {"pid": 100 + index, "starttime": 1000 + index, "binary_sha256": arm},
@@ -705,10 +709,10 @@ class DependencyChecks(unittest.TestCase):
     def test_baseline_acceptance_miss_does_not_hide_later_technical_corruption(self):
         with tempfile.TemporaryDirectory() as directory:
             output, rows = Path(directory), []
-            manifest = {"head": "a" * 40, "qualification_head": source.PINNED, "bars": terminal.BARS}
+            manifest = {"head": "a" * 40, "qualification_head": PIN, "bars": terminal.BARS}
             for index, (shape, arm) in enumerate(terminal.BARS["correctness_schedule"]):
                 row = {"status": "FAIL" if index == 0 else "PASS", "error": "headroom", "shape": shape, "arm": arm,
-                       "correctness_only": True, "head": manifest["head"], "qualification_head": source.PINNED,
+                       "correctness_only": True, "head": manifest["head"], "qualification_head": PIN,
                        "scope": terminal.SCOPE, "production_activation": False, "driver_exit": 0, "settled": {}, "evidence": {},
                        "boot_id": "00000000-0000-0000-0000-000000000001",
                        "daemon_owner": {"pid": index + 100, "starttime": index + 1000, "binary_sha256": arm},
@@ -734,10 +738,10 @@ class DependencyChecks(unittest.TestCase):
         for defect in ("copied-process", "copied-interval", "copied-raw-clocks", "wrong-arm-binary"):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 output, rows = Path(directory), []
-                manifest = {"head": "a" * 40, "qualification_head": source.PINNED, "bars": terminal.BARS}
+                manifest = {"head": "a" * 40, "qualification_head": PIN, "bars": terminal.BARS}
                 for index, (shape, arm) in enumerate(terminal.BARS["schedule"]):
                     row = {"status": "PASS", "shape": shape, "arm": arm, "correctness_only": False, "head": manifest["head"],
-                           "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
+                           "qualification_head": PIN, "scope": terminal.SCOPE, "production_activation": False,
                            "driver_exit": 0, "settled": {}, "evidence": {"work": {"inventory_visits": 0}},
                            "churn-applied-seconds": 1.0, "convergence-seconds": 1.0,
                            "boot_id": "00000000-0000-0000-0000-000000000001",
@@ -767,11 +771,11 @@ class DependencyChecks(unittest.TestCase):
     def test_only_timed_overlap_cells_carry_the_medians(self):
         with tempfile.TemporaryDirectory() as directory:
             output, rows = Path(directory), []
-            manifest = {"head": "a" * 40, "qualification_head": source.PINNED, "bars": terminal.BARS}
+            manifest = {"head": "a" * 40, "qualification_head": PIN, "bars": terminal.BARS}
             for index, (shape, arm) in enumerate(terminal.BARS["schedule"]):
                 timed = shape == "overlap"
                 row = {"status": "PASS", "shape": shape, "arm": arm, "correctness_only": False, "head": manifest["head"],
-                       "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
+                       "qualification_head": PIN, "scope": terminal.SCOPE, "production_activation": False,
                        "driver_exit": 0, "settled": {}, "evidence": {"work": {"inventory_visits": 0}},
                        # Pressure and forced timings are diagnostic: never a median input.
                        "churn-applied-seconds": (1.0 if arm == "private" else 1.02) if timed else None,
@@ -800,7 +804,7 @@ class DependencyChecks(unittest.TestCase):
                 (output / "bin").mkdir()
                 for name in ("rustbgpd-private", "rustbgpd-candidate", "evpn-rr-soak"):
                     (output / "bin" / name).write_bytes(name.encode())
-                manifest = {"head": "a" * 40, "qualification_head": source.PINNED, "qualification_sha256": "b" * 64,
+                manifest = {"head": "a" * 40, "qualification_head": PIN, "qualification_sha256": "b" * 64,
                             "terminal_sha256": "c" * 64, "build_toolchain": {"rustc": "rustc 1.99.1", "cargo": "cargo 1.99.1"}}
                 receipt = {key: manifest[key] for key in ("head", "qualification_head", "qualification_sha256", "terminal_sha256")}
                 receipt.update(toolchain=manifest["build_toolchain"], binaries={path.name: self.q.digest(path) for path in (output / "bin").iterdir()})

@@ -6,22 +6,11 @@ TCP peers and observes the complete producer called by incremental distribution.
 Production EVPN group ownership remains disabled. This receipt cannot authorize
 activation, replace a soak, or qualify RTC or enhanced route refresh.
 
-The harness is independent of the qualification branch. Its required input is
-one explicit clean commit. The 2026-10-27 receipt used qualification commit
-`a5da4df26898b3658511babd3cb919e130b7fc40` from
-[the qualification PR](https://github.com/lance0/rustbgpd/pull/3440). The
-2026-11-02 rerun used `8de125af1384e61d8fdb31268bc26a710507a72d`, which merges
-it into the owned-feed renewal fix `288e12769`. The current input,
-`8a501cba8d1234b14d902be85dd06cc58a02ec07`, merges it into the owned-feed marker
-fix `3c733902746d1390822994282a6e7cc815d49b96`, whose refresh tail sends the
-markers a complete feed owes right behind its data and leaves a refused send to
-the one-second resync tick. The merge changes no product file of the fix.
-
-On a main that already contains the dense-ID provenance candidate, the input is
-the qualification harness carried forward onto that main as one commit.
-`source.py` pins that commit and uses it as the base; the 2026-11-02 dense-ID
-campaign instead used `eae550c1f6444d4db99b1dd0a229a42025ea3948` on base
-`110dd43f9be38901fc7826eb74673b7c6d2bc0d6`.
+Its input is one explicit clean commit, named with `--base`: the product tree
+together with the [qualification harness](../evpn-qualification/README.md) and
+its driver. This harness adds only its own directory, checks that the input
+carries the same qualification harness as its own head, and derives both arms
+from that input.
 
 ## Cell types
 
@@ -116,8 +105,7 @@ bench/scale/evpn-terminal-debt/run.sh "$CAMPAIGN" --correctness-only
 ```
 
 `--base` names the input commit: the product tree plus the qualification harness
-and driver, which must match this head's copies. `source.py` records the input
-this harness was written against as `PINNED`; a campaign may name another input
+and driver, which must match this head's copies. A campaign may name any input
 with the same harness, which is how two product trees are compared (below).
 
 Coordinate build capacity first: the build command runs one Cargo process at a

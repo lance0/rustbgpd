@@ -82,6 +82,9 @@ scope.
 The [EVPN qualification runner](scale/evpn-qualification/README.md) compares
 owned and private output for initial-load memory, policy regroup and recovery
 over real sessions. Its results do not authorize production ownership.
+The [EVPN terminal-debt harness](scale/evpn-terminal-debt/README.md) measures
+marker debt after a refresh feed is admitted, and compares the cost of two
+product trees on its timed overlap cell.
 
 The tester validates the workload before listening for BGP. `--batch` must
 be non-zero, and an enabled churn phase requires both a non-zero `--count`

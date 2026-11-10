@@ -12,13 +12,9 @@ import time
 
 import patches
 
-# The qualification harness ported to current main (a5da4df plus the 22 MiB
-# per-peer cap of ab39f1990, carried forward unchanged); the dense-ID provenance
-# candidate is part of that main. The 2026-11-02 campaign used eae550c1f, the
-# same harness merged into the pre-merge candidate head eb1f6080e, on base
-# 110dd43f9. The base is the pinned input: this harness adds only its own directory.
-PINNED = "a6a74e674c75a6fc05bed3f9d36cd402e874e3f9"
-BASE = "a6a74e674c75a6fc05bed3f9d36cd402e874e3f9"
+# A campaign's input is one explicit clean commit, named with `--base`: the
+# product tree plus the qualification harness and driver. This harness adds
+# only its own directory to it.
 PREFIX = "bench/scale/evpn-terminal-debt/"
 # What an input commit and the terminal head must have in common.
 INPUT_PATHS = ("bench/scale/evpn-qualification", "bench/evpn-load")
@@ -90,9 +86,9 @@ def verify_tree(source, files):
 
 def manifest(output):
     row = json.loads((output / "campaign.json").read_text())
-    # A campaign names its own input. The owned-versus-private campaign uses
-    # PINNED; a parent-versus-candidate comparison freezes one campaign per
-    # product tree, each on its own input commit (see compare.py).
+    # A campaign names its own input. A parent-versus-candidate comparison
+    # freezes one campaign per product tree, each on its own input commit
+    # (see compare.py).
     require(row["schema"] == "rustbgpd.evpn-terminal-debt.v1" and row["qualification_head"] == row["base"]
             and type(row["base"]) is str and len(row["base"]) == 40, "wrong qualification dependency")
     import hashlib
@@ -193,7 +189,9 @@ def build(args):
         # serial, pinned, and uses a separate target for each measured arm.
         env["CARGO_TARGET_DIR"] = str(output / f"target-{arm}")
         label = arm if target == "rustbgpd" else "driver"
-        command = ["taskset", "-c", BUILD_CPUS, "cargo", "build", "--locked", "--release",
+        # The daemon is a release binary; the driver is a scale harness.
+        profile = "release" if target == "rustbgpd" else "scale"
+        command = ["taskset", "-c", BUILD_CPUS, "cargo", "build", "--locked", "--profile", profile,
                    "-p", package, "--bin", target, "-j", "8"]
         if target == "rustbgpd":
             command += ["--features", "rustbgpd-transport/bench-internals"]
@@ -212,7 +210,7 @@ def build(args):
                                     stdout=log, stderr=subprocess.STDOUT)
         (output / f"build-{label}.exit").write_text(f"{result.returncode}\n")
         require(result.returncode == 0, f"{label} build failed; first log retained")
-        shutil.copy2(Path(env["CARGO_TARGET_DIR"]) / "release" / target,
+        shutil.copy2(Path(env["CARGO_TARGET_DIR"]) / profile / target,
                      binary / (f"rustbgpd-{arm}" if target == "rustbgpd" else target))
     identities = {path.name: q.digest(path) for path in binary.iterdir()}
     require(identities["rustbgpd-candidate"] != identities["rustbgpd-private"], "identical arms")
