@@ -593,7 +593,7 @@ impl SelectionDeferral {
             .is_some_and(|gate| gate.armed && !gate.selection_staged)
     }
 
-    fn has_deferred_selection(&self) -> bool {
+    pub(super) fn has_deferred_selection(&self) -> bool {
         self.active
             .values()
             .any(|gate| gate.armed && !gate.selection_staged)
@@ -1070,9 +1070,7 @@ impl SelectionDeferral {
 
 impl RibManager {
     fn deferred_selection_recording_active(&self) -> bool {
-        self.selection_deferral
-            .as_ref()
-            .is_some_and(SelectionDeferral::has_deferred_selection)
+        self.selection_deferred_any()
     }
 
     /// An empty input retains nothing, so it opens no readiness owner.

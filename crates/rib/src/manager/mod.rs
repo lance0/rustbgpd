@@ -3380,6 +3380,14 @@ impl RibManager {
             .is_some_and(|state| state.selection_deferred(family))
     }
 
+    /// Whether any family is [`Self::selection_deferred`]: armed and not
+    /// yet staged.
+    pub(super) fn selection_deferred_any(&self) -> bool {
+        self.selection_deferral
+            .as_ref()
+            .is_some_and(selection_deferral::SelectionDeferral::has_deferred_selection)
+    }
+
     #[must_use]
     pub(super) fn selection_convergence_held(&self, family: (Afi, Safi)) -> bool {
         self.selection_deferral

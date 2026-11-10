@@ -180,6 +180,9 @@ impl<P> UnicastDistributionResult<P> {
 /// one staging group while placing a strict bound on both retained encoded
 /// lengths and compatibility checks for adversarially heterogeneous peers.
 const MAX_SHARED_UNICAST_PROBE_COHORTS: usize = 8;
+/// The checkpoint stage of one row checked against a deferred family's
+/// gate. It classifies as the unnamed stage does.
+pub(in crate::manager) const GATE_ROW_SCAN: &str = "gate_row_scan";
 
 #[cfg(test)]
 thread_local! {
@@ -3455,6 +3458,9 @@ impl RibManager {
     ) -> Result<(), OutboundCommitFailure> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        // One per row checked against a deferred family's gate.
+        let gate_row =
+            || super::replacement_readiness_checkpoint_at(&readiness, GATE_ROW_SCAN, false);
         #[cfg(test)]
         let retirement_observer = self.replacement_readiness_test_hook.clone();
         checkpoint();
@@ -3483,6 +3489,9 @@ impl RibManager {
         // The deferral object intentionally retains released-family history,
         // so `Option::is_some` is too broad after startup convergence: guard
         // on the O(1) active map instead and skip every route-vector scan.
+        // A row arm asks `selection_deferred` of its family, which is false
+        // for every family unless one is armed and not yet staged; a staged
+        // gate, as every release pass runs under, still holds the markers.
         let mut unicast_deferral_exemptions = FastMap::default();
         let eligible_was_caught_up =
             !self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer);
@@ -3492,36 +3501,37 @@ impl RibManager {
         // left stale would refuse a later removed-RTBH withdrawal.
         let private_admission_complete = self.private_common_admission_complete(peer);
         self.filter_deferred_unicast_recovery(peer, &mut batch);
-        let gated = self
+        let gated = (self
             .selection_deferral
             .as_ref()
             .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
             && (batch
-                .unicast
-                .announce
+                .end_of_rib
                 .iter()
                 .inspect(|_| checkpoint())
-                .any(|route| {
-                    self.selection_deferred(prefix_family(&route.prefix))
-                        && !self.unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions)
-                })
-                || batch
-                    .end_of_rib
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .any(|family| self.selection_convergence_held(*family))
+                .any(|family| self.selection_convergence_held(*family))
                 || batch
                     .refresh_markers
                     .iter()
                     .inspect(|_| checkpoint())
-                    .any(|(afi, safi, _)| self.selection_convergence_held((*afi, *safi)))
+                    .any(|(afi, safi, _)| self.selection_convergence_held((*afi, *safi)))))
+            || (self.selection_deferred_any()
+                && (batch
+                    .unicast
+                    .announce
+                    .iter()
+                    .inspect(|_| gate_row())
+                    .any(|route| {
+                        self.selection_deferred(prefix_family(&route.prefix))
+                            && !self.unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions)
+                    })
                 // A deferred FlowSpec Loc-RIB holds only injected rules, so
                 // their announces and withdrawals pass; a received rule here
                 // would be a selection leak.
                 || batch
                     .flowspec_announce
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|route| {
                         route.peer != LOCAL_PEER
                             && self.selection_deferred(route.family())
@@ -3531,35 +3541,35 @@ impl RibManager {
                 || batch
                     .bgpls_announce
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|route| self.selection_deferred(route.family.to_afi_safi()))
                 || batch
                     .bgpls_withdraw
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|key| self.selection_deferred(key.family.to_afi_safi()))
                 || batch
                     .vpn_announce
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|route| self.selection_deferred(route.afi_safi()))
                 || batch
                     .vpn_withdraw
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|key| self.selection_deferred(key.afi_safi()))
                 || batch
                     .labeled_announce
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|route| self.selection_deferred(route.afi_safi()))
                 || batch
                     .labeled_withdraw
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| gate_row())
                     .any(|key| self.selection_deferred(key.afi_safi()))
                 || ((!batch.rtc_announce.is_empty() || !batch.rtc_withdraw.is_empty())
-                    && self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi())));
+                    && self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()))));
         if gated {
             warn!(%peer, "outbound transaction intersected an active RFC 4724 selection gate; failing closed");
             batch.retire_with(
@@ -5041,15 +5051,12 @@ impl RibManager {
             super::retire_hash_set(&mut vpn_seen, &mut || checkpoint());
         }
         // Backstops may synthesize withdrawals after staging. Preserve the
-        // old admission and its overlay while an ordinary choice is frozen.
+        // old admission and its overlay while an ordinary choice is frozen:
+        // only a family that is armed and not yet staged freezes one.
         let mut frozen_backstop = false;
-        if self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
-        {
+        if self.selection_deferred_any() {
             withdraw.to_mut().retain(|(prefix, path_id)| {
-                checkpoint();
+                gate_row();
                 let frozen = self.frozen_unicast_withdraw(peer, prefix, *path_id);
                 if frozen {
                     overlay_changes.remove(&ExactExportKey::Unicast(*prefix, *path_id));
@@ -8086,18 +8093,13 @@ impl RibManager {
     }
 
     /// Partial recovery exports local RTBH while ordinary admitted rows stay frozen.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one filtering pass keeps unicast and VPN selection-held payloads aligned"
-    )]
     fn filter_deferred_unicast_recovery(&mut self, peer: PeerId, batch: &mut OutboundCommitBatch) {
+        // Every row this keeps back belongs to a family that is armed and
+        // not yet staged.
         if (!self.dirty_peers.contains(&peer)
             && !self.force_outbound_peers.contains(&peer)
             && !self.retain_initial_group_admitted(peer))
-            || !self
-                .selection_deferral
-                .as_ref()
-                .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
+            || !self.selection_deferred_any()
         {
             return;
         }
@@ -8106,7 +8108,7 @@ impl RibManager {
             .announce
             .iter()
             .map(|route| {
-                self.replacement_checkpoint(false);
+                self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
                 !self.selection_deferred(prefix_family(&route.prefix))
                     || (route.peer == LOCAL_PEER
                         && self
@@ -8145,7 +8147,7 @@ impl RibManager {
             batch.shared_group_encode = None;
         }
         let mut retain_withdrawal = |(prefix, path_id): &(Prefix, u32)| {
-            self.replacement_checkpoint(false);
+            self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
             let frozen = self.frozen_unicast_withdraw(peer, prefix, *path_id);
             partial |= frozen;
             !frozen
@@ -8167,7 +8169,7 @@ impl RibManager {
             batch.withdraw.retain(retain_withdrawal);
         }
         if batch.vpn_announce.iter().any(|route| {
-            self.replacement_checkpoint(false);
+            self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
             self.selection_deferred(route.afi_safi())
         }) {
             let allowed: Vec<_> = batch
@@ -8184,7 +8186,7 @@ impl RibManager {
             partial = true;
         }
         batch.vpn_withdraw.retain(|key| {
-            self.replacement_checkpoint(false);
+            self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
             let held = self.selection_deferred(key.afi_safi());
             partial |= held;
             !held
