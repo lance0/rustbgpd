@@ -1571,8 +1571,6 @@ impl RibManager {
                     OwingDrain::keyed(peer, family, usize::MAX, keys)
                 };
                 drain.close = true;
-                // No End-of-RIB is settled here: the session gets its Cease
-                // next, so a marker these keys held no longer matters.
                 let popped: Vec<OwedKey> = drain_keys(&drain);
                 self.distribute_owing_drain(&mut drain);
                 match drain.outcome {
@@ -1580,6 +1578,8 @@ impl RibManager {
                     _ => self.reinsert_owed(peer, popped),
                 }
             }
+            // Settle only freed markers; announcements left owed must not be absorbed.
+            self.settle_free_eor(peer);
         }
     }
 
