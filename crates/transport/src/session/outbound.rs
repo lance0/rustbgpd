@@ -4537,3 +4537,344 @@ mod attr_group_index_tests {
         assert_eq!(index.by_ptr.len(), 3);
     }
 }
+
+/// Baseline for how the chunkers fill UPDATEs: one same-attribute group of a
+/// full slice per case, with the frames read back off the wire and every
+/// chunk build counted, discarded oversize probes included. The figures are
+/// the current behaviour, not a target; a change to packing updates them on
+/// purpose.
+#[cfg(test)]
+mod packing_baseline_tests {
+    use super::*;
+    use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
+    use rustbgpd_wire::{
+        AddPathMode, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp,
+        Ipv4Prefix, Ipv6Prefix, MacAddress, MplsLabel, Origin, RouteDistinguisher,
+    };
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::timeout;
+
+    /// The largest group the slicer hands a chunker.
+    const ROWS: usize = super::super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Wire {
+        V4Announce,
+        V4Withdraw,
+        V6Announce,
+        V6Withdraw,
+        EvpnAnnounce,
+        SharedV4Announce,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Lengths {
+        Uniform,
+        Mixed,
+    }
+
+    /// `(messages, shortest, longest, total bytes)` on the wire, then
+    /// `(chunk builds, entries built)` where the chunker takes a build
+    /// closure. All for `ROWS` entries sent.
+    type Packing = ((usize, usize, usize, usize), Option<(usize, usize)>);
+
+    fn base_attrs() -> Vec<PathAttribute> {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65_001, 65_010, 65_020])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
+            PathAttribute::Communities(vec![0xFDE9_0001, 0xFDE9_0002, 0xFDE9_0003]),
+        ]
+    }
+
+    fn v4_entries(lengths: Lengths, add_path: bool) -> Vec<Ipv4NlriEntry> {
+        (0..u32::try_from(ROWS).unwrap())
+            .map(|i| Ipv4NlriEntry {
+                path_id: if add_path { i + 1 } else { 0 },
+                prefix: Ipv4Prefix::new(
+                    Ipv4Addr::from(0x0B00_0000 + (i << 8)),
+                    match lengths {
+                        Lengths::Uniform => 24,
+                        Lengths::Mixed => [24, 24, 24, 22, 20, 16, 23, 19][i as usize % 8],
+                    },
+                ),
+            })
+            .collect()
+    }
+
+    fn v6_entries(lengths: Lengths, add_path: bool) -> Vec<NlriEntry> {
+        (0..u32::try_from(ROWS).unwrap())
+            .map(|i| NlriEntry {
+                path_id: if add_path { i + 1 } else { 0 },
+                prefix: Prefix::V6(Ipv6Prefix::new(
+                    Ipv6Addr::from((0x2001_0db8_u128 << 96) | (u128::from(i) << 80)),
+                    match lengths {
+                        Lengths::Uniform => 48,
+                        Lengths::Mixed => [48, 48, 48, 32, 40, 44, 36, 47][i as usize % 8],
+                    },
+                )),
+            })
+            .collect()
+    }
+
+    fn evpn_routes() -> Vec<EvpnRoute> {
+        (0..u32::try_from(ROWS).unwrap())
+            .map(|i| {
+                let [_, b, c, d] = i.to_be_bytes();
+                EvpnRoute::MacIp(EvpnMacIp {
+                    rd: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+                    esi: EthernetSegmentIdentifier::ZERO,
+                    ethernet_tag: EthernetTagId(100),
+                    mac: MacAddress([0x02, 0, 0, b, c, d]),
+                    ip: Some(IpAddr::V4(Ipv4Addr::new(10, b, c, d))),
+                    label1: MplsLabel::new(10_000),
+                    label2: None,
+                })
+            })
+            .collect()
+    }
+
+    async fn frame_lengths(server: &mut TcpStream, count: usize) -> Vec<usize> {
+        let mut lengths = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut header = [0_u8; 19];
+            server.read_exact(&mut header).await.unwrap();
+            let length = usize::from(u16::from_be_bytes([header[16], header[17]]));
+            let mut body = vec![0_u8; length - header.len()];
+            server.read_exact(&mut body).await.unwrap();
+            lengths.push(length);
+        }
+        lengths
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per chunker call shape, mirroring the production call sites"
+    )]
+    async fn pack(wire: Wire, lengths: Lengths, add_path: bool, extended: bool) -> Packing {
+        let family = match wire {
+            Wire::V4Announce | Wire::V4Withdraw | Wire::SharedV4Announce => {
+                (Afi::Ipv4, Safi::Unicast)
+            }
+            Wire::V6Announce | Wire::V6Withdraw => (Afi::Ipv6, Safi::Unicast),
+            Wire::EvpnAnnounce => (Afi::L2Vpn, Safi::Evpn),
+        };
+        let mut peer_config = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        peer_config.families = vec![family];
+        let config =
+            crate::config::TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        let (_command_tx, command_rx) = tokio::sync::mpsc::channel(8);
+        let (rib_tx, _rib_rx) = tokio::sync::mpsc::channel(8);
+        let mut session = PeerSession::new(
+            config,
+            rustbgpd_telemetry::BgpMetrics::new(),
+            command_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let mut negotiated = NegotiatedSession::default();
+        negotiated.peer_asn = 65_002;
+        negotiated.four_octet_as = true;
+        negotiated.negotiated_families = vec![family];
+        negotiated.peer_extended_message = extended;
+        if add_path {
+            negotiated
+                .add_path_families
+                .insert(family, AddPathMode::Both);
+        }
+        session.negotiated = Some(Arc::new(negotiated));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        session.test_install_stream(client);
+        let profile = SessionExportProfile::capture(&session).with_test_ebgp(true);
+        let max_len = profile.max_message_len();
+        assert_eq!(max_len, if extended { 65_535 } else { 4_096 });
+        assert_eq!(profile.add_path_send(family), add_path);
+
+        let attrs = base_attrs();
+        let mp_attrs = &attrs[..2];
+        let next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
+        let (mut builds, mut built) = (0_usize, 0_usize);
+        let mut count = |entries: usize| {
+            builds += 1;
+            built += entries;
+        };
+        let sent = match wire {
+            Wire::V4Announce => {
+                let entries = v4_entries(lengths, add_path);
+                session.send_v4_chunked(&entries, max_len, "announce", |chunk| {
+                    count(chunk.len());
+                    profile.build_ipv4_body(chunk, &[], &attrs).unwrap()
+                })
+            }
+            Wire::V4Withdraw => {
+                let entries = v4_entries(lengths, add_path);
+                session.send_v4_chunked(&entries, max_len, "withdraw", |chunk| {
+                    count(chunk.len());
+                    profile.build_ipv4_body(&[], chunk, &[]).unwrap()
+                })
+            }
+            Wire::V6Announce => {
+                let entries = v6_entries(lengths, add_path);
+                session.send_mp_chunked(
+                    &entries,
+                    max_len,
+                    "IPv6 unicast",
+                    "announcement",
+                    |chunk| {
+                        count(chunk.len());
+                        profile.build_mp_reach(
+                            Afi::Ipv6,
+                            Safi::Unicast,
+                            next_hop,
+                            None,
+                            mp_attrs,
+                            ReachNlri::Unicast(chunk),
+                            Ipv4UnicastMode::Body,
+                        )
+                    },
+                )
+            }
+            Wire::V6Withdraw => {
+                let entries = v6_entries(lengths, add_path);
+                session.send_mp_chunked(&entries, max_len, "IPv6 unicast", "withdrawal", |chunk| {
+                    count(chunk.len());
+                    profile.build_mp_unreach(
+                        Afi::Ipv6,
+                        Safi::Unicast,
+                        UnreachNlri::Unicast(chunk),
+                        Ipv4UnicastMode::Body,
+                    )
+                })
+            }
+            Wire::EvpnAnnounce => session.send_evpn_reach_chunked(
+                &profile,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                mp_attrs,
+                &evpn_routes(),
+                max_len,
+            ),
+            Wire::SharedV4Announce => {
+                // The update-group encoder publishes bytes instead of
+                // enqueueing; every member then sends the same chunks.
+                let template = super::super::tests::make_route(100);
+                let routes: Vec<Route> = v4_entries(lengths, add_path)
+                    .into_iter()
+                    .map(|entry| Route {
+                        prefix: Prefix::V4(entry.prefix),
+                        ..template.clone()
+                    })
+                    .collect();
+                let chunks = super::super::shared_group::encode_shared_unicast_slice(
+                    &profile,
+                    &mut PreparedAttrCache::default(),
+                    &routes,
+                    &vec![None; ROWS],
+                    &(0..ROWS).collect::<Vec<_>>(),
+                )
+                .expect("one same-attribute source encodes");
+                let lengths: Vec<usize> = chunks.iter().map(|chunk| chunk.bytes.len()).collect();
+                return (
+                    (
+                        lengths.len(),
+                        *lengths.iter().min().unwrap(),
+                        *lengths.iter().max().unwrap(),
+                        lengths.iter().sum(),
+                    ),
+                    None,
+                );
+            }
+        };
+        assert_eq!(
+            sent,
+            Ok(ROWS),
+            "{wire:?}: the whole group is sent in one call"
+        );
+        let messages = usize::try_from(session.config.neighbor_counters.updates_sent()).unwrap();
+        let lengths = timeout(
+            Duration::from_secs(10),
+            frame_lengths(&mut server, messages),
+        )
+        .await
+        .expect("every enqueued UPDATE reaches the peer");
+        let total: usize = lengths.iter().sum();
+        assert_eq!(u64::try_from(total).unwrap(), session.writer_bulk_admitted);
+        (
+            (
+                messages,
+                *lengths.iter().min().unwrap(),
+                *lengths.iter().max().unwrap(),
+                total,
+            ),
+            (wire != Wire::EvpnAnnounce).then_some((builds, built)),
+        )
+    }
+
+    #[tokio::test]
+    async fn records_fill_and_entries_built_per_full_slice() {
+        use Lengths::{Mixed, Uniform};
+        let cases = [
+            (Wire::V4Announce, Uniform, false, false),
+            (Wire::V4Announce, Mixed, false, false),
+            (Wire::V4Announce, Uniform, true, false),
+            (Wire::V4Announce, Uniform, false, true),
+            (Wire::V4Withdraw, Uniform, false, false),
+            (Wire::V4Withdraw, Uniform, true, false),
+            (Wire::V6Announce, Uniform, false, false),
+            (Wire::V6Announce, Mixed, false, false),
+            (Wire::V6Announce, Uniform, true, false),
+            (Wire::V6Announce, Uniform, false, true),
+            (Wire::V6Withdraw, Uniform, false, false),
+            (Wire::V6Withdraw, Uniform, false, true),
+            (Wire::EvpnAnnounce, Uniform, false, false),
+            (Wire::EvpnAnnounce, Uniform, false, true),
+            (Wire::SharedV4Announce, Uniform, false, false),
+        ];
+        let mut actual = Vec::new();
+        for (wire, lengths, add_path, extended) in cases {
+            actual.push((
+                (wire, lengths, add_path, extended),
+                pack(wire, lengths, add_path, extended).await,
+            ));
+        }
+        // A /24 costs 4 bytes (8 with a path ID), an IPv6 /48 7 (11), this
+        // EVPN MAC/IP route 39. Byte-exact packing of the same groups needs
+        // 3, 2, 5, 1, 3, 5, 4, 4, 6, 1, 4, 1, 20, 2 and 3 messages.
+        let expected: [Packing; 15] = [
+            // IPv4 body: starts at min(len, max_len / 2) entries and halves.
+            ((4, 2_114, 2_114, 8_456), Some((6, 5_120))),
+            ((2, 4_034, 4_034, 8_068), Some((3, 4_096))),
+            ((8, 2_114, 2_114, 16_912), Some((11, 5_632))),
+            ((1, 8_258, 8_258, 8_258), Some((1, 2_048))),
+            ((4, 2_071, 2_071, 8_284), Some((6, 5_120))),
+            ((8, 2_071, 2_071, 16_568), Some((11, 5_632))),
+            // MP_REACH / MP_UNREACH: bisects, then doubles after each success.
+            ((4, 3_009, 4_073, 14_612), Some((13, 9_096))),
+            ((4, 2_409, 3_969, 13_588), Some((12, 8_528))),
+            ((7, 2_082, 4_095, 23_011), Some((32, 14_001))),
+            ((2, 7_237, 7_237, 14_474), Some((2, 2_048))),
+            ((4, 2_697, 4_083, 14_456), Some((15, 10_298))),
+            ((2, 7_198, 7_198, 14_396), Some((2, 2_048))),
+            // Typed families: start at 1,000 entries and halve, so 62 a
+            // message at 4,096 bytes and never more than 1,000 at 65,535.
+            ((34, 134, 2_475, 81_809), None),
+            ((3, 1_929, 39_057, 80_043), None),
+            // Update-group encoder: the IPv4 body shape at the standard limit.
+            ((4, 2_095, 2_095, 8_380), None),
+        ];
+        for ((case, packing), expected) in actual.iter().zip(expected) {
+            assert_eq!(*packing, expected, "{case:?}");
+        }
+    }
+}
