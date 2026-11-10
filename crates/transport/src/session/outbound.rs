@@ -3,7 +3,7 @@ use super::export::{
     PreparedMpCandidate, PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri,
     SessionExportProfile, UnreachNlri, has_otc,
 };
-use super::packing::{ChunkSizer, entry_len, ipv4_entry_len, prefix_len};
+use super::packing::{ChunkSizer, Fit, entry_len, ipv4_entry_len, prefix_len, within};
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
     Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix, Route,
@@ -2163,6 +2163,8 @@ impl PeerSession {
             // is sent or deferred, not after the whole slice is encoded.
             drop((prepared_attr_cache, v4_body_index, v4_mp_index));
             let max_len = export.max_message_len();
+            let add_path = export.add_path_send((Afi::Ipv4, Safi::Unicast));
+            let (body_fit, mp_fit) = (ipv4_entry_len(add_path), entry_len(add_path));
             for group in v4_body_groups {
                 let attrs = group.attrs.as_ref();
                 if !self.send_or_defer(
@@ -2173,9 +2175,7 @@ impl PeerSession {
                             &group.prefixes,
                             max_len,
                             "announce",
-                            Some(&ipv4_entry_len(
-                                export.add_path_send((Afi::Ipv4, Safi::Unicast)),
-                            )),
+                            Some(&body_fit),
                             |chunk| {
                                 export.build_ipv4_body(chunk, &[], attrs).expect(
                                     "IPv4 body announcement construction was previously infallible",
@@ -2207,7 +2207,7 @@ impl PeerSession {
                             &group.prefixes,
                             max_len,
                             "announce",
-                            Some(&entry_len(export.add_path_send((Afi::Ipv4, Safi::Unicast)))),
+                            Some(&mp_fit),
                             |chunk| {
                                 export
                                     .build_mp_reach(
@@ -2295,6 +2295,7 @@ impl PeerSession {
         // As for IPv4 above: release the lookup state before sending.
         drop((prepared_attr_cache, v6_group_index));
         let max_len = export.max_message_len();
+        let v6_fit = entry_len(export.add_path_send((Afi::Ipv6, Safi::Unicast)));
         for group in v6_groups {
             let base_attrs = group.attrs.as_ref();
             let next_hop = group.next_hop;
@@ -2316,7 +2317,7 @@ impl PeerSession {
                         max_len,
                         "IPv6 unicast",
                         "announcement",
-                        Some(&entry_len(export.add_path_send((Afi::Ipv6, Safi::Unicast)))),
+                        Some(&v6_fit),
                         |chunk| {
                             export.build_mp_reach(
                                 Afi::Ipv6,
@@ -3304,13 +3305,15 @@ impl PeerSession {
                         slice.build_chunk(group, chunk, &pending.update, export, &attrs)
                     };
                     let add_path = export.add_path_send((afi, safi));
-                    let unicast_len = |&row: &usize| {
-                        let prefix = if matches!(slice.phase, OutboundPhase::Announce) {
-                            pending.update.announce[slice.source_start + row].prefix
-                        } else {
-                            slice.withdrawal(&pending.update, row).0
-                        };
-                        prefix_len(prefix, add_path)
+                    let unicast_len = |rows: &[usize], room: usize| {
+                        within(rows, room, |&row| {
+                            let prefix = if matches!(slice.phase, OutboundPhase::Announce) {
+                                pending.update.announce[slice.source_start + row].prefix
+                            } else {
+                                slice.withdrawal(&pending.update, row).0
+                            };
+                            prefix_len(prefix, add_path)
+                        })
                     };
                     if matches!(wire, GroupWire::Ipv4Body)
                         || matches!(
@@ -3341,11 +3344,11 @@ impl PeerSession {
                         } else {
                             "announcement"
                         };
-                        let size: Option<&dyn Fn(&usize) -> usize> = matches!(
+                        let size: Option<Fit<'_, usize>> = matches!(
                             slice.phase,
                             OutboundPhase::Announce | OutboundPhase::Withdraw
                         )
-                        .then_some(&unicast_len);
+                        .then_some(&unicast_len as Fit<'_, usize>);
                         self.send_mp_chunked(rows, max_len, family, kind, size, build)?
                     } else {
                         self.send_resumed_family_chunked(
@@ -3444,7 +3447,7 @@ impl PeerSession {
         entries: &[E],
         max_len: usize,
         kind: &'static str,
-        size: Option<&dyn Fn(&E) -> usize>,
+        size: Option<Fit<'_, E>>,
         mut build: F,
     ) -> Result<usize, ()>
     where
@@ -3521,7 +3524,7 @@ impl PeerSession {
         max_len: usize,
         family: &'static str,
         kind: &'static str,
-        size: Option<&dyn Fn(&E) -> usize>,
+        size: Option<Fit<'_, E>>,
         mut build: F,
     ) -> Result<usize, ()>
     where
@@ -4588,7 +4591,7 @@ mod attr_group_index_tests {
 /// included.
 #[cfg(test)]
 mod packing_tests {
-    use super::super::packing::BUILT;
+    use super::super::packing::{BUILT, CREATED};
     use super::*;
     use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
     use rustbgpd_wire::{
@@ -5192,6 +5195,37 @@ mod packing_tests {
             }
         }
         assert!(moved.is_empty(), "packing moved:\n{}", moved.join("\n"));
+    }
+
+    /// A group of one entry is the common case of a diverse table, one
+    /// UPDATE per route. It is built once and sent, with no sizing state
+    /// created for it; a group of two creates one.
+    #[tokio::test]
+    async fn a_single_entry_group_is_built_once_without_sizing() {
+        for wire in [
+            Wire::V4Announce,
+            Wire::V4Withdraw,
+            Wire::V6Announce,
+            Wire::V6Withdraw,
+            Wire::EvpnAnnounce,
+            Wire::SharedV4Announce,
+        ] {
+            for add_path in [false, true] {
+                if add_path && matches!(wire, Wire::EvpnAnnounce | Wire::SharedV4Announce) {
+                    continue;
+                }
+                for (rows, created) in [(1, 0), (2, 1)] {
+                    CREATED.set(0);
+                    let (frames, builds, built) =
+                        pack(wire, rows, Lengths::Uniform, add_path, false).await;
+                    assert_eq!(
+                        (frames.len(), builds, built, CREATED.get()),
+                        (1, 1, rows, created),
+                        "{wire:?}, Add-Path {add_path}, {rows} rows"
+                    );
+                }
+            }
+        }
     }
 
     /// A run of large entries inside a long group of small ones must not

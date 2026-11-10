@@ -56,7 +56,7 @@
 use super::export::{
     MpAttrCache, PreparedAttrCache, PreparedUnicastCandidate, ReachNlri, SessionExportProfile,
 };
-use super::packing::{ChunkSizer, entry_len, ipv4_entry_len};
+use super::packing::{ChunkSizer, Fit, entry_len, ipv4_entry_len};
 use super::{
     Afi, IpAddr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate,
     PathAttribute, PeerSession, Route, Safi, UpdateMessage, debug,
@@ -356,7 +356,7 @@ fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
 fn encode_chunks<E>(
     entries: &[E],
     max_len: usize,
-    size: Option<&dyn Fn(&E) -> usize>,
+    size: Option<Fit<'_, E>>,
     mut build: impl FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
 ) -> Option<Vec<Bytes>> {
     let mut out = Vec::new();

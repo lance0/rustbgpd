@@ -26,14 +26,34 @@ fn prefix_entry_len(bits: u8, add_path: bool) -> usize {
     1 + usize::from(bits).div_ceil(8) + if add_path { 4 } else { 0 }
 }
 
-/// Wire size of one IPv4 body NLRI or withdrawn-route entry.
-pub(super) fn ipv4_entry_len(add_path: bool) -> impl Fn(&Ipv4NlriEntry) -> usize {
-    move |entry| prefix_entry_len(entry.prefix.len, add_path)
+/// How many leading entries of a slice fit a byte budget, for a group whose
+/// entry sizes are arithmetic. One call sizes a whole chunk, so the
+/// per-entry size is inlined into the summing loop.
+pub(super) type Fit<'a, E> = &'a dyn Fn(&[E], usize) -> usize;
+
+/// The longest run at the front of `rest` whose entries fit `room` bytes.
+pub(super) fn within<E>(rest: &[E], room: usize, size: impl Fn(&E) -> usize) -> usize {
+    let mut used = 0;
+    rest.iter()
+        .take_while(|entry| {
+            used += size(entry);
+            used <= room
+        })
+        .count()
 }
 
-/// Wire size of one unicast `MP_REACH_NLRI` or `MP_UNREACH_NLRI` entry.
-pub(super) fn entry_len(add_path: bool) -> impl Fn(&NlriEntry) -> usize {
-    move |entry| prefix_len(entry.prefix, add_path)
+/// [`Fit`] for IPv4 body NLRI or withdrawn-route entries.
+pub(super) fn ipv4_entry_len(add_path: bool) -> impl Fn(&[Ipv4NlriEntry], usize) -> usize {
+    move |rest, room| {
+        within(rest, room, |entry| {
+            prefix_entry_len(entry.prefix.len, add_path)
+        })
+    }
+}
+
+/// [`Fit`] for unicast `MP_REACH_NLRI` or `MP_UNREACH_NLRI` entries.
+pub(super) fn entry_len(add_path: bool) -> impl Fn(&[NlriEntry], usize) -> usize {
+    move |rest, room| within(rest, room, |entry| prefix_len(entry.prefix, add_path))
 }
 
 /// Wire size of one unicast prefix.
@@ -101,6 +121,10 @@ fn split(message: &UpdateMessage) -> Option<(usize, usize)> {
 
 /// Chooses the length of each contiguous chunk of one group.
 ///
+/// A group of one entry needs no sizing: it is built, checked and sent as
+/// it always was, and no sizing state is created for it. A chunk that takes
+/// all the entries left is not measured either, since nothing follows it.
+///
 /// With entry sizes (unicast), a group that fits one message is built once,
 /// and a group that has to be split costs one build that is not sent: a
 /// single entry measured up front, or the whole group when only its
@@ -124,6 +148,60 @@ fn split(message: &UpdateMessage) -> Option<(usize, usize)> {
 /// that fails or cannot be measured halves the chunk instead.
 pub(super) struct ChunkSizer {
     max_len: usize,
+    state: Option<Sizing>,
+}
+
+impl ChunkSizer {
+    pub(super) const fn new(max_len: usize) -> Self {
+        Self {
+            max_len,
+            state: None,
+        }
+    }
+
+    /// Entries the next build takes from the front of `rest`: at least one,
+    /// never more than remain. `fit` sizes a group whose entry sizes are
+    /// arithmetic.
+    pub(super) fn next<E>(&mut self, rest: &[E], fit: Option<Fit<'_, E>>) -> usize {
+        if rest.len() == 1 {
+            return 1;
+        }
+        let max_len = self.max_len;
+        self.state
+            .get_or_insert_with(|| Sizing::new(max_len))
+            .next(rest, fit)
+    }
+
+    /// Whether the build just made was the single-entry measurement, which
+    /// is not sent. See [`Sizing::measured_only`].
+    pub(super) fn measured_only(&mut self, message: Option<&UpdateMessage>) -> bool {
+        self.state
+            .as_mut()
+            .is_some_and(|state| state.measured_only(message))
+    }
+
+    /// A build of `tried` entries was too long or failed: the next is shorter.
+    pub(super) fn rejected(&mut self, tried: usize, message: Option<&UpdateMessage>) {
+        #[cfg(test)]
+        tally(tried);
+        if let Some(state) = &mut self.state {
+            state.rejected(tried, message);
+        }
+    }
+
+    /// A build of `entries` entries fits and is being sent.
+    pub(super) fn accepted(&mut self, message: &UpdateMessage, entries: usize) {
+        #[cfg(test)]
+        tally(entries);
+        if let Some(state) = &mut self.state {
+            state.accepted(message, entries);
+        }
+    }
+}
+
+/// The sizing state of a group of more than one entry.
+struct Sizing {
+    max_len: usize,
     /// Bytes of one UPDATE of this group outside its entries.
     overhead: Option<usize>,
     /// Entry bytes and entry count of the last chunk sent, or of the
@@ -136,14 +214,25 @@ pub(super) struct ChunkSizer {
     cap: usize,
     /// Rejected builds since the last one sent.
     rejections: u32,
-    /// Whether the last chunk length came from exact entry sizes.
+    /// Whether the last chunk length came from exact entry sizes, and
+    /// whether it took every entry that was left.
     sized: bool,
-    probing: bool,
-    probed: bool,
+    last_chunk: bool,
+    probe: Probe,
 }
 
-impl ChunkSizer {
-    pub(super) fn new(max_len: usize) -> Self {
+/// The single-entry measurement build of a group.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    NotMade,
+    Building,
+    Made,
+}
+
+impl Sizing {
+    fn new(max_len: usize) -> Self {
+        #[cfg(test)]
+        CREATED.set(CREATED.get() + 1);
         Self {
             max_len,
             overhead: None,
@@ -152,29 +241,17 @@ impl ChunkSizer {
             cap: usize::MAX,
             rejections: 0,
             sized: false,
-            probing: false,
-            probed: false,
+            last_chunk: false,
+            probe: Probe::NotMade,
         }
     }
 
-    /// Entries the next build takes from the front of `rest`: at least one,
-    /// never more than remain. `size` is the exact wire size of an entry
-    /// where that is arithmetic.
-    pub(super) fn next<E>(&mut self, rest: &[E], size: Option<&dyn Fn(&E) -> usize>) -> usize {
-        let within = |size: &dyn Fn(&E) -> usize, room: usize| {
-            let mut used = 0;
-            rest.iter()
-                .take_while(|entry| {
-                    used += size(entry);
-                    used <= room
-                })
-                .count()
-        };
-        self.sized = size.is_some();
+    fn next<E>(&mut self, rest: &[E], fit: Option<Fit<'_, E>>) -> usize {
+        self.sized = fit.is_some();
         let take = if let Some(overhead) = self.overhead {
             let room = self.max_len.saturating_sub(overhead);
-            if let Some(size) = size {
-                within(size, room)
+            if let Some(fit) = fit {
+                fit(rest, room)
             } else {
                 let (bytes, entries) = if self.known.1 == 0 {
                     self.last
@@ -184,23 +261,22 @@ impl ChunkSizer {
                 room * entries / bytes.max(1)
             }
         } else {
-            let whole = match size {
-                Some(size) => {
-                    within(size, self.max_len.saturating_sub(MIN_UPDATE_LEN)) == rest.len()
-                }
+            let whole = match fit {
+                Some(fit) => fit(rest, self.max_len.saturating_sub(MIN_UPDATE_LEN)) == rest.len(),
                 None => rest.len() <= UNSIZED_WHOLE_TRY,
             };
             if whole {
                 rest.len()
-            } else if self.probed {
-                UNMEASURED_CHUNK
-            } else {
-                self.probing = true;
-                self.probed = true;
+            } else if self.probe == Probe::NotMade {
+                self.probe = Probe::Building;
                 return 1;
+            } else {
+                UNMEASURED_CHUNK
             }
         };
-        take.min(self.cap).clamp(1, rest.len())
+        let take = take.min(self.cap).clamp(1, rest.len());
+        self.last_chunk = take == rest.len();
+        take
     }
 
     /// Whether the build just made was the single-entry measurement, which
@@ -208,10 +284,11 @@ impl ChunkSizer {
     /// entry that cannot be built, or is over the limit alone, is not a
     /// measurement: the caller goes on to treat it as the unsendable entry
     /// it is.
-    pub(super) fn measured_only(&mut self, message: Option<&UpdateMessage>) -> bool {
-        if !std::mem::take(&mut self.probing) {
+    fn measured_only(&mut self, message: Option<&UpdateMessage>) -> bool {
+        if self.probe != Probe::Building {
             return false;
         }
+        self.probe = Probe::Made;
         #[cfg(test)]
         tally(1);
         let Some(message) = message.filter(|message| message.encoded_len() <= self.max_len) else {
@@ -224,8 +301,7 @@ impl ChunkSizer {
         true
     }
 
-    /// A build of `tried` entries was too long or failed: the next is shorter.
-    pub(super) fn rejected(&mut self, tried: usize, message: Option<&UpdateMessage>) {
+    fn rejected(&mut self, tried: usize, message: Option<&UpdateMessage>) {
         let predicted = self.sized && self.overhead.is_some();
         let measured = message.and_then(|message| self.measure(message));
         if let Some(bytes) = measured {
@@ -239,12 +315,12 @@ impl ChunkSizer {
         let resize = measured.is_some() && !predicted && self.rejections < RESIZED_REJECTIONS;
         self.cap = if resize { tried - 1 } else { tried / 2 }.max(1);
         self.rejections += 1;
-        #[cfg(test)]
-        tally(tried);
     }
 
-    /// A build of `entries` entries fits and is being sent.
-    pub(super) fn accepted(&mut self, message: &UpdateMessage, entries: usize) {
+    fn accepted(&mut self, message: &UpdateMessage, entries: usize) {
+        if self.last_chunk {
+            return;
+        }
         if let Some(bytes) = self.measure(message) {
             self.last = (bytes, entries);
             // What a rejected build measured, less what has now been sent,
@@ -257,8 +333,6 @@ impl ChunkSizer {
         }
         self.cap = usize::MAX;
         self.rejections = 0;
-        #[cfg(test)]
-        tally(entries);
     }
 
     /// The message's entry bytes, learning the group's overhead from the
@@ -280,6 +354,8 @@ impl ChunkSizer {
 thread_local! {
     /// Chunk builds and entries built on this thread, for packing tests.
     pub(super) static BUILT: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    /// Sizing states created on this thread.
+    pub(super) static CREATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -355,7 +431,7 @@ mod tests {
         let wrapped = reach(10_000);
         assert!(wrapped.encoded_len() > 70_000);
         assert_eq!(split(&wrapped), None);
-        let mut sizer = ChunkSizer::new(65_535);
+        let mut sizer = Sizing::new(65_535);
         sizer.rejected(10_000, Some(&wrapped));
         assert_eq!(
             sizer.overhead, None,
