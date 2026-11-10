@@ -237,7 +237,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_aggregate_dirty_cannot_fake_actual_roster(self):
         row = two_groups()
-        row["dirty"] = row["dirty_high_water"] = 4
+        row["dirty"] = row["dirty_high_water"] = row["recovery_pending"] = 4
         with self.assertRaisesRegex(ValueError, "aggregate observer"):
             R.roster(row, "candidate", 4)
         for peer in row["peers"]:
@@ -296,43 +296,59 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing required wire phase"):
                 R.check_wire(root, 3, 10)
 
-    def test_high_water_witness_needs_every_member_inside_one_paused_slot(self):
+    def test_recovery_witness_needs_every_member_inside_one_paused_slot(self):
         first, second = two_groups(), two_groups()
         first["wall_us"], second["wall_us"] = 100, 200
-        second.update(elapsed_us=100_000, sample_slot=2, dirty_high_water=4)
-        self.assertEqual(R.dirty_pair([first, second], 4, 100, 200), (first, second))
+        second.update(elapsed_us=100_000, sample_slot=2, dirty=4, dirty_high_water=4, recovery_pending=4)
+        for peer in second["peers"]:
+            peer[2] = True
+        self.assertEqual(R.recovery_pair([first, second], 4, 100, 200), (first, second))
         for paused, resumed in ((101, 200), (100, 199)):
             with self.subTest(paused=paused, resumed=resumed):
-                self.assertIsNone(R.dirty_pair([first, second], 4, paused, resumed))
+                self.assertIsNone(R.recovery_pair([first, second], 4, paused, resumed))
         short = copy.deepcopy(second)
-        short["dirty_high_water"] = 3
-        self.assertIsNone(R.dirty_pair([first, short], 4, 100, 200), "one member short is not mass-dirty")
+        short["dirty"] = short["dirty_high_water"] = short["recovery_pending"] = 3
+        short["peers"][2][2] = False
+        self.assertIsNone(R.recovery_pair([first, short], 4, 100, 200), "one member short is not mass-dirty")
         for gap in (1_000_000, 50_001):
             with self.subTest(gap=gap):
                 late = copy.deepcopy(second)
                 late["elapsed_us"] = first["elapsed_us"] + gap
                 late["sample_slot"] = late["elapsed_us"] // 50_000
-                self.assertIsNone(R.dirty_pair([first, late], 4, 100, 200))
+                self.assertIsNone(R.recovery_pair([first, late], 4, 100, 200))
         for elapsed, slot in ((50_001, 1), (150_000, 3), (100_000, 3)):
             with self.subTest(elapsed=elapsed, slot=slot):
                 skewed = copy.deepcopy(second)
                 skewed.update(elapsed_us=elapsed, sample_slot=slot)
-                self.assertIsNone(R.dirty_pair([first, skewed], 4, 100, 200))
+                self.assertIsNone(R.recovery_pair([first, skewed], 4, 100, 200))
 
-    def test_high_water_records_a_peak_the_sampled_gauge_misses(self):
+    def test_private_owing_requires_every_peer_in_one_snapshot(self):
+        first, second = witness("private", 4, 10), witness("private", 4, 10)
+        first.update(wall_us=100, elapsed_us=50_000, sample_slot=1)
+        second.update(wall_us=200, elapsed_us=100_000, sample_slot=2, owing=4, recovery_pending=4)
+        for peer in second["peers"]:
+            peer[10] = True
+        R.roster(second, "private", 4)
+        self.assertEqual(R.recovery_pair([first, second], 4, 100, 200), (first, second))
+        short = copy.deepcopy(second)
+        short["peers"][2][10] = False
+        short["owing"] = short["recovery_pending"] = 3
+        R.roster(short, "private", 4)
+        self.assertIsNone(R.recovery_pair([first, short], 4, 100, 200))
+
+    def test_high_water_and_cross_row_union_do_not_replace_a_snapshot(self):
         rows = []
         for slot in range(1, 6):
             row = two_groups()
             row.update(elapsed_us=slot * 50_000, sample_slot=slot, wall_us=slot * 100,
-                       dirty=3, dirty_high_water=4 if slot == 3 else 3)
+                       dirty=3, dirty_high_water=4, recovery_pending=3)
+            for index, peer in enumerate(row["peers"]):
+                peer[2] = index != slot % 4
+            R.roster(row, "candidate", 4)
             rows.append(row)
-        # The old witness needed two consecutive samples with every member
-        # dirty; no 20 Hz sample here reads more than 3 of 4.
-        self.assertFalse(any(left["dirty"] == right["dirty"] == 4 for left, right in zip(rows, rows[1:])))
-        self.assertEqual(R.dirty_pair(rows, 4, 0, 1_000), (rows[1], rows[2]))
-        for row in rows:
-            row["dirty_high_water"] = 3
-        self.assertIsNone(R.dirty_pair(rows, 4, 0, 1_000), "a peak one member short fails")
+        self.assertEqual({peer[0] for row in rows for peer in row["peers"] if peer[2]},
+                         {Q.COMMON.peer(index) for index in range(4)})
+        self.assertIsNone(R.recovery_pair(rows, 4, 0, 1_000))
 
     def test_timings_use_reload_trigger_and_all_resume_ack(self):
         events = [{"event": "reload", "generation": "a", "at": 1},
@@ -414,7 +430,7 @@ class RecoveryTests(unittest.TestCase):
                    "executed_resets": dict.fromkeys(Q.CAUSES, 0), "daemon_owner": {"pid": 1000 + index},
                    "reload_client_sha256": client_hash}
             snapshots = []
-            names = ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_dirty_previous", "mass_dirty",
+            names = ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_recovery_previous", "mass_recovery",
                      "protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn", "settled")
             for sequence, name in enumerate(names):
                 observation = witness(arm, 3, 10_000)
@@ -424,9 +440,11 @@ class RecoveryTests(unittest.TestCase):
                     for peer, data in enumerate(observation["peers"]):
                         data[1] = 2 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1
                 observation.update(elapsed_us=sequence * 50_000, sample_slot=sequence, wall_us=sequence * 100)
-                if name.startswith("mass_dirty"):
-                    observation["dirty"] = observation["dirty_high_water"] = 3
-                    for data in observation["peers"]: data[2] = True
+                if name.startswith("mass_recovery") or name.startswith("protocol_obligation"):
+                    observation["recovery_pending"] = 3
+                    observation["dirty" if arm == "candidate" else "owing"] = 3
+                    observation["dirty_high_water"] = observation["dirty"]
+                    for data in observation["peers"]: data[2 if arm == "candidate" else 10] = True
                 if name.startswith("protocol_obligation"):
                     observation["refresh_pending"] = observation["protocol_obligations"] = 3
                     for data in observation["peers"]: data[8] = True
@@ -514,7 +532,7 @@ class RecoveryTests(unittest.TestCase):
                     self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], expected)
                     self.assertEqual(isinstance(caught.exception, Q.AcceptanceFailure), expected == "FAIL")
 
-    def test_analyze_rejects_dirty_cadence_misses_in_either_arm(self):
+    def test_analyze_rejects_recovery_cadence_misses_in_either_arm(self):
         for arm in ("candidate", "private"):
             for gap in (1_000_000, 50_001, 100_000, 1):
                 with self.subTest(arm=arm, gap=gap), tempfile.TemporaryDirectory() as temporary:
@@ -525,12 +543,12 @@ class RecoveryTests(unittest.TestCase):
                     snapshots = [json.loads(line.removeprefix("evpn_qualification "))
                                  for line in (leg / "observer.log").read_text().splitlines()
                                  if line.startswith("evpn_qualification ")]
-                    start = snapshots.index(row["mass_dirty"])
+                    start = snapshots.index(row["mass_recovery"])
                     shift = gap - 50_000
                     for snapshot in snapshots[start:]:
                         snapshot["elapsed_us"] += shift
                         snapshot["sample_slot"] = snapshot["elapsed_us"] // 50_000
-                    row["mass_dirty"] = snapshots[start]
+                    row["mass_recovery"] = snapshots[start]
                     # Other retained receipts refer to these same raw rows.
                     for name in ("protocol_obligation_before_churn", "protocol_obligation_during_churn",
                                  "protocol_obligation_after_churn", "settled"):
@@ -546,7 +564,7 @@ class RecoveryTests(unittest.TestCase):
                          self.assertRaises(Q.AcceptanceFailure):
                         R.analyze(root)
 
-    def test_analyze_fails_a_short_or_unpaused_high_water_in_either_arm(self):
+    def test_analyze_fails_a_short_or_unpaused_recovery_snapshot_in_either_arm(self):
         for arm in ("candidate", "private"):
             for defect in ("short", "before-pause", "after-resume"):
                 with self.subTest(arm=arm, defect=defect), tempfile.TemporaryDirectory() as temporary:
@@ -557,11 +575,13 @@ class RecoveryTests(unittest.TestCase):
                     events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
                     lines = (leg / "observer.log").read_text().splitlines()
                     if defect == "short":
-                        target = row["mass_dirty"]
-                        row["mass_dirty"] = copy.deepcopy(target)
-                        row["mass_dirty"]["dirty"] = row["mass_dirty"]["dirty_high_water"] = 2
-                        row["mass_dirty"]["peers"][2][2] = False
-                        lines = [("evpn_qualification " + json.dumps(row["mass_dirty"]))
+                        target = row["mass_recovery"]
+                        row["mass_recovery"] = copy.deepcopy(target)
+                        row["mass_recovery"]["recovery_pending"] = 2
+                        row["mass_recovery"]["dirty" if arm == "candidate" else "owing"] = 2
+                        row["mass_recovery"]["dirty_high_water"] = row["mass_recovery"]["dirty"]
+                        row["mass_recovery"]["peers"][2][2 if arm == "candidate" else 10] = False
+                        lines = [("evpn_qualification " + json.dumps(row["mass_recovery"]))
                                  if line.startswith("evpn_qualification ")
                                  and json.loads(line.removeprefix("evpn_qualification ")) == target
                                  else line for line in lines]
@@ -577,6 +597,60 @@ class RecoveryTests(unittest.TestCase):
                     with patch.object(R, "check_wire", return_value=report), \
                          self.assertRaises(Q.AcceptanceFailure):
                         R.analyze(root)
+
+    def test_analyze_checks_one_complete_recovery_snapshot(self):
+        for arm in ("candidate", "private"):
+            for mode, verdict in (("mixed", "PASS"), ("overlap", "PASS"), ("missing-reason", "FAIL"),
+                                  ("missing-peer", "INVALID"), ("missing-row", "INVALID"),
+                                  ("cross-row-union", "FAIL"), ("double-count", "INVALID")):
+                with self.subTest(arm=arm, mode=mode), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    report = self.analysis_fixture(root)
+                    leg = next(root.glob(f"recovery-*-{arm}"))
+                    row = json.loads((leg / "result.json").read_text())
+                    original = copy.deepcopy(row["mass_recovery"])
+                    changed = row["mass_recovery"]
+                    for index, peer in enumerate(changed["peers"]):
+                        peer[2], peer[10] = index == 0, index != 0
+                    if mode == "overlap":
+                        changed["peers"][0][10] = True
+                    elif mode in ("missing-reason", "cross-row-union", "double-count"):
+                        changed["peers"][2][10] = False
+                        if mode == "double-count":
+                            changed["peers"][0][10] = True
+                    elif mode == "missing-peer":
+                        changed["peers"].pop()
+                        changed["members"] = 2
+                        changed["owned_members"] = 2 if arm == "candidate" else 0
+                    changed["dirty"] = changed["dirty_high_water"] = sum(peer[2] for peer in changed["peers"])
+                    changed["owing"] = sum(peer[10] for peer in changed["peers"])
+                    changed["recovery_pending"] = sum(peer[2] or peer[10] for peer in changed["peers"])
+                    if mode == "double-count":
+                        changed["recovery_pending"] = changed["dirty"] + changed["owing"]
+                    lines = (leg / "observer.log").read_text().splitlines()
+                    lines = [line if not line.startswith("evpn_qualification ")
+                             or json.loads(line.removeprefix("evpn_qualification ")) != original
+                             else "evpn_qualification " + json.dumps(changed) for line in lines]
+                    if mode == "missing-row":
+                        lines.remove("evpn_qualification " + json.dumps(changed))
+                    (leg / "observer.log").write_text("".join(line + "\n" for line in lines))
+                    Q.write_json(leg / "result.json", row)
+                    with patch.object(R, "check_wire", return_value=report) as wire_check:
+                        if verdict == "PASS":
+                            R.analyze(root)
+                            self.assertEqual(wire_check.call_count, 2)
+                            summary = json.loads((root / "recovery-summary.json").read_text())
+                            result = next(item for item in summary["recovery"] if item["arm"] == arm)
+                            self.assertEqual(result["pending"], 3)
+                            self.assertEqual(len(result["dirty"]), 1)
+                            self.assertEqual(len(result["owing"]), 3 if mode == "overlap" else 2)
+                        else:
+                            with self.assertRaises(ValueError) as caught:
+                                R.analyze(root)
+                            self.assertEqual(isinstance(caught.exception, Q.AcceptanceFailure), verdict == "FAIL")
+                            # The mutated arm must fail before its wire/parity or median checks.
+                            self.assertLessEqual(wire_check.call_count, 1)
+                    self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], verdict)
 
     def test_analyze_needs_the_pause_and_resume_clocks(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -607,7 +681,7 @@ class RecoveryTests(unittest.TestCase):
         below = copy.deepcopy(row)
         for peer in below["peers"]:
             peer[2] = True
-        below["dirty"], below["dirty_high_water"] = 4, 3
+        below["dirty"], below["dirty_high_water"], below["recovery_pending"] = 4, 3, 4
         with self.assertRaisesRegex(ValueError, "dirty high-water"):
             R.roster(below, "candidate", 4)
 

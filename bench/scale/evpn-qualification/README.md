@@ -132,19 +132,25 @@ establish a new-source memory or 150-peer recovery result; that requires a new
 frozen-source campaign in an explicitly recorded timing window.
 
 The controller pauses actual socket readers with acknowledged generation fences,
-then issues 32 fixed full-window churn rounds. Both arms must show all members
-dirty at the same time: an observer row whose `dirty_high_water` is 150/150.
-That field is the most members dirty at once since the previous row; the
-derived daemon records the dirty-set size at both writers that can grow it
-(the dirty mark and the resync pass's re-admission of withheld peers), so a
-peak between two 20 Hz rows cannot be missed. The observer captures timestamps before building each receipt and
-emits at most once per anchored 50,000 µs slot, skipping missed slots without
-catch-up or interpolation. Both online and final checks require the witness row
-and its predecessor to be adjacent raw records in adjacent slots, with an actual
-timestamp gap greater than zero and at most 50,000 µs, and that one-slot window
-to lie wholly between the pause acknowledgement and the resume command; there is
-no extra tolerance. A peak of 149/150 fails. Queue occupancy and a pause
-acknowledgement do not establish that condition. A real Route Refresh
+then issues 32 fixed full-window churn rounds. Both arms must show every
+expected receiver with pending EVPN recovery in one actual actor snapshot:
+`dirty || owing` for each peer, with `recovery_pending == 150`. The same observer
+in both exports reads the real dirty flag and EVPN owed-work flag. The final
+summary reports each reason's peer identities; a peer with both flags counts once.
+This prospective witness replaces the dirty-high-water requirement. Private
+output can retain owed work with no dirty flag, so the old failed receipts remain
+failed under their original rule; this change does not establish mass-dirty
+coverage. `dirty` and `dirty_high_water` remain diagnostic fields.
+
+The observer captures timestamps before building each receipt and emits at most
+once per anchored 50,000 µs slot, skipping missed slots without catch-up or
+interpolation. Both online and final checks require the witness row and its
+predecessor to be adjacent raw records in adjacent slots, with an actual timestamp
+gap greater than zero and at most 50,000 µs, and that one-slot window to lie wholly
+between the pause acknowledgement and the resume command; there is no extra
+tolerance. A snapshot missing one receiver, a sum of separate peaks, or peers
+combined across different rows fails. Queue occupancy and a pause acknowledgement
+do not establish that condition. A real Route Refresh
 must leave an outstanding refresh/EoR obligation, observed before, during and
 after another paced source-update sequence. The private observer retains three
 origins separately: pending EVPN refresh response, pending EVPN EoR, and
@@ -173,7 +179,7 @@ The fixed recovery bars are:
 | Wire convergence | Each regroup and recovery at most 60 seconds; candidate median at most private median × 1.03 across three alternating samples |
 | Timing origin | Regroup starts at SIGHUP; recovery starts after every socket resume acknowledgement |
 | Provenance headroom | Observed peer and daemon peaks at most 80% of the existing 16 MiB / 256 MiB budgets |
-| Settlement | No dirty members, live recovery obligations, pending refresh/EoR, completion marker debt, completion receipts or pending resets; all five executed-reset counters remain zero |
+| Settlement | No dirty members, owed EVPN work, live recovery obligations, pending refresh/EoR, completion marker debt, completion receipts or pending resets; all five executed-reset counters remain zero |
 
 The 900-second initial-load bound is a safety timeout. Normal daemon reload and
 RPC deadlines remain unchanged. Charged metadata after settlement is reported;

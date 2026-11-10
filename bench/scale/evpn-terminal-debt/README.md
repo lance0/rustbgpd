@@ -54,15 +54,22 @@ dispatches (`mono_us`, microseconds).
   ordinary refresh's data then takes the last slot (an admitted refresh row with
   `capacity == 0`). The candidate must record a `refresh_refused` row for that
   debtor whose complete, current feed owes markers, with the `refresh` refusal
-  counter at least one; its absence is INVALID. After the readers resume and every
-  receiver has its refresh EoR, source zero withdraws the fill and a source
+  counter at least one; its absence is INVALID. After the readers resume, the controller waits for both the candidate retry
+  send and a post-resume empty-channel sample before source zero withdraws the
+  fill. The private arm waits for the same empty-channel sample. A source
   barrier proves the withdrawal applied, so the final inventory is unchanged.
   - Drain clock: the first debtor `sample` row at or after the resume dispatch,
     and no later than the withdrawal dispatch, whose channel is empty
     (`capacity == max_capacity`). Its absence is INVALID.
-  - Tick clock: the first debtor row after the refusal that no longer owes
-    markers. It must be the resync tick's `retry_sent`, and
-    `tick − resume ≤ 1 s + (drain − resume)`; otherwise the cell FAILs.
+  - Retry proof: a read-only `retry_offer` event identifies the first eligible
+    resync attempt with marker debt and channel capacity. The very next event
+    for that peer must be `retry_sent`, with debt cleared, one added retry
+    attempt and no added refusal. A skipped offer FAILs even if a later attempt
+    is fast. Retry and drain clocks remain diagnostic; either can occur first. The retry
+    may precede resume, but must follow the witnessed refusal.
+    The controller waits for both under the existing 60-second bound. This
+    prospective causal bar replaces the former one-second-plus-drain inequality;
+    earlier receipts retain their original result and rule.
   - The private arm runs the same fill and must also show the refresh taking the
     last slot; it carries no debt and has no timing comparison.
   - Every root from the refresh dispatch to settlement, including the fill
