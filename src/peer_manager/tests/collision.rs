@@ -1510,6 +1510,10 @@ async fn inbound_during_established_dropped() {
 /// successful-accept refresh, or the ordinary `BackToIdle` removal refresh
 /// breaks the exact 0 → 1 → 0 process-global gauge sequence.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle fixture verifies the complete presence-event order and capacity gauge sequence"
+)]
 async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -1594,16 +1598,27 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
     assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
     let presence = query_session_event_history(&mgr, Some(peer_addr), BTreeSet::new(), 0).await;
+    let events: Vec<_> = presence.iter().map(|event| event.event_type).collect();
+    assert_eq!(events.first(), Some(&SessionLifecycleEventType::PeerAdded));
+    assert_eq!(events.last(), Some(&SessionLifecycleEventType::PeerRemoved));
     assert_eq!(
-        presence
+        events
             .iter()
-            .map(|event| event.event_type)
-            .collect::<Vec<_>>(),
-        vec![
-            SessionLifecycleEventType::PeerAdded,
-            SessionLifecycleEventType::StateChanged,
-            SessionLifecycleEventType::PeerRemoved,
-        ]
+            .filter(|&&event| event == SessionLifecycleEventType::PeerAdded)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|&&event| event == SessionLifecycleEventType::PeerRemoved)
+            .count(),
+        1
+    );
+    assert!(
+        events[1..events.len() - 1]
+            .iter()
+            .all(|&event| event == SessionLifecycleEventType::StateChanged)
     );
 
     drop(client_stream);

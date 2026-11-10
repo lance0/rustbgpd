@@ -1141,9 +1141,36 @@ async fn a_direct_round_trip_behind_a_deferred_deletion_completes_once_the_rib_r
         }
         admitted
     });
-    mgr.dampening_retirement_barrier(&retiring, &[7])
+    let (reply, response) = oneshot::channel();
+    let updates = [
+        RibUpdate::PeerDown {
+            peer: mgr.rib_peer_of(&retiring),
+            session_id: 7,
+        },
+        RibUpdate::QueryLocRibCount { reply },
+    ];
+    tokio::time::timeout(RIB_REPLY_TIMEOUT, async {
+        for update in updates {
+            mgr.send_rib_update(
+                update,
+                OperatorReadAdmission::Fenced {
+                    reason: "the test's foreground round trip is in flight",
+                },
+            )
+            .await
+            .unwrap();
+        }
+        mgr.await_with_readiness(
+            response,
+            OperatorReadAdmission::Fenced {
+                reason: "the test's foreground round trip awaits its acknowledgement",
+            },
+        )
         .await
-        .expect("the barrier completes once the RIB resumes");
+        .unwrap();
+    })
+    .await
+    .expect("the foreground round trip completes once the RIB resumes");
     mgr.flush_deferred_rib_updates(OperatorReadAdmission::Served)
         .await
         .unwrap();

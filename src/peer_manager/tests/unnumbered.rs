@@ -15,6 +15,9 @@ use crate::ra_discovery::{Command, DiscoveryEvent, Endpoint, LinkEvent, LinkStat
 #[path = "unnumbered_mutation_state.rs"]
 mod mutation_state;
 
+#[path = "unnumbered_wait_rounds.rs"]
+mod wait_rounds;
+
 fn ll(last: u16) -> Ipv6Addr {
     Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, last)
 }
@@ -3118,10 +3121,8 @@ async fn carrier_loss_and_recreation_retire_an_established_session() {
     }
 }
 
-/// A bound session that reports Active, then admits a conditional retirement
-/// and holds its answer until `release`: the manager's wait times out with
-/// the command admitted. Released, it shuts down as the real session would,
-/// reporting nothing, and closes its command channel before `exited`.
+/// Hold an unclaimed conditional command until its caller withdraws it.
+/// The receipt reports consumption; a withdrawn command leaves the actor live.
 fn retirement_answered_after_release(
     peer_addr: IpAddr,
     release: oneshot::Receiver<()>,
@@ -3130,33 +3131,38 @@ fn retirement_answered_after_release(
     let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
     let task = tokio::spawn(async move {
         let mut release = Some(release);
+        let mut checked = Some(exited);
         while let Some(command) = rx.recv().await {
             match command {
                 PeerCommand::QueryState { reply } => {
                     let _ = reply.send(policy_test_peer_state(peer_addr, SessionState::Active));
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, ticket }
+                | PeerCommand::ShutdownUnlessConnected { reply, ticket } => {
                     if let Some(release) = release.take() {
                         let _ = release.await;
                     }
-                    let _ = reply.send(true);
-                    break;
+                    let claimed = ticket.claim();
+                    if let Some(checked) = checked.take() {
+                        let _ = checked.send(());
+                    }
+                    if claimed {
+                        let _ = reply.send(true);
+                        break;
+                    }
                 }
+                PeerCommand::Shutdown => break,
                 _ => {}
             }
         }
         drop(rx);
-        let _ = exited.send(());
         Ok(())
     });
     PeerHandle::from_parts(tx, task)
 }
 
-/// An admitted retirement whose answer came too late ended the session
-/// afterwards. Whether discovery then expires the new address or reverts to
-/// the old one, the binding is not trusted on its face: the session is read
-/// and found gone. A reverted binding recreates it; an expired one leaves
-/// nothing retained, so the address is released.
+/// A withdrawn command leaves the original session alive. A returning
+/// binding keeps it; an expired binding starts a fresh conditional release.
 async fn settle_an_unanswered_retirement(reverted: bool) {
     {
         let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
@@ -3172,12 +3178,12 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
         assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept on doubt");
         assert!(h.mgr.unnumbered_retry_at().is_some(), "retry armed");
 
-        // The late command ends the session.
+        let session_id = h.mgr.peers[&swp1_key(2)].session_id();
+        // The actor observes the withdrawn ticket without ending its session.
         release.send(()).unwrap();
         exited.await.unwrap();
 
-        // Mutation-red: trusting the keep shortcut leaves the binding on an
-        // exited session that never reconnects.
+        // The unchanged endpoint must not replace a still-live actor.
         let back = reverted.then(|| endpoint(2, 7));
         h.bind("swp1", back).await;
         if !reverted {
@@ -3185,6 +3191,7 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
             return;
         }
         assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+        assert_eq!(h.mgr.peers[&swp1_key(2)].session_id(), session_id);
         assert!(
             matches!(
                 h.mgr.peers[&swp1_key(2)]
@@ -3193,7 +3200,7 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
                     .await,
                 rustbgpd_transport::StateQueryOutcome::State(_)
             ),
-            "a live session replaces the exited one"
+            "the withdrawn retirement keeps the live session"
         );
     }
 }
@@ -3204,7 +3211,7 @@ async fn an_unanswered_retirement_then_an_expired_endpoint_releases_the_address(
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unanswered_retirement_then_a_reverted_endpoint_recreates_the_session() {
+async fn a_withdrawn_retirement_then_a_reverted_endpoint_keeps_the_session() {
     settle_an_unanswered_retirement(true).await;
 }
 
@@ -3247,30 +3254,16 @@ async fn an_address_change_never_promotes_a_pending_candidate_into_a_retired_pee
     assert_eq!(h.peers_at(ll(3)), []);
 }
 
-/// A late conditional retirement settles while a transaction is staged:
-/// the replacement at the new endpoint is deferred, and discovery's binding
-/// then expires before the stage clears. The exited peer is kept, with any
-/// retention its replacement would purge, while the replacement is deferred;
-/// with no binding left it is released only once nothing is retained.
+/// A successful release discovers retention left after its first check.
+/// A staged replacement preserves that stopped peer and its GR ownership.
 async fn an_exited_peer_whose_deferred_replacement_expired(
     retained: bool,
 ) -> (Harness, Arc<std::sync::Mutex<PeerRetention>>) {
-    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
-    let retention = h.answer_retention();
-    h.bind("swp1", Some(endpoint(2, 7))).await;
-    let (release, released) = oneshot::channel();
-    let (exited_tx, exited) = oneshot::channel();
-    h.replace_session(
-        &swp1_key(2),
-        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
-    );
-    h.bind("swp1", Some(endpoint(3, 7))).await;
-    release.send(()).unwrap();
-    exited.await.unwrap();
-    if retained {
+    let (mut h, retention, _) = retention_left_after_the_check().await;
+    if !retained {
         *retention.lock().unwrap() = PeerRetention {
-            stale_routes: 3,
-            next_deadline: Some(tokio::time::Instant::now() + Duration::from_secs(120)),
+            stale_routes: 0,
+            next_deadline: None,
         };
     }
 
@@ -3365,6 +3358,19 @@ async fn a_lost_link_overrides_an_unsettled_retirement(recreated: bool, exits: b
     let _held = if exits {
         release.send(()).unwrap();
         exited.await.unwrap();
+        h.mgr.peers[&swp1_key(2)]
+            .handle()
+            .commands_sender()
+            .send(PeerCommand::Shutdown)
+            .await
+            .unwrap();
+        assert!(matches!(
+            h.mgr.peers[&swp1_key(2)]
+                .handle()
+                .query_state_outcome(Duration::from_secs(1))
+                .await,
+            rustbgpd_transport::StateQueryOutcome::SessionGone
+        ));
         None
     } else {
         Some(release)

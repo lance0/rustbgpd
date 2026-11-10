@@ -59,6 +59,15 @@ publication, then enters shortened coordinated teardown. The daemon sends
 core-actor probe. PID 1 independently enforces the unit's five-minute watchdog
 deadline; see [deployment.md](../how-to/deployment.md#systemd).
 
+Session-retirement notifications and interface-only reconciliation keep serving
+readiness while independent session checks finish. Each session-wait round
+shares one 500 ms deadline across command admission, replies, and retirement
+phases; healthy peers finish without waiting for a stalled peer. An unanswered
+conditional retirement keeps the current binding and retries. A full RIB
+mailbox also makes an interface-only retention query retry immediately. Collision
+selection, listener updates, and BFD work have their own operation boundaries;
+the round deadline is not a bound on the entire reconciliation pass.
+
 ### Runtime-config settlement fail-stop
 
 The dedicated operator page — ownership phases, the two bounds, the

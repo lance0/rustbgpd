@@ -19,10 +19,8 @@ impl PeerManager {
     ///
     /// The acknowledgement queues behind every earlier primary-lane update,
     /// which can take seconds after a large export commit, so the wait serves
-    /// readiness. Operator reads stay queued: the source is mid-transition. A
-    /// retiring dynamic peer is out of the peer table until the barrier
-    /// decides whether it returns, and a disable or enable has not yet been
-    /// acknowledged against the RIB's capacity block.
+    /// readiness. Operator reads stay queued: capacity disable or enable has
+    /// not yet been acknowledged against the RIB's capacity block.
     async fn rib_control<T>(
         &mut self,
         commands: Vec<RibUpdate>,
@@ -51,29 +49,6 @@ impl PeerManager {
         .await
         .map_err(|_| PeerLifecycleError::internal(format!("{what} timed out")))?
         .map_err(PeerLifecycleError::internal)
-    }
-
-    /// Producers must already be joined. This primary-lane acknowledgement
-    /// follows their exact teardown and every previously queued route chunk.
-    pub(super) async fn dampening_retirement_barrier(
-        &mut self,
-        peer: &rustbgpd_api::peer_types::PeerKey,
-        retired_sessions: &[u64],
-    ) -> Result<(), PeerLifecycleError> {
-        let (reply, response) = oneshot::channel();
-        // The retiring neighbor has left the table; its slot is still retained.
-        let rib_peer = self.rib_peer_of(peer);
-        let commands = retired_sessions
-            .iter()
-            .map(|&session_id| RibUpdate::PeerDown {
-                peer: rib_peer,
-                session_id,
-            })
-            .chain([RibUpdate::QueryLocRibCount { reply }])
-            .collect();
-        self.rib_control(commands, response, "RIB source-retirement barrier")
-            .await
-            .map(drop)
     }
 
     pub(super) async fn disable_dampening_capacity(

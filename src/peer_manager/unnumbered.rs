@@ -37,8 +37,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
 
+use futures::{FutureExt as _, StreamExt as _};
 use rustbgpd_api::peer_types::{PeerKey, PeerLifecycleError};
 use rustbgpd_fsm::SessionState;
+use rustbgpd_transport::{PeerCommandError, PeerHandle, StateQueryOutcome};
 use tracing::{debug, error, info, warn};
 
 use crate::config::BindTimeProjection;
@@ -62,6 +64,119 @@ const BOUND_STATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from
 const RECONCILE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// How soon retained routes with no RIB timer armed are checked again.
 const RETENTION_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Session replies retained only while one port completes this reconcile round.
+#[derive(Default)]
+#[expect(
+    clippy::option_option,
+    reason = "outer None means unasked; an answered inner None records unavailable retention and retries without querying twice"
+)]
+struct PortSessionChecks {
+    state: Option<StateQueryOutcome>,
+    retirement: Option<Result<bool, PeerCommandError>>,
+    retention_before: Option<Option<rustbgpd_rib::PeerRetention>>,
+    retention_after: Option<Option<rustbgpd_rib::PeerRetention>>,
+}
+
+enum PortSessionRequest {
+    State,
+    Retire { spare_handshake: bool },
+    Retention { after_shutdown: bool },
+    Delete { reason: &'static str },
+}
+
+struct BoundPeerRetirement {
+    had_latch: bool,
+    graceful_shutdown: bool,
+    held: HeldState,
+}
+
+enum PortRoundCompletion {
+    Check {
+        name: String,
+        key: PeerKey,
+        id: Option<u64>,
+        checks: Box<PortSessionChecks>,
+    },
+    Deleted {
+        name: String,
+        key: PeerKey,
+        stopped: Option<Box<super::lifecycle::StoppedPeerDelete>>,
+        retirement: BoundPeerRetirement,
+    },
+}
+
+impl PortSessionChecks {
+    fn state(&self) -> Result<&StateQueryOutcome, PortSessionRequest> {
+        self.state.as_ref().ok_or(PortSessionRequest::State)
+    }
+
+    async fn wait(
+        mut self,
+        request: PortSessionRequest,
+        commands: Option<tokio::sync::mpsc::Sender<rustbgpd_transport::PeerCommand>>,
+        deadline_at: tokio::time::Instant,
+        rib_tx: tokio::sync::mpsc::Sender<rustbgpd_rib::RibUpdate>,
+        rib_peer: rustbgpd_rib::PeerId,
+    ) -> Self {
+        match request {
+            PortSessionRequest::State => {
+                self.state = Some(
+                    PeerHandle::query_state_outcome_until(
+                        commands.expect("state request has a captured actor"),
+                        deadline_at,
+                    )
+                    .await,
+                );
+            }
+            PortSessionRequest::Retire { spare_handshake } => {
+                self.retirement = Some(if spare_handshake {
+                    PeerHandle::shutdown_unless_connected_until(
+                        commands.expect("retirement has a captured actor"),
+                        deadline_at,
+                    )
+                    .await
+                } else {
+                    PeerHandle::shutdown_unless_established_until(
+                        commands.expect("retirement has a captured actor"),
+                        deadline_at,
+                    )
+                    .await
+                });
+            }
+            PortSessionRequest::Retention { after_shutdown } => {
+                let retention = query_peer_retention_until(rib_tx, rib_peer, deadline_at).await;
+                if after_shutdown {
+                    self.retention_after = Some(retention);
+                } else {
+                    self.retention_before = Some(retention);
+                }
+            }
+            PortSessionRequest::Delete { .. } => {
+                unreachable!("deletion owns a detached peer, not a command sender")
+            }
+        }
+        self
+    }
+}
+
+pub(super) async fn query_peer_retention_until(
+    rib_tx: tokio::sync::mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    peer: rustbgpd_rib::PeerId,
+    deadline_at: tokio::time::Instant,
+) -> Option<rustbgpd_rib::PeerRetention> {
+    if deadline_at <= tokio::time::Instant::now() {
+        return None;
+    }
+    let (reply, response) = tokio::sync::oneshot::channel();
+    rib_tx
+        .try_send(rustbgpd_rib::RibUpdate::QueryPeerRetention { peer, reply })
+        .ok()?;
+    tokio::time::timeout_at(deadline_at, response)
+        .await
+        .ok()?
+        .ok()
+}
 
 /// The discovery actor, its events, and one entry per interface-only
 /// neighbor, by interface name.
@@ -215,15 +330,8 @@ struct Port {
     /// The bind-time settings the bound peer was created with; a change
     /// rebinds it.
     settings: Option<BindTimeProjection>,
-    /// A conditional retirement of the bound session went unanswered: it may
-    /// still have shut the session down, which reports nothing. Settled by
-    /// reading the session before the binding is trusted again.
-    retire_unsettled: bool,
-    /// The bound session was shut down, to release the address or by a late
-    /// conditional retirement. Either may follow a GR teardown, so the
-    /// stopped peer keeps the address until the RIB retains nothing from it
-    /// or a binding elsewhere is installed. A new session installed for the
-    /// peer, such as an inbound reconnect, clears it.
+    /// A successfully stopped peer keeps its address while the RIB retains
+    /// its routes. A reconnect clears this mark after its state is read.
     stopped_retained: bool,
     /// The address the neighbor was last bound to, so a binding to another
     /// one counts as an address change.
@@ -514,29 +622,6 @@ impl PeerManager {
         unnumbered.reconcile_due = true;
     }
 
-    /// The bound peer's session state now, read from the session itself:
-    /// the decision to replace it never rests on an edge event that may have
-    /// been dropped. `None` when the session did not answer in time.
-    // ponytail: one bounded query per port that needs replacing, run in turn
-    // on the owner loop, so N stalled sessions cost up to N x 500 ms; join
-    // the queries if fabrics ever replace many ports at once.
-    async fn bound_session_established(&self, peer: &PeerKey) -> Option<bool> {
-        let Some(managed) = self.peers.get(peer) else {
-            return Some(false);
-        };
-        match managed
-            .handle()
-            .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
-            .await
-        {
-            rustbgpd_transport::StateQueryOutcome::State(state) => {
-                Some(state.fsm_state == SessionState::Established)
-            }
-            rustbgpd_transport::StateQueryOutcome::TimedOut => None,
-            rustbgpd_transport::StateQueryOutcome::SessionGone => Some(false),
-        }
-    }
-
     /// A binding resolves its peer from `current_config`, which is
     /// provisional while a transaction snapshot is staged: a rollback would
     /// not undo the bound peer's installed policies. Defer it; the commit or
@@ -554,8 +639,7 @@ impl PeerManager {
     /// Shut the bound session down unless it is Established, atomically in
     /// the session. `true` once it can no longer establish (or is already
     /// gone). An Established session is kept and reported to discovery. An
-    /// unanswered command keeps the binding and retries: it may still run
-    /// later, and the retry's command then finds the session gone.
+    /// unanswered command withdraws its ticket, keeps the binding and retries.
     /// `spare_handshake` also keeps an `OpenSent` or `OpenConfirm` session,
     /// decided in the same session turn; its outcome reports itself.
     async fn shut_down_unless_established(
@@ -577,16 +661,26 @@ impl PeerManager {
             self.arm_unnumbered_retry();
             return false;
         }
-        let handle = managed.handle();
-        let outcome = if spare_handshake {
-            handle
-                .shutdown_unless_connected_timeout(BOUND_STATE_QUERY_TIMEOUT)
-                .await
-        } else {
-            handle
-                .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
-                .await
+        let commands = managed.handle().commands_sender();
+        let deadline_at = tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT;
+        let operation = async move {
+            if spare_handshake {
+                PeerHandle::shutdown_unless_connected_until(commands, deadline_at).await
+            } else {
+                PeerHandle::shutdown_unless_established_until(commands, deadline_at).await
+            }
         };
+        let outcome = self.await_session_sweep(operation).await;
+        self.apply_unnumbered_retirement(name, key, spare_handshake, outcome)
+    }
+
+    fn apply_unnumbered_retirement(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        spare_handshake: bool,
+        outcome: Result<bool, PeerCommandError>,
+    ) -> bool {
         match outcome {
             Ok(true)
             | Err(
@@ -610,41 +704,31 @@ impl PeerManager {
             }
             Err(error) => {
                 warn!(interface = %name, peer = %key, %error, "unnumbered: bound session did not answer the retirement check; retrying");
-                self.port_mut(name).retire_unsettled = true;
                 self.arm_unnumbered_retry();
                 false
             }
         }
     }
 
-    /// Whether an unanswered retirement ended the bound session since: the
-    /// read queues behind that command, so it settles the outcome. `false`
-    /// with nothing unsettled, and on a `lost` link, which ends the session
-    /// unconditionally without reading it (it may never answer). `None`
-    /// (retry armed) when still unanswered.
-    async fn settle_retirement(&mut self, name: &str, peer: &PeerKey, lost: bool) -> Option<bool> {
-        if lost || !self.port_mut(name).retire_unsettled {
-            return Some(false);
+    fn checked_unnumbered_retirement(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        spare_handshake: bool,
+        checks: &mut PortSessionChecks,
+    ) -> Result<bool, PortSessionRequest> {
+        let Some(managed) = self.peers.get(key) else {
+            return Ok(true);
+        };
+        if managed.pending_inbound.is_some() {
+            self.arm_unnumbered_retry();
+            return Ok(false);
         }
-        let outcome = match self.peers.get(peer) {
-            None => rustbgpd_transport::StateQueryOutcome::SessionGone,
-            Some(managed) => {
-                managed
-                    .handle()
-                    .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
-                    .await
-            }
-        };
-        let exited = match outcome {
-            rustbgpd_transport::StateQueryOutcome::State(_) => false,
-            rustbgpd_transport::StateQueryOutcome::SessionGone => true,
-            rustbgpd_transport::StateQueryOutcome::TimedOut => {
-                self.arm_unnumbered_retry();
-                return None;
-            }
-        };
-        self.port_mut(name).retire_unsettled = false;
-        Some(exited)
+        let outcome = checks
+            .retirement
+            .take()
+            .ok_or(PortSessionRequest::Retire { spare_handshake })?;
+        Ok(self.apply_unnumbered_retirement(name, key, spare_handshake, outcome))
     }
 
     /// When an unanswered state query is due to be asked again.
@@ -1126,7 +1210,13 @@ impl PeerManager {
 
     /// Bring the port set in line with the configured interface-only
     /// neighbors, then every neighbor's peer in line with its binding.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one finite pump retains identity checks and continuation ordering across owned session phases"
+    )]
     pub(super) async fn reconcile_unnumbered(&mut self) {
+        // Keep the finite continuation pump off every caller future's stack.
+        Box::pin(async {
         if self.unnumbered_runtime.config_due && !self.config_snapshot_staged {
             self.unnumbered_runtime.config_due = false;
             self.sync_unnumbered_ports().await;
@@ -1136,9 +1226,121 @@ impl PeerManager {
         };
         unnumbered.reconcile_due = false;
         let names: Vec<String> = unnumbered.ports.keys().cloned().collect();
-        for name in names {
-            self.reconcile_port(&name).await;
+        let deadline_at = tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT;
+        let mut ready: std::collections::VecDeque<_> = names
+            .into_iter()
+            .map(|name| (name, PortSessionChecks::default()))
+            .collect();
+        let mut pending = futures::stream::FuturesUnordered::<
+            futures::future::BoxFuture<'static, PortRoundCompletion>,
+        >::new();
+        loop {
+            while let Some((name, mut checks)) = ready.pop_front() {
+                if let Err(request) = self.reconcile_port(&name, &mut checks).await {
+                    let Some(key) = self.port_mut(&name).bound.clone() else {
+                        continue;
+                    };
+                    if let PortSessionRequest::Delete { reason } = request {
+                        match self
+                            .prepare_bound_peer_retirement(&name, &key, reason)
+                            .await
+                        {
+                            Ok((detached, retirement)) => {
+                                pending.push(
+                                    async move {
+                                        let stopped = match detached {
+                                            Some(detached) => Some(Box::new(
+                                                detached.stop_until(deadline_at).await,
+                                            )),
+                                            None => None,
+                                        };
+                                        PortRoundCompletion::Deleted {
+                                            name,
+                                            key,
+                                            stopped,
+                                            retirement,
+                                        }
+                                    }
+                                    .boxed(),
+                                );
+                            }
+                            Err(error) => {
+                                self.port_mut(&name).presence_reason = None;
+                                warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
+                                self.arm_unnumbered_retry();
+                            }
+                        }
+                        continue;
+                    }
+                    let managed = self.peers.get(&key);
+                    let id = managed.map(super::ManagedPeer::session_id);
+                    let commands = managed.map(|managed| managed.handle().commands_sender());
+                    let rib_tx = self.rib_tx.clone();
+                    let rib_peer = self.rib_peer_of(&key);
+                    pending.push(
+                        async move {
+                            let checks = checks
+                                .wait(request, commands, deadline_at, rib_tx, rib_peer)
+                                .await;
+                            PortRoundCompletion::Check {
+                                name,
+                                key,
+                                id,
+                                checks: Box::new(checks),
+                            }
+                        }
+                        .boxed(),
+                    );
+                }
+            }
+            let Some(completion) = self.await_session_sweep(pending.next()).await else {
+                break;
+            };
+            match completion {
+                PortRoundCompletion::Check {
+                    name,
+                    key,
+                    id,
+                    checks,
+                } => {
+                    if self
+                        .unnumbered
+                        .as_ref()
+                        .and_then(|u| u.ports.get(&name))
+                        .is_some_and(|port| port.bound.as_ref() == Some(&key))
+                        && self.peers.get(&key).map(super::ManagedPeer::session_id) == id
+                    {
+                        ready.push_back((name, *checks));
+                    } else {
+                        self.arm_unnumbered_retry();
+                    }
+                }
+                PortRoundCompletion::Deleted {
+                    name,
+                    key,
+                    stopped,
+                    retirement,
+                } => {
+                    if let Some(stopped) = stopped {
+                        self.finish_stopped_peer_delete(*stopped, deadline_at).await;
+                    }
+                    if self
+                        .unnumbered
+                        .as_ref()
+                        .and_then(|u| u.ports.get(&name))
+                        .is_some_and(|port| port.bound.as_ref() == Some(&key))
+                    {
+                        self.finish_bound_peer_retirement(&name, key, retirement)
+                            .await;
+                        ready.push_back((name, PortSessionChecks::default()));
+                    } else {
+                        self.arm_unnumbered_retry();
+                    }
+                }
+            }
         }
+        })
+        .await;
     }
 
     /// Add, remove and rebind ports against `current_config`.
@@ -1472,10 +1674,14 @@ impl PeerManager {
             .expect("reconciled port exists")
     }
 
-    async fn reconcile_port(&mut self, name: &str) {
+    async fn reconcile_port(
+        &mut self,
+        name: &str,
+        checks: &mut PortSessionChecks,
+    ) -> Result<(), PortSessionRequest> {
         let port = self.port_mut(name);
         if port.bfd_removal_unsettled {
-            return;
+            return Ok(());
         }
         let link = port.link;
         let link_down = matches!(link, Some((_, LinkState::Down | LinkState::Removed)));
@@ -1495,19 +1701,9 @@ impl PeerManager {
             // Level-triggered: the bound peer's scope against the interface's
             // index now. A mismatch means the interface it ran on is gone.
             let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
-            // A session that an unanswered retirement ended is a stopped
-            // peer: it may have failed with GR before its late shutdown ran.
-            // A binding elsewhere replaces it, purging that retention; with
-            // none, its address waits on the retention.
             let lost = link_down || recreated;
-            let Some(exited) = self.settle_retirement(name, &key, lost).await else {
-                return;
-            };
-            if exited && !lost {
-                self.port_mut(name).stopped_retained = true;
-            }
-            if !lost && !self.confirm_still_stopped(name, &key).await {
-                return;
+            if !lost && !self.confirm_still_stopped(name, &key, checks)? {
+                return Ok(());
             }
             let same_endpoint = desired.is_some_and(|endpoint| {
                 key.address == IpAddr::V6(endpoint.address) && bound_scope == Some(endpoint.ifindex)
@@ -1519,7 +1715,7 @@ impl PeerManager {
             // its replacement would purge, until the stage clears. A binding
             // that expires meanwhile leaves it to the retention.
             if stopped && !lost && self.defer_unnumbered_while_staged() {
-                return;
+                return Ok(());
             }
             // A lost binding keeps the peer; a new one never displaces an
             // Established session; confirmed carrier loss or interface
@@ -1528,29 +1724,28 @@ impl PeerManager {
             let keep = !gone && (desired.is_none() || same_endpoint || established);
             if keep {
                 if desired.is_none() && !established {
-                    self.release_unless_retained(name, key).await;
+                    self.release_unless_retained(name, &key, checks)?;
                 }
-                return;
+                return Ok(());
             }
             // Replacing the endpoint binds from `current_config`; wait out a
             // staged transaction. Teardown on a lost link reads no config.
             if !gone && self.defer_unnumbered_while_staged() {
-                return;
+                return Ok(());
             }
             // Level-triggered check of what the edge events claimed.
-            if !gone && !self.bound_session_down(name, &key).await {
-                return;
+            if !gone && !self.bound_session_down(name, &key, checks)? {
+                return Ok(());
             }
-            let reason = retire_reason(link, recreated, stopped);
-            if !self.retire_bound_peer(name, key, reason, !gone).await {
-                return;
+            if !gone && !self.checked_unnumbered_retirement(name, &key, false, checks)? {
+                return Ok(());
             }
-            if self.port_mut(name).bfd_removal_unsettled {
-                return;
-            }
+            return Err(PortSessionRequest::Delete {
+                reason: retire_reason(link, recreated, stopped),
+            });
         }
         if link_down {
-            return;
+            return Ok(());
         }
         let Some(endpoint) = desired else {
             // A refusal with no binding behind it, such as an inbound
@@ -1565,18 +1760,18 @@ impl PeerManager {
                 port.refused = None;
             }
             port.refusal = refusal;
-            return;
+            return Ok(());
         };
         if self.defer_unnumbered_while_staged() {
-            return;
+            return Ok(());
         }
         if let Some((reason, detail)) = self.learned_address_refusal(name, endpoint.address) {
             self.refuse_learned_address(name, endpoint.address, reason, &detail);
-            return;
+            return Ok(());
         }
         if self.bind_would_wait(name) {
             self.defer_bind_behind_rib(name, endpoint.address);
-            return;
+            return Ok(());
         }
         let port = self.port_mut(name);
         port.refused = None;
@@ -1591,6 +1786,7 @@ impl PeerManager {
                 self.arm_unnumbered_retry();
             }
         }
+        Ok(())
     }
 
     /// Refuse a learned address for `reason`, logging it and counting a BMP
@@ -1647,21 +1843,29 @@ impl PeerManager {
     /// Whether the bound session is down, read from the session itself. An
     /// Established session is recorded and reported to discovery. No answer
     /// keeps it, claims nothing to discovery, and asks again shortly.
-    async fn bound_session_down(&mut self, name: &str, key: &PeerKey) -> bool {
-        match self.bound_session_established(key).await {
-            Some(true) => {
+    fn bound_session_down(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        checks: &PortSessionChecks,
+    ) -> Result<bool, PortSessionRequest> {
+        if !self.peers.contains_key(key) {
+            return Ok(true);
+        }
+        Ok(match checks.state()? {
+            StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
                     report_established(&unnumbered.discovery, name, key);
                 }
                 self.port_mut(name).established = true;
                 false
             }
-            None => {
+            StateQueryOutcome::TimedOut => {
                 self.arm_unnumbered_retry();
                 false
             }
-            Some(false) => true,
-        }
+            _ => true,
+        })
     }
 
     /// ADR-0142: an unbound neighbor whose session is down keeps its last
@@ -1670,30 +1874,38 @@ impl PeerManager {
     /// is removed: the redial ends and the address is released. Retained, it
     /// is checked again at the RIB's next timer, which sweeps the routes or
     /// promotes them to LLGR.
-    async fn release_unless_retained(&mut self, name: &str, key: PeerKey) {
+    fn release_unless_retained(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        checks: &mut PortSessionChecks,
+    ) -> Result<(), PortSessionRequest> {
         if !self.port_mut(name).stopped_retained {
-            if !self.bound_session_quiet(name, &key).await {
-                return;
+            if checks.retirement.is_none() {
+                if !self.bound_session_quiet(name, key, checks)? {
+                    return Ok(());
+                }
+                // The session answered the read only after sending its
+                // teardown's GR or PeerDown to the RIB, so this query, queued
+                // behind it, sees the retention that teardown left.
+                if self.retained_until_next_check(name, key, checks, false)? {
+                    return Ok(());
+                }
             }
-            // The session answered the read only after sending its
-            // teardown's GR or PeerDown to the RIB, so this query, queued
-            // behind it, sees the retention that teardown left.
-            if self.retained_until_next_check(name, &key).await {
-                return;
-            }
-            if !self.shut_down_unless_established(name, &key, true).await {
-                return;
+            if !self.checked_unnumbered_retirement(name, key, true, checks)? {
+                return Ok(());
             }
             // The session may have established and failed with GR between
             // the check and the shutdown; the second query, queued behind
             // that teardown, sees it.
             self.port_mut(name).stopped_retained = true;
         }
-        if self.retained_until_next_check(name, &key).await {
-            return;
+        if self.retained_until_next_check(name, key, checks, true)? {
+            return Ok(());
         }
-        self.retire_bound_peer(name, key, "binding_expired", false)
-            .await;
+        Err(PortSessionRequest::Delete {
+            reason: "binding_expired",
+        })
     }
 
     /// Whether the bound session has no connection past TCP: Idle, Connect,
@@ -1701,15 +1913,16 @@ impl PeerManager {
     /// discovery. An `OpenSent` or `OpenConfirm` session is a live router mid-
     /// handshake, such as an inbound connection learned without an RA; its
     /// outcome reports itself. No answer retries shortly.
-    async fn bound_session_quiet(&mut self, name: &str, key: &PeerKey) -> bool {
-        let Some(managed) = self.peers.get(key) else {
-            return true;
+    fn bound_session_quiet(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        checks: &PortSessionChecks,
+    ) -> Result<bool, PortSessionRequest> {
+        let Some(_) = self.peers.get(key) else {
+            return Ok(true);
         };
-        match managed
-            .handle()
-            .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
-            .await
-        {
+        Ok(match checks.state()? {
             rustbgpd_transport::StateQueryOutcome::State(state) => match state.fsm_state {
                 SessionState::Established => {
                     if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -1731,25 +1944,26 @@ impl PeerManager {
                 self.arm_unnumbered_retry();
                 false
             }
-        }
+        })
     }
 
     /// A stopped peer stays stopped until a new session is installed for
     /// it, such as an inbound reconnect: a session that answers clears the
     /// mark, and the ordinary checks then apply to it. `false` (retry
     /// armed) when the session did not answer.
-    async fn confirm_still_stopped(&mut self, name: &str, key: &PeerKey) -> bool {
-        if !self.port_mut(name).stopped_retained {
-            return true;
+    fn confirm_still_stopped(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        checks: &PortSessionChecks,
+    ) -> Result<bool, PortSessionRequest> {
+        if !self.port_mut(name).stopped_retained || checks.retention_after.is_some() {
+            return Ok(true);
         }
-        let Some(managed) = self.peers.get(key) else {
-            return true;
+        let Some(_) = self.peers.get(key) else {
+            return Ok(true);
         };
-        match managed
-            .handle()
-            .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
-            .await
-        {
+        Ok(match checks.state()? {
             rustbgpd_transport::StateQueryOutcome::State(_) => {
                 self.port_mut(name).stopped_retained = false;
                 true
@@ -1759,19 +1973,33 @@ impl PeerManager {
                 self.arm_unnumbered_retry();
                 false
             }
-        }
+        })
     }
 
     /// Whether the RIB still retains the bound peer's GR or LLGR routes.
     /// Retained, the next check is armed at the RIB's next timer, which
     /// sweeps them or promotes them to LLGR; no answer retries shortly.
-    async fn retained_until_next_check(&mut self, name: &str, key: &PeerKey) -> bool {
-        let Some(retention) = self.bound_peer_retention(key).await else {
+    fn retained_until_next_check(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        checks: &PortSessionChecks,
+        after_shutdown: bool,
+    ) -> Result<bool, PortSessionRequest> {
+        let result = if after_shutdown {
+            &checks.retention_after
+        } else {
+            &checks.retention_before
+        };
+        let Some(retention) = result
+            .as_ref()
+            .ok_or(PortSessionRequest::Retention { after_shutdown })?
+        else {
             self.arm_unnumbered_retry();
-            return true;
+            return Ok(true);
         };
         if retention.stale_routes == 0 {
-            return false;
+            return Ok(false);
         }
         let now = tokio::time::Instant::now();
         let at = retention
@@ -1780,29 +2008,7 @@ impl PeerManager {
             .max(now + RECONCILE_RETRY);
         debug!(interface = %name, peer = %key, stale_routes = retention.stale_routes, "unnumbered: unbound neighbor keeps its address while its routes are retained");
         self.arm_unnumbered_retry_at(at);
-        true
-    }
-
-    /// The RIB's GR/LLGR retention for the bound peer's identity; `None`
-    /// when the RIB did not answer in time.
-    pub(super) async fn bound_peer_retention(
-        &mut self,
-        key: &PeerKey,
-    ) -> Option<rustbgpd_rib::PeerRetention> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        let request = rustbgpd_rib::RibUpdate::QueryPeerRetention {
-            peer: self.rib_peer_of(key),
-            reply,
-        };
-        let rib_tx = self.rib_tx.clone();
-        let round_trip = tokio::time::timeout(BOUND_STATE_QUERY_TIMEOUT, async move {
-            rib_tx.send(request).await.ok()?;
-            response.await.ok()
-        });
-        self.await_with_readiness(round_trip, super::OperatorReadAdmission::Served)
-            .await
-            .ok()
-            .flatten()
+        Ok(true)
     }
 
     /// End the bound peer's session and clear the binding, keeping the
@@ -1823,43 +2029,85 @@ impl PeerManager {
         if unless_established && !self.shut_down_unless_established(name, &key, false).await {
             return false;
         }
-        info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
-        self.port_mut(name).presence_reason = Some(reason);
-        // Drain already-reported state before joining the retiring actor.
-        self.drain_ready_session_notifications(Some(&key)).await;
-        // The neighbor's operator and safety state outlives the endpoint.
-        let had_latch = self.max_prefix_latches.contains_key(&key);
-        let graceful_shutdown = self
-            .peers
-            .get(&key)
-            .is_some_and(|managed| managed.advertise_graceful_shutdown);
-        let mut held = HeldState {
-            enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
-            config_admin_down: self
-                .peers
-                .get(&key)
-                .is_some_and(|managed| managed.admin_down.is_some()),
-            max_prefix_restart_seconds: self
-                .peers
-                .get(&key)
-                .and_then(|managed| managed.max_prefix_restart_seconds),
-            latch: None,
-            counters: self.neighbor_counters_for(&key),
-        };
-        // Retiring an endpoint keeps terminal notices emitted during shutdown;
-        // only deleting the configured neighbor may clear its latch.
-        let deleted = self
-            .delete_peer_checked(key.clone(), false, None, false, None, None)
-            .await;
-        match deleted {
-            // Already gone: nothing is left to clear.
-            Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
+        let (detached, retirement) = match self
+            .prepare_bound_peer_retirement(name, &key, reason)
+            .await
+        {
+            Ok(retirement) => retirement,
+            Err(PeerLifecycleError::NotFound(_)) => return true,
             Err(error) => {
                 self.port_mut(name).presence_reason = None;
                 warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
                 return false;
             }
+        };
+        if let Some(detached) = detached {
+            self.delete_detached_peers(vec![detached]).await;
         }
+        self.finish_bound_peer_retirement(name, key, retirement)
+            .await;
+        true
+    }
+
+    async fn prepare_bound_peer_retirement(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        reason: &'static str,
+    ) -> Result<(Option<super::lifecycle::DetachedPeer>, BoundPeerRetirement), PeerLifecycleError>
+    {
+        info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
+        self.port_mut(name).presence_reason = Some(reason);
+        // Drain already-reported state before joining the retiring actor.
+        self.drain_ready_session_notifications(Some(key)).await;
+        // The neighbor's operator and safety state outlives the endpoint.
+        let had_latch = self.max_prefix_latches.contains_key(key);
+        let graceful_shutdown = self
+            .peers
+            .get(key)
+            .is_some_and(|managed| managed.advertise_graceful_shutdown);
+        let held = HeldState {
+            enabled: self.peers.get(key).is_none_or(|managed| managed.enabled),
+            config_admin_down: self
+                .peers
+                .get(key)
+                .is_some_and(|managed| managed.admin_down.is_some()),
+            max_prefix_restart_seconds: self
+                .peers
+                .get(key)
+                .and_then(|managed| managed.max_prefix_restart_seconds),
+            latch: None,
+            counters: self.neighbor_counters_for(key),
+        };
+        let detached = match self
+            .detach_peer_for_delete(key.clone(), false, None, false, None, None)
+            .await
+        {
+            Ok(detached) => Some(detached),
+            Err(PeerLifecycleError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        Ok((
+            detached,
+            BoundPeerRetirement {
+                had_latch,
+                graceful_shutdown,
+                held,
+            },
+        ))
+    }
+
+    async fn finish_bound_peer_retirement(
+        &mut self,
+        name: &str,
+        key: PeerKey,
+        retirement: BoundPeerRetirement,
+    ) {
+        let BoundPeerRetirement {
+            had_latch,
+            graceful_shutdown,
+            mut held,
+        } = retirement;
         held.latch = self.max_prefix_latches.remove(&key);
         if let Some(latch) = &mut held.latch {
             held.enabled = false;
@@ -1902,7 +2150,6 @@ impl PeerManager {
         let port = self.port_mut(name);
         port.bound = None;
         port.established = false;
-        port.retire_unsettled = false;
         port.stopped_retained = false;
         port.held = Some(held);
         port.graceful_shutdown = graceful_shutdown;
@@ -1922,7 +2169,6 @@ impl PeerManager {
         if let Some(unnumbered) = self.unnumbered.as_mut() {
             unnumbered.discovery.session_failed(name);
         }
-        true
     }
 
     /// The interface-only neighbor's interface whose current index is
@@ -2058,18 +2304,23 @@ impl PeerManager {
             }
             let state = match self.peers.get(&key) {
                 None => None,
-                Some(managed) => match managed
-                    .handle()
-                    .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
-                    .await
-                {
-                    rustbgpd_transport::StateQueryOutcome::State(state) => Some(state),
-                    rustbgpd_transport::StateQueryOutcome::SessionGone => None,
-                    rustbgpd_transport::StateQueryOutcome::TimedOut => {
-                        info!(interface = %name, %address, peer = %key, "unnumbered: bound session did not report its state; dropping the inbound connection (remote will retry)");
-                        return self.refuse_inbound();
+                Some(managed) => {
+                    let commands = managed.handle().commands_sender();
+                    match self
+                        .await_session_sweep(PeerHandle::query_state_outcome_with(
+                            commands,
+                            BOUND_STATE_QUERY_TIMEOUT,
+                        ))
+                        .await
+                    {
+                        rustbgpd_transport::StateQueryOutcome::State(state) => Some(state),
+                        rustbgpd_transport::StateQueryOutcome::SessionGone => None,
+                        rustbgpd_transport::StateQueryOutcome::TimedOut => {
+                            info!(interface = %name, %address, peer = %key, "unnumbered: bound session did not report its state; dropping the inbound connection (remote will retry)");
+                            return self.refuse_inbound();
+                        }
                     }
-                },
+                }
             };
             if let Some(
                 state @ (SessionState::OpenSent

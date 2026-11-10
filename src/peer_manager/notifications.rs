@@ -4,7 +4,112 @@ use rustbgpd_transport::{
 };
 use tracing::{debug, info, warn};
 
-use super::{ManagedPeer, PeerManager};
+use super::{ManagedPeer, ManagedPeerState, PeerManager};
+use futures::{FutureExt as _, StreamExt as _};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use tokio::time::Instant;
+
+struct NotificationRetirement {
+    peer: PeerKey,
+    sessions: Vec<(u64, PeerHandle, &'static str)>,
+    stop_primary: Option<(
+        u64,
+        tokio::sync::mpsc::Sender<rustbgpd_transport::PeerCommand>,
+    )>,
+    dynamic: Option<Box<DynamicRetirement>>,
+}
+
+struct DynamicRetirement {
+    managed: ManagedPeerState,
+    end_retention: rustbgpd_transport::SessionEndRetention,
+    superseded: Option<u64>,
+}
+
+struct SettledNotificationRetirement {
+    peer: PeerKey,
+    sessions: Vec<u64>,
+    rib_sessions: Vec<u64>,
+    failed_stop: Option<(u64, rustbgpd_transport::PeerCommandError)>,
+    dynamic: Option<Box<DynamicRetirement>>,
+}
+
+enum NotificationCompletion {
+    Sessions(SettledNotificationRetirement),
+    Barrier(SettledNotificationRetirement, bool),
+    Replaced {
+        peer: PeerKey,
+        old_id: u64,
+        managed: Box<ManagedPeerState>,
+        rib_owner: Option<u64>,
+    },
+}
+
+type NotificationWait = futures::future::BoxFuture<'static, NotificationCompletion>;
+
+fn start_notification_wait(
+    wait: impl std::future::Future<Output = NotificationCompletion> + Send + 'static,
+    pending: &mut futures::stream::FuturesUnordered<NotificationWait>,
+    ready: &mut VecDeque<NotificationCompletion>,
+) {
+    let mut wait = wait.boxed();
+    // Every target gets its first poll before any completion can await.
+    if let Some(completed) = wait.as_mut().now_or_never() {
+        ready.push_back(completed);
+    } else {
+        pending.push(wait);
+    }
+}
+
+impl NotificationRetirement {
+    async fn wait(self, deadline_at: Instant) -> SettledNotificationRetirement {
+        let failed_stop = if let Some((id, commands)) = self.stop_primary {
+            let remaining = deadline_at.saturating_duration_since(Instant::now());
+            let result = if remaining.is_zero() {
+                Err(rustbgpd_transport::PeerCommandError::TimedOut {
+                    operation: "stop",
+                    deadline: remaining,
+                })
+            } else {
+                match tokio::time::timeout_at(
+                    deadline_at,
+                    commands.send(rustbgpd_transport::PeerCommand::Stop { reason: None }),
+                )
+                .await
+                {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(_)) => Err(rustbgpd_transport::PeerCommandError::SessionExited),
+                    Err(_) => Err(rustbgpd_transport::PeerCommandError::TimedOut {
+                        operation: "stop",
+                        deadline: remaining,
+                    }),
+                }
+            };
+            result.err().map(|error| (id, error))
+        } else {
+            None
+        };
+        let mut sessions = Vec::with_capacity(self.sessions.len());
+        let mut rib_sessions = Vec::with_capacity(self.sessions.len());
+        for (id, handle, context) in self.sessions {
+            rib_sessions.push(handle.rib_registration_owner(id).unwrap_or(id));
+            PeerManager::shutdown_handle_until_owned(
+                self.peer.address,
+                context,
+                handle,
+                deadline_at,
+            )
+            .await;
+            sessions.push(id);
+        }
+        SettledNotificationRetirement {
+            peer: self.peer,
+            sessions,
+            rib_sessions,
+            failed_stop,
+            dynamic: self.dynamic,
+        }
+    }
+}
 
 impl PeerManager {
     /// A failed Stop enqueue cannot leave a candidate's sibling primary live:
@@ -103,15 +208,15 @@ impl PeerManager {
 
     /// The Idle primary's state, queried only when a candidate is pending.
     async fn idle_primary_state_for_pending(
-        &self,
+        &mut self,
         peer_key: &PeerKey,
+        deadline_at: Instant,
     ) -> Option<rustbgpd_transport::StateQueryOutcome> {
         let managed = self.peers.get(peer_key)?;
         managed.pending_inbound.as_ref()?;
+        let commands = managed.handle().commands_sender();
         Some(
-            managed
-                .handle()
-                .query_state_outcome(super::PEER_QUERY_TIMEOUT)
+            self.await_session_sweep(PeerHandle::query_state_outcome_until(commands, deadline_at))
                 .await,
         )
     }
@@ -129,14 +234,32 @@ impl PeerManager {
     /// notification is `peer`'s when its session resolves to `peer`; one that
     /// does not resolve, or a fence with no `peer`, handles nothing.
     pub(super) async fn drain_ready_session_notifications(&mut self, peer: Option<&PeerKey>) {
+        self.drain_ready_session_notifications_until(
+            peer,
+            Instant::now() + super::PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        )
+        .await;
+    }
+
+    pub(super) async fn drain_ready_session_notifications_until(
+        &mut self,
+        peer: Option<&PeerKey>,
+        deadline_at: Instant,
+    ) {
         if self.session_notification_depth == 0 {
-            while let Ok(notification) = self.session_notify_rx.try_recv() {
+            if let Ok(notification) = self.session_notify_rx.try_recv() {
                 self.drain_ready_session_lifecycle_notifications();
-                self.handle_session_notification(notification).await;
+                self.handle_session_notification_until(notification, deadline_at)
+                    .await;
             }
             return;
         }
-        loop {
+        let ready = self.session_notify_rx.ready_count()
+            + peer
+                .and_then(|peer| self.deferred_session_notification_counts.get(peer))
+                .copied()
+                .unwrap_or(0);
+        for _ in 0..ready {
             // `peer`'s deferred notices are older than anything still queued.
             let deferred = peer
                 .filter(|peer| {
@@ -160,7 +283,8 @@ impl PeerManager {
                 return;
             };
             if let Some(notification) = notification {
-                self.handle_session_notification(notification).await;
+                self.handle_session_notification_until(notification, deadline_at)
+                    .await;
             }
         }
     }
@@ -249,25 +373,389 @@ impl PeerManager {
         Some(notification)
     }
 
-    /// Handle one notification; the outermost call then handles whatever
-    /// nested drains deferred, oldest first.
+    /// Capture one finite outer round. Nested drains keep one peer's notices
+    /// ordered; unrelated notices they discover belong to the following round.
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+        self.handle_session_notification_until(
+            notification,
+            Instant::now() + super::PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        )
+        .await;
+    }
+
+    async fn handle_session_notification_until(
+        &mut self,
+        notification: SessionNotification,
+        deadline_at: Instant,
+    ) {
         self.session_notification_depth += 1;
-        self.handle_one_session_notification(notification).await;
-        if self.session_notification_depth == 1 {
-            while let Some(deferred) = self.release_deferred_session_notification(0) {
-                self.drain_ready_session_lifecycle_notifications();
-                self.handle_one_session_notification(deferred).await;
+        if self.session_notification_depth > 1 {
+            let mut retirements = Vec::new();
+            self.handle_one_session_notification(notification, &mut retirements, deadline_at)
+                .await;
+            self.finish_notification_round(retirements, deadline_at)
+                .await;
+            self.session_notification_depth -= 1;
+            return;
+        }
+        let owner = self.peer_key_for_session(session_notification_id(&notification));
+        self.defer_session_notification(owner, notification);
+        for _ in 0..self.session_notify_rx.ready_count() {
+            if let Ok(notification) = self.session_notify_rx.try_recv() {
+                let owner = self.peer_key_for_session(session_notification_id(&notification));
+                self.defer_session_notification(owner, notification);
             }
         }
+        let mut deadline_at = deadline_at;
+        loop {
+            let mut retirements = Vec::new();
+            let mut ordered_after_collision = BTreeSet::new();
+            let ready = self.deferred_session_notifications.len();
+            let mut index = 0;
+            for _ in 0..ready {
+                let Some((peer, notification)) = self.deferred_session_notifications.get(index)
+                else {
+                    break;
+                };
+                let collision = self.is_collision_notification(notification);
+                if collision
+                    || peer
+                        .as_ref()
+                        .is_some_and(|peer| ordered_after_collision.contains(peer))
+                {
+                    if let Some(peer) = peer {
+                        ordered_after_collision.insert(peer.clone());
+                    }
+                    index += 1;
+                    continue;
+                }
+                let notification = self
+                    .release_deferred_session_notification(index)
+                    .expect("the captured notification remains queued");
+                self.drain_ready_session_lifecycle_notifications();
+                self.handle_one_session_notification(notification, &mut retirements, deadline_at)
+                    .await;
+            }
+            self.finish_notification_round(retirements, deadline_at)
+                .await;
+            // A newly deferred ordinary retirement belongs to the next
+            // finite cohort; only collision selection runs on its own.
+            if self.deferred_session_notifications.is_empty() {
+                break;
+            }
+            if self
+                .deferred_session_notifications
+                .front()
+                .is_some_and(|(_, notification)| self.is_collision_notification(notification))
+            {
+                let notification = self
+                    .release_deferred_session_notification(0)
+                    .expect("the deferred collision remains queued");
+                let collision_deadline = Instant::now() + super::PEER_LIFECYCLE_COMMAND_TIMEOUT;
+                let mut retirements = Vec::new();
+                self.handle_one_session_notification(
+                    notification,
+                    &mut retirements,
+                    collision_deadline,
+                )
+                .await;
+                self.finish_notification_round(retirements, collision_deadline)
+                    .await;
+            }
+            // Unrelated notices found by a nested drain form the next finite batch.
+            deadline_at = Instant::now() + super::PEER_LIFECYCLE_COMMAND_TIMEOUT;
+        }
         self.session_notification_depth -= 1;
+    }
+
+    fn is_collision_notification(&self, notification: &SessionNotification) -> bool {
+        if matches!(notification, SessionNotification::OpenReceived { .. }) {
+            return true;
+        }
+        let SessionNotification::BackToIdle { session_id, .. } = notification else {
+            return false;
+        };
+        self.peer_key_for_session(*session_id)
+            .and_then(|peer| self.peers.get(&peer))
+            .is_some_and(|managed| {
+                managed.session_id() == *session_id
+                    && !managed.is_dynamic
+                    && managed.pending_inbound.is_some()
+                    && managed.enabled
+                    && !self.bfd_withholding(&managed.transport_config.remote_addr.ip())
+            })
+    }
+
+    fn queue_notification_retirement(
+        &mut self,
+        peer: &PeerKey,
+        session_id: u64,
+        handle: PeerHandle,
+        context: &'static str,
+        retirements: &mut Vec<NotificationRetirement>,
+    ) {
+        self.retiring_sessions.insert(session_id, peer.clone());
+        retirements.push(NotificationRetirement {
+            peer: peer.clone(),
+            sessions: vec![(session_id, handle, context)],
+            stop_primary: None,
+            dynamic: None,
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one completion pump keeps same-peer ordering and ownership settlement visible together"
+    )]
+    async fn finish_notification_round(
+        &mut self,
+        retirements: Vec<NotificationRetirement>,
+        deadline_at: Instant,
+    ) {
+        let mut by_peer: BTreeMap<PeerKey, VecDeque<NotificationRetirement>> = BTreeMap::new();
+        for retirement in retirements {
+            by_peer
+                .entry(retirement.peer.clone())
+                .or_default()
+                .push_back(retirement);
+        }
+        let mut pending = futures::stream::FuturesUnordered::new();
+        let mut ready = VecDeque::new();
+        for queue in by_peer.values_mut() {
+            if let Some(retirement) = queue.pop_front() {
+                start_notification_wait(
+                    async move { NotificationCompletion::Sessions(retirement.wait(deadline_at).await) },
+                    &mut pending,
+                    &mut ready,
+                );
+            }
+        }
+        loop {
+            let completion = if let Some(completion) = ready.pop_front() {
+                completion
+            } else if let Some(completion) = self.await_session_sweep(pending.next()).await {
+                completion
+            } else {
+                break;
+            };
+            let (settled, barrier_failed) = match completion {
+                NotificationCompletion::Replaced {
+                    peer,
+                    old_id,
+                    managed,
+                    rib_owner,
+                } => {
+                    let mut additional = Vec::new();
+                    Box::pin(self.collect_notification_owner(&peer, deadline_at, &mut additional))
+                        .await;
+                    by_peer.entry(peer.clone()).or_default().extend(additional);
+                    self.finish_notification_replacement(&peer, old_id, *managed, rib_owner);
+                    if let Some(retirement) = by_peer.get_mut(&peer).and_then(VecDeque::pop_front) {
+                        start_notification_wait(
+                            async move {
+                                NotificationCompletion::Sessions(retirement.wait(deadline_at).await)
+                            },
+                            &mut pending,
+                            &mut ready,
+                        );
+                    }
+                    continue;
+                }
+                NotificationCompletion::Barrier(settled, failed) => (settled, failed),
+                NotificationCompletion::Sessions(mut settled) => {
+                    let peer = &settled.peer;
+                    if let Some((session_id, error)) = settled.failed_stop.take()
+                        && self
+                            .peers
+                            .get(peer)
+                            .is_some_and(|managed| managed.session_id() == session_id)
+                    {
+                        warn!(peer = %peer, session_id, %error, "failed to stop primary after max-prefix breach");
+                        if let Some(managed) = self.peers.remove(peer) {
+                            let (aborted, old_id, managed) = managed.into_parts();
+                            let peer = peer.clone();
+                            self.retiring_sessions.insert(old_id, peer.clone());
+                            start_notification_wait(
+                                async move {
+                                    let rib_owner =
+                                        aborted.abort_and_rib_registration_owner(old_id).await;
+                                    NotificationCompletion::Replaced {
+                                        peer,
+                                        old_id,
+                                        managed: Box::new(managed),
+                                        rib_owner,
+                                    }
+                                },
+                                &mut pending,
+                                &mut ready,
+                            );
+                        }
+                    }
+                    if settled.dynamic.as_ref().is_some_and(|dynamic| {
+                        dynamic
+                            .managed
+                            .transport_config
+                            .dampening_admission
+                            .as_ref()
+                            .is_some_and(|admission| admission.owner.records_wire_history())
+                    }) {
+                        for &session_id in &settled.rib_sessions {
+                            self.defer_retired_session_down(peer, session_id);
+                        }
+                        let (reply, response) = tokio::sync::oneshot::channel();
+                        // A full primary lane keeps cleanup in its existing FIFO;
+                        // uncertainty retains the disabled recovery owner.
+                        let admitted = deadline_at > Instant::now()
+                            && self.deferred_rib.queue.is_empty()
+                            && self
+                                .rib_tx
+                                .try_send(rustbgpd_rib::RibUpdate::QueryLocRibCount { reply })
+                                .is_ok();
+                        if admitted {
+                            start_notification_wait(
+                                async move {
+                                    let failed = !matches!(
+                                        tokio::time::timeout_at(deadline_at, response).await,
+                                        Ok(Ok(_))
+                                    );
+                                    NotificationCompletion::Barrier(settled, failed)
+                                },
+                                &mut pending,
+                                &mut ready,
+                            );
+                            continue;
+                        }
+                        (settled, true)
+                    } else {
+                        (settled, false)
+                    }
+                }
+            };
+            let peer = settled.peer.clone();
+            let mut additional = Vec::new();
+            Box::pin(self.collect_notification_owner(&peer, deadline_at, &mut additional)).await;
+            by_peer.entry(peer.clone()).or_default().extend(additional);
+            for id in &settled.sessions {
+                self.retiring_sessions.remove(id);
+                self.unregister_session(*id);
+            }
+            if let Some(dynamic) = settled.dynamic {
+                self.finish_dynamic_notification_retirement(&peer, *dynamic, barrier_failed);
+            }
+            if let Some(retirement) = by_peer.get_mut(&peer).and_then(VecDeque::pop_front) {
+                start_notification_wait(
+                    async move { NotificationCompletion::Sessions(retirement.wait(deadline_at).await) },
+                    &mut pending,
+                    &mut ready,
+                );
+            }
+        }
+    }
+
+    /// Joined producers' same-peer notices apply before their IDs disappear.
+    /// Any retirement they request joins the outer pump rather than holding
+    /// another peer's ready bookkeeping behind a nested wait.
+    async fn collect_notification_owner(
+        &mut self,
+        peer: &PeerKey,
+        deadline_at: Instant,
+        retirements: &mut Vec<NotificationRetirement>,
+    ) {
+        let ready = self.session_notify_rx.ready_count()
+            + self
+                .deferred_session_notification_counts
+                .get(peer)
+                .copied()
+                .unwrap_or(0);
+        for _ in 0..ready {
+            let notification =
+                if let Some(notification) = self.take_deferred_session_notification(peer) {
+                    notification
+                } else if let Ok(notification) = self.session_notify_rx.try_recv() {
+                    let owner = self.peer_key_for_session(session_notification_id(&notification));
+                    if owner.as_ref() != Some(peer) {
+                        self.defer_session_notification(owner, notification);
+                        continue;
+                    }
+                    notification
+                } else {
+                    break;
+                };
+            self.drain_ready_session_lifecycle_notifications();
+            self.handle_one_session_notification(notification, retirements, deadline_at)
+                .await;
+        }
+    }
+
+    pub(super) fn finish_notification_replacement(
+        &mut self,
+        peer: &PeerKey,
+        old_id: u64,
+        mut managed: ManagedPeerState,
+        rib_owner: Option<u64>,
+    ) {
+        self.defer_retired_session_down(peer, rib_owner.unwrap_or(old_id));
+        let session_id = self.allocate_session_id();
+        let mut transport = managed.transport_config.clone();
+        transport.supersedes_session = rib_owner;
+        let handle = PeerHandle::spawn_at_tcp_ao_generation(
+            transport,
+            self.metrics.clone(),
+            self.rib_tx.clone(),
+            managed.import_policy.clone(),
+            managed.export_policy.clone(),
+            Some(self.session_notify_tx.clone()),
+            Some(self.session_notification_event_tx.clone()),
+            Some(self.session_lifecycle_tx.clone()),
+            self.session_bmp_tx(peer),
+            self.validation_rx.clone(),
+            managed.advertise_graceful_shutdown,
+            SessionIdentity::primary(session_id),
+            managed.tcp_ao_rotation.applied,
+        );
+        managed.enabled = false;
+        self.peers
+            .insert(peer.clone(), ManagedPeer::new(handle, session_id, managed));
+        self.retiring_sessions.remove(&old_id);
+        self.unregister_session(old_id);
+        self.register_session(session_id, peer);
+    }
+
+    /// A queued cleanup can outlive more than one replacement. Mark it late
+    /// so it cannot purge retention belonging to any later RIB generation.
+    fn defer_retired_session_down(&mut self, peer: &PeerKey, session_id: u64) {
+        let update = rustbgpd_rib::RibUpdate::PeerDown {
+            peer: self.rib_peer_of(peer),
+            session_id,
+        };
+        let update = if self.deferred_rib.queue.is_empty() {
+            match self.rib_tx.try_send(update) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    warn!(peer = %peer, session_id, "RIB unavailable while fencing retired session");
+                    return;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(update)) => update,
+            }
+        } else {
+            update
+        };
+        let _ = self.defer_rib_update(
+            None,
+            rustbgpd_rib::RibUpdate::LateSessionEnd(Box::new(update)),
+        );
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "notification handling keeps collision, dynamic-peer removal, and lifecycle ordering together"
     )]
-    async fn handle_one_session_notification(&mut self, notification: SessionNotification) {
+    async fn handle_one_session_notification(
+        &mut self,
+        notification: SessionNotification,
+        retirements: &mut Vec<NotificationRetirement>,
+        deadline_at: Instant,
+    ) {
         match notification {
             SessionNotification::OpenReceived {
                 session_id,
@@ -331,15 +819,13 @@ impl PeerManager {
                 });
                 if let Some(pending) = pending {
                     debug!(peer = %peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
-                    let _ = self
-                        .quiesce_retiring_session(
-                            &peer_key,
-                            pending.session_id,
-                            pending.handle,
-                            "BackToIdle pending inbound candidate",
-                            false,
-                        )
-                        .await;
+                    self.queue_notification_retirement(
+                        &peer_key,
+                        pending.session_id,
+                        pending.handle,
+                        "BackToIdle pending inbound candidate",
+                        retirements,
+                    );
                     return;
                 }
 
@@ -363,129 +849,11 @@ impl PeerManager {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
                     self.mark_unadmitted_disabled_dynamic(&peer_key);
                 } else if self.peers.get(&peer_key).is_some_and(|m| m.is_dynamic) {
-                    // Snapshot any unfired hot-apply / Route Refresh
-                    // intent before we drop the ManagedPeer. A
-                    // re-establishing dynamic peer at the same address
-                    // (typical for a transient TCP drop on a
-                    // [[dynamic_neighbors]] range) inherits the retry
-                    // when handle_inbound recreates the ManagedPeer.
-                    self.dead_letter_pending_for(peer_addr);
-                    info!(peer = %peer_addr, "dynamic peer session went idle, retiring producers");
-                    if let Some(managed) = self.peers.remove(&peer_key) {
-                        let (primary_handle, primary_session_id, mut managed) =
-                            managed.into_parts();
-                        // Final: the session reported BackToIdle after leaving
-                        // Established.
-                        let end_retention = primary_handle.session_end_retention();
-                        let superseded = primary_handle.rib_registration_owner(primary_session_id);
-                        self.retiring_sessions
-                            .insert(primary_session_id, peer_key.clone());
-                        let mut retired_sessions = vec![primary_session_id];
-                        if let Some(pending) = managed.pending_inbound.take() {
-                            retired_sessions.push(pending.session_id);
-                            let _ = self
-                                .quiesce_retiring_session(
-                                    &peer_key,
-                                    pending.session_id,
-                                    pending.handle,
-                                    "BackToIdle dynamic pending inbound",
-                                    false,
-                                )
-                                .await;
-                        }
-                        let _ = self
-                            .quiesce_retiring_session(
-                                &peer_key,
-                                primary_session_id,
-                                primary_handle,
-                                "BackToIdle dynamic primary",
-                                false,
-                            )
-                            .await;
-
-                        // Joined producers may already have queued a wire batch
-                        // whose capacity failure the RIB has not processed yet.
-                        // Fence those exact sessions on the primary lane before
-                        // deciding whether their dynamic recovery target can go.
-                        let mut barrier_failed = false;
-                        if managed
-                            .transport_config
-                            .dampening_admission
-                            .as_ref()
-                            .is_some_and(|admission| admission.owner.records_wire_history())
-                            && let Err(error) = self
-                                .dampening_retirement_barrier(&peer_key, &retired_sessions)
-                                .await
-                        {
-                            tracing::error!(peer = %peer_addr, %error, "dynamic dampening retirement barrier failed; retaining disabled peer");
-                            self.dampening_control_failed = true;
-                            barrier_failed = true;
-                        }
-
-                        if barrier_failed
-                            || self.max_prefix_latches.contains_key(&peer_key)
-                            || managed
-                                .transport_config
-                                .dampening_admission
-                                .as_ref()
-                                .is_some_and(
-                                    rustbgpd_rib::dampening::DampeningAdmission::is_blocked,
-                                )
-                        {
-                            // A late terminal block or an unacknowledged RIB
-                            // fence must retain the explicit recovery target.
-                            self.admit_deferred_rib_updates_for(&peer_key).await;
-                            let session_id = self.allocate_session_id();
-                            let mut transport = managed.transport_config.clone();
-                            transport.supersedes_session = superseded;
-                            let handle = PeerHandle::spawn_at_tcp_ao_generation(
-                                transport,
-                                self.metrics.clone(),
-                                self.rib_tx.clone(),
-                                managed.import_policy.clone(),
-                                managed.export_policy.clone(),
-                                Some(self.session_notify_tx.clone()),
-                                Some(self.session_notification_event_tx.clone()),
-                                Some(self.session_lifecycle_tx.clone()),
-                                self.session_bmp_tx(&peer_key),
-                                self.validation_rx.clone(),
-                                managed.advertise_graceful_shutdown,
-                                SessionIdentity::primary(session_id),
-                                managed.tcp_ao_rotation.applied,
-                            );
-                            managed.enabled = false;
-                            self.peers.insert(
-                                peer_key.clone(),
-                                ManagedPeer::new(handle, session_id, managed),
-                            );
-                            self.register_session(session_id, &peer_key);
-                            self.seed_peer_truth_metrics(&peer_key, false);
-                            self.publish_peer_info_metric(&peer_key);
-                            info!(peer = %peer_addr, "retained dynamic peer disabled after terminal block or failed RIB retirement fence");
-                        } else if self.resume_retained_dynamic(&peer_key, end_retention) {
-                            // A reconnect that never reached Established: the
-                            // retention it waited on stands, unchanged.
-                        } else if self.retain_dynamic_identity(
-                            &peer_key,
-                            &managed,
-                            superseded,
-                            end_retention,
-                        ) {
-                            // Graceful restart may still hold routes on either
-                            // side: the RIB's for the peer, or the peer's of
-                            // ours. Its identity stays until both lapse, so a
-                            // reconnect resumes as the same RIB peer.
-                        } else {
-                            // Producer joins and the required RIB fence found
-                            // no terminal block, so auto-removal is authoritative.
-                            self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
-                            self.refresh_dynamic_neighbor_capacity_metrics();
-                            self.reap_deleted_peer_metric_series_for_key(&peer_key);
-                        }
+                    if let Some(retirement) =
+                        self.prepare_dynamic_notification_retirement(&peer_key)
+                    {
+                        retirements.push(retirement);
                     }
-                    // The session is gone: so is its BFD session, unless its
-                    // peer stays, disabled, for a recovery target.
-                    self.release_dynamic_bfd(peer_addr);
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
                     let enabled = self.peers.get(&peer_key).is_some_and(|m| m.enabled);
@@ -498,7 +866,10 @@ impl PeerManager {
                         // Existing primary failed — promote the already-running
                         // inbound candidate if one exists, unless the primary
                         // is waiting out an escalated NOTIFICATION backoff.
-                        let promoted = match self.idle_primary_state_for_pending(&peer_key).await {
+                        let promoted = match self
+                            .idle_primary_state_for_pending(&peer_key, deadline_at)
+                            .await
+                        {
                             None => false,
                             // An exited primary has no reconnect wait to honour.
                             Some(rustbgpd_transport::StateQueryOutcome::SessionGone) => {
@@ -521,15 +892,13 @@ impl PeerManager {
                                     .and_then(|m| m.pending_inbound.take())
                                 {
                                     info!(peer = %peer_addr, "primary state query timed out after BackToIdle; dropping inbound collision candidate");
-                                    let _ = self
-                                        .quiesce_retiring_session(
-                                            &peer_key,
-                                            pending.session_id,
-                                            pending.handle,
-                                            "BackToIdle unknown-primary pending inbound",
-                                            false,
-                                        )
-                                        .await;
+                                    self.queue_notification_retirement(
+                                        &peer_key,
+                                        pending.session_id,
+                                        pending.handle,
+                                        "BackToIdle unknown-primary pending inbound",
+                                        retirements,
+                                    );
                                 }
                                 false
                             }
@@ -542,15 +911,13 @@ impl PeerManager {
                         .get_mut(&peer_key)
                         .and_then(|m| m.pending_inbound.take())
                     {
-                        let _ = self
-                            .quiesce_retiring_session(
-                                &peer_key,
-                                pending.session_id,
-                                pending.handle,
-                                "BackToIdle dropped pending inbound",
-                                false,
-                            )
-                            .await;
+                        self.queue_notification_retirement(
+                            &peer_key,
+                            pending.session_id,
+                            pending.handle,
+                            "BackToIdle dropped pending inbound",
+                            retirements,
+                        );
                         if withheld {
                             info!(peer = %peer_addr, "BFD withholding — dropped inbound collision candidate instead of promoting");
                         }
@@ -678,33 +1045,29 @@ impl PeerManager {
                 );
                 self.set_bfd_peer_disabled(peer_addr, true);
 
-                // Stop the currently owned primary for every breach. The
-                // breaching actor normally stopped itself first, but a queued
-                // Enable/Start can clear that session-local flag before this
-                // manager latch wins the cross-channel race.
-                if let Some(managed) = self.peers.get(&peer_key)
-                    && let Err(stop_error) = managed
-                        .handle()
-                        .stop_timeout(None, super::PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                        .await
-                {
-                    warn!(
-                        peer = %peer_addr,
-                        session_id,
-                        error = %stop_error,
-                        "failed to stop primary after max-prefix breach"
-                    );
-                    self.replace_unstoppable_primary(&peer_key).await;
-                }
-                if let Some(pending) = pending {
-                    self.unregister_session(pending.session_id);
-                    let _ = self
-                        .shutdown_handle_bounded(
-                            peer_addr,
-                            "max-prefix latch pending inbound",
+                let stop_primary = self
+                    .peers
+                    .get(&peer_key)
+                    .map(|managed| (managed.session_id(), managed.handle().commands_sender()));
+                let sessions: Vec<_> = pending
+                    .into_iter()
+                    .map(|pending| {
+                        self.retiring_sessions
+                            .insert(pending.session_id, peer_key.clone());
+                        (
+                            pending.session_id,
                             pending.handle,
+                            "max-prefix latch pending inbound",
                         )
-                        .await;
+                    })
+                    .collect();
+                if stop_primary.is_some() || !sessions.is_empty() {
+                    retirements.push(NotificationRetirement {
+                        peer: peer_key.clone(),
+                        sessions,
+                        stop_primary,
+                        dynamic: None,
+                    });
                 }
                 if installed {
                     if let Some(seconds) = restart_seconds {
@@ -721,6 +1084,114 @@ impl PeerManager {
                 }
             }
         }
+    }
+
+    fn prepare_dynamic_notification_retirement(
+        &mut self,
+        peer: &PeerKey,
+    ) -> Option<NotificationRetirement> {
+        self.dead_letter_pending_for(peer.address);
+        let managed = self.peers.remove(peer)?;
+        let (primary, primary_id, mut managed) = managed.into_parts();
+        let end_retention = primary.session_end_retention();
+        let superseded = primary.rib_registration_owner(primary_id);
+        let mut sessions = Vec::new();
+        if let Some(pending) = managed.pending_inbound.take() {
+            sessions.push((
+                pending.session_id,
+                pending.handle,
+                "BackToIdle dynamic pending inbound",
+            ));
+        }
+        sessions.push((primary_id, primary, "BackToIdle dynamic primary"));
+        for (id, _, _) in &sessions {
+            self.retiring_sessions.insert(*id, peer.clone());
+        }
+        info!(peer = %peer, "dynamic peer session went idle, retiring producers");
+        Some(NotificationRetirement {
+            peer: peer.clone(),
+            sessions,
+            stop_primary: None,
+            dynamic: Some(Box::new(DynamicRetirement {
+                managed,
+                end_retention,
+                superseded,
+            })),
+        })
+    }
+
+    fn finish_dynamic_notification_retirement(
+        &mut self,
+        peer_key: &PeerKey,
+        retirement: DynamicRetirement,
+        barrier_failed: bool,
+    ) {
+        let DynamicRetirement {
+            mut managed,
+            end_retention,
+            superseded,
+        } = retirement;
+        let peer_addr = peer_key.address;
+        if barrier_failed {
+            tracing::error!(peer = %peer_addr, "dynamic dampening retirement barrier unanswered; retaining disabled peer");
+            self.dampening_control_failed = true;
+        }
+
+        if barrier_failed
+            || self.max_prefix_latches.contains_key(peer_key)
+            || managed
+                .transport_config
+                .dampening_admission
+                .as_ref()
+                .is_some_and(rustbgpd_rib::dampening::DampeningAdmission::is_blocked)
+        {
+            // A late terminal block or an unacknowledged RIB
+            // fence must retain the explicit recovery target.
+            let session_id = self.allocate_session_id();
+            let mut transport = managed.transport_config.clone();
+            transport.supersedes_session = superseded;
+            let handle = PeerHandle::spawn_at_tcp_ao_generation(
+                transport,
+                self.metrics.clone(),
+                self.rib_tx.clone(),
+                managed.import_policy.clone(),
+                managed.export_policy.clone(),
+                Some(self.session_notify_tx.clone()),
+                Some(self.session_notification_event_tx.clone()),
+                Some(self.session_lifecycle_tx.clone()),
+                self.session_bmp_tx(peer_key),
+                self.validation_rx.clone(),
+                managed.advertise_graceful_shutdown,
+                SessionIdentity::primary(session_id),
+                managed.tcp_ao_rotation.applied,
+            );
+            managed.enabled = false;
+            self.peers.insert(
+                peer_key.clone(),
+                ManagedPeer::new(handle, session_id, managed),
+            );
+            self.register_session(session_id, peer_key);
+            self.seed_peer_truth_metrics(peer_key, false);
+            self.publish_peer_info_metric(peer_key);
+            info!(peer = %peer_addr, "retained dynamic peer disabled after terminal block or failed RIB retirement fence");
+        } else if self.resume_retained_dynamic(peer_key, end_retention) {
+            // A reconnect that never reached Established: the
+            // retention it waited on stands, unchanged.
+        } else if self.retain_dynamic_identity(peer_key, &managed, superseded, end_retention) {
+            // Graceful restart may still hold routes on either
+            // side: the RIB's for the peer, or the peer's of
+            // ours. Its identity stays until both lapse, so a
+            // reconnect resumes as the same RIB peer.
+        } else {
+            // Producer joins and the required RIB fence found
+            // no terminal block, so auto-removal is authoritative.
+            self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+            self.refresh_dynamic_neighbor_capacity_metrics();
+            self.reap_deleted_peer_metric_series_for_key(peer_key);
+        }
+        // The session is gone: so is its BFD session, unless its
+        // peer stays, disabled, for a recovery target.
+        self.release_dynamic_bfd(peer_addr);
     }
 
     pub(super) fn handle_session_lifecycle_notification(

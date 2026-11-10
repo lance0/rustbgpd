@@ -582,3 +582,41 @@ fn release_forgets_the_superseded_session() {
     manager.handle_update(RibUpdate::ReleasePeer { peer: peer() });
     assert!(manager.superseded_session.is_empty());
 }
+
+/// Notification retirement may queue an inherited owner's cleanup while its
+/// disabled replacement never registers. Only the inherited ID owns that GR.
+#[test]
+fn deferred_cleanup_of_an_unregistered_replacement_purges_its_inherited_owner() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 41);
+    receive_route(&mut manager);
+    restart(&mut manager, 41);
+    late_down(&mut manager, 42);
+    assert_eq!(
+        retention(&manager),
+        (1, 1, true),
+        "the unregistered actor owns no retention"
+    );
+    late_down(&mut manager, 41);
+    assert_eq!(
+        retention(&manager),
+        (0, 0, false),
+        "the final inherited owner must purge its retention"
+    );
+}
+
+/// A deferred manager cleanup can outlive several independently registered
+/// replacements, beyond the latest superseded-session record.
+#[test]
+fn deferred_old_owner_cleanup_preserves_gr_after_multiple_replacements() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    receive_route(&mut manager);
+    restart(&mut manager, 3);
+    assert_eq!(retention(&manager), (1, 1, true));
+    late_down(&mut manager, 1);
+    assert_eq!(retention(&manager), (1, 1, true));
+    assert!(failed_over(&manager, 0));
+}

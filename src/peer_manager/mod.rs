@@ -338,7 +338,7 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// or, from an inbound connection, refused.
 ///
 /// Every `await_with_readiness*` wait and a session's bounded shutdown
-/// drive the oldest one's reservation (`drive_while`), sending it once it is
+/// drive the oldest one's reservation, sending it once it is
 /// granted while keeping its place among waiting senders. The BMP tick sends
 /// it only if it is already granted (`send_if_granted`), and peer-manager
 /// shutdown gives it back. The other bounded waits (session start, stop,
@@ -454,25 +454,6 @@ impl DeferredRibUpdates {
             && !sent
         {
             debug!("RIB exited: discarding deferred RIB updates");
-        }
-    }
-
-    /// Await `future`, which must not need the actor, while driving the
-    /// oldest deferred update's reservation: a granted one is sent at once,
-    /// so `future` never waits beside a slot the actor holds, and the update
-    /// keeps its place among waiting senders.
-    async fn drive_while<F: Future>(&mut self, future: F) -> F::Output {
-        tokio::pin!(future);
-        loop {
-            tokio::select! {
-                biased;
-                output = &mut future => return output,
-                sent = self.send_oldest(), if self.ready() => {
-                    if !sent {
-                        debug!("RIB exited: discarding deferred RIB updates");
-                    }
-                }
-            }
         }
     }
 

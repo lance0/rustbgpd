@@ -142,8 +142,6 @@ enum Drive {
     BfdReload,
     /// A reload or catalog change installs conditional advertisements.
     ConditionalInstall,
-    /// Dynamic source retirement awaits the primary-lane RIB barrier.
-    DampeningRetirement,
     /// Config-transaction planning queries the RIB's update groups.
     UpdateGroupSnapshot,
     /// An unstoppable primary is replaced and its RIB generation fenced.
@@ -154,9 +152,6 @@ enum Drive {
     /// Peer removal defers the RIB's `PeerDeleted` reap marker behind a full
     /// mailbox; a session start at the same label then waits for it.
     PeerRemoval,
-    /// An unbound interface-only neighbor's reconcile asks the RIB whether
-    /// its GR or LLGR routes are still retained.
-    UnboundRetention,
 }
 
 #[derive(Clone, Copy)]
@@ -293,10 +288,6 @@ fn is_conditional_install(update: &RibUpdate) -> bool {
 
 fn is_rib_barrier(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::QueryLocRibCount { .. })
-}
-
-fn is_peer_retention(update: &RibUpdate) -> bool {
-    matches!(update, RibUpdate::QueryPeerRetention { .. })
 }
 
 fn is_update_group_snapshot(update: &RibUpdate) -> bool {
@@ -845,29 +836,16 @@ const WAIT_SITES: &[WaitSite] = &[
     // Capacity disable and owned enable share this helper and its fence.
     WaitSite {
         site: "dampening_control.rs::rib_control",
-        awaits: "RibUpdate::QueryLocRibCount barrier after dynamic source retirement",
-        drive: Drive::DampeningRetirement,
+        awaits: "RibUpdate::QueryLocRibCount acknowledgement after capacity disable",
+        drive: Drive::DampeningDisable,
         rib: RibHold::Reply(is_rib_barrier),
         session: answer_all,
         additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
-            reason: "the source is mid-transition: a retiring dynamic peer is out of the peer \
-                     table until the barrier decides whether it returns, and a capacity disable \
-                     or owned enable is unacknowledged against the RIB block; bounded by \
-                     RIB_REPLY_TIMEOUT (5 s)",
+            reason: "capacity disable or owned enable is unacknowledged against the RIB block; \
+                     bounded by RIB_REPLY_TIMEOUT",
         },
-        completion: Completion::Finished,
-    },
-    WaitSite {
-        site: "unnumbered.rs::bound_peer_retention",
-        awaits: "RibUpdate::QueryPeerRetention reply (unbound interface-only reconcile)",
-        drive: Drive::UnboundRetention,
-        rib: RibHold::Reply(is_peer_retention),
-        session: answer_all,
-        additional_entry: None,
-        window: Duration::from_millis(250),
-        contract: Contract::Served,
         completion: Completion::Finished,
     },
     WaitSite {
@@ -1447,12 +1425,10 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::ConfiguredOwnerPublication
         | Drive::BfdReload
         | Drive::ConditionalInstall
-        | Drive::DampeningRetirement
         | Drive::UpdateGroupSnapshot
         | Drive::ReplacePrimary
         | Drive::DampeningDisable
-        | Drive::PeerRemoval
-        | Drive::UnboundRetention => (Vec::new(), false),
+        | Drive::PeerRemoval => (Vec::new(), false),
     };
     match drive {
         Drive::ForwardCohort { .. }
@@ -1650,16 +1626,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             assert_eq!(manager.conditional_advertisements, set);
             Ok(())
         }
-        Drive::DampeningRetirement => manager
-            .dampening_retirement_barrier(&key(peers[0]), &[1])
-            .await
-            .map_err(|error| error.to_string()),
         Drive::UpdateGroupSnapshot => manager.query_update_group_snapshot().await.map(drop),
-        Drive::UnboundRetention => manager
-            .bound_peer_retention(&key(peers[0]))
-            .await
-            .map(drop)
-            .ok_or_else(|| "the RIB did not report the retention".to_owned()),
         Drive::ReplacePrimary => {
             manager.replace_unstoppable_primary(&key(peers[0])).await;
             Ok(())
@@ -1949,11 +1916,9 @@ async fn run(row: &WaitSite) {
         | Drive::OutboundReplay
         | Drive::ConfiguredOwnerPublication
         | Drive::ConditionalInstall
-        | Drive::DampeningRetirement
         | Drive::UpdateGroupSnapshot
         | Drive::ReplacePrimary
-        | Drive::PeerRemoval
-        | Drive::UnboundRetention => {}
+        | Drive::PeerRemoval => {}
         Drive::BfdReload => {
             manager = attach_held_bfd_actor(manager, first, gate.clone());
         }
@@ -2259,12 +2224,6 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          serves any readiness query",
     ),
     (
-        "mod.rs::drive_while",
-        1,
-        "drives the deferred drain beside a session's bounded shutdown, a wait bounded by \
-         PEER_LIFECYCLE_COMMAND_TIMEOUT that never served the readiness lane",
-    ),
-    (
         "mod.rs::run",
         1,
         "the deferred-update drain is a run-loop select arm beside the readiness lane, never \
@@ -2287,6 +2246,21 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
         "try_send never waits: a full mailbox defers the update, which the run loop sends as a \
          select branch beside the readiness lane, or the next flush sends under \
          await_with_readiness",
+    ),
+    (
+        "notifications.rs::defer_retired_session_down",
+        1,
+        "try_send never waits; a full lane transfers the exact retired owner's late end to the existing deferred FIFO",
+    ),
+    (
+        "notifications.rs::finish_notification_round",
+        1,
+        "barrier admission uses try_send; an admitted reply is an owned future polled with the other retirements under await_session_sweep and the original round deadline",
+    ),
+    (
+        "unnumbered.rs::query_peer_retention_until",
+        1,
+        "an owned round future: admission is immediate try_send and its reply shares the round deadline; reconcile_unnumbered polls it under await_session_sweep beside all other targets",
     ),
     (
         "unnumbered.rs::bind_port",
@@ -3377,10 +3351,10 @@ async fn readiness_ping_runs_while_commands_stay_queued() {
     assert_eq!(dispatched.load(Ordering::SeqCst), COMMANDS);
 }
 
-/// No session starts behind a deferred deletion under its label: every
-/// `PeerHandle::spawn*` in the peer manager is preceded, in its function, by
-/// the wait (`admit_deferred_rib_updates_for`) or, on an inbound accept, the
-/// refusal (`refuse_inbound_behind_deferred_cleanup`).
+/// New session owners wait for or refuse a pending deletion under their
+/// label. The two notification reinsertion sites instead retain the same
+/// locally owned peer state, identity slot and retirement fence throughout;
+/// no mutating input or deletion can run during their owned session waits.
 #[test]
 fn every_session_spawn_is_fenced_behind_deferred_rib_cleanup() {
     const FENCES: [&str; 2] = [
@@ -3404,10 +3378,14 @@ fn every_session_spawn_is_fenced_behind_deferred_rib_cleanup() {
             }
         }
     }
-    assert_eq!(spawns, 6, "the scan finds every session spawn site");
-    assert!(
-        unfenced.is_empty(),
-        "a session spawn starts without waiting for, or refusing behind, a deferred deletion \
-         under its label: {unfenced:?}"
+    assert_eq!(spawns, 7, "the scan finds every session spawn site");
+    unfenced.sort();
+    assert_eq!(
+        unfenced,
+        [
+            "notifications.rs::finish_dynamic_notification_retirement",
+            "notifications.rs::finish_notification_replacement",
+        ],
+        "only the two ownership-preserving reinsertions may skip a new-label admission fence"
     );
 }
