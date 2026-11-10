@@ -212,23 +212,7 @@ fn late_restart_end_after_deletion_recreates_nothing() {
     late_restart(&mut manager, 1);
     assert_eq!(retention(&manager), (0, 0, false));
     assert!(manager.gr_stale_deadlines.get(&peer()).is_none());
-    let label = peer().label();
-    let series: Vec<String> = manager
-        .metrics
-        .registry()
-        .gather()
-        .into_iter()
-        .filter(|family| {
-            family.get_metric().iter().any(|metric| {
-                metric
-                    .get_label()
-                    .iter()
-                    .any(|pair| pair.name() == "peer" && pair.value() == label)
-            })
-        })
-        .map(|family| family.name().to_owned())
-        .collect();
-    assert_eq!(series, Vec::<String>::new());
+    assert_eq!(series_for_peer(&manager), Vec::<String>::new());
 }
 
 /// With another session registered, a late end takes the ordinary
@@ -249,16 +233,67 @@ fn late_end_with_another_session_registered_is_the_ordinary_stale_discard() {
     assert!(discarded(&manager, 2));
 }
 
-/// A late `PeerDown` with nothing retained is the empty teardown, not a
-/// discard.
+/// Every metric family with a series under the test peer's label.
+fn series_for_peer(manager: &RibManager) -> Vec<String> {
+    let label = peer().label();
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| {
+            family.get_metric().iter().any(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == "peer" && pair.value() == label)
+            })
+        })
+        .map(|family| family.name().to_owned())
+        .collect()
+}
+
+/// A late `PeerDown` delivered between the neighbor's `PeerDeleted` and
+/// its `ReleasePeer` has nothing to tear down and republishes nothing
+/// under the deleted peer's label.
+/// Mutation-red: running the ordinary teardown for it republishes
+/// `bgp_rib_adj_out_prefixes` for the deleted peer.
 #[test]
-fn late_peer_down_without_retention_is_an_empty_teardown() {
+fn late_peer_down_after_deletion_recreates_nothing() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    receive_route(&mut manager);
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: peer(),
+        label: None,
+        keep_series: false,
+    });
+    assert_eq!(series_for_peer(&manager), Vec::<String>::new());
+    late_down(&mut manager, 1);
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert_eq!(series_for_peer(&manager), Vec::<String>::new());
+}
+
+/// A late `PeerDown` with nothing retained is discarded without a count:
+/// whatever removed the registration already tore the session down. The
+/// context the session staged is still dropped.
+/// Mutation-red: a discard that skips the staged-context removal leaves
+/// the entry behind.
+#[test]
+fn late_peer_down_without_retention_drops_only_staged_context() {
     let mut manager = test_manager();
     peer_up(&mut manager, 1);
     receive_route(&mut manager);
     peer_down(&mut manager, 1);
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer: peer(),
+        session_id: 1,
+        peer_group: None,
+    });
+    assert_eq!(manager.pending_peer_policy_context.len(), 1);
     late_down(&mut manager, 1);
     assert_eq!(retention(&manager), (0, 0, false));
+    assert!(manager.pending_peer_policy_context.is_empty());
     assert!(discarded(&manager, 0));
 }
 

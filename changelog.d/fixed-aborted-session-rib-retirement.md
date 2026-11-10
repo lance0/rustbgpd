@@ -18,10 +18,12 @@
   graceful restart. A session whose `PeerUp` was itself still held is not
   announced to the RIB at all. Session ends delivered this way are
   marked late: once no session is registered for the peer, a late
-  graceful-restart notice is discarded and a late `PeerDown` does not end
-  graceful-restart retention that another session created (counted in
-  `bgp_rib_stale_peer_down_ignored_total`). Session ends sent in the
-  ordinary way are handled as before.
+  graceful-restart notice is discarded, and a late `PeerDown` only purges
+  graceful-restart retention its own session created. One that finds
+  another session's retention is discarded and counted in
+  `bgp_rib_stale_peer_down_ignored_total`; one that finds nothing to tear
+  down, as after the neighbor was deleted, is discarded without a count.
+  Session ends sent in the ordinary way are handled as before.
   **Operator-visible:** after a session is replaced or stopped under RIB
   backpressure, its routes are withdrawn, or retained as its graceful
   restart capability says, and

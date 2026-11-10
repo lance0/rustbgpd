@@ -61,6 +61,11 @@ impl ActorTurn {
         update: &RibUpdate,
         ribs: &std::collections::HashMap<PeerId, AdjRibIn>,
     ) -> Self {
+        // A late session end is the turn of the end it wraps.
+        let update = match update {
+            RibUpdate::LateSessionEnd(end) => end.as_ref(),
+            update => update,
+        };
         let (routes, members) = match update {
             RibUpdate::WireRoutesReceived(batch) => (
                 Some(
