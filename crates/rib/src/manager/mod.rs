@@ -1580,6 +1580,12 @@ enum ReadinessOwnerKind {
     Replacement,
     SelectionRelease,
     PeerTeardown,
+    /// Table-sized work inside ordinary ingest. It answers under the actor
+    /// loop's seam and leaves no scope receipt or capacity record. Like
+    /// every owner it answers stalled once its own age, counted from the
+    /// start of a pending policy transition if there is one, passes the
+    /// healthy bound; the loop applies that bound to the transition only.
+    Ingest,
 }
 
 /// Register the checkpoint wake when empty, without charging the synchronous
@@ -1864,6 +1870,9 @@ fn service_replacement_readiness_with_origin(
                 "policy_transition_fence",
                 RibReadinessError::PolicyTransitionStalled,
             ),
+            ReadinessOwnerKind::Ingest => {
+                ("actor_loop", RibReadinessError::PolicyTransitionStalled)
+            }
         };
         readiness
             .metrics
@@ -3114,6 +3123,27 @@ impl RibManager {
         })
     }
 
+    /// Table-sized work inside ordinary ingest, which holds no owner and so
+    /// leaves every checkpoint inert: take the lane for the work, so its
+    /// checkpoints serve, and hand the executor off, so a probe woken by a
+    /// reply can run before the actor returns. Inside an owner this adds
+    /// nothing.
+    fn with_ingest_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        if self.replacement_readiness.is_some() {
+            return work(self);
+        }
+        let age = self.pending_clean_policy_transition.as_ref().map_or(
+            std::time::Duration::ZERO,
+            distribution::PendingCleanPolicyTransition::elapsed,
+        );
+        with_executor_handoff(|| {
+            let installed = self.begin_readiness_owner_kind(age, ReadinessOwnerKind::Ingest);
+            let result = work(self);
+            self.finish_readiness_owner(installed);
+            result
+        })
+    }
+
     fn with_readiness_owner<T>(
         &mut self,
         age: std::time::Duration,
@@ -3176,7 +3206,9 @@ impl RibManager {
             }),
         }));
         self.replacement_checkpoint(true);
-        self.record_replacement_capacities();
+        if kind != ReadinessOwnerKind::Ingest {
+            self.record_replacement_capacities();
+        }
         true
     }
 
@@ -3185,7 +3217,17 @@ impl RibManager {
         if !installed {
             return;
         }
-        self.record_replacement_capacities();
+        let ingest = self.replacement_readiness.as_ref().is_some_and(|context| {
+            context
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .kind
+                == ReadinessOwnerKind::Ingest
+        });
+        if !ingest {
+            self.record_replacement_capacities();
+        }
         self.replacement_checkpoint_at("terminal_cleanup", true);
         let context = self
             .replacement_readiness
@@ -3207,14 +3249,16 @@ impl RibManager {
             .retirement
             .finish(readiness.max_gap, readiness.budget);
         #[cfg(all(feature = "bench-internals", not(test)))]
-        info!(target: "replacement_readiness", count = readiness.count,
+        if !ingest {
+            info!(target: "replacement_readiness", count = readiness.count,
             elapsed_us = readiness.started.elapsed().as_micros(),
             max_gap_us = readiness.max_gap.as_micros(), serviced = readiness.serviced,
             "replacement readiness scope finished");
-        #[cfg(all(feature = "bench-internals", not(test)))]
-        for (name, (len, capacity, slots)) in &readiness.capacities {
-            info!(target: "replacement_capacity", name, max_len = len, max_capacity = capacity,
+            #[cfg(all(feature = "bench-internals", not(test)))]
+            for (name, (len, capacity, slots)) in &readiness.capacities {
+                info!(target: "replacement_capacity", name, max_len = len, max_capacity = capacity,
                 max_raw_slots = slots, "replacement capacity maximum");
+            }
         }
         #[cfg(test)]
         {
