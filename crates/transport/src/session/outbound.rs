@@ -137,15 +137,15 @@ impl PendingSlice {
         let index = self.source_start + row;
         let attrs = match self.phase {
             OutboundPhase::Announce => {
-                let attrs = export.prepare_unicast_attribute_bundle(
+                let mut attrs = export.prepare_unicast_attribute_bundle(
                     &update.announce[index],
                     export.local_ipv4(),
                     update.next_hop_override.get(index).and_then(Option::as_ref),
                 );
                 return if matches!(group.wire, GroupWire::Ipv4Body) {
-                    attrs.with_next_hop
+                    attrs.with_next_hop()
                 } else {
-                    attrs.without_next_hop
+                    attrs.without_next_hop()
                 };
             }
             OutboundPhase::FlowspecAnnounce => {
@@ -1494,8 +1494,9 @@ impl PeerSession {
 // RR fanout flamegraph. HashDoS tradeoff (deliberate), mirroring the
 // route-map rationale at the top of `rib::adj_rib_in`: keys include
 // peer-derived attributes, next hops and router ids. Ordinary maps live
-// for one outbound slice; shared encoding keeps its attribute cache for
-// the group payload. The hasher is not collision-resistant.
+// for one family's grouping pass in an outbound slice; shared encoding
+// keeps its attribute cache for the group payload. The hasher is not
+// collision-resistant.
 // Optional `max_prefixes` limits count unique prefixes, not Add-Path paths
 // or distinct attribute sets, so they do not bound collision-chain length.
 use crate::fast_hash::FastMap as HashMap;
@@ -1892,7 +1893,6 @@ impl PeerSession {
         }
         let use_extended_nexthop_ipv4 = export.use_extended_nexthop_ipv4();
         let local_ipv4 = export.local_ipv4();
-        let mut prepared_attr_cache = PreparedAttrCache::default();
         // Split withdrawals by address family, filtering by negotiated families
         let mut v4_body_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
         let mut v4_body_sources = Vec::new();
@@ -2078,15 +2078,14 @@ impl PeerSession {
             let mut v4_body_groups: Vec<V4BodyGroup> = Vec::new();
             let mut v4_mp_index = AttrGroupIndex::default();
             let mut v4_mp_groups: Vec<MpGroup> = Vec::new();
+            let mut prepared_attr_cache = PreparedAttrCache::default();
             for (route, nh_override, source) in &v4_routes {
-                let cached_attrs = export
-                    .prepared_unicast_attributes_cached(
-                        &mut prepared_attr_cache,
-                        route,
-                        local_ipv4,
-                        *nh_override,
-                    )
-                    .clone();
+                let cached_attrs = export.prepared_unicast_attributes_cached(
+                    &mut prepared_attr_cache,
+                    route,
+                    local_ipv4,
+                    *nh_override,
+                );
                 match export.finish_unicast_candidate(route, *nh_override, cached_attrs) {
                     Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
                         dropped_ipv6_next_hops.note_ipv4_body(*nh_override, entry.prefix);
@@ -2148,6 +2147,10 @@ impl PeerSession {
                     Err(_) => {}
                 }
             }
+            // Grouping is done, so its lookup state goes now. Each group
+            // then owns its prepared attributes alone and frees them once it
+            // is sent or deferred, not after the whole slice is encoded.
+            drop((prepared_attr_cache, v4_body_index, v4_mp_index));
             let max_len = export.max_message_len();
             for group in v4_body_groups {
                 let attrs = group.attrs.as_ref();
@@ -2208,16 +2211,15 @@ impl PeerSession {
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_group_index = AttrGroupIndex::default();
         let mut v6_groups: Vec<MpGroup> = Vec::new();
+        let mut prepared_attr_cache = PreparedAttrCache::default();
         for (route, nh_override_ref, source) in &v6_routes {
             let nh_override = *nh_override_ref;
-            let cached_attrs = export
-                .prepared_unicast_attributes_cached(
-                    &mut prepared_attr_cache,
-                    route,
-                    local_ipv4,
-                    nh_override,
-                )
-                .clone();
+            let cached_attrs = export.prepared_unicast_attributes_cached(
+                &mut prepared_attr_cache,
+                route,
+                local_ipv4,
+                nh_override,
+            );
             let prepared = match export.finish_unicast_candidate(route, nh_override, cached_attrs) {
                 Ok(PreparedUnicastCandidate::Mp {
                     next_hop,
@@ -2265,6 +2267,8 @@ impl PeerSession {
                 }),
             }
         }
+        // As for IPv4 above: release the lookup state before sending.
+        drop((prepared_attr_cache, v6_group_index));
         let max_len = export.max_message_len();
         for group in v6_groups {
             let base_attrs = group.attrs.as_ref();

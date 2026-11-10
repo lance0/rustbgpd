@@ -1061,9 +1061,9 @@ impl SessionExportProfile {
         route: &Route,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> Result<PreparedUnicastCandidate, ExportProbeError> {
-        let attrs =
+        let mut attrs =
             self.prepare_unicast_attribute_bundle(route, self.local_ipv4(), next_hop_override);
-        self.finish_unicast_candidate(route, next_hop_override, attrs)
+        self.finish_unicast_candidate(route, next_hop_override, &mut attrs)
     }
 
     pub(super) fn prepare_unicast_attribute_bundle(
@@ -1072,19 +1072,11 @@ impl SessionExportProfile {
         local_ipv4: Ipv4Addr,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> PreparedUnicastAttributes {
-        let with_next_hop =
-            Arc::new(self.prepare_unicast_attributes(route, local_ipv4, next_hop_override));
-        let without_next_hop = Arc::new(
-            with_next_hop
-                .iter()
-                .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
-                .cloned()
-                .collect(),
-        );
-        PreparedUnicastAttributes {
-            with_next_hop,
-            without_next_hop,
-        }
+        PreparedUnicastAttributes::new(self.prepare_unicast_attributes(
+            route,
+            local_ipv4,
+            next_hop_override,
+        ))
     }
 
     fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
@@ -1120,7 +1112,7 @@ impl SessionExportProfile {
         route: &'r Route,
         local_ipv4: Ipv4Addr,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
-    ) -> &'c PreparedUnicastAttributes {
+    ) -> &'c mut PreparedUnicastAttributes {
         #[cfg(debug_assertions)]
         cache.bind(self.owner_id, self.generation);
         let key = self.prepared_attr_cache_key(route, local_ipv4, next_hop_override);
@@ -1133,7 +1125,7 @@ impl SessionExportProfile {
         &self,
         route: &Route,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
-        attrs: PreparedUnicastAttributes,
+        attrs: &mut PreparedUnicastAttributes,
     ) -> Result<PreparedUnicastCandidate, ExportProbeError> {
         let next_hop_override = local_self_next_hop(route, next_hop_override);
         let local_ipv4 = self.local_ipv4();
@@ -1164,12 +1156,12 @@ impl SessionExportProfile {
                 // MP_REACH next hop even with Extended Next Hop negotiated.
                 if !self.scoped_link_local_peer
                     && next_hop.is_ipv4()
-                    && attrs.with_next_hop.iter().any(|attr| {
+                    && attrs.attrs.iter().any(|attr| {
                         matches!(attr, PathAttribute::NextHop(nh) if IpAddr::V4(*nh) == next_hop)
                     })
                 {
                     return Ok(PreparedUnicastCandidate::Ipv4Body {
-                        attrs: attrs.with_next_hop,
+                        attrs: attrs.with_next_hop(),
                         entry: Ipv4NlriEntry {
                             path_id: route.path_id,
                             prefix,
@@ -1180,7 +1172,7 @@ impl SessionExportProfile {
                     afi: Afi::Ipv4,
                     next_hop,
                     link_local_next_hop: self.ipv4_mp_reach_link_local_next_hop(next_hop, route),
-                    attrs: attrs.without_next_hop,
+                    attrs: attrs.without_next_hop(),
                     entry: NlriEntry {
                         path_id: route.path_id,
                         prefix: route.prefix,
@@ -1191,14 +1183,14 @@ impl SessionExportProfile {
             Prefix::V4(prefix) => {
                 if self.scoped_link_local_peer
                     || !attrs
-                        .with_next_hop
+                        .attrs
                         .iter()
                         .any(|attr| matches!(attr, PathAttribute::NextHop(_)))
                 {
                     return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
                 }
                 Ok(PreparedUnicastCandidate::Ipv4Body {
-                    attrs: attrs.with_next_hop,
+                    attrs: attrs.with_next_hop(),
                     entry: Ipv4NlriEntry {
                         path_id: route.path_id,
                         prefix,
@@ -1236,7 +1228,7 @@ impl SessionExportProfile {
                     next_hop,
                     link_local_next_hop: self
                         .route_link_local_next_hop_for_selected_primary(next_hop, route),
-                    attrs: attrs.without_next_hop,
+                    attrs: attrs.without_next_hop(),
                     entry: NlriEntry {
                         path_id: route.path_id,
                         prefix: route.prefix,
@@ -1251,9 +1243,9 @@ impl SessionExportProfile {
         &self,
         route: &Route,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
-        attrs: PreparedUnicastAttributes,
+        mut attrs: PreparedUnicastAttributes,
     ) -> Result<ExactExportProbe, ExportProbeError> {
-        match self.finish_unicast_candidate(route, next_hop_override, attrs)? {
+        match self.finish_unicast_candidate(route, next_hop_override, &mut attrs)? {
             PreparedUnicastCandidate::Ipv4Body { attrs, entry } => self
                 .probe_ipv4_body(std::slice::from_ref(&entry), &[], &attrs)
                 .map_err(Into::into),
@@ -1286,7 +1278,7 @@ impl SessionExportProfile {
         &self,
         route: &Route,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
-        attrs: PreparedUnicastAttributes,
+        attrs: &mut PreparedUnicastAttributes,
         length_cache: &mut FastMap<UnicastProbeShapeKey, ExactExportResult>,
     ) -> Result<ExactExportResult, ExactExportError> {
         let candidate = match self.finish_unicast_candidate(route, next_hop_override, attrs) {
@@ -1811,10 +1803,60 @@ pub(crate) enum PreparedUnicastCandidate {
     },
 }
 
-#[derive(Clone)]
+/// One route's prepared unicast attributes, held once. They start as
+/// prepared, `NEXT_HOP` included, which is the IPv4 body NLRI form;
+/// [`Self::without_next_hop`] turns them into the `MP_REACH_NLRI` form.
+/// Keeping a second copy for the unused form doubled what a slice of
+/// distinct routes with large attribute sets held while it was prepared.
 pub(super) struct PreparedUnicastAttributes {
-    pub(super) with_next_hop: Arc<Vec<PathAttribute>>,
-    pub(super) without_next_hop: Arc<Vec<PathAttribute>>,
+    attrs: Arc<Vec<PathAttribute>>,
+    /// The `MP_REACH_NLRI` form was taken, so `attrs` has no `NEXT_HOP` and
+    /// later routes of this entry need not look for one.
+    stripped: bool,
+}
+
+impl PreparedUnicastAttributes {
+    fn new(attrs: Vec<PathAttribute>) -> Self {
+        Self {
+            attrs: Arc::new(attrs),
+            stripped: false,
+        }
+    }
+
+    /// The IPv4 body NLRI form: the attributes as prepared, with their
+    /// `NEXT_HOP`.
+    pub(super) fn with_next_hop(&self) -> Arc<Vec<PathAttribute>> {
+        debug_assert!(
+            self.attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::NextHop(_))),
+            "IPv4 body NLRI attributes without NEXT_HOP"
+        );
+        Arc::clone(&self.attrs)
+    }
+
+    /// The `MP_REACH_NLRI` form: no `NEXT_HOP` (RFC 4760 §3). The first
+    /// call removes it in place, without copying the other attributes;
+    /// later calls share that allocation and do not scan it again. A cache
+    /// entry is never asked for the body form afterwards: its key (family,
+    /// route next hop, next-hop action, source attributes) and the profile
+    /// decide the wire form, so every route that hits one entry takes the
+    /// same form.
+    pub(super) fn without_next_hop(&mut self) -> Arc<Vec<PathAttribute>> {
+        if !self.stripped {
+            // A body form still alive here would mean one cache key resolved
+            // to both forms. Release builds copy instead of corrupting it.
+            debug_assert_eq!(
+                Arc::strong_count(&self.attrs),
+                1,
+                "prepared unicast attributes handed out in both forms"
+            );
+            Arc::make_mut(&mut self.attrs)
+                .retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+            self.stripped = true;
+        }
+        Arc::clone(&self.attrs)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2443,10 +2485,12 @@ impl ExactExportSnapshot for SessionExportProfile {
         prepared_attr_cache.entries.reserve(candidates.len());
         checkpoint();
         // Exact length-reuse cache for unicast probes. A probed message's
-        // length is a pure function of the prepared attribute bytes
-        // (identified by `Arc` pointer — the prepared-attr cache keeps every
-        // bundle alive for the whole call, so pointers are stable and
-        // distinct), the MP framing inputs, and the entry's wire size; with
+        // length is a pure function of the prepared attribute bytes, the MP
+        // framing inputs, and the entry's wire size. The prepared `Arc`
+        // pointer and the key's `mp` field together identify those bytes:
+        // the prepared-attr cache keeps every entry alive for the whole
+        // call, so pointers are stable and distinct, and an entry stripped
+        // in place for `MP_REACH_NLRI` is only ever probed in that form. With
         // the profile constant across one call, the prefix bit-length
         // determines the NLRI bytes (Add-Path emission is a per-family
         // profile constant). The first candidate of each shape runs the
@@ -2466,14 +2510,12 @@ impl ExactExportSnapshot for SessionExportProfile {
                     route,
                     next_hop_override,
                 } => {
-                    let attrs = self
-                        .prepared_unicast_attributes_cached(
-                            &mut prepared_attr_cache,
-                            route,
-                            local_ipv4,
-                            next_hop_override,
-                        )
-                        .clone();
+                    let attrs = self.prepared_unicast_attributes_cached(
+                        &mut prepared_attr_cache,
+                        route,
+                        local_ipv4,
+                        next_hop_override,
+                    );
                     self.probe_unicast_with_length_cache(
                         route,
                         next_hop_override,
@@ -3449,6 +3491,49 @@ mod tests {
                 "specific next-hop address is part of the cache key"
             );
         }
+    }
+
+    /// The `MP_REACH_NLRI` form is the prepared allocation with `NEXT_HOP`
+    /// removed in place, and later routes share it without scanning it
+    /// again. A second prepared copy per route doubled what a large slice of
+    /// distinct routes allocated.
+    #[test]
+    fn mp_form_strips_next_hop_in_place_and_is_shared_afterwards() {
+        let origin = PathAttribute::Origin(rustbgpd_wire::Origin::Igp);
+        let next_hop = PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1));
+        let mut attrs = PreparedUnicastAttributes::new(vec![
+            origin.clone(),
+            next_hop.clone(),
+            PathAttribute::LocalPref(100),
+        ]);
+        let stripped = vec![origin, PathAttribute::LocalPref(100)];
+        let as_prepared = Arc::as_ptr(&attrs.attrs);
+        let first = attrs.without_next_hop();
+        let second = attrs.without_next_hop();
+        assert_eq!(*first, stripped);
+        assert_eq!(Arc::as_ptr(&first), as_prepared, "stripped without a copy");
+        assert!(Arc::ptr_eq(&first, &second), "later routes share the form");
+
+        // Only the entry's first MP route looks for a NEXT_HOP. One put back
+        // behind its back is therefore still there for the next route.
+        drop((first, second));
+        Arc::get_mut(&mut attrs.attrs)
+            .unwrap()
+            .push(next_hop.clone());
+        assert_eq!(attrs.without_next_hop().last(), Some(&next_hop));
+    }
+
+    /// One cache key resolves to one wire form. An entry asked for the MP
+    /// form while its body form is alive is caught in debug builds.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "handed out in both forms")]
+    fn prepared_attributes_reject_both_forms_of_one_entry() {
+        let mut attrs = PreparedUnicastAttributes::new(vec![PathAttribute::NextHop(
+            Ipv4Addr::new(192, 0, 2, 1),
+        )]);
+        let _body = attrs.with_next_hop();
+        attrs.without_next_hop();
     }
 
     /// The memo keys on the source allocation. Its `'a` borrow keeps every

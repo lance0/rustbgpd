@@ -1645,29 +1645,43 @@ async fn drain_envelope(
         }
     }
     session.timers.hold = None;
-    let (mut frames, completed) = hand_writer(&mut session);
+    if update.end_of_rib.is_empty() {
+        update.end_of_rib = families.to_vec();
+    }
+    wire_items(drain_frames(&mut session, update, pressured).await.0)
+}
+
+/// [`drain_envelope`] on a prepared session, returning the frames as sent
+/// and, for each, whether the resume of a parked slice sent it.
+async fn drain_frames(
+    session: &mut PeerSession,
+    mut update: OutboundRouteUpdate,
+    pressured: bool,
+) -> (Vec<Bytes>, Vec<bool>) {
+    let (mut frames, completed) = hand_writer(session);
     // One maximum frame plus two markers' worth: a full frame or two
     // markers per step.
     let headroom = u64::from(session.outbound_max_message_len()) + 40;
     update.exact_export_snapshot = Some(session.publish_export_profile());
-    if update.end_of_rib.is_empty() {
-        update.end_of_rib = families.to_vec();
-    }
     if pressured {
         session.writer_bulk_admitted = BYTE_BUDGET - headroom;
     }
     session.handle_outbound_route_update(update).await;
     let mut sink = Vec::new();
-    let mut parked = false;
+    let mut resumed = Vec::new();
+    let (mut parked, mut resuming) = (false, false);
     for _ in 0..10_000 {
-        parked |= session
-            .pending_outbound
-            .as_ref()
-            .is_some_and(super::outbound::PendingOutbound::slice_parked);
         assert!(session.writer_bytes_held() <= BYTE_BUDGET);
         while let Ok(frame) = frames.try_recv() {
             sink.push(frame);
+            resumed.push(resuming);
         }
+        // An admission step that starts with a parked slice only resumes it.
+        resuming = session
+            .pending_outbound
+            .as_ref()
+            .is_some_and(super::outbound::PendingOutbound::slice_parked);
+        parked |= resuming;
         if session.pending_outbound.is_none() {
             break;
         }
@@ -1676,13 +1690,13 @@ async fn drain_envelope(
             session.writer_bulk_admitted += BYTE_BUDGET - headroom;
             session.advance_pending_outbound();
         } else {
-            admit_until_blocked(&mut session);
+            admit_until_blocked(session);
         }
     }
     assert!(session.pending_outbound.is_none(), "envelope completed");
     assert!(session.writer_priority_tx.is_some(), "session remains up");
     assert_eq!(parked, pressured, "only the pressured drain parks a slice");
-    wire_items(sink)
+    (sink, resumed)
 }
 
 /// A slice parked mid-group and resumed in one-frame steps delivers exactly
@@ -3336,4 +3350,465 @@ async fn a_write_completing_with_the_deadline_rearms_it() {
     assert_eq!(rearmed - tokio::time::Instant::now(), interval);
     session.expire_outbound_admission();
     assert_cease_out_of_resources(priority_rx.try_recv().expect("Cease/8"));
+}
+
+/// A route-server-client session with IPv4 and IPv6 unicast and RFC 8950
+/// Extended Next Hop, so one envelope yields IPv4 body NLRI, IPv4
+/// `MP_REACH_NLRI` and IPv6 `MP_REACH_NLRI` groups.
+async fn unicast_forms_session() -> (PeerSession, TcpStream) {
+    let (mut session, wire) = shared_group_member(65001).await;
+    let negotiated = Arc::make_mut(session.negotiated.as_mut().unwrap());
+    negotiated
+        .negotiated_families
+        .push((Afi::Ipv6, Safi::Unicast));
+    negotiated
+        .extended_nexthop_families
+        .insert((Afi::Ipv4, Safi::Unicast), Afi::Ipv6);
+    (session, wire)
+}
+
+fn unicast_form_route(prefix: &str, attributes: &Arc<AttrSet>, next_hop: &str) -> Route {
+    let (addr, len) = prefix.split_once('/').unwrap();
+    let len = len.parse().unwrap();
+    Route {
+        prefix: match addr.parse().unwrap() {
+            IpAddr::V4(addr) => Prefix::V4(Ipv4Prefix::new(addr, len)),
+            IpAddr::V6(addr) => Prefix::V6(Ipv6Prefix::new(addr, len)),
+        },
+        next_hop: next_hop.parse().unwrap(),
+        attributes: Arc::clone(attributes),
+        ..make_route(100)
+    }
+}
+
+/// The UPDATE the wire codec builds for `prefixes` with exactly `attrs`:
+/// IPv4 body NLRI, or `MP_REACH_NLRI` (encoded first) when `mp` names the
+/// family and next hop.
+fn unicast_form_frame(
+    mp: Option<(Afi, IpAddr)>,
+    prefixes: &[Prefix],
+    mut attrs: Vec<PathAttribute>,
+) -> Bytes {
+    let message = if let Some((afi, next_hop)) = mp {
+        attrs.insert(
+            0,
+            PathAttribute::MpReachNlri(Box::new(rustbgpd_wire::MpReachNlri {
+                afi,
+                safi: Safi::Unicast,
+                next_hop,
+                link_local_next_hop: None,
+                announced: prefixes
+                    .iter()
+                    .map(|&prefix| NlriEntry { path_id: 0, prefix })
+                    .collect(),
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
+            })),
+        );
+        let mode = if afi == Afi::Ipv4 {
+            Ipv4UnicastMode::MpReach
+        } else {
+            Ipv4UnicastMode::Body
+        };
+        UpdateMessage::build(&[], &[], &attrs, true, false, mode)
+    } else {
+        let entries: Vec<_> = prefixes
+            .iter()
+            .map(|prefix| match prefix {
+                Prefix::V4(prefix) => Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: *prefix,
+                },
+                Prefix::V6(_) => panic!("IPv6 is never body NLRI"),
+            })
+            .collect();
+        UpdateMessage::build(&entries, &[], &attrs, true, false, Ipv4UnicastMode::Body)
+    };
+    rustbgpd_wire::encode_message(&Message::Update(message))
+        .unwrap()
+        .freeze()
+}
+
+/// A table row: the route, its next-hop action, then the form (`None` is
+/// body NLRI) and the attributes it must send.
+type UnicastFormRow = (
+    Route,
+    Option<rustbgpd_policy::NextHopAction>,
+    Option<(Afi, IpAddr)>,
+    Vec<PathAttribute>,
+);
+
+/// Sent attributes: ORIGIN, `AS_PATH`, `NEXT_HOP` if any, MED. `LOCAL_PREF`
+/// never reaches these eBGP peers.
+fn unicast_form_attrs(as_path: &[u32], next_hop: Option<Ipv4Addr>, med: u32) -> Vec<PathAttribute> {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(as_path.to_vec())],
+        }),
+    ];
+    attrs.extend(next_hop.map(PathAttribute::NextHop));
+    attrs.push(PathAttribute::Med(med));
+    attrs
+}
+
+/// Source attributes learned from AS 65002, with `LOCAL_PREF` before MED.
+fn unicast_form_source(next_hop: Option<Ipv4Addr>, med: u32) -> Arc<AttrSet> {
+    let mut attrs = unicast_form_attrs(&[65002], next_hop, med);
+    attrs.insert(attrs.len() - 1, PathAttribute::LocalPref(100));
+    AttrSet::new(attrs)
+}
+
+/// One frame per group of table rows, in the first row's form and attributes.
+fn unicast_form_frames(table: &[UnicastFormRow], groups: &[&[usize]]) -> Vec<Bytes> {
+    groups
+        .iter()
+        .map(|rows| {
+            let prefixes: Vec<_> = rows.iter().map(|&row| table[row].0.prefix).collect();
+            let (_, _, mp, attrs) = &table[rows[0]];
+            unicast_form_frame(*mp, &prefixes, attrs.clone())
+        })
+        .collect()
+}
+
+/// Send the table as one envelope and return the frames.
+async fn send_unicast_forms(session: &mut PeerSession, table: &[UnicastFormRow]) -> Vec<Bytes> {
+    let routes: Vec<_> = table.iter().map(|row| row.0.clone()).collect();
+    let actions: Vec<_> = table.iter().map(|row| row.1.clone()).collect();
+    let update = OutboundRouteUpdate {
+        announce: routes.into(),
+        next_hop_override: actions.into(),
+        ..OutboundRouteUpdate::default()
+    };
+    drain_frames(session, update, false).await.0
+}
+
+/// The batched exact-export probe agrees with the scalar probe, and each
+/// probed length is the length that route is sent at on its own.
+fn assert_unicast_form_probes(profile: &export::SessionExportProfile, table: &[UnicastFormRow]) {
+    use rustbgpd_rib::{ExactExportCandidate, ExactExportSnapshot};
+    let candidates: Vec<_> = table
+        .iter()
+        .map(|(route, action, ..)| ExactExportCandidate::Unicast {
+            route,
+            next_hop_override: action.as_ref(),
+        })
+        .collect();
+    let batched = profile.probe_announcements(&candidates);
+    for (row, (candidate, result)) in candidates.iter().zip(&batched).enumerate() {
+        let alone = <export::SessionExportProfile as ExactExportSnapshot>::probe_announcement(
+            profile, *candidate,
+        );
+        assert_eq!(*result, alone, "route {row}: batched probe");
+        assert_eq!(
+            result.as_ref().unwrap().encoded_len,
+            unicast_form_frames(table, &[&[row]])[0].len(),
+            "route {row}: probed length is the sent length"
+        );
+    }
+}
+
+/// The shared update-group encoder's frames for one slice of `rows`.
+fn shared_unicast_form_frames<'r>(
+    profile: &export::SessionExportProfile,
+    cache: &mut export::PreparedAttrCache<'r>,
+    routes: &'r [Route],
+    table: &[UnicastFormRow],
+    rows: &[usize],
+) -> Vec<Bytes> {
+    let actions: Vec<_> = table.iter().map(|row| row.1.clone()).collect();
+    shared_group::encode_shared_unicast_slice(profile, cache, routes, &actions, rows)
+        .expect("shareable")
+        .into_iter()
+        .map(|chunk| chunk.bytes)
+        .collect()
+}
+
+/// Every unicast wire form keeps its exact bytes, grouping and order when
+/// routes share one source attribute allocation across forms, repeat it,
+/// or carry an equal value in another allocation. The exact-export probe
+/// and the shared update-group encoder prepare through the same seam.
+#[tokio::test(start_paused = true)]
+async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
+    let stored = Ipv4Addr::new(10, 0, 0, 2);
+    // A route-server client gets the attributes unchanged, less LOCAL_PREF.
+    let sent = |med, next_hop| unicast_form_attrs(&[65002], next_hop, med);
+    let (body, bare) = (|med| sent(med, Some(stored)), |med| sent(med, None));
+    // `s` is shared across forms, `e` equals it in another allocation.
+    let source = |med| unicast_form_source(Some(stored), med);
+    let (shared, equal, other) = (source(7), source(7), source(8));
+    let (s, e, o) = (&shared, &equal, &other);
+    let (v4, a6, b6) = ("10.0.0.2", "2001:db8::1", "2001:db8::2");
+    let policy_v4 = Ipv4Addr::new(10, 0, 0, 9);
+    let policy_v6: IpAddr = "2001:db8::3".parse().unwrap();
+    let mp4 = |next_hop: &str| Some((Afi::Ipv4, next_hop.parse().unwrap()));
+    let mp6 = |next_hop: &str| Some((Afi::Ipv6, next_hop.parse().unwrap()));
+    let to = |next_hop| Some(rustbgpd_policy::NextHopAction::Specific(next_hop));
+    let mut table: Vec<UnicastFormRow> = Vec::new();
+    let mut row = |prefix, attributes, next_hop, action, mp, attrs| {
+        let route = unicast_form_route(prefix, attributes, next_hop);
+        table.push((route, action, mp, attrs));
+    };
+    row("20.0.0.0/32", s, v4, None, None, body(7));
+    row("20.0.0.1/32", s, a6, None, mp4(a6), bare(7));
+    row("20.0.0.2/32", s, v4, None, None, body(7));
+    row("20.0.0.3/32", e, v4, None, None, body(7));
+    row("20.0.0.4/32", o, v4, None, None, body(8));
+    row("20.0.0.5/32", e, a6, None, mp4(a6), bare(7));
+    row("20.0.0.6/32", s, b6, None, mp4(b6), bare(7));
+    row("20.0.0.7/32", s, a6, None, mp4(a6), bare(7));
+    row("2001:db8:0:8::/64", s, a6, None, mp6(a6), bare(7));
+    row("2001:db8:0:9::/64", s, a6, None, mp6(a6), bare(7));
+    row("2001:db8:0:a::/64", e, a6, None, mp6(a6), bare(7));
+    row("2001:db8:0:b::/64", o, a6, None, mp6(a6), bare(8));
+    let form = Some((Afi::Ipv6, policy_v6));
+    row("2001:db8:0:c::/64", s, a6, to(policy_v6), form, bare(7));
+    let (action, attrs) = (to(policy_v4.into()), sent(7, Some(policy_v4)));
+    row("20.0.0.13/32", s, v4, action, None, attrs);
+    let frames = |groups: &[&[usize]]| unicast_form_frames(&table, groups);
+
+    let (mut session, _wire) = unicast_forms_session().await;
+    let profile = session.publish_export_profile();
+    // IPv4 body groups, then IPv4 MP_REACH groups, then IPv6 groups, each
+    // in first-arrival order with pointer and value joins.
+    assert_eq!(
+        send_unicast_forms(&mut session, &table).await,
+        frames(&[
+            &[0, 2, 3],
+            &[4],
+            &[13],
+            &[1, 5, 7],
+            &[6],
+            &[8, 9, 10],
+            &[11],
+            &[12]
+        ])
+    );
+    assert_unicast_form_probes(&profile, &table);
+
+    // The shared encoder groups by source and prepared allocation only.
+    let routes: Vec<_> = table.iter().map(|row| row.0.clone()).collect();
+    let rows: Vec<_> = (0..table.len()).collect();
+    let mut cache = export::PreparedAttrCache::default();
+    assert_eq!(
+        shared_unicast_form_frames(&profile, &mut cache, &routes, &table, &rows),
+        frames(&[
+            &[0, 2],
+            &[1, 7],
+            &[3],
+            &[4],
+            &[5],
+            &[6],
+            &[8, 9],
+            &[10],
+            &[11],
+            &[12],
+            &[13]
+        ])
+    );
+}
+
+/// The same exact-bytes check for next hops the session supplies itself: an
+/// eBGP peer that is not a route-server client (`NEXT_HOP` is rewritten to
+/// the local IPv4 address, then stripped for `MP_REACH_NLRI`), next-hop
+/// self, and source attributes with no `NEXT_HOP` to strip. A second shared
+/// encoder slice reuses an entry the first slice already stripped.
+#[tokio::test(start_paused = true)]
+async fn rewritten_self_and_absent_next_hops_keep_exact_bytes() {
+    let stored = Ipv4Addr::new(10, 0, 0, 2);
+    // `w` stores a NEXT_HOP, `e` equals it in another allocation, `b` has none.
+    let (with, equal, bare) = (
+        unicast_form_source(Some(stored), 7),
+        unicast_form_source(Some(stored), 7),
+        unicast_form_source(None, 7),
+    );
+    let (w, e, b) = (&with, &equal, &bare);
+    let (v4, a6) = ("10.0.0.2", "2001:db8::1");
+    let own = || Some(rustbgpd_policy::NextHopAction::Self_);
+
+    // eBGP, not a route-server client: AS_PATH gains the local AS and every
+    // MP_REACH next hop is the session's own IPv6 address.
+    let (mut session, _wire) = unicast_forms_session().await;
+    session.config.route_server_client = false;
+    let local6: Ipv6Addr = "2001:db8::ffff".parse().unwrap();
+    session.config.local_ipv6_nexthop = Some(local6);
+    let profile = session.publish_export_profile();
+    let sent = |next_hop| unicast_form_attrs(&[65001, 65002], next_hop, 7);
+    let (mp4, mp6) = (
+        Some((Afi::Ipv4, IpAddr::V6(local6))),
+        Some((Afi::Ipv6, IpAddr::V6(local6))),
+    );
+    let mut table: Vec<UnicastFormRow> = Vec::new();
+    let mut row = |prefix, attributes, next_hop, action, mp, attrs| {
+        let route = unicast_form_route(prefix, attributes, next_hop);
+        table.push((route, action, mp, attrs));
+    };
+    // NEXT_HOP rewritten to the local IPv4 address, then stripped.
+    row("20.1.0.0/32", w, v4, None, mp4, sent(None));
+    row("20.1.0.1/32", w, v4, None, mp4, sent(None));
+    row("20.1.0.2/32", e, v4, None, mp4, sent(None));
+    let local4 = Some(profile.local_ipv4());
+    row("20.1.0.3/32", w, v4, own(), None, sent(local4));
+    row("2001:db8:1:4::/64", w, a6, None, mp6, sent(None));
+    // Nothing to strip; equal to the stripped sets by value.
+    row("2001:db8:1:5::/64", b, a6, None, mp6, sent(None));
+    // NEXT_HOP added for the IPv4 route, then stripped.
+    row("20.1.0.6/32", b, v4, None, mp4, sent(None));
+    assert_eq!(
+        send_unicast_forms(&mut session, &table).await,
+        unicast_form_frames(&table, &[&[3], &[0, 1, 2, 6], &[4, 5]])
+    );
+    assert_unicast_form_probes(&profile, &table);
+
+    // Route-server client: next-hop self, and sources without a NEXT_HOP.
+    let (mut session, _wire) = unicast_forms_session().await;
+    let profile = session.publish_export_profile();
+    let sent = |next_hop| unicast_form_attrs(&[65002], next_hop, 7);
+    let (mp4, mp6) = (
+        Some((Afi::Ipv4, a6.parse().unwrap())),
+        Some((Afi::Ipv6, a6.parse().unwrap())),
+    );
+    let mut table: Vec<UnicastFormRow> = Vec::new();
+    let mut row = |prefix, attributes, next_hop, action, mp, attrs| {
+        let route = unicast_form_route(prefix, attributes, next_hop);
+        table.push((route, action, mp, attrs));
+    };
+    let local4 = Some(profile.local_ipv4());
+    row("20.2.0.0/32", w, v4, own(), None, sent(local4));
+    row("20.2.0.1/32", b, a6, None, mp4, sent(None));
+    row("20.2.0.2/32", w, a6, None, mp4, sent(None));
+    row("2001:db8:2:3::/64", b, a6, None, mp6, sent(None));
+    row("2001:db8:2:4::/64", w, a6, own(), mp6, sent(None));
+    row("2001:db8:2:5::/64", w, a6, None, mp6, sent(None));
+    row("2001:db8:2:6::/64", w, a6, None, mp6, sent(None));
+    let frames = |groups: &[&[usize]]| unicast_form_frames(&table, groups);
+    assert_eq!(
+        send_unicast_forms(&mut session, &table).await,
+        frames(&[&[0], &[1, 2], &[3, 4, 5, 6]])
+    );
+    assert_unicast_form_probes(&profile, &table);
+
+    // Row 6 hits the entry row 5 stripped in the first slice.
+    let routes: Vec<_> = table.iter().map(|row| row.0.clone()).collect();
+    let mut cache = export::PreparedAttrCache::default();
+    assert_eq!(
+        shared_unicast_form_frames(&profile, &mut cache, &routes, &table, &[0, 1, 2, 3, 5]),
+        frames(&[&[0], &[1], &[2], &[3], &[5]])
+    );
+    assert_eq!(
+        shared_unicast_form_frames(&profile, &mut cache, &routes, &table, &[4, 6]),
+        frames(&[&[4], &[6]])
+    );
+}
+
+/// A slice parked partway through a group rebuilds only that group's
+/// attributes on resume, in the form the group sends: the resumed bytes are
+/// the unpressured ones for body NLRI and both `MP_REACH_NLRI` families.
+#[tokio::test(start_paused = true)]
+async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
+    let stored = Ipv4Addr::new(10, 0, 0, 2);
+    let mp_next_hop: IpAddr = "2001:db8::1".parse().unwrap();
+    // One large shared attribute set, so every group spans several frames.
+    let mut attrs = make_route(100).attributes.to_vec();
+    attrs.push(PathAttribute::Unknown(RawAttribute {
+        flags: 0xc0,
+        type_code: 200,
+        data: Bytes::from(vec![0; 3_000]),
+    }));
+    let attrs = AttrSet::new(attrs);
+    // 400 body NLRI rows, 400 IPv4 MP_REACH rows, 300 IPv6 rows.
+    let routes: Vec<Route> = (0..1_100_u32)
+        .map(|row| {
+            let v4 = format!("20.0.{}.{}/32", row / 256, row % 256);
+            match row {
+                0..400 => unicast_form_route(&v4, &attrs, "10.0.0.2"),
+                400..800 => unicast_form_route(&v4, &attrs, "2001:db8::1"),
+                _ => unicast_form_route(&format!("2001:db8:0:{row:x}::/64"), &attrs, "2001:db8::1"),
+            }
+        })
+        .collect();
+    let prefixes: Vec<_> = routes.iter().map(|route| route.prefix).collect();
+    let update = || OutboundRouteUpdate {
+        announce: routes.clone().into(),
+        ..OutboundRouteUpdate::default()
+    };
+
+    let (mut session, _wire) = unicast_forms_session().await;
+    let reference = drain_frames(&mut session, update(), false).await.0;
+    let mut seen = Vec::new();
+    let mut forms = Vec::new();
+    for frame in &reference {
+        assert!(frame.len() <= usize::from(rustbgpd_wire::MAX_MESSAGE_LEN));
+        let Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut frame.clone(), rustbgpd_wire::MAX_MESSAGE_LEN)
+                .unwrap()
+        else {
+            panic!("UPDATE")
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        let body_next_hop = parsed.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::NextHop(next_hop) => Some(*next_hop),
+            _ => None,
+        });
+        let mp = parsed.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        });
+        if let Some(mp) = mp {
+            assert_eq!(body_next_hop, None, "no NEXT_HOP beside MP_REACH_NLRI");
+            assert_eq!(mp.next_hop, mp_next_hop);
+            forms.push(if mp.afi == Afi::Ipv4 { 1 } else { 2 });
+            seen.extend(mp.announced.iter().map(|entry| entry.prefix));
+        } else {
+            assert_eq!(body_next_hop, Some(stored));
+            forms.push(0);
+            seen.extend(
+                parsed
+                    .announced
+                    .iter()
+                    .map(|entry| Prefix::V4(entry.prefix)),
+            );
+        }
+    }
+    assert_eq!(seen, prefixes, "every route once, in source order");
+    let per_form = |frames: &mut dyn Iterator<Item = usize>| {
+        frames.fold([0; 3], |mut counts, form| {
+            counts[form] += 1;
+            counts
+        })
+    };
+    let frames_per_form = per_form(&mut forms.iter().copied());
+    assert!(
+        frames_per_form.iter().all(|&frames| frames > 1),
+        "each form's one group spans several frames: {frames_per_form:?}"
+    );
+    // FNV-1a over every frame, pinned before prepared attributes were held
+    // in one form, so the bytes are compared across that change too.
+    let digest = reference
+        .iter()
+        .flatten()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |digest, byte| {
+            (digest ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    assert_eq!(
+        (frames_per_form, digest),
+        ([2, 2, 3], 0xb2fb_6486_bcd8_20fa),
+        "pinned unpressured frames"
+    );
+
+    let (mut session, _wire) = unicast_forms_session().await;
+    let (frames, resumed) = drain_frames(&mut session, update(), true).await;
+    assert_eq!(frames, reference);
+    // Every form had frames sent by a resume, which rebuilds its attributes.
+    let resumed_forms = forms.iter().zip(&resumed).filter(|(_, sent)| **sent);
+    let resumed_per_form = per_form(&mut resumed_forms.map(|(form, _)| *form));
+    assert!(
+        resumed_per_form.iter().all(|&frames| frames > 0),
+        "{resumed_per_form:?}"
+    );
 }
