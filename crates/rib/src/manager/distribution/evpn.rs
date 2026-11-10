@@ -1114,11 +1114,40 @@ pub(in crate::manager) struct PendingEvpnFanout {
 impl RibManager {
     /// One shared stage retains displaced OLD until every member's existing
     /// transaction has either admitted its sparse payload or captured retry.
+    fn distribute_owned_evpn_group(
+        &mut self,
+        gid: usize,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        // A member that is refused, or that retains a recovery proof, costs
+        // a table-sized capture or complete-feed build and commit. Such a
+        // pass takes the readiness lane for its whole turn; a pass of clean
+        // deltas serves it at each member boundary below.
+        let table_sized = self.group_ribs.get(&gid).is_some_and(|group| {
+            group.members.iter().any(|&peer| {
+                self.dirty_peers.contains(&peer)
+                    || self.force_outbound_peers.contains(&peer)
+                    || self.outbound_channel_full(peer)
+                    || self
+                        .evpn_recovery_handle(peer)
+                        .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle))
+            })
+        });
+        if table_sized {
+            self.with_ingest_readiness(|manager| {
+                manager.owned_evpn_group_pass(gid, keys, checkpoint);
+            });
+        } else {
+            self.owned_evpn_group_pass(gid, keys, checkpoint);
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "keeps shared-inventory eligibility, complete-feed fallback and admitted-state commit in one transaction"
     )]
-    fn distribute_owned_evpn_group(
+    fn owned_evpn_group_pass(
         &mut self,
         gid: usize,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,

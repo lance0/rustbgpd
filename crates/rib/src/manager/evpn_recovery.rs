@@ -1164,10 +1164,9 @@ impl RibManager {
         // which would leave every checkpoint below inert, so the walk takes
         // the lane itself: it serves at its start and end and at its stride.
         // Inside an owner (a refresh, a resync) this installs nothing.
-        let installed = self.begin_replacement_readiness();
-        let captured = self.walk_evpn_capture(peer, private, old_deltas, gid, handle);
-        self.finish_readiness_owner(installed);
-        captured
+        self.with_ingest_readiness(|manager| {
+            manager.walk_evpn_capture(peer, private, old_deltas, gid, handle)
+        })
     }
 
     fn walk_evpn_capture(

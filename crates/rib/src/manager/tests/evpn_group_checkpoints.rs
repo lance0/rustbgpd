@@ -217,7 +217,7 @@ struct OwnedPass {
     manager: RibManager,
     gid: usize,
     peers: Vec<PeerId>,
-    _outputs: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    outputs: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
     responses: Vec<oneshot::Receiver<Result<usize, crate::update::RibReadinessError>>>,
 }
 
@@ -250,7 +250,7 @@ impl OwnedPass {
                 {}
             }
         }
-        let queued = (usize::from(members) * usize::from(rows) * 4 + 64)
+        let queued = (usize::from(members) * usize::from(rows) * 16 + 256)
             * crate::manager::QUERY_BUDGET_PER_CHUNK;
         let (readiness_tx, readiness_rx) = mpsc::channel(queued);
         manager.readiness_rx = Some(readiness_rx);
@@ -271,7 +271,7 @@ impl OwnedPass {
             manager,
             gid,
             peers,
-            _outputs: outputs,
+            outputs,
             responses,
         }
     }
@@ -285,8 +285,8 @@ impl OwnedPass {
         HashSet::from([changed.key()])
     }
 
-    /// Readiness batches answered so far; some queries must remain queued,
-    /// or the count would understate the service points.
+    /// Readiness batches answered since the last call; some queries must
+    /// remain queued, or the count would understate the service points.
     fn batches(&mut self) -> usize {
         let mut answered = 0;
         for response in &mut self.responses {
@@ -355,4 +355,100 @@ fn owned_pass_serves_readiness_at_each_member_boundary() {
         assert!(pass.manager.dirty_peers.is_empty());
         assert_eq!(pass.batches(), usize::from(members), "{members} members");
     }
+}
+
+/// A member that retains a recovery proof with its writer open again gets a
+/// complete feed: a completeness walk, a table walk with route clones, an
+/// OLD proof walk and a table-sized commit. In ordinary ingest that is as
+/// long as a capture and was just as unserved. The pass takes the lane, so
+/// every member's feed build answers at least one batch per table row.
+#[test]
+fn retained_owned_feed_builds_serve_readiness_at_every_stride_for_any_size() {
+    for (members, rows) in [(2_u8, 64_u16), (4, 64), (2, 256), (4, 256)] {
+        let mut pass = OwnedPass::new(members, rows, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        for output in &mut pass.outputs {
+            while output.try_recv().is_ok() {}
+        }
+        pass.batches();
+        let second = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 2), 9);
+        pass.manager
+            .loc_rib
+            .recompute_evpn(second.key(), [&second].into_iter());
+        let peer = pass.peers[0];
+        assert!(pass.manager.dirty_peers.is_empty());
+        let builds = pass.manager.adj_rib_out_commit_stats.successful_enqueues;
+        pass.manager
+            .distribute_evpn_keys_to_peer(peer, &HashSet::from([second.key()]), &mut || {});
+        assert_eq!(
+            pass.manager.adj_rib_out_commit_stats.successful_enqueues - builds,
+            usize::from(members),
+            "every retained member's complete feed was built and admitted"
+        );
+        let batches = pass.batches();
+        assert!(
+            batches >= usize::from(members) * usize::from(rows),
+            "{members} members x {rows} rows: {batches} readiness batches leaves a stretch \
+             as long as one member's feed build"
+        );
+    }
+}
+
+/// A reply alone does not unblock a probe: the waiting task is woken on the
+/// actor's own worker and cannot run while the pass holds it. The pass must
+/// hand the executor off, so the probe task itself completes mid-pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_owned_pass_lets_the_waiting_probe_task_run() {
+    let mut pass = OwnedPass::new(4, 64, true);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    pass.manager.readiness_rx = Some(readiness_rx);
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (reply, response) = oneshot::channel();
+    readiness_tx
+        .try_send(RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        })
+        .unwrap();
+    let probe = tokio::spawn({
+        let completed = Arc::clone(&completed);
+        async move {
+            response.await.unwrap().unwrap();
+            completed.store(true, Ordering::SeqCst);
+        }
+    });
+    // Let the probe park on its reply before the pass starts.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let ran_during_pass = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    pass.manager.replacement_readiness_test_hook = Some(Arc::new({
+        let completed = Arc::clone(&completed);
+        let ran_during_pass = Arc::clone(&ran_during_pass);
+        move |seam| {
+            // The owner's last checkpoint: the reply went out at its first.
+            if seam == "terminal_cleanup" && !ran_during_pass.load(Ordering::SeqCst) {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !completed.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                ran_during_pass.store(completed.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        }
+    }));
+    let keys = pass.changed();
+    let gid = pass.gid;
+    // The actor runs on a worker thread, where a reply wakes the probe onto
+    // that worker's own queue; the test's main thread would hide that.
+    tokio::spawn(async move {
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        drop(pass);
+    })
+    .await
+    .unwrap();
+    assert!(
+        ran_during_pass.load(Ordering::SeqCst),
+        "the probe task did not run until the pass returned"
+    );
+    probe.await.unwrap();
 }
