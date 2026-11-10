@@ -1072,11 +1072,11 @@ impl SessionExportProfile {
         local_ipv4: Ipv4Addr,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> PreparedUnicastAttributes {
-        PreparedUnicastAttributes(Arc::new(self.prepare_unicast_attributes(
+        PreparedUnicastAttributes::new(self.prepare_unicast_attributes(
             route,
             local_ipv4,
             next_hop_override,
-        )))
+        ))
     }
 
     fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
@@ -1156,7 +1156,7 @@ impl SessionExportProfile {
                 // MP_REACH next hop even with Extended Next Hop negotiated.
                 if !self.scoped_link_local_peer
                     && next_hop.is_ipv4()
-                    && attrs.0.iter().any(|attr| {
+                    && attrs.attrs.iter().any(|attr| {
                         matches!(attr, PathAttribute::NextHop(nh) if IpAddr::V4(*nh) == next_hop)
                     })
                 {
@@ -1183,7 +1183,7 @@ impl SessionExportProfile {
             Prefix::V4(prefix) => {
                 if self.scoped_link_local_peer
                     || !attrs
-                        .0
+                        .attrs
                         .iter()
                         .any(|attr| matches!(attr, PathAttribute::NextHop(_)))
                 {
@@ -1808,40 +1808,54 @@ pub(crate) enum PreparedUnicastCandidate {
 /// [`Self::without_next_hop`] turns them into the `MP_REACH_NLRI` form.
 /// Keeping a second copy for the unused form doubled what a slice of
 /// distinct routes with large attribute sets held while it was prepared.
-pub(super) struct PreparedUnicastAttributes(Arc<Vec<PathAttribute>>);
+pub(super) struct PreparedUnicastAttributes {
+    attrs: Arc<Vec<PathAttribute>>,
+    /// The `MP_REACH_NLRI` form was taken, so `attrs` has no `NEXT_HOP` and
+    /// later routes of this entry need not look for one.
+    stripped: bool,
+}
 
 impl PreparedUnicastAttributes {
+    fn new(attrs: Vec<PathAttribute>) -> Self {
+        Self {
+            attrs: Arc::new(attrs),
+            stripped: false,
+        }
+    }
+
     /// The IPv4 body NLRI form: the attributes as prepared, with their
     /// `NEXT_HOP`.
     pub(super) fn with_next_hop(&self) -> Arc<Vec<PathAttribute>> {
         debug_assert!(
-            self.0
+            self.attrs
                 .iter()
                 .any(|attr| matches!(attr, PathAttribute::NextHop(_))),
             "IPv4 body NLRI attributes without NEXT_HOP"
         );
-        Arc::clone(&self.0)
+        Arc::clone(&self.attrs)
     }
 
     /// The `MP_REACH_NLRI` form: no `NEXT_HOP` (RFC 4760 §3). The first
-    /// call removes it in place, without copying the other attributes, and
-    /// later calls share that allocation. A cache entry is never asked for
-    /// the body form afterwards: its key (family, route next hop, next-hop
-    /// action, source attributes) and the profile decide the wire form, so
-    /// every route that hits one entry takes the same form.
+    /// call removes it in place, without copying the other attributes;
+    /// later calls share that allocation and do not scan it again. A cache
+    /// entry is never asked for the body form afterwards: its key (family,
+    /// route next hop, next-hop action, source attributes) and the profile
+    /// decide the wire form, so every route that hits one entry takes the
+    /// same form.
     pub(super) fn without_next_hop(&mut self) -> Arc<Vec<PathAttribute>> {
-        let is_next_hop = |attr: &PathAttribute| matches!(attr, PathAttribute::NextHop(_));
-        if self.0.iter().any(is_next_hop) {
+        if !self.stripped {
             // A body form still alive here would mean one cache key resolved
             // to both forms. Release builds copy instead of corrupting it.
             debug_assert_eq!(
-                Arc::strong_count(&self.0),
+                Arc::strong_count(&self.attrs),
                 1,
                 "prepared unicast attributes handed out in both forms"
             );
-            Arc::make_mut(&mut self.0).retain(|attr| !is_next_hop(attr));
+            Arc::make_mut(&mut self.attrs)
+                .retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+            self.stripped = true;
         }
-        Arc::clone(&self.0)
+        Arc::clone(&self.attrs)
     }
 }
 
@@ -3480,23 +3494,33 @@ mod tests {
     }
 
     /// The `MP_REACH_NLRI` form is the prepared allocation with `NEXT_HOP`
-    /// removed in place, and later routes share it. A second prepared copy
-    /// per route doubled what a large slice of distinct routes allocated.
+    /// removed in place, and later routes share it without scanning it
+    /// again. A second prepared copy per route doubled what a large slice of
+    /// distinct routes allocated.
     #[test]
     fn mp_form_strips_next_hop_in_place_and_is_shared_afterwards() {
         let origin = PathAttribute::Origin(rustbgpd_wire::Origin::Igp);
-        let mut attrs = PreparedUnicastAttributes(Arc::new(vec![
+        let next_hop = PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1));
+        let mut attrs = PreparedUnicastAttributes::new(vec![
             origin.clone(),
-            PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)),
+            next_hop.clone(),
             PathAttribute::LocalPref(100),
-        ]));
+        ]);
         let stripped = vec![origin, PathAttribute::LocalPref(100)];
-        let as_prepared = Arc::as_ptr(&attrs.0);
+        let as_prepared = Arc::as_ptr(&attrs.attrs);
         let first = attrs.without_next_hop();
         let second = attrs.without_next_hop();
         assert_eq!(*first, stripped);
         assert_eq!(Arc::as_ptr(&first), as_prepared, "stripped without a copy");
         assert!(Arc::ptr_eq(&first, &second), "later routes share the form");
+
+        // Only the entry's first MP route looks for a NEXT_HOP. One put back
+        // behind its back is therefore still there for the next route.
+        drop((first, second));
+        Arc::get_mut(&mut attrs.attrs)
+            .unwrap()
+            .push(next_hop.clone());
+        assert_eq!(attrs.without_next_hop().last(), Some(&next_hop));
     }
 
     /// One cache key resolves to one wire form. An entry asked for the MP
@@ -3505,9 +3529,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "handed out in both forms")]
     fn prepared_attributes_reject_both_forms_of_one_entry() {
-        let mut attrs = PreparedUnicastAttributes(Arc::new(vec![PathAttribute::NextHop(
+        let mut attrs = PreparedUnicastAttributes::new(vec![PathAttribute::NextHop(
             Ipv4Addr::new(192, 0, 2, 1),
-        )]));
+        )]);
         let _body = attrs.with_next_hop();
         attrs.without_next_hop();
     }
