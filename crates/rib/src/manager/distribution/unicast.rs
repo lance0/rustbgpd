@@ -1782,7 +1782,7 @@ impl RibManager {
             if rib_len == [0, 0] {
                 self.gc_attr_intern();
             } else {
-                self.defer_unicast_attr_gc(removed);
+                self.defer_attr_gc(removed);
             }
         }
     }
@@ -1892,7 +1892,7 @@ impl RibManager {
             let changed = self.recompute_best_after_announce(peer, &affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            self.defer_unicast_attr_gc(replaced);
+            self.defer_attr_gc(replaced);
             self.sync_attr_intern_gauge();
         }
     }
@@ -2013,7 +2013,7 @@ impl RibManager {
         affected.insert(prefix);
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
-        self.defer_unicast_attr_gc(usize::from(replaced));
+        self.defer_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
         log_started();
         Ok((outcome, generation))
@@ -2085,7 +2085,7 @@ impl RibManager {
         if unicast_lens == [0, 0] {
             self.gc_attr_intern();
         } else {
-            self.defer_unicast_attr_gc(withdrawn);
+            self.defer_attr_gc(withdrawn);
         }
         self.sync_attr_intern_gauge();
     }
