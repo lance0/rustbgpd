@@ -144,6 +144,10 @@ struct Args {
     /// Controlled recovery protocol on stdin; retain raw receiver UPDATEs here.
     #[arg(long)]
     qualification_control_dir: Option<PathBuf>,
+    /// After the finish acknowledgement, print a final receiver receipt and
+    /// fail unless the inventory is still exact (memory qualification).
+    #[arg(long, requires = "evidence_dir")]
+    final_inventory: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -916,7 +920,7 @@ async fn flap(args: &Args, shape: Shape, client: &mut Client, n: u32, lost: &Arc
     );
 }
 
-async fn finish(args: &Args, clients: &mut [Client]) {
+async fn finish(args: &Args, shape: Shape, clients: &mut [Client]) {
     if let Some(dir) = &args.evidence_dir {
         if let Err(error) = std::fs::create_dir_all(dir)
             .and_then(|()| std::fs::write(dir.join("ready"), b"ready\n"))
@@ -929,6 +933,24 @@ async fn finish(args: &Args, clients: &mut [Client]) {
                 fail("finish handshake: no ack");
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    // The caller settles between the receipt and this acknowledgement; an
+    // update in that interval must not leave the earlier receipt standing.
+    if args.final_inventory {
+        let result = check(shape, clients);
+        println!(
+            "evpn_final_receipt receivers={} min_live={} max_live={} invalid={} parse_errors={} \
+             self_reflected={}",
+            result.receivers,
+            result.min_live,
+            result.max_live,
+            result.invalid,
+            result.parse_errors,
+            result.self_reflected,
+        );
+        if !converged(&result, shape) {
+            fail("receiver state changed before finish acknowledgement");
         }
     }
     for client in clients.iter_mut() {
@@ -1115,7 +1137,7 @@ async fn main() -> anyhow::Result<()> {
         terminal.parse_errors,
         terminal.self_reflected,
     );
-    finish(&args, &mut clients).await;
+    finish(&args, shape, &mut clients).await;
     Ok(())
 }
 

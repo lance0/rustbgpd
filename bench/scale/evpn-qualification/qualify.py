@@ -61,7 +61,9 @@ def accept(condition, message):
 def require_host_lock():
     """The runner (run.sh) holds the canonical host lock on an inherited
     descriptor. The descriptor must be the lock file, and the lock must be
-    held: a fresh open of the file cannot take it."""
+    held through it: a fresh open of the file cannot take the lock, and taking
+    it again on the inherited descriptor succeeds, which it does not while
+    another holder has it."""
     path = Path(os.environ.get("RUSTBGPD_HOST_LOCK") or Path.home() / ".local/state/rustbgpd-host.lock")
     descriptor = os.environ.get("RUSTBGPD_HOST_LOCK_FD", "")
     message = "use run.sh to hold the host lock"
@@ -75,10 +77,16 @@ def require_host_lock():
     try:
         fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        return
+        held = True
+    else:
+        held = False
     finally:
         os.close(probe)
-    require(False, message)
+    require(held, message)
+    try:
+        fcntl.flock(int(descriptor), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        require(False, message)
 
 
 def manifest_for(output):
@@ -355,6 +363,14 @@ def receipt(text, clients, routes):
                        "converged_epochs": 0, "flaps": 0, "reloads": 0, "invalid": 0,
                        "parse_errors": 0, "self_reflected": 0}.items():
         require(row.get(key) == str(value), f"EVPN fleet receipt differs: {key}")
+    # The first receipt precedes settling. The driver checks the inventory and
+    # its error counters again after the finish acknowledgement.
+    final = [line for line in text.splitlines() if line.startswith("evpn_final_receipt ")]
+    require(len(final) == 1 and text.index(final[0]) > text.index(lines[0]), "missing/duplicate final receiver receipt")
+    row = dict(item.split("=", 1) for item in final[0].split()[1:])
+    for key, value in {"receivers": clients, "min_live": expected, "max_live": expected, "invalid": 0,
+                       "parse_errors": 0, "self_reflected": 0}.items():
+        require(row.get(key) == str(value), f"final receiver receipt differs: {key}")
     convergence = re.findall(r"^converged \(initial\) clients=\d+ expected=\d+ ms=(\d+)$", text, re.M)
     require(len(convergence) == 1, "initial convergence evidence missing")
     return {"exact_receiver_keys": True, "initial_convergence_ms": int(convergence[0])}
@@ -493,7 +509,7 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
             command = ["taskset", "-c", manifest["harness_cpus"], str(harness), "--daemon", "127.0.0.1:17986",
                        "--clients", str(clients), "--type2", str(routes * 4 // 5), "--type5", str(routes // 5),
                        "--shift2", "1", "--shift5", "1", "--epochs", "0", "--epoch-secs", "1", "--churn-secs", "0",
-                       "--evidence-dir", str(scenario / "finish"), "--hold-time", "180"]
+                       "--evidence-dir", str(scenario / "finish"), "--final-inventory", "--hold-time", "180"]
             driver = COMMON.own_child(subprocess.Popen(command, stdout=driver_log, stderr=subprocess.STDOUT))
             samples = []
             ready_at = None
@@ -602,11 +618,13 @@ def analyze_results(args):
         require(row["ownership"] in observed, "retained ownership witness absent from daemon log")
         for observation in observed:
             validate_provenance(observation, row["clients"])
+        # The arm's structure is checked before any resource bar, so a bar
+        # miss cannot stand in for evidence from the wrong arm.
+        ownership(row["ownership"], row["arm"], row["clients"], row["routes_per_client"])
         for observation in observed:
             accept_provenance_headroom(observation)
         heap = metrics((leg / "metrics.txt").read_text())
         require(row["executed_resets"] == heap["executed_resets"], "reset receipt differs from raw metrics")
-        ownership(row["ownership"], row["arm"], row["clients"], row["routes_per_client"])
         require(set(row["executed_resets"]) == set(CAUSES) and not any(row["executed_resets"].values()),
                 "reset evidence missing or nonzero")
         require(row["readiness"] and all(sample["status"] == 200 for sample in row["readiness"]), "failed/empty readiness evidence")

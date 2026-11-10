@@ -69,7 +69,10 @@ dispatches (`mono_us`, microseconds).
     withdrawal, must report its counters and visit zero repeated inventory rows.
 
 In both cell types every receiver's raw EVPN EoR must follow every route its
-refresh covers (FAIL otherwise). ERR is not negotiated, so no EoRR is on this wire.
+refresh covers (FAIL otherwise). In a forced-refusal cell the refresh also covers
+the admitted fill: each filled route must reach every other peer twice, its first
+announcement and its replay, before that EoR. ERR is not negotiated, so no EoRR
+is on this wire.
 Preparation archives that input and this harness separately, records both source
 commits and archive hashes, and derives two independent source exports. Verification
 compares every export input with both archives and the reviewed derivations.

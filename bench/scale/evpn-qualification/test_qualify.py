@@ -60,6 +60,8 @@ def driver_text(clients, routes):
     return (f"converged (initial) clients={clients} expected={expected} ms=42\n"
             f"evpn_receipt clients={clients} expected={expected} epochs=0 converged_epochs=0 "
             f"flaps=0 reloads=0 receivers={clients} min_live={expected} max_live={expected} "
+            "invalid=0 parse_errors=0 self_reflected=0\n"
+            f"evpn_final_receipt receivers={clients} min_live={expected} max_live={expected} "
             "invalid=0 parse_errors=0 self_reflected=0\n")
 
 
@@ -164,6 +166,12 @@ class TestQualification(unittest.TestCase):
                      patch.dict(Q.os.environ, {**unheld, "RUSTBGPD_HOST_LOCK_FD": descriptor}), \
                      self.assertRaisesRegex(ValueError, "host lock"):
                     Q.require_host_lock()
+            # Another holder: the inherited descriptor is open on the lock
+            # file, but a different open file description holds the lock.
+            with open(lock.name) as holder:
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                with patch.dict(Q.os.environ, unheld), self.assertRaisesRegex(ValueError, "host lock"):
+                    Q.require_host_lock()
             with patch.dict(Q.os.environ, held(lock)):
                 Q.require_host_lock()
 
@@ -249,8 +257,15 @@ class TestQualification(unittest.TestCase):
     def test_exact_receiver_count_is_not_enough(self):
         text = driver_text(3, 10)
         Q.receipt(text, 3, 10)
-        for bad in (text.replace("invalid=0", "invalid=1"),
-                    text.replace("max_live=20", "max_live=21"),
+        first, final = text.splitlines(keepends=True)[1:]
+        for bad in (text.replace(first, first.replace("invalid=0", "invalid=1")),
+                    text.replace(first, first.replace("max_live=20", "max_live=21")),
+                    # State that moved during settling, after the first receipt.
+                    text.replace(final, final.replace("invalid=0", "invalid=1")),
+                    text.replace(final, final.replace("min_live=20", "min_live=19")),
+                    text.replace(final, final.replace("parse_errors=0", "parse_errors=2")),
+                    text.replace(final, ""),
+                    text + final,
                     text + "evpn_session_lost client=1\n",
                     text + "FAIL: receiver state changed before finish acknowledgement\n",
                     text + text):
@@ -319,6 +334,21 @@ class TestQualification(unittest.TestCase):
                 for row in summary["slopes"]:
                     self.assertEqual(row["bytes_per_delivery"]["jemalloc_allocated_bytes"],
                                      slope if row["arm"] == "candidate" else 300)
+
+    def test_wrong_arm_evidence_outranks_a_headroom_miss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = self.make_campaign(root)
+            path = next(root.glob("memory-*-private-*/result.json"))
+            row = json.loads(path.read_text())
+            row["ownership"]["owned_groups"] = 1
+            set_provenance_peak(row["ownership"], "peer", int(Q.PEER_BAR_BUDGET * .9))
+            Q.write_json(path, row)
+            (path.parent / "observer.log").write_text("evpn_qualification " + json.dumps(row["ownership"]) + "\n")
+            with self.assertRaises(ValueError) as caught:
+                Q.analyze(args)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+            self.assertEqual(json.loads((root / "summary.json").read_text())["status"], "INVALID")
 
     def test_raw_memory_consumer_enforces_peer_and_daemon_headroom(self):
         for arm in ("candidate", "private"):

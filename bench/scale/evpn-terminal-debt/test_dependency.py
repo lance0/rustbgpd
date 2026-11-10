@@ -136,7 +136,7 @@ class DependencyChecks(unittest.TestCase):
                     (root / "link").unlink()
                     (root / "link").symlink_to("file")
 
-    def write_wire_fixture(self, leg, eor_split=None, forced=False):
+    def write_wire_fixture(self, leg, eor_split=None, forced=False, fill_replayed=True):
         """No-refusal: refresh replay, its EoR, then churn (the fixed build's
         order). eor_split puts the EoR before part of the replay. Forced: fill,
         replay with the fill, EoR from the tick, then the fill's withdrawal."""
@@ -159,7 +159,9 @@ class DependencyChecks(unittest.TestCase):
             if forced:
                 fill = b"".join(self.fixture_wire.announce(2, 0, index, community) for index in (8, 9)) if peer else b""
                 unfill = b"".join(self.fixture_wire.withdraw(2, 0, index) for index in (8, 9)) if peer else b""
-                refresh = fill + inventory + fill + self.fixture_wire.EOR + unfill
+                # Without its replay the fill follows the EoR that should cover it.
+                replay = (fill, b"") if fill_replayed else (b"", fill)
+                refresh = fill + inventory + replay[0] + self.fixture_wire.EOR + replay[1] + unfill
             elif eor_split is not None:
                 refresh = b"".join(routes[:eor_split]) + self.fixture_wire.EOR + b"".join(routes[eor_split:]) + churn
             else:
@@ -208,6 +210,10 @@ class DependencyChecks(unittest.TestCase):
             with tempfile.TemporaryDirectory() as forced:
                 self.write_wire_fixture(Path(forced), forced=True)
                 terminal.wire_receipt(Path(forced), 3, 10, self.wire, self.q)
+            with tempfile.TemporaryDirectory() as forced:
+                self.write_wire_fixture(Path(forced), forced=True, fill_replayed=False)
+                with self.assertRaisesRegex(self.q.AcceptanceFailure, "before the replay of a filled route"):
+                    terminal.wire_receipt(Path(forced), 3, 10, self.wire, self.q)
             original = (leg / "wire/peer-1.bgp").read_bytes()
             for mode in ("raw-mismatch", "eor-before-covered-route", "unknown-withdraw", "missing-coverage", "missing-initial-eor"):
                 with self.subTest(mode=mode), tempfile.TemporaryDirectory() as altered:

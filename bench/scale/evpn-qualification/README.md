@@ -48,7 +48,9 @@ operation and cleanup deadlines, and no later cell starts outside the interval.
 Omit `--correctness-only` only for that authorized campaign. It installs no timer and must be serialized
 with other qualification work. Each shape has three samples per arm in strict
 candidate/private alternation, with 45 seconds of settling after exact initial
-convergence and before the finish acknowledgement:
+convergence and before the finish acknowledgement. After the acknowledgement the
+driver checks the exact inventory and its error counters once more and prints a
+final receiver receipt, which the analysis requires. The shapes:
 
 | Fixed route total | Smaller fleet | Larger fleet |
 | --- | --- | --- |

@@ -43,22 +43,27 @@ impl WireCapture {
 }
 
 fn boundary(name: &str, clients: &[Client]) -> anyhow::Result<serde_json::Value> {
-    let offsets = clients
+    // One lock per receiver covers both readings: an End-of-RIB processed
+    // between them would be counted but absent from the capture prefix.
+    let (offsets, eors): (Vec<_>, Vec<_>) = clients
         .iter()
         .map(|client| {
             let mut view = client
                 .view
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            view.capture
+            let offset = view
+                .capture
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("missing wire capture"))?
-                .position()
-                .map_err(anyhow::Error::from)
+                .position()?;
+            anyhow::Ok((offset, view.eors))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .unzip();
     Ok(serde_json::json!({"boundary": name, "offsets": offsets,
-                         "eors": eors(clients),
+                         "eors": eors,
                          "shifts": clients.iter().map(|client| client.shifts).collect::<Vec<_>>()}))
 }
 
@@ -353,7 +358,7 @@ pub(super) async fn run(
                     converged(&check(shape, clients), shape),
                     "final inventory changed"
                 );
-                finish(args, clients).await;
+                finish(args, shape, clients).await;
                 println!(
                     "evpn_control {}",
                     serde_json::json!({"command": "finish", "result": result})

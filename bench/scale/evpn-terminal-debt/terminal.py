@@ -309,6 +309,11 @@ def wire_receipt(leg, clients, routes, wire, q):
     check.require(all(sum(row.get("result", {}).get("boundary") == name for row in controls) == 1
                       for name in ("loaded", "baseline", "refresh-start", "settled", "finished")), "missing/duplicate wire boundary")
     check.require(sum(row["command"] == "finish" for row in controls) == 1, "missing final finish acknowledgement")
+    # Forced refusal: source zero's fill is admitted before the refresh, so the
+    # refresh replays it too. The fill routes are not in the inventory taken at
+    # `refresh-start`; each must reach every other peer twice, once as its
+    # first announcement and once as replay, before the refresh's EoR.
+    fill = max((row["result"]["total"] for row in controls if row["command"].startswith("terminal-fill ")), default=0)
     result = []
     for peer in range(clients):
         path = leg / "wire" / f"peer-{peer}.bgp"
@@ -335,6 +340,12 @@ def wire_receipt(leg, clients, routes, wire, q):
                         # negotiated, so no EoRR reaches this wire.
                         q.accept(receiver.coverage <= receiver.replay_seen,
                                  f"peer {peer}: EVPN EoR reached the wire before a route it covers")
+                        if fill and peer != 0 and receiver.replay_eors == 0:
+                            late = [key for key in receiver.state if key not in receiver.coverage]
+                            check.require(len(late) == fill, f"peer {peer}: the fill is not live at the refresh EoR")
+                            q.accept(all(sum(event[0] == "announce" for event in receiver.events[key]) >= 2
+                                         for key in late),
+                                     f"peer {peer}: EVPN EoR reached the wire before the replay of a filled route")
                     receiver.consume(frame, {2000 if peer == 1 else 1000})
                     offset += size
                 receiver.end_replay()
