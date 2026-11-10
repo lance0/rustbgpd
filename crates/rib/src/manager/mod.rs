@@ -713,11 +713,11 @@ pub struct RibManager {
     /// `PeerDown`/GR-down or by full peer teardown.
     live_sessions: HashMap<PeerId, Vec<LiveSessionRecord>>,
     /// The session whose `PeerGracefulRestart` created the peer's current
-    /// GR/LLGR retention. With no session registered, only that session's
-    /// `PeerDown` may end the retention; a late `PeerDown` from another,
-    /// already retired session must not. Read only while retention exists,
-    /// overwritten by the next accepted restart end, and removed by every
-    /// full teardown of the peer (its `PeerDown`, retention expiry, deletion).
+    /// GR/LLGR retention. A late `PeerDown` delivered by another session's
+    /// hand-off ([`RibUpdate::LateSessionEnd`]) must not end it. Read only
+    /// while retention exists, overwritten by the next accepted restart
+    /// end, and removed by every full teardown of the peer (a `PeerDown`,
+    /// retention expiry, deletion) and when its handle is released.
     retention_owner: HashMap<PeerId, u64>,
     /// Physical live-session completion options, including collision records.
     /// Zero avoids fleet scans while EVPN completion control is inactive.
@@ -4618,6 +4618,11 @@ impl RibManager {
                         self.prune_exact_export_rejections();
                         self.ensure_all_route_pages_advanced(page_versions);
                     }
+                }
+            }
+            RibUpdate::LateSessionEnd(end) => {
+                if !self.late_session_end_is_stale(&end) {
+                    self.handle_update_untimed(*end);
                 }
             }
             RibUpdate::PeerDeleted {

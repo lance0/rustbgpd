@@ -31,6 +31,8 @@ struct GatedRib {
     forwarded: Vec<(&'static str, u64)>,
     /// Every message forwarded through the relay other than its fillers.
     from_sessions: usize,
+    /// Session ends forwarded as `LateSessionEnd`.
+    late_ends: usize,
 }
 
 impl GatedRib {
@@ -50,6 +52,7 @@ impl GatedRib {
             ends: Vec::new(),
             forwarded: Vec::new(),
             from_sessions: 0,
+            late_ends: 0,
         }
     }
 
@@ -70,7 +73,12 @@ impl GatedRib {
         while let Ok(Some(update)) =
             tokio::time::timeout(Duration::from_millis(10), self.relay_rx.recv()).await
         {
-            let seen = match &update {
+            let late = matches!(&update, RibUpdate::LateSessionEnd(_));
+            self.late_ends += usize::from(late);
+            let seen = match match &update {
+                RibUpdate::LateSessionEnd(end) => end.as_ref(),
+                update => update,
+            } {
                 RibUpdate::PeerUp { session_id, .. } => Some(("PeerUp", *session_id)),
                 RibUpdate::PeerDown { session_id, .. } => Some(("PeerDown", *session_id)),
                 RibUpdate::PeerGracefulRestart { session_id, .. } => {
@@ -264,6 +272,7 @@ async fn aborted_shutdown_behind_a_full_rib_still_retires_the_session() {
 
     rib.release().await;
     let s1_ends = rib.ends.clone();
+    assert_eq!(rib.late_ends, 1, "the hand-off marks the held end as late");
     let routes_after_s1 = rib.loc_rib_count().await;
 
     let (mut s2, _s2_commands, _s2_peer) = established(&rib, 2).await;
@@ -337,6 +346,7 @@ async fn abort_of_an_idle_established_session_closes_its_epoch() {
     rib.release().await;
 
     assert_eq!(rib.ends, [("PeerDown", 1)]);
+    assert_eq!(rib.late_ends, 1, "the drop's own PeerDown is marked late");
     assert_eq!(rib.loc_rib_count().await, 0);
 }
 
@@ -405,6 +415,7 @@ async fn orderly_shutdown_delivers_one_session_end() {
     rib.release().await;
 
     assert_eq!(rib.ends, [("PeerDown", 1)]);
+    assert_eq!(rib.late_ends, 0, "a session's own end is not marked late");
 }
 
 /// The replacement registers before the aborted session's held `PeerDown`

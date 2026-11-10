@@ -1357,9 +1357,10 @@ impl PeerSession {
     /// its deadline behind a full RIB channel, a transport-safety abort), or
     /// its command channel closed. Their delivery moves to its own task: the
     /// held messages in session order, the head through its queued
-    /// reservation, then a `PeerDown` for the open epoch. The RIB orders a
-    /// late teardown by session identity, so one that arrives after a
-    /// replacement registered is discarded without touching the replacement.
+    /// reservation, then a `PeerDown` for the open epoch. Session ends are
+    /// sent as `LateSessionEnd`: the RIB discards one that arrives after a
+    /// replacement registered, or that would start or end retention the
+    /// session no longer owns.
     /// The task ends when the last message is admitted or the RIB is gone.
     ///
     /// A `PeerUp` still held was never admitted, so the RIB never saw that
@@ -1382,11 +1383,11 @@ impl PeerSession {
                 self.rib_reserve = None;
             }
         }
-        if let Some(peer) = self.rib_epoch {
-            let _ = self.send_to_rib(RibUpdate::PeerDown {
+        if let Some(peer) = self.rib_epoch.take() {
+            let _ = self.send_to_rib(late_session_end(RibUpdate::PeerDown {
                 peer,
                 session_id: self.session_identity.id,
-            });
+            }));
         }
         if self.rib_backlog.is_empty() {
             return;
@@ -1398,6 +1399,7 @@ impl PeerSession {
             .unwrap_or_else(|| tokio_util::sync::PollSender::new(self.rib_tx.clone()));
         tokio::spawn(async move {
             for (update, _) in backlog {
+                let update = late_session_end(update);
                 let reserved = std::future::poll_fn(|cx| reserve.poll_reserve(cx))
                     .await
                     .is_ok();
@@ -4279,6 +4281,18 @@ pub(super) enum OnRibAdmission {
     BeginRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
     /// A peer `EoRR` or a local refresh timeout: close and sweep the window.
     EndRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+}
+
+/// Mark a session end the hand-off delivers as late, so the RIB does not
+/// treat it as authoritative once the session is no longer registered.
+/// Everything else is delivered as it was held.
+fn late_session_end(update: RibUpdate) -> RibUpdate {
+    match update {
+        RibUpdate::PeerDown { .. } | RibUpdate::PeerGracefulRestart { .. } => {
+            RibUpdate::LateSessionEnd(Box::new(update))
+        }
+        update => update,
+    }
 }
 
 /// The context a session stages for the RIB right before its `PeerUp`.

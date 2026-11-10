@@ -3471,9 +3471,14 @@ async fn replaced_session_behind_a_full_rib_mailbox_still_sends_its_peer_down() 
     // is bounded rather than ended by a closed channel.
     let delivered = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
+            // The aborted session's hand-off delivers its end marked late.
             match rib_rx.recv().await {
-                Some(rustbgpd_rib::RibUpdate::PeerDown { session_id, .. })
-                    if session_id == first_session =>
+                Some(rustbgpd_rib::RibUpdate::LateSessionEnd(end))
+                    if matches!(
+                        *end,
+                        rustbgpd_rib::RibUpdate::PeerDown { session_id, .. }
+                            if session_id == first_session
+                    ) =>
                 {
                     return true;
                 }

@@ -16,12 +16,12 @@
   Established session that had not queued its own end is closed with a
   plain `PeerDown`, so its routes are withdrawn rather than retained under
   graceful restart. A session whose `PeerUp` was itself still held is not
-  announced to the RIB at all. Because such an end can now arrive late,
-  the RIB decides an end that finds no session registered by who owns the
-  peer's retained routes: a graceful-restart notice from an unregistered
-  session is discarded, and a `PeerDown` ends graceful-restart retention
-  only when its own session created it; one from another session is
-  discarded and counted in `bgp_rib_stale_peer_down_ignored_total`.
+  announced to the RIB at all. Session ends delivered this way are
+  marked late: once no session is registered for the peer, a late
+  graceful-restart notice is discarded and a late `PeerDown` does not end
+  graceful-restart retention that another session created (counted in
+  `bgp_rib_stale_peer_down_ignored_total`). Session ends sent in the
+  ordinary way are handled as before.
   **Operator-visible:** after a session is replaced or stopped under RIB
   backpressure, its routes are withdrawn, or retained as its graceful
   restart capability says, and

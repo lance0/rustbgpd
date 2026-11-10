@@ -72,10 +72,10 @@ impl PeerManager {
         // the mailbox is full, and it also clears a primary that was not
         // Established and so had no epoch of its own to close. When the
         // primary was Established the RIB therefore sees two PeerDowns for
-        // it. The second finds no registration: it is an empty teardown,
-        // or, when the peer's retained routes were created by another
-        // session's restart end, the RIB discards it, so it cannot abort
-        // that session's retention.
+        // it: this authoritative one and the one its hand-off delivers
+        // marked late. Whichever arrives second finds an empty peer. The
+        // late one can no longer end retention another session created,
+        // however long the mailbox delays it.
         // Reads stay queued while the peer's session identity is mid-swap.
         if self
             .send_rib_update(
