@@ -1306,13 +1306,17 @@ fn owned_late_full_queue_captures_actual_displaced_old_before_delta_retirement()
 /// An owned refresh replays the full inventory, and the terminal markers it
 /// stripped from the data follow right behind it once the admission has
 /// verified complete coverage, with no wait for the resync tick. A failed
-/// verification never releases them.
+/// verification never releases them: the proof match runs for a member that
+/// carries a proof, so the fault arm refreshes one.
 #[test]
 fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
     for late_fault in [false, true] {
         let (mut manager, peer, gid, mut output) = fixture();
         let route = received(100);
         admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+        if late_fault {
+            assert!(manager.capture_shared_evpn_admitted(peer));
+        }
         manager.adj_rib_out_commit_stats.fail_evpn_feed_completion = late_fault;
         manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
         let data = output.try_recv().map(delivered).unwrap();
@@ -1347,6 +1351,10 @@ fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
             assert!(!manager.has_evpn_feed_completion(peer));
             assert!(output.try_recv().map(delivered).is_err());
         }
+        assert!(
+            !manager.adj_rib_out_commit_stats.fail_evpn_feed_completion,
+            "the proof match consumed its fault"
+        );
         assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
     }
 }
@@ -3151,4 +3159,599 @@ fn evpn_refresh_markers_leave_other_families_pending_eor() {
     );
     assert!(manager.eor_pending(peer).contains(&unicast));
     assert!(!manager.has_evpn_feed_completion(peer));
+}
+
+// A clean member's refresh replays its projection with no proof. The proof
+// is captured only when the refresh tail leaves a terminal marker owed.
+
+/// The fixture's owned member, converged and clean on `count` routes.
+fn clean_owned_member(
+    count: u32,
+) -> (
+    RibManager,
+    PeerId,
+    usize,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    Vec<EvpnRibRoute>,
+) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let routes: Vec<_> = (1..=count).map(imet_with_tag).collect();
+    manager
+        .ribs
+        .insert(routes[0].peer, AdjRibIn::new(routes[0].peer));
+    manager.process_evpn_announce_chunk(routes[0].peer, routes.clone());
+    let update = output.try_recv().map(delivered).unwrap();
+    assert_eq!(update.evpn_announce.len(), routes.len());
+    assert!(output.try_recv().map(delivered).is_err());
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert_proof_only_while_owed(&manager, peer);
+    (manager, peer, gid, output, routes)
+}
+
+fn sorted_keys<'a>(
+    routes: impl IntoIterator<Item = &'a EvpnRibRoute>,
+) -> Vec<rustbgpd_wire::EvpnRouteKey> {
+    let mut keys: Vec<_> = routes.into_iter().map(EvpnRibRoute::key).collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// The member's Ready proof, in key order.
+fn proof_keys(manager: &RibManager, peer: PeerId) -> Option<Vec<rustbgpd_wire::EvpnRouteKey>> {
+    manager
+        .evpn_recovery
+        .proof_keys(manager.evpn_recovery_handle(peer)?)
+        .unwrap()
+}
+
+/// A grouped member holds a Ready proof exactly while it is dirty or owes a
+/// terminal marker. A pending reset owns recovery instead of a proof.
+fn assert_proof_only_while_owed(manager: &RibManager, peer: PeerId) {
+    if manager.evpn_recovery_reset_pending(peer) {
+        return;
+    }
+    assert_eq!(
+        proof_keys(manager, peer).is_some(),
+        manager.dirty_peers.contains(&peer) || manager.has_evpn_feed_completion(peer),
+    );
+}
+
+/// Leave room for the refresh data only: its terminal markers are refused.
+fn leave_one_slot(manager: &RibManager, peer: PeerId) {
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.capacity() > 1 {
+        sender.try_send(OutboundRouteUpdate::default()).unwrap();
+    }
+}
+
+fn clean_replay_batch(
+    feed: crate::manager::evpn_recovery::EvpnCompleteFeed,
+) -> OutboundCommitBatch {
+    OutboundCommitBatch {
+        evpn_announce: feed.announce.into(),
+        evpn_withdraw: feed.withdraw,
+        evpn_complete_feed: Some(feed.seal),
+        ..OutboundCommitBatch::default()
+    }
+}
+
+const EVPN_TERMINAL: [(Afi, Safi, RouteRefreshSubtype); 1] =
+    [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)];
+
+/// A clean refresh passes zero capture checkpoints and never holds a proof:
+/// the member's ledger charge and its peak do not move, on the wire the
+/// data and its terminal markers are those of the proof cycle.
+#[test]
+fn clean_refresh_replays_the_projection_with_no_proof_and_no_capture_work() {
+    let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(3);
+    let usage = (
+        manager.evpn_recovery.peer_usage(peer),
+        manager.evpn_recovery.daemon_usage(),
+    );
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    });
+    assert_eq!(work.get("capture_evpn"), None);
+    let data = output.try_recv().map(delivered).unwrap();
+    assert_eq!(sorted_keys(data.evpn_announce.iter()), sorted_keys(&routes));
+    assert_eq!(data.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    assert_eq!(
+        data.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
+    );
+    assert!(!data.end_of_rib.contains(&EVPN));
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+    assert!(output.try_recv().map(delivered).is_err());
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert_eq!(
+        (
+            manager.evpn_recovery.peer_usage(peer),
+            manager.evpn_recovery.daemon_usage(),
+        ),
+        usage,
+        "no proof was held at any point of the replay"
+    );
+    assert_eq!(manager.evpn_admitted_count(peer), routes.len());
+    assert!(!manager.dirty_peers.contains(&peer));
+}
+
+/// Without an outbound slot the refresh is deferred before anything is
+/// built: its work does not grow with the table, and nothing is captured.
+/// The retried answer is a clean replay.
+#[test]
+fn refresh_without_a_slot_walks_nothing_and_captures_nothing() {
+    let deferred = |count| {
+        let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(count);
+        let sender = manager.outbound_peers[&peer].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        let usage = manager.evpn_recovery.peer_usage(peer);
+        let work = super::work_scaling::checkpoints_in(|| {
+            manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+        });
+        assert!(manager.pending_refresh[&peer].contains(&EVPN));
+        assert_eq!(proof_keys(&manager, peer), None);
+        assert_eq!(manager.evpn_recovery.peer_usage(peer), usage);
+        assert!(!manager.has_evpn_feed_completion(peer));
+        for update in drain_all(&mut output) {
+            assert!(update.evpn_announce.is_empty() && update.refresh_markers.is_empty());
+        }
+        manager.resync_dirty_peers_bounded();
+        let answer = drain_all(&mut output);
+        assert_eq!(
+            sorted_keys(answer[0].evpn_announce.iter()),
+            sorted_keys(&routes)
+        );
+        assert_eq!(answer.last().unwrap().refresh_markers, EVPN_TERMINAL);
+        assert_eq!(proof_keys(&manager, peer), None);
+        assert_eq!(manager.evpn_recovery.peer_usage(peer), usage);
+        assert_proof_only_while_owed(&manager, peer);
+        work
+    };
+    assert_eq!(deferred(1), deferred(48));
+}
+
+/// A clean replay's seal is current only while the member is still clean on
+/// the table the replay walked. A stale one refuses the commit: nothing is
+/// sent and no receipt is left.
+#[test]
+fn clean_replay_commit_is_refused_once_the_member_or_its_table_moved() {
+    use crate::manager::distribution::OutboundCommitFailure;
+    use rustbgpd_telemetry::reason_labels::OutboundCommitRefusal;
+    for moved_table in [false, true] {
+        let (mut manager, peer, gid, mut output, routes) = clean_owned_member(2);
+        let feed = manager.clean_evpn_refresh_feed(peer).unwrap();
+        assert_eq!(sorted_keys(&feed.announce), sorted_keys(&routes));
+        assert_eq!(feed.withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+        if moved_table {
+            let stamp = manager.group_ribs[&gid].evpn_table_stamp;
+            stage(&mut manager, gid, &received(100));
+            assert_ne!(manager.group_ribs[&gid].evpn_table_stamp, stamp);
+        } else {
+            assert!(manager.mark_outbound_dirty(peer));
+            assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+        }
+        assert_eq!(
+            manager.try_send_and_commit_outbound_update(peer, clean_replay_batch(feed)),
+            Err(OutboundCommitFailure::Refused(
+                OutboundCommitRefusal::EvpnRecovery
+            ))
+        );
+        assert!(output.try_recv().map(delivered).is_err());
+        assert!(!manager.has_evpn_feed_completion(peer));
+        assert_eq!(manager.evpn_admitted_count(peer), routes.len());
+    }
+}
+
+/// A clean replay refused by the selection gate after its walk has sent
+/// nothing and left neither proof nor receipt, so the dirty mark that
+/// follows a refused refresh captures the admitted set as any first missed
+/// admission does.
+#[test]
+fn clean_replay_refused_by_the_selection_gate_is_captured_when_it_goes_dirty() {
+    use crate::manager::distribution::OutboundCommitFailure;
+    use rustbgpd_telemetry::reason_labels::OutboundCommitRefusal;
+    let (manager, peer, _gid, mut output, routes) = clean_owned_member(2);
+    let source = routes[0].peer;
+    let feed = manager.clean_evpn_refresh_feed(peer).unwrap();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: source.into(),
+            families: vec![EVPN],
+        }],
+    });
+    let metrics = manager.metrics.clone();
+    manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .classify_session(source, 12, false, &HashSet::from([EVPN]), &metrics);
+    assert!(manager.selection_deferred(EVPN));
+    assert!(manager.clean_evpn_refresh_feed(peer).is_none());
+    assert_eq!(
+        manager.try_send_and_commit_outbound_update(peer, clean_replay_batch(feed)),
+        Err(OutboundCommitFailure::Refused(
+            OutboundCommitRefusal::SelectionGate
+        ))
+    );
+    assert!(output.try_recv().map(delivered).is_err());
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(manager.mark_outbound_dirty(peer));
+    assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+}
+
+/// A row the exact probe rejects during a clean replay was admitted before,
+/// so it is withdrawn in the same envelope and leaves the admitted count; a
+/// later replay that accepts it announces it again. With no proof to consult,
+/// the admitted set stays the eligible projection throughout.
+#[test]
+fn clean_replay_withdraws_a_row_its_exact_probe_rejects() {
+    let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(2);
+    let encoder = MockExactExportEncoder::accepting(11);
+    encoder.set_profile(12, [crate::update::ExactExportKey::Evpn(routes[0].key())]);
+    manager.peer_export_encoders.insert(peer, encoder.clone());
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    let updates = drain_all(&mut output);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(
+        sorted_keys(updates[0].evpn_announce.iter()),
+        [routes[1].key()]
+    );
+    assert_eq!(updates[0].evpn_withdraw, [routes[0].key()]);
+    assert_eq!(updates[1].refresh_markers, EVPN_TERMINAL);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert!(!manager.has_evpn_feed_completion(peer));
+
+    encoder.set_profile(13, []);
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    let updates = drain_all(&mut output);
+    assert_eq!(
+        sorted_keys(updates[0].evpn_announce.iter()),
+        sorted_keys(&routes)
+    );
+    assert_eq!(
+        updates[0].evpn_withdraw,
+        [] as [rustbgpd_wire::EvpnRouteKey; 0]
+    );
+    assert_eq!(manager.evpn_admitted_count(peer), 2);
+    assert_eq!(proof_keys(&manager, peer), None);
+
+    // The rejection is part of the projection a later capture reads.
+    encoder.set_profile(14, [crate::update::ExactExportKey::Evpn(routes[1].key())]);
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    drain_all(&mut output);
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    assert_eq!(proof_keys(&manager, peer), Some(vec![routes[0].key()]));
+}
+
+/// A terminal marker the writer refuses in the refresh tail stays owed past
+/// the turn, so the proof is captured in that turn and equals the admitted
+/// set. The tick's retries, refused or sent, never capture.
+#[test]
+fn refused_refresh_marker_captures_the_proof_in_the_refresh_turn() {
+    let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(3);
+    leave_one_slot(&manager, peer);
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    });
+    assert!(work.get("capture_evpn").is_some_and(|&count| count > 0));
+    assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+    assert_eq!(manager.evpn_feed_owed_markers(peer), (true, true));
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+
+    let refused = super::work_scaling::checkpoints_in(|| manager.retry_eor_markers_bounded());
+    assert_eq!(refused.get("capture_evpn"), None);
+    assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+    let data = drain_all(&mut output).pop().unwrap();
+    assert_eq!(sorted_keys(data.evpn_announce.iter()), sorted_keys(&routes));
+    assert_eq!(
+        data.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
+    );
+
+    let sent = super::work_scaling::checkpoints_in(|| manager.retry_eor_markers_bounded());
+    assert_eq!(sent.get("capture_evpn"), None);
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+    assert!(output.try_recv().map(delivered).is_err());
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert!(!manager.has_evpn_feed_completion(peer));
+}
+
+/// A terminal marker a hold keeps back in the refresh tail is owed past the
+/// turn like a refused one: the proof is captured in the refresh turn, the
+/// polls send nothing, and the release sends the marker and drops the proof.
+#[test]
+fn held_refresh_marker_captures_the_proof_in_the_refresh_turn() {
+    let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(2);
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    let updates = drain_all(&mut output);
+    assert_eq!(updates.len(), 1, "the held markers did not follow the data");
+    assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+    assert_eq!(manager.evpn_feed_owed_markers(peer), (true, true));
+    for _ in 0..2 {
+        let poll = super::work_scaling::checkpoints_in(|| manager.retry_eor_markers_bounded());
+        assert_eq!(poll.get("capture_evpn"), None);
+        assert!(output.try_recv().map(delivered).is_err());
+        assert!(!manager.dirty_peers.contains(&peer));
+    }
+    manager.end_rt_membership_hold(peer);
+    manager.retry_eor_markers_bounded();
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert!(!manager.has_evpn_feed_completion(peer));
+}
+
+/// The actor message behind a refresh changes the table. After a clean
+/// replay it is an ordinary delta with no proof; after one that left a
+/// marker owed it lands in the proof captured in the refresh turn, which
+/// then holds the new admitted set until the marker follows that data.
+#[test]
+fn table_change_queued_behind_the_refresh_lands_on_the_state_it_left() {
+    for marker_refused in [false, true] {
+        let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(2);
+        let resets = count_reset_attempts(&mut manager);
+        if marker_refused {
+            leave_one_slot(&manager, peer);
+        }
+        manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+        drain_all(&mut output);
+        assert_eq!(manager.has_evpn_feed_completion(peer), marker_refused);
+
+        let added = imet_with_tag(9);
+        manager.process_evpn_announce_chunk(added.peer, vec![added.clone()]);
+        manager.process_evpn_withdraw_chunk(routes[0].peer, vec![routes[0].key()]);
+        let deltas = drain_all(&mut output);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(sorted_keys(deltas[0].evpn_announce.iter()), [added.key()]);
+        assert_eq!(deltas[1].evpn_withdraw, [routes[0].key()]);
+        assert!(
+            deltas
+                .iter()
+                .all(|delta| delta.end_of_rib.is_empty() && delta.refresh_markers.is_empty())
+        );
+        assert_eq!(manager.evpn_admitted_count(peer), 2);
+        assert!(!manager.dirty_peers.contains(&peer));
+        if marker_refused {
+            assert_eq!(
+                proof_keys(&manager, peer),
+                Some(sorted_keys([&routes[1], &added]))
+            );
+            assert!(manager.evpn_feed_is_current(peer));
+            manager.retry_eor_markers_bounded();
+            let marker = output.try_recv().map(delivered).unwrap();
+            assert_eq!(marker.end_of_rib, [EVPN]);
+            assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+        }
+        assert!(output.try_recv().map(delivered).is_err());
+        assert_eq!(proof_keys(&manager, peer), None);
+        assert!(!manager.has_evpn_feed_completion(peer));
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// A member that already holds a proof, or owes a terminal marker, keeps the
+/// proof cycle for its refresh: the proof match runs, here into its fault.
+#[test]
+fn refresh_of_a_member_with_a_proof_or_marker_debt_keeps_the_proof_cycle() {
+    for debt in [false, true] {
+        let (mut manager, peer, _gid, mut output, _routes) = clean_owned_member(2);
+        if debt {
+            leave_one_slot(&manager, peer);
+            manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+            drain_all(&mut output);
+            assert!(manager.has_evpn_feed_completion(peer));
+        } else {
+            assert!(manager.capture_shared_evpn_admitted(peer));
+        }
+        assert!(manager.clean_evpn_refresh_feed(peer).is_none());
+        manager.adj_rib_out_commit_stats.fail_evpn_feed_completion = true;
+        manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+        assert!(
+            !manager.adj_rib_out_commit_stats.fail_evpn_feed_completion,
+            "the proof match ran"
+        );
+        assert!(manager.evpn_recovery_reset_pending(peer));
+    }
+}
+
+/// Every state in which the admitted set is not provably the eligible
+/// projection refuses the proofless feed, and the refresh falls back to the
+/// proof cycle.
+#[test]
+fn only_a_clean_member_gets_a_proofless_refresh_feed() {
+    type Taint = fn(&mut RibManager, PeerId, usize, &EvpnRibRoute);
+    let taints: [(&str, Taint); 9] = [
+        ("dirty peer", |manager, peer, _, _| {
+            manager.dirty_peers.insert(peer);
+        }),
+        ("dirty member", |manager, peer, gid, _| {
+            let group = manager.group_ribs.get_mut(&gid).unwrap();
+            group.dirty_members.insert(peer);
+        }),
+        ("proof", |manager, peer, _, _| {
+            assert!(manager.capture_shared_evpn_admitted(peer));
+        }),
+        ("receipt", |manager, peer, gid, _| {
+            assert!(
+                manager
+                    .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+                    .is_some()
+            );
+        }),
+        ("pending reset", |manager, peer, _, _| {
+            let handle = manager.evpn_recovery_handle(peer).unwrap();
+            assert!(manager.evpn_recovery.fail_admission(handle));
+        }),
+        ("missing handle", |manager, peer, _, _| {
+            manager.retire_evpn_recovery(peer);
+            assert!(manager.evpn_recovery_handle(peer).is_none());
+        }),
+        ("unreleased private row", |manager, peer, _, route| {
+            let private = manager.adj_ribs_out.get_mut(&peer).unwrap();
+            private.insert_evpn(route.clone());
+        }),
+        ("incomplete projection", |manager, _, gid, route| {
+            let group = manager.group_ribs.get_mut(&gid).unwrap();
+            assert!(group.evpn_inputs.remove(&route.key()).is_some());
+        }),
+        ("owed End-of-RIB", |manager, peer, _, _| {
+            manager.owe_eor(peer, EVPN);
+        }),
+    ];
+    for (name, taint) in taints {
+        let (mut manager, peer, gid, _output, routes) = clean_owned_member(2);
+        assert!(manager.clean_evpn_refresh_feed(peer).is_some());
+        taint(&mut manager, peer, gid, &routes[0]);
+        assert!(manager.clean_evpn_refresh_feed(peer).is_none(), "{name}");
+    }
+}
+
+/// A member that leaves its group while the refresh's markers are still
+/// owed takes the proof captured in the refresh turn into the private
+/// handoff: its rows and marker debt survive, and the marker settles it.
+#[test]
+fn member_leaving_its_group_before_the_marker_retry_keeps_the_captured_proof() {
+    let (mut manager, peer, gid, mut output, routes) = clean_owned_member(2);
+    let resets = count_reset_attempts(&mut manager);
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    assert_eq!(drain_all(&mut output).len(), 1);
+    assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 7,
+        slow: true,
+    });
+    assert!(manager.grouped_member_of(peer).is_none());
+    assert!(!manager.group_ribs.contains_key(&gid));
+    assert!(manager.has_private_evpn_handoff(peer));
+    assert!(manager.evpn_feed_is_current(peer));
+    for route in &routes {
+        assert!(manager.adj_ribs_out[&peer].get_evpn(&route.key()).is_some());
+    }
+    assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
+    manager.retry_eor_markers_bounded();
+    for update in drain_all(&mut output) {
+        assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+        assert!(update.end_of_rib.is_empty() && update.refresh_markers.is_empty());
+    }
+
+    manager.end_rt_membership_hold(peer);
+    manager.retry_eor_markers_bounded();
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+    assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    assert_eq!(proof_keys(&manager, peer), None);
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+/// The ledger refuses the capture the refresh tail owes. The member falls
+/// back to the reset a refused capture always takes: no marker is owed or
+/// sent on a receipt that has no proof behind it.
+#[test]
+fn ledger_refusal_at_the_tail_capture_resets_and_sends_no_marker() {
+    let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(2);
+    let resets = count_reset_attempts(&mut manager);
+    leave_one_slot(&manager, peer);
+    manager
+        .evpn_recovery
+        .fail_allocation_after_for_test(Some(0));
+    manager.evpn_recovery.fail_next_allocation_for_test();
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    assert!(manager.evpn_recovery_reset_pending(peer));
+    assert!(resets.load(Ordering::SeqCst) > 0);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_feed_is_current(peer));
+    assert_eq!(manager.evpn_feed_owed_markers(peer), (false, false));
+    let data = drain_all(&mut output).pop().unwrap();
+    assert_eq!(sorted_keys(data.evpn_announce.iter()), sorted_keys(&routes));
+    for _ in 0..2 {
+        manager.retry_eor_markers_bounded();
+        assert!(output.try_recv().map(delivered).is_err());
+    }
+}
+
+/// A clean replay puts on the wire what the proof cycle does for the same
+/// member: the same envelopes in the same order, with and without a row the
+/// exact probe rejects, and the same admitted count.
+#[test]
+fn clean_refresh_envelopes_equal_the_proof_cycle() {
+    let content = |update: &OutboundRouteUpdate| {
+        (
+            update
+                .evpn_announce
+                .iter()
+                .map(|route| (route.key(), route.attributes.clone()))
+                .collect::<Vec<_>>(),
+            update.evpn_withdraw.clone(),
+            update.refresh_markers.clone(),
+            update.end_of_rib.clone(),
+        )
+    };
+    for rejected in [false, true] {
+        let replay = |proof_cycle: bool| {
+            let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(5);
+            if rejected {
+                let encoder = MockExactExportEncoder::accepting(11);
+                encoder.set_profile(12, [crate::update::ExactExportKey::Evpn(routes[2].key())]);
+                manager.peer_export_encoders.insert(peer, encoder);
+            }
+            if proof_cycle {
+                assert!(manager.capture_shared_evpn_admitted(peer));
+            }
+            assert_eq!(manager.clean_evpn_refresh_feed(peer).is_none(), proof_cycle);
+            manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+            let updates = drain_all(&mut output);
+            assert_eq!(proof_keys(&manager, peer), None);
+            assert!(!manager.has_evpn_feed_completion(peer));
+            (
+                updates.iter().map(content).collect::<Vec<_>>(),
+                manager.evpn_admitted_count(peer),
+            )
+        };
+        let clean = replay(false);
+        assert_eq!(clean.0.len(), 2);
+        assert_eq!(clean.0[0].1.len(), usize::from(rejected));
+        assert_eq!(clean, replay(true));
+    }
+}
+
+/// Only a peer refresh takes the proofless replay. An operator replay of
+/// the same clean member keeps the proof cycle.
+#[test]
+fn operator_replay_of_a_clean_member_keeps_the_proof_cycle() {
+    use crate::manager::route_refresh::FamilyReplayKind;
+    let (mut manager, peer, _gid, mut output, routes) = clean_owned_member(2);
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.send_route_refresh_response_inner(
+            peer,
+            EVPN.0,
+            EVPN.1,
+            FamilyReplayKind::OperatorReplay,
+        );
+    });
+    assert!(work.get("capture_evpn").is_some_and(|&count| count > 0));
+    let updates = drain_all(&mut output);
+    assert_eq!(
+        sorted_keys(updates[0].evpn_announce.iter()),
+        sorted_keys(&routes)
+    );
+    assert_eq!(proof_keys(&manager, peer), None);
 }

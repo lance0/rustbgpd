@@ -45,6 +45,10 @@ pub(in crate::manager) struct EvpnFeedSeal {
     /// A sparse renewal's staged keys: the only keys whose admission or
     /// eligibility can differ from the complete feed it renews.
     sparse_keys: Option<std::sync::Arc<[EvpnRouteKey]>>,
+    /// A clean member's replay ([`RibManager::clean_evpn_refresh_feed`]):
+    /// minted with no proof and no receipt, and current only while the
+    /// member stays clean on the same table.
+    clean_replay: bool,
 }
 
 impl EvpnFeedSeal {
@@ -52,6 +56,11 @@ impl EvpnFeedSeal {
     /// keys rather than carrying a complete feed.
     pub(in crate::manager) fn is_sparse_renewal(&self) -> bool {
         self.sparse_keys.is_some()
+    }
+
+    /// Whether this replays a clean member's projection with no proof.
+    pub(in crate::manager) fn is_clean_replay(&self) -> bool {
+        self.clean_replay
     }
 }
 
@@ -290,12 +299,21 @@ impl RibManager {
         peer: PeerId,
         key: &EvpnRouteKey,
         stage: Option<&super::update_groups::EvpnGroupStageOutput>,
+        clean_replay: bool,
     ) -> Option<bool> {
         if let Some(proof) = self
             .evpn_recovery_handle(peer)
             .and_then(|handle| self.evpn_recovery.proof(handle).ok().flatten())
         {
             return Some(proof.contains(key));
+        }
+        if clean_replay {
+            // Every candidate of a clean replay is an eligible row of the
+            // unmoved table, so it is admitted unless the member's last
+            // exact probe rejected it.
+            return Some(!self.peer_unexportable.get(&peer).is_some_and(|rejected| {
+                rejected.contains(&crate::update::ExactExportKey::Evpn(*key))
+            }));
         }
         let stage = stage?;
         let gid = self.evpn_grouped_member_of(peer)?;
@@ -326,6 +344,7 @@ impl RibManager {
         announce: &[EvpnRibRoute],
         withdraw: &[EvpnRouteKey],
         stage: Option<&super::update_groups::EvpnGroupStageOutput>,
+        clean_replay: bool,
     ) -> Option<usize> {
         let mut count = self
             .evpn_recovery_handle(peer)
@@ -335,7 +354,9 @@ impl RibManager {
         for route in announce {
             self.replacement_checkpoint(false);
             let key = route.key();
-            if previous != Some(key) && !self.evpn_prior_admitted(peer, &key, stage)? {
+            if previous != Some(key)
+                && !self.evpn_prior_admitted(peer, &key, stage, clean_replay)?
+            {
                 count = count.checked_add(1)?;
             }
             previous = Some(key);
@@ -345,7 +366,7 @@ impl RibManager {
             if announce
                 .binary_search_by_key(key, EvpnRibRoute::key)
                 .is_err()
-                && self.evpn_prior_admitted(peer, key, stage)?
+                && self.evpn_prior_admitted(peer, key, stage, clean_replay)?
             {
                 count = count.checked_sub(1)?;
             }
@@ -385,6 +406,16 @@ impl RibManager {
         peer: PeerId,
         seal: &EvpnFeedSeal,
     ) -> bool {
+        if seal.clean_replay {
+            // No receipt carries a revision: the member is still clean on
+            // the table the replay walked.
+            return self.outbound_session_ids.get(&peer) == Some(&seal.session_id)
+                && self
+                    .outbound_peers
+                    .get(&peer)
+                    .is_some_and(|tx| tx.same_channel(&seal.outbound))
+                && self.clean_evpn_member(peer) == Some((seal.provenance, seal.target));
+        }
         seal.revision != 0
             && self.outbound_session_ids.get(&peer) == Some(&seal.session_id)
             && self
@@ -484,6 +515,7 @@ impl RibManager {
             revision: completion.revision,
             required_markers: 0,
             sparse_keys: None,
+            clean_replay: false,
         })
     }
 
@@ -536,6 +568,7 @@ impl RibManager {
             revision: completion.revision,
             required_markers: 0,
             sparse_keys: Some(std::sync::Arc::clone(staged_keys)),
+            clean_replay: false,
         })
     }
 
@@ -590,6 +623,9 @@ impl RibManager {
         seal: EvpnFeedSeal,
         admitted_markers: u8,
     ) -> bool {
+        if seal.clean_replay {
+            return self.complete_clean_evpn_replay(peer, &seal, admitted_markers);
+        }
         if !self.evpn_feed_seal_is_current(peer, &seal) {
             return false;
         }
@@ -646,6 +682,45 @@ impl RibManager {
         }
         self.try_settle_evpn_feed(peer);
         true
+    }
+
+    /// A clean replay was admitted: the member's admitted set is still its
+    /// eligible projection, so there is no proof to match. Only a terminal
+    /// marker the replay did not carry leaves anything behind: a receipt
+    /// that owes it, whose proof the refresh tail captures in this turn
+    /// unless the marker leaves first.
+    fn complete_clean_evpn_replay(
+        &mut self,
+        peer: PeerId,
+        seal: &EvpnFeedSeal,
+        admitted_markers: u8,
+    ) -> bool {
+        let owed_markers = seal.required_markers & !admitted_markers;
+        if !self.evpn_feed_seal_is_current(peer, seal) {
+            // The envelope is admitted and cannot be undone: recover as a
+            // missed admission does.
+            self.mark_outbound_dirty(peer);
+            return false;
+        }
+        if owed_markers == 0 {
+            return true;
+        }
+        let installed = self.next_evpn_table_stamp().is_some_and(|revision| {
+            self.replace_evpn_feed_completion(
+                peer,
+                Some(EvpnFeedCompletion {
+                    provenance: seal.provenance,
+                    target: seal.target,
+                    revision,
+                    complete: true,
+                    owed_markers,
+                }),
+            )
+        });
+        if !installed {
+            self.mark_outbound_dirty(peer);
+        }
+        installed
     }
 
     /// Extend an existing full private inventory with proof-owned withdrawals
@@ -732,12 +807,15 @@ impl RibManager {
             return false;
         }
         let handle = completion.provenance;
-        if self
-            .evpn_recovery
-            .finish_recovery_with_checkpoint(handle, &mut |force| {
-                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
-            })
-            != Ok(true)
+        // A clean replay's markers left in its own turn: no proof was
+        // captured, and only the receipt is dropped.
+        if !self.evpn_recovery.is_dormant(handle)
+            && self
+                .evpn_recovery
+                .finish_recovery_with_checkpoint(handle, &mut |force| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                })
+                != Ok(true)
         {
             return false;
         }
@@ -825,6 +903,13 @@ impl RibManager {
     /// leaving them to the resync tick, which retries a refused or held one.
     /// Other families' owed End-of-RIB, and EVPN's own owed initial one,
     /// stay with their own releases.
+    ///
+    /// This is also the capture seam of a clean replay, which was admitted
+    /// with no proof. A marker that is refused or held here stays owed past
+    /// this actor turn, so the proof is captured now, while the admitted
+    /// set is still the member's eligible projection: nothing has staged
+    /// the group table since the replay walked it. Later retries of the
+    /// marker find that proof and never capture.
     pub(in crate::manager) fn send_evpn_refresh_markers(&mut self, peer: PeerId) {
         let (end_of_rib, end_of_refresh) = self.evpn_feed_owed_markers(peer);
         if (end_of_rib || end_of_refresh)
@@ -834,6 +919,15 @@ impl RibManager {
             && !self.eor.owes(peer, EVPN_FAMILY)
         {
             self.retry_eor_markers(peer, false);
+        }
+        if self.has_evpn_feed_completion(peer)
+            && self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| self.evpn_recovery.is_dormant(handle))
+        {
+            // A refused capture leaves the member dirty behind a pending
+            // reset, which sends no marker and invalidates the receipt.
+            self.capture_shared_evpn_admitted(peer);
         }
     }
 
@@ -992,11 +1086,95 @@ impl RibManager {
                 revision,
                 required_markers: 0,
                 sparse_keys: None,
+                clean_replay: false,
             },
             announce,
             withdraw,
         })
     }
+
+    /// The grouped member whose admitted EVPN set is its current eligible
+    /// projection, with its handle and table: it is not dirty, owes no reset
+    /// and no terminal marker, and holds no proof, receipt or private row.
+    /// Every other member recovers through its Ready proof.
+    fn clean_evpn_member(&self, peer: PeerId) -> Option<(ProvenanceHandle, EvpnFeedTarget)> {
+        let group_id = self.evpn_grouped_member_of(peer)?;
+        let group = self.group_ribs.get(&group_id)?;
+        let handle = self.evpn_recovery_handle(peer)?;
+        let record = self.evpn_completion_record(peer)?;
+        (group.evpn_table_stamp != 0
+            && group.members.contains(&peer)
+            && record.evpn_feed_completion.is_none()
+            && !record.outbound_tx.is_closed()
+            // A pending reset, a proof (any handle that is not dormant) or
+            // a dirty member.
+            && !self.evpn_advertised_resync_in_progress(peer)
+            && !self.eor.owes(peer, EVPN_FAMILY)
+            && self
+                .adj_ribs_out
+                .get(&peer)
+                .is_none_or(|private| private.evpn_len() == 0))
+        .then_some((
+            handle,
+            EvpnFeedTarget::Grouped {
+                group_id,
+                table_stamp: group.evpn_table_stamp,
+            },
+        ))
+    }
+
+    /// A clean member's refresh replay: its whole eligible projection, with
+    /// a fresh exact probe for every row, and no withdrawal, because the
+    /// peer holds nothing else. No proof is captured and no receipt is
+    /// minted; [`Self::send_evpn_refresh_markers`] captures the proof if
+    /// the replay leaves a terminal marker owed. `None` for any other
+    /// member, which takes the captured-proof cycle.
+    pub(in crate::manager) fn clean_evpn_refresh_feed(
+        &self,
+        peer: PeerId,
+    ) -> Option<EvpnCompleteFeed> {
+        let (provenance, target) = self.clean_evpn_member(peer)?;
+        let EvpnFeedTarget::Grouped { group_id, .. } = target else {
+            return None;
+        };
+        let group = self.group_ribs.get(&group_id)?;
+        let session_id = *self.outbound_session_ids.get(&peer)?;
+        let outbound = self.outbound_peers.get(&peer)?.clone();
+        if self.selection_deferred(EVPN_FAMILY) {
+            return None;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        if !group.evpn_projection_complete_with_checkpoint(&mut checkpoint) {
+            return None;
+        }
+        let filter = self.member_rt_filter(peer);
+        let announce = group
+            .evpn_member_projection_with_checkpoint(
+                peer,
+                self.cluster_id,
+                filter.as_ref(),
+                None,
+                checkpoint,
+            )
+            .cloned()
+            .collect();
+        Some(EvpnCompleteFeed {
+            seal: EvpnFeedSeal {
+                session_id,
+                outbound,
+                provenance,
+                target,
+                revision: 0,
+                required_markers: 0,
+                sparse_keys: None,
+                clean_replay: true,
+            },
+            announce,
+            withdraw: Vec::new(),
+        })
+    }
+
     pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: PeerId) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
         self.group_ribs.get(&gid)?.owns_evpn_routes().then_some(gid)

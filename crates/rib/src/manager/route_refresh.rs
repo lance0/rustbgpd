@@ -1138,7 +1138,15 @@ impl RibManager {
         let owned_evpn = (family == (Afi::L2Vpn, Safi::Evpn))
             .then(|| self.evpn_grouped_member_of(peer))
             .flatten();
-        let owned_evpn_feed = if let Some(gid) = owned_evpn {
+        // A peer refresh of a clean member replays its projection with no
+        // proof; the tail captures one only if a terminal marker stays owed.
+        let clean_evpn_feed = (owned_evpn.is_some()
+            && matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. }))
+        .then(|| self.clean_evpn_refresh_feed(peer))
+        .flatten();
+        let owned_evpn_feed = if clean_evpn_feed.is_some() {
+            clean_evpn_feed
+        } else if let Some(gid) = owned_evpn {
             if !self.capture_shared_evpn_admitted(peer) {
                 return FamilyReplayOutcome::Failed;
             }
