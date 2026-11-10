@@ -38,7 +38,7 @@ async fn send_peer_orf(
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when,
-        entries,
+        groups: vec![entries],
         reply: rtx,
     })
     .await
@@ -250,7 +250,10 @@ async fn orf_capacity_rejection_keeps_filter_through_plain_refresh_fallback() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Immediate,
-        entries: vec![orf_permit(0, 0, 32, denied), orf_permit(cap, 0, 32, denied)],
+        groups: vec![vec![
+            orf_permit(0, 0, 32, denied),
+            orf_permit(cap, 0, 32, denied),
+        ]],
         reply,
     })
     .await
@@ -536,7 +539,7 @@ async fn orf_unmatchable_entry_is_installed_and_warned() {
             Afi::Ipv4,
             Safi::Unicast,
             WhenToRefresh::Defer,
-            &[entry],
+            &[vec![entry]],
             warm_reply,
         );
         tracing::callsite::rebuild_interest_cache();
@@ -548,7 +551,7 @@ async fn orf_unmatchable_entry_is_installed_and_warned() {
             Afi::Ipv4,
             Safi::Unicast,
             WhenToRefresh::Defer,
-            &[entry],
+            &[vec![entry]],
             reply,
         );
     });
@@ -1320,7 +1323,7 @@ fn push_orf_entries(
         afi,
         safi: Safi::Unicast,
         when: WhenToRefresh::Defer,
-        entries,
+        groups: vec![entries],
         reply,
     });
     response.try_recv().expect("synchronous ORF reply")
@@ -1560,7 +1563,7 @@ fn orf_pending_entry_drops_after_last_orf_message_lift() {
             afi,
             safi: Safi::Unicast,
             when,
-            entries: vec![],
+            groups: vec![vec![]],
             reply,
         });
         response
@@ -1651,7 +1654,7 @@ fn orf_filter_entry_tracks_installed_filters() {
             afi,
             safi: Safi::Unicast,
             when: WhenToRefresh::Immediate,
-            entries,
+            groups: vec![entries],
             reply,
         });
         response
@@ -1792,14 +1795,14 @@ fn explain_best_path_orf_case(afi: Afi, denied: Prefix, permitted: Prefix) {
         afi,
         safi: Safi::Unicast,
         when: WhenToRefresh::Immediate,
-        entries: vec![AddressPrefixOrf {
+        groups: vec![vec![AddressPrefixOrf {
             action: OrfAction::Add,
             match_: OrfMatch::Permit,
             sequence: 10,
             min_len: permitted.prefix_len(),
             max_len: permitted.prefix_len(),
             prefix: Some(permitted),
-        }],
+        }]],
         reply,
     });
     result.try_recv().unwrap().unwrap();
@@ -1818,4 +1821,258 @@ fn explain_best_path_orf_case(afi: Afi, denied: Prefix, permitted: Prefix) {
         "{permitted}: {held:?}"
     );
     assert_eq!(explained, held, "ORF-permitted {permitted}");
+}
+
+fn push_orf_groups(
+    manager: &mut RibManager,
+    peer: PeerId,
+    when: WhenToRefresh,
+    groups: Vec<Vec<AddressPrefixOrf>>,
+) -> Result<(), String> {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 7,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when,
+        groups,
+        reply,
+    });
+    response.try_recv().expect("synchronous ORF reply")
+}
+
+fn orf_remove_all() -> AddressPrefixOrf {
+    AddressPrefixOrf {
+        action: OrfAction::RemoveAll,
+        prefix: None,
+        ..orf_permit(0, 0, 0, Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))
+    }
+}
+
+/// Final IPv4 filter after `groups` arrive as one message, checked against
+/// the same groups arriving as one message each.
+fn orf_filter_after_one_message(
+    when: WhenToRefresh,
+    groups: &[Vec<AddressPrefixOrf>],
+) -> (RibManager, Result<(), String>) {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let (mut folded, _out_rx) = dual_stack_orf_manager(peer);
+    let result = push_orf_groups(&mut folded, peer, when, groups.to_vec());
+    let (mut split, _out_rx) = dual_stack_orf_manager(peer);
+    for group in groups {
+        let _ = push_orf_groups(&mut split, peer, when, vec![group.clone()]);
+    }
+    let filter = |manager: &RibManager| manager.peer_orf_filters.get(&peer)?.get(&family).cloned();
+    assert_eq!(
+        filter(&folded),
+        filter(&split),
+        "one message must install what its groups install one at a time"
+    );
+    assert_eq!(
+        folded.peer_orf_pending.get(&peer),
+        split.peer_orf_pending.get(&peer)
+    );
+    (folded, result)
+}
+
+/// One ROUTE-REFRESH is one forced resync, however many ORF groups the peer
+/// splits it into.
+#[test]
+fn orf_groups_of_one_message_cost_one_forced_resync() {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    for groups in [1_u32, 8, 1357] {
+        for empty in [true, false] {
+            let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+            let before = manager.adj_rib_out_commit_stats.resync_builds;
+            push_orf_groups(
+                &mut manager,
+                peer,
+                WhenToRefresh::Immediate,
+                (0..groups)
+                    .map(|seq| {
+                        if empty {
+                            vec![]
+                        } else {
+                            vec![orf_permit(seq, 0, 32, prefix)]
+                        }
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            assert_eq!(
+                manager.adj_rib_out_commit_stats.resync_builds - before,
+                1,
+                "{groups} groups (empty: {empty})"
+            );
+            assert!(
+                !manager.peer_orf_pending[&peer].contains(&(Afi::Ipv4, Safi::Unicast)),
+                "IMMEDIATE lifts the gate"
+            );
+        }
+    }
+}
+
+#[test]
+fn orf_groups_apply_in_message_order() {
+    let ten = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let private = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
+    let remove = AddressPrefixOrf {
+        action: OrfAction::Remove,
+        prefix: None,
+        ..orf_permit(3, 0, 0, ten)
+    };
+    let (manager, result) = orf_filter_after_one_message(
+        WhenToRefresh::Immediate,
+        &[
+            vec![orf_permit(1, 0, 32, ten)],
+            vec![orf_remove_all()],
+            vec![orf_permit(2, 0, 32, private), orf_deny(3, 0, 32, ten)],
+            vec![remove],
+        ],
+    );
+    result.unwrap();
+    let filter = &manager.peer_orf_filters[&peer_v4(Ipv4Addr::new(10, 0, 0, 2))]
+        [&(Afi::Ipv4, Safi::Unicast)];
+    assert_eq!(filter.len(), 1);
+    assert!(filter.permits(&Prefix::V4(private)));
+    assert!(!filter.permits(&Prefix::V4(ten)));
+}
+
+#[test]
+fn orf_defer_groups_install_without_resync_or_gate_lift() {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let (manager, result) = orf_filter_after_one_message(
+        WhenToRefresh::Defer,
+        &[
+            vec![orf_permit(1, 0, 32, prefix)],
+            vec![],
+            vec![orf_permit(2, 0, 32, prefix)],
+        ],
+    );
+    result.unwrap();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
+    assert_eq!(
+        manager.peer_orf_filters[&peer][&(Afi::Ipv4, Safi::Unicast)].len(),
+        2
+    );
+    assert!(manager.peer_orf_pending[&peer].contains(&(Afi::Ipv4, Safi::Unicast)));
+}
+
+/// A malformed group resets the list (RFC 5291 §6) and forces the sweep even
+/// under DEFER; the groups after it still install.
+#[test]
+fn orf_malformed_group_resets_and_later_groups_still_apply() {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let ten = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let private = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
+    let (manager, result) = orf_filter_after_one_message(
+        WhenToRefresh::Defer,
+        &[
+            vec![orf_permit(1, 0, 32, ten)],
+            // min length above max length.
+            vec![orf_permit(2, 24, 16, ten)],
+            vec![orf_permit(3, 0, 32, private)],
+        ],
+    );
+    result.unwrap();
+    let filter = &manager.peer_orf_filters[&peer][&(Afi::Ipv4, Safi::Unicast)];
+    assert_eq!(filter.len(), 1);
+    assert!(filter.permits(&Prefix::V4(private)));
+    assert!(!filter.permits(&Prefix::V4(ten)));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert!(
+        manager.peer_orf_pending[&peer].contains(&(Afi::Ipv4, Safi::Unicast)),
+        "a reset under DEFER leaves the gate up"
+    );
+}
+
+/// A group over the entry limit is refused whole; the groups around it
+/// install, and the reply reports the refusal so the session falls back to
+/// a plain refresh.
+#[test]
+fn orf_capacity_rejected_group_keeps_the_other_groups_of_the_message() {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
+    let ten = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let private = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
+    let (manager, result) = orf_filter_after_one_message(
+        WhenToRefresh::Immediate,
+        &[
+            vec![orf_permit(cap + 1, 0, 32, ten)],
+            (0..=cap).map(|seq| orf_deny(seq, 0, 32, ten)).collect(),
+            vec![orf_permit(cap + 2, 0, 32, private)],
+        ],
+    );
+    assert!(result.unwrap_err().contains("installed filter retained"));
+    let filter = &manager.peer_orf_filters[&peer][&(Afi::Ipv4, Safi::Unicast)];
+    assert_eq!(filter.len(), 2);
+    assert!(filter.permits(&Prefix::V4(ten)));
+    assert!(filter.permits(&Prefix::V4(private)));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert_eq!(
+        counter_metric_value(
+            &manager.metrics,
+            "bgp_orf_capacity_rejections_total",
+            &[("peer", "10.0.0.2"), ("family", "ipv4_unicast")],
+        ),
+        1.0
+    );
+}
+
+/// The End-of-RIB a GR restarter is owed behind its gated table follows the
+/// table the whole message selects, and is sent once.
+#[tokio::test]
+async fn gr_restarter_deferred_eor_follows_the_table_of_a_multi_group_orf() {
+    let (tx, handle, target, _old_rx) = orf_setup().await;
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let mut out_rx =
+        gr_flap_and_reup(&tx, target, vec![family], ipv4_sendable(), vec![family]).await;
+    let ten = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::PeerOrfUpdate {
+        session_id: 0,
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Immediate,
+        groups: vec![
+            vec![orf_permit(
+                1,
+                0,
+                32,
+                Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+            )],
+            vec![orf_remove_all()],
+            vec![orf_permit(2, 0, 32, ten)],
+        ],
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let updates = drain_until_eor(&mut out_rx, family).await;
+    assert_eq!(
+        prefixes_announced(&updates),
+        vec![Prefix::V4(ten)],
+        "only the final list's table precedes the End-of-RIB"
+    );
+    assert_eq!(
+        updates
+            .iter()
+            .filter(|update| update.end_of_rib.contains(&family))
+            .count(),
+        1
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "nothing follows the one End-of-RIB"
+    );
+    drop(tx);
+    handle.await.unwrap();
 }

@@ -3014,8 +3014,12 @@ pub enum RibUpdate {
         safi: Safi,
         /// When-to-refresh directive: IMMEDIATE sweeps now, DEFER installs only.
         when: WhenToRefresh,
-        /// The ORF entries, in wire order (mix of ADD/REMOVE/REMOVE-ALL).
-        entries: Vec<AddressPrefixOrf>,
+        /// Every Address-Prefix ORF group of the one ROUTE-REFRESH message,
+        /// in wire order; each group's entries are in wire order too (mix
+        /// of ADD/REMOVE/REMOVE-ALL). Groups apply in order, each with the
+        /// malformed-reset and capacity rules of a single list update, and
+        /// the message is followed by at most one resync.
+        groups: Vec<Vec<AddressPrefixOrf>>,
         /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },

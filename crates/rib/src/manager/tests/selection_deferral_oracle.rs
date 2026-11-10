@@ -827,7 +827,7 @@ impl Harness {
             afi: FAMILY.0,
             safi: FAMILY.1,
             when: WhenToRefresh::Immediate,
-            entries,
+            groups: vec![entries],
             reply,
         });
         response.try_recv().unwrap().unwrap();

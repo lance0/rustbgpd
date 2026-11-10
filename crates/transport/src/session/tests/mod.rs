@@ -1814,7 +1814,7 @@ struct CapturedOrfUpdate {
     afi: Afi,
     safi: Safi,
     when: WhenToRefresh,
-    entries: Vec<AddressPrefixOrf>,
+    groups: Vec<Vec<AddressPrefixOrf>>,
 }
 async fn drive_inbound_orf_with_reply(
     session: &mut PeerSession,
@@ -1832,7 +1832,7 @@ async fn drive_inbound_orf_with_reply(
         afi,
         safi,
         when,
-        entries,
+        groups,
         reply,
         ..
     } = msg
@@ -1849,7 +1849,7 @@ async fn drive_inbound_orf_with_reply(
             afi,
             safi,
             when,
-            entries,
+            groups,
         },
     )
 }

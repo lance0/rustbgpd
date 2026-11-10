@@ -7479,7 +7479,13 @@ impl RibManager {
         }
     }
 
-    /// Apply Address-Prefix ORF entries pushed by a peer (RFC 5291/5292).
+    /// Apply the Address-Prefix ORF groups of one ROUTE-REFRESH pushed by a
+    /// peer (RFC 5291/5292), in wire order, then resync at most once.
+    ///
+    /// Each group keeps the rules of a single list update: a malformed field
+    /// resets the installed list and later groups apply to the emptied list;
+    /// a group over the entry limit is rejected whole, the other groups still
+    /// apply, and the reply reports the rejection.
     ///
     /// Only an `IMMEDIATE` update lifts the initial-advertisement gate
     /// (RFC 5291 §6). The sweep runs for `IMMEDIATE` or a malformed-field
@@ -7495,7 +7501,7 @@ impl RibManager {
         afi: Afi,
         safi: Safi,
         when: rustbgpd_wire::WhenToRefresh,
-        entries: &[rustbgpd_wire::AddressPrefixOrf],
+        groups: &[Vec<rustbgpd_wire::AddressPrefixOrf>],
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
         if !self.outbound_peers.contains_key(&peer) {
@@ -7524,79 +7530,100 @@ impl RibManager {
             .or_default()
             .entry(family)
             .or_default();
-        let unknown_when = matches!(when, WhenToRefresh::Unknown(_));
-        let reset = match when {
-            WhenToRefresh::Unknown(value) => {
-                // RFC 5291 only defines IMMEDIATE and DEFER. Treat an unknown
-                // value like a malformed negotiated ORF control field: clear the
-                // installed list and force a safe resync instead of silently
-                // installing peer state with defer-like behavior.
-                let remove_all = AddressPrefixOrf {
-                    action: OrfAction::RemoveAll,
-                    match_: OrfMatch::Permit,
-                    sequence: 0,
-                    min_len: 0,
-                    max_len: 0,
-                    prefix: None,
-                };
-                let _ = filter.apply(&[remove_all]);
-                warn!(
-                    %peer,
-                    ?family,
-                    when_to_refresh = value,
-                    "unknown ORF When-to-refresh — installed ORF list for this type reset"
-                );
-                true
-            }
-            _ => match filter.apply(entries) {
-                Ok(()) => false,
-                Err(crate::orf::OrfApplyError::Malformed) => true,
-                Err(crate::orf::OrfApplyError::Capacity) => {
-                    self.metrics.record_orf_capacity_rejection(
-                        &peer.label(),
-                        rustbgpd_wire::family_label(afi, safi).unwrap_or("unknown"),
-                    );
-                    warn!(
-                        %peer,
-                        ?family,
-                        limit = crate::orf::MAX_ORF_ENTRIES,
-                        installed = filter.len(),
-                        "ORF entry limit exceeded — update rejected, installed filter retained"
-                    );
-                    self.reap_empty_orf_filter(peer, family);
-                    let _ = reply.send(Err(format!(
-                        "ORF entry limit {} exceeded; installed filter retained",
-                        crate::orf::MAX_ORF_ENTRIES
-                    )));
-                    return;
+        let mut reset = false;
+        // Whether any group was refused for capacity, and whether any was
+        // applied (a reset counts as applied).
+        let (mut rejected, mut applied) = (false, false);
+        if let WhenToRefresh::Unknown(value) = when {
+            // RFC 5291 only defines IMMEDIATE and DEFER. Treat an unknown
+            // value like a malformed negotiated ORF control field: clear the
+            // installed list and force a safe resync instead of silently
+            // installing peer state with defer-like behavior.
+            let remove_all = AddressPrefixOrf {
+                action: OrfAction::RemoveAll,
+                match_: OrfMatch::Permit,
+                sequence: 0,
+                min_len: 0,
+                max_len: 0,
+                prefix: None,
+            };
+            let _ = filter.apply(&[remove_all]);
+            warn!(
+                %peer,
+                ?family,
+                when_to_refresh = value,
+                "unknown ORF When-to-refresh — installed ORF list for this type reset"
+            );
+            reset = true;
+        } else {
+            for entries in groups {
+                match filter.apply(entries) {
+                    Ok(()) => {
+                        applied = true;
+                        // A well-formed entry whose max length is below its
+                        // own prefix length is installed as sent (RFC 5292 §4
+                        // allows it) but can never match. Report it;
+                        // rejecting it would flush the list and fail open to
+                        // permit-all.
+                        let unmatchable: Vec<String> = entries
+                            .iter()
+                            .filter(|entry| entry.action == OrfAction::Add)
+                            .filter_map(|entry| {
+                                let prefix = entry.prefix?;
+                                crate::orf::unmatchable_window(
+                                    &prefix,
+                                    entry.min_len,
+                                    entry.max_len,
+                                )
+                                .then(|| {
+                                    format!("{prefix} min {} max {}", entry.min_len, entry.max_len)
+                                })
+                            })
+                            .collect();
+                        if !unmatchable.is_empty() {
+                            warn!(
+                                %peer,
+                                ?family,
+                                entries = ?unmatchable,
+                                "ORF entry installed but can never match — max length below prefix length"
+                            );
+                        }
+                    }
+                    Err(crate::orf::OrfApplyError::Malformed) => {
+                        applied = true;
+                        reset = true;
+                        warn!(%peer, ?family, "malformed ORF entry — installed ORF list for this type reset");
+                    }
+                    Err(crate::orf::OrfApplyError::Capacity) => {
+                        rejected = true;
+                        self.metrics.record_orf_capacity_rejection(
+                            &peer.label(),
+                            rustbgpd_wire::family_label(afi, safi).unwrap_or("unknown"),
+                        );
+                        warn!(
+                            %peer,
+                            ?family,
+                            limit = crate::orf::MAX_ORF_ENTRIES,
+                            installed = filter.len(),
+                            "ORF entry limit exceeded — update rejected, installed filter retained"
+                        );
+                    }
                 }
-            },
-        };
-        if reset && !unknown_when {
-            warn!(%peer, ?family, "malformed ORF entry — installed ORF list for this type reset");
-        }
-        if !reset {
-            // A well-formed entry whose max length is below its own prefix
-            // length is installed as sent (RFC 5292 §4 allows it) but can
-            // never match. Report it; rejecting it would flush the list and
-            // fail open to permit-all.
-            let unmatchable: Vec<String> = entries
-                .iter()
-                .filter(|entry| entry.action == OrfAction::Add)
-                .filter_map(|entry| {
-                    let prefix = entry.prefix?;
-                    crate::orf::unmatchable_window(&prefix, entry.min_len, entry.max_len)
-                        .then(|| format!("{prefix} min {} max {}", entry.min_len, entry.max_len))
-                })
-                .collect();
-            if !unmatchable.is_empty() {
-                warn!(
-                    %peer,
-                    ?family,
-                    entries = ?unmatchable,
-                    "ORF entry installed but can never match — max length below prefix length"
-                );
             }
+        }
+        let outcome = if rejected {
+            Err(format!(
+                "ORF entry limit {} exceeded; installed filter retained",
+                crate::orf::MAX_ORF_ENTRIES
+            ))
+        } else {
+            Ok(())
+        };
+        if rejected && !applied {
+            // Nothing in the message was accepted: no gate lift, no resync.
+            self.reap_empty_orf_filter(peer, family);
+            let _ = reply.send(outcome);
+            return;
         }
         // RFC 5291 §6: the gate lifts on a ROUTE-REFRESH without ORF entries
         // or with When-to-refresh IMMEDIATE. DEFER (and an unknown value)
@@ -7635,7 +7662,7 @@ impl RibManager {
             }
             self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
         }
-        let _ = reply.send(Ok(()));
+        let _ = reply.send(outcome);
     }
 
     #[expect(
