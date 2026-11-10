@@ -375,7 +375,7 @@ def series():
 
 class ReadinessAndWireChecks(unittest.TestCase):
     def test_every_settlement_duty_and_every_reset_cause_must_be_zero(self):
-        settled = {name: 0 for name in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+        settled = {name: 0 for name in ("dirty", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
                                        "refresh_pending", "eor_pending", "protocol_obligations")}
         self.assertTrue(check.settled(settled))
         for name in settled:

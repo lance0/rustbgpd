@@ -61,7 +61,7 @@ def marker_refusals(interval):
 
 
 def settled(row):
-    fields = ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+    fields = ("dirty", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
               "refresh_pending", "eor_pending", "protocol_obligations")
     require(all(type(row[name]) is int and row[name] >= 0 for name in fields), "malformed settlement observation")
     return not any(row[name] for name in fields)
