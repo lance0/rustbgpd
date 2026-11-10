@@ -5085,13 +5085,15 @@ mod packing_tests {
         FlowSpecRule { components }
     }
 
-    /// Whether entry `i` of a 2,048-entry group is a small one.
+    /// Which entries of a typed group are small ones.
     #[derive(Clone, Copy, Debug)]
     enum Sizes {
-        /// 500 small entries, then large ones.
+        /// 2,048 entries: 500 small, then large ones.
         SmallThenLarge,
-        /// Runs of 100 small and 100 large entries.
+        /// 2,048 entries in runs of 100 small and 100 large.
         Alternating,
+        /// 500 small entries, 100 large ones, then this many small ones.
+        Spike(u32),
     }
 
     impl Sizes {
@@ -5099,14 +5101,21 @@ mod packing_tests {
             match self {
                 Self::SmallThenLarge => i < 500,
                 Self::Alternating => (i / 100).is_multiple_of(2),
+                Self::Spike(_) => !(500..600).contains(&i),
+            }
+        }
+
+        fn rows(self) -> u32 {
+            match self {
+                Self::Spike(tail) => 600 + tail,
+                _ => u32::try_from(SLICE).unwrap(),
             }
         }
     }
 
-    /// `(messages, builds)` for one 2,048-entry typed group whose entry
-    /// sizes vary.
-    async fn pack_varying(flowspec: bool, sizes: Sizes, extended: bool) -> (usize, usize) {
-        let rows = u32::try_from(SLICE).unwrap();
+    /// Frame lengths and builds for one typed group whose entry sizes vary.
+    async fn pack_varying(flowspec: bool, sizes: Sizes, extended: bool) -> (Vec<usize>, usize) {
+        let rows = sizes.rows();
         let attrs = base_attrs();
         let mp_attrs = &attrs[..2];
         let family = if flowspec {
@@ -5145,40 +5154,93 @@ mod packing_tests {
                 max_len,
             )
         };
-        assert_eq!(sent, Ok(SLICE));
+        assert_eq!(sent, Ok(rows as usize));
         let frames = sent_frames(&session, &mut server).await;
         assert!(frames.iter().all(|frame| *frame <= max_len));
-        (frames.len(), BUILT.get().0)
+        (frames, BUILT.get().0)
     }
 
-    /// Entry sizes that change within a typed group cost extra builds, but a
-    /// bounded number: one measurement, four rejections that raise the
-    /// assumed bytes per entry to what they measured, then rejections that
-    /// at least double it. The pinned figures are `(messages, builds)`; the
-    /// chunkers this replaced took (34, 38), (3, 3), (34, 38), (3, 3) for
-    /// EVPN and (37, 155), (3, 4), (29, 130), (2, 2) for `FlowSpec`.
+    /// Entry sizes that change within a typed group cost extra builds, at
+    /// the messages where the entries get larger. The pinned figures are
+    /// `(messages, builds)`; the chunkers this replaced took (34, 38),
+    /// (3, 3), (34, 38), (3, 3) for EVPN and (37, 155), (3, 4), (29, 130),
+    /// (2, 2) for `FlowSpec`.
     #[tokio::test]
     async fn varying_typed_groups_stay_within_the_build_bound() {
         use Sizes::{Alternating, SmallThenLarge};
         let cases = [
-            ((false, SmallThenLarge, false), (24, 27)),
+            ((false, SmallThenLarge, false), (24, 26)),
             ((false, SmallThenLarge, true), (2, 4)),
-            ((false, Alternating, false), (26, 30)),
+            ((false, Alternating, false), (25, 40)),
             ((false, Alternating, true), (2, 4)),
-            ((true, SmallThenLarge, false), (33, 36)),
+            ((true, SmallThenLarge, false), (34, 36)),
             ((true, SmallThenLarge, true), (2, 4)),
-            ((true, Alternating, false), (36, 40)),
+            ((true, Alternating, false), (32, 58)),
             ((true, Alternating, true), (2, 5)),
         ];
         let mut moved = Vec::new();
         for (case, pinned) in cases {
             let (flowspec, sizes, extended) = case;
-            let (messages, builds) = pack_varying(flowspec, sizes, extended).await;
-            // Measurement, exact rejections, then one doubling per power of
-            // two of the message limit.
-            let doublings = if extended { 16 } else { 12 };
+            let (frames, builds) = pack_varying(flowspec, sizes, extended).await;
+            let messages = frames.len();
             assert!(
-                builds <= messages + 1 + 4 + doublings,
+                builds <= 2 * messages + 4,
+                "{case:?}: {builds} builds for {messages} messages"
+            );
+            if (messages, builds) != pinned {
+                moved.push(format!("{case:?}: {:?}", (messages, builds)));
+            }
+        }
+        assert!(moved.is_empty(), "packing moved:\n{}", moved.join("\n"));
+    }
+
+    /// A run of large entries inside a long group of small ones must not
+    /// set the size of every later message: once the entries are one size
+    /// again the messages are full again. The pinned figures are
+    /// `(messages, builds)`. The EVPN tail is shorter so that the group
+    /// stays inside the writer's byte budget.
+    #[tokio::test]
+    async fn messages_fill_again_after_a_run_of_large_entries() {
+        let cases = [
+            ((true, 2_000, false), (7, 12)),
+            ((true, 2_000, true), (1, 2)),
+            ((true, 20_000, false), (25, 30)),
+            ((true, 20_000, true), (2, 6)),
+            ((false, 2_000, false), (24, 26)),
+            ((false, 2_000, true), (2, 5)),
+            ((false, 10_000, false), (93, 95)),
+            ((false, 10_000, true), (6, 9)),
+        ];
+        let mut moved = Vec::new();
+        for (case, pinned) in cases {
+            let (flowspec, tail, extended) = case;
+            let limit = if extended { 65_535 } else { 4_096 };
+            let (frames, builds) = pack_varying(flowspec, Sizes::Spike(tail), extended).await;
+            let messages = frames.len();
+            // Every frame repeats the attributes, so the bytes sent bound
+            // the messages a perfect packing needs from above.
+            let full = frames.iter().sum::<usize>().div_ceil(limit);
+            assert!(
+                messages <= full + full / 4 + 4,
+                "{case:?}: {messages} messages where about {full} are full"
+            );
+            // Only the few messages around the large run are short. From
+            // there the entries are one size, and every message but the
+            // last is full to within an entry.
+            let entry = if flowspec { 4 } else { 35 };
+            let (_, sent_full) = frames.split_last().unwrap();
+            let short = |frame: &&usize| limit - **frame >= entry;
+            assert!(
+                sent_full.iter().filter(short).count() <= 6
+                    && (messages < 12
+                        || !sent_full
+                            .iter()
+                            .skip(messages * 2 / 3)
+                            .any(|frame| short(&frame))),
+                "{case:?}: short messages away from the large run: {frames:?}"
+            );
+            assert!(
+                builds <= 2 * messages + 4,
                 "{case:?}: {builds} builds for {messages} messages"
             );
             if (messages, builds) != pinned {

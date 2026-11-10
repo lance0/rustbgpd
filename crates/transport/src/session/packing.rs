@@ -18,11 +18,9 @@ const MIN_UPDATE_LEN: usize = 23;
 const UNSIZED_WHOLE_TRY: usize = 64;
 /// Chunk length when a group could not be measured at all.
 const UNMEASURED_CHUNK: usize = 1000;
-/// Rejected builds of one unsized group whose measured bytes per entry are
-/// taken as they are. Each later one at least doubles the group's assumed
-/// bytes per entry, so the number of rejections stays logarithmic in the
-/// message limit however the entry sizes are arranged.
-const EXACT_MISSES: u32 = 4;
+/// Rejections in a row for one message that are re-sized from what the
+/// rejected build measured. Further ones halve the chunk.
+const RESIZED_REJECTIONS: u32 = 2;
 
 fn prefix_entry_len(bits: u8, add_path: bool) -> usize {
     1 + usize::from(bits).div_ceil(8) + if add_path { 4 } else { 0 }
@@ -110,25 +108,34 @@ fn split(message: &UpdateMessage) -> Option<(usize, usize)> {
 ///
 /// Without them, a group of more than [`UNSIZED_WHOLE_TRY`] entries always
 /// builds one entry first, and each chunk assumes the bytes per entry of
-/// the last measured build. If the entries are all one size, that first
-/// build is the only one not sent and every message but the last is full.
-/// If they vary, a chunk that meets larger entries is rejected and raises
-/// the assumption, which from then on never falls: messages after it can
-/// be short of full, and one group costs at most
-/// `1 + EXACT_MISSES + ceil(log2(max_len))` builds that are not sent (17 at
-/// 4,096 bytes, 21 at 65,535) while its builds can be measured. A build
+/// the chunk sent before it, so the assumption follows the entries up and
+/// down. If the entries are all one size, that first build is the only one
+/// not sent and every message but the last is full.
+///
+/// If they vary, a chunk is rejected only when its entries are larger on
+/// average than the ones it was sized from. The rejected build is not
+/// wasted knowledge: it gives the exact bytes of the entries it covered,
+/// and the chunks that follow are sized from what is left of that total
+/// until those entries are sent. The first of them can be short of full
+/// when small entries lead the rejected stretch; once the entries are one
+/// size again, so are the messages. One message costs at most
+/// `RESIZED_REJECTIONS + ceil(log2(chunk))` rejected builds, and a group
+/// costs that only at the messages where its entries get larger; a build
 /// that fails or cannot be measured halves the chunk instead.
 pub(super) struct ChunkSizer {
     max_len: usize,
     /// Bytes of one UPDATE of this group outside its entries.
     overhead: Option<usize>,
-    /// Entry bytes and entry count standing for the bytes per entry the next
-    /// unsized chunk assumes.
-    worst: (usize, usize),
+    /// Entry bytes and entry count of the last chunk sent, or of the
+    /// single-entry measurement.
+    last: (usize, usize),
+    /// Exact entry bytes of the next so many entries, left over from a
+    /// rejected build. No entries when nothing is known.
+    known: (usize, usize),
     /// Upper bound after a rejected build, until one is accepted.
     cap: usize,
-    /// Measured rejections in this group.
-    misses: u32,
+    /// Rejected builds since the last one sent.
+    rejections: u32,
     /// Whether the last chunk length came from exact entry sizes.
     sized: bool,
     probing: bool,
@@ -140,9 +147,10 @@ impl ChunkSizer {
         Self {
             max_len,
             overhead: None,
-            worst: (0, 1),
+            last: (0, 0),
+            known: (0, 0),
             cap: usize::MAX,
-            misses: 0,
+            rejections: 0,
             sized: false,
             probing: false,
             probed: false,
@@ -165,9 +173,15 @@ impl ChunkSizer {
         self.sized = size.is_some();
         let take = if let Some(overhead) = self.overhead {
             let room = self.max_len.saturating_sub(overhead);
-            match size {
-                Some(size) => within(size, room),
-                None => room * self.worst.1 / self.worst.0.max(1),
+            if let Some(size) = size {
+                within(size, room)
+            } else {
+                let (bytes, entries) = if self.known.1 == 0 {
+                    self.last
+                } else {
+                    self.known
+                };
+                room * entries / bytes.max(1)
             }
         } else {
             let whole = match size {
@@ -200,64 +214,65 @@ impl ChunkSizer {
         }
         #[cfg(test)]
         tally(1);
-        message.is_some_and(|message| {
-            message.encoded_len() <= self.max_len && self.measure(message, 1)
-        })
+        let Some(message) = message.filter(|message| message.encoded_len() <= self.max_len) else {
+            return false;
+        };
+        let Some(bytes) = self.measure(message) else {
+            return false;
+        };
+        self.last = (bytes, 1);
+        true
     }
 
     /// A build of `tried` entries was too long or failed: the next is shorter.
     pub(super) fn rejected(&mut self, tried: usize, message: Option<&UpdateMessage>) {
         let predicted = self.sized && self.overhead.is_some();
-        let before = self.worst;
-        let measured = message.is_some_and(|message| self.measure(message, tried));
-        // A measured miss re-sizes the chunk: with exact sizes from the
-        // overhead it revealed, without them from the raised bytes per
-        // entry. A build that failed, could not be measured, or missed an
-        // exact prediction halves instead.
-        self.cap = if measured && !predicted {
-            tried - 1
-        } else {
-            tried / 2
+        let measured = message.and_then(|message| self.measure(message));
+        if let Some(bytes) = measured {
+            self.known = (bytes, tried);
         }
-        .max(1);
-        if measured && !self.sized {
-            self.misses += 1;
-            if self.misses > EXACT_MISSES && self.worst.0 * before.1 < 2 * before.0 * self.worst.1 {
-                self.worst = (2 * before.0, before.1);
-            }
-        }
+        // A measured rejection re-sizes the chunk: with exact sizes from
+        // the overhead it revealed, without them from the bytes it measured
+        // for these entries. A build that failed, could not be measured,
+        // missed an exact prediction, or follows two re-sized rejections
+        // halves instead.
+        let resize = measured.is_some() && !predicted && self.rejections < RESIZED_REJECTIONS;
+        self.cap = if resize { tried - 1 } else { tried / 2 }.max(1);
+        self.rejections += 1;
         #[cfg(test)]
         tally(tried);
     }
 
     /// A build of `entries` entries fits and is being sent.
     pub(super) fn accepted(&mut self, message: &UpdateMessage, entries: usize) {
-        self.measure(message, entries);
+        if let Some(bytes) = self.measure(message) {
+            self.last = (bytes, entries);
+            // What a rejected build measured, less what has now been sent,
+            // is the exact size of the entries that come next.
+            self.known = if self.known.1 > entries && self.known.0 > bytes {
+                (self.known.0 - bytes, self.known.1 - entries)
+            } else {
+                (0, 0)
+            };
+        }
         self.cap = usize::MAX;
+        self.rejections = 0;
         #[cfg(test)]
         tally(entries);
     }
 
-    fn measure(&mut self, message: &UpdateMessage, entries: usize) -> bool {
-        let entry_bytes = if let Some(overhead) = self.overhead {
+    /// The message's entry bytes, learning the group's overhead from the
+    /// first message that can be taken apart.
+    fn measure(&mut self, message: &UpdateMessage) -> Option<usize> {
+        if let Some(overhead) = self.overhead {
             // The group's overhead does not change, so the entries are the
             // rest of the message, whatever its length fields could hold.
             let short = usize::from(short_mp_header(message));
-            (message.encoded_len() + short).saturating_sub(overhead)
-        } else {
-            let Some((overhead, entry_bytes)) = split(message) else {
-                return false;
-            };
-            self.overhead = Some(overhead);
-            entry_bytes
-        };
-        // Until a build of this group is rejected the assumption follows
-        // the last measurement, down as well as up, so a group whose entries
-        // get smaller fills its later messages. After that it only rises.
-        if self.misses == 0 || entry_bytes * self.worst.1 > self.worst.0 * entries {
-            self.worst = (entry_bytes, entries);
+            return Some((message.encoded_len() + short).saturating_sub(overhead));
         }
-        true
+        let (overhead, entry_bytes) = split(message)?;
+        self.overhead = Some(overhead);
+        Some(entry_bytes)
     }
 }
 
@@ -348,7 +363,7 @@ mod tests {
         );
         sizer.accepted(&long, 100);
         sizer.rejected(10_000, Some(&wrapped));
-        assert_eq!(sizer.worst, (70_000, 10_000));
+        assert_eq!(sizer.known, (70_000, 10_000));
         assert_eq!(sizer.next(&[(); 20_000], None), (65_535 - overhead) / 7);
         // Anything else leading the attributes is not measured.
         assert_eq!(split(&message(PathAttribute::Med(1))), None);
