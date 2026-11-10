@@ -13,8 +13,9 @@ use super::{PolicyFilteredRouteKey, RibManager, RibUpdate};
 use crate::ERR_REFRESH_TIMEOUT;
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
+use crate::fast_hash::ShardedMap;
 use crate::outbound_credit::OutboundOperation;
-use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
+use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute};
 use crate::update::OutboundRouteUpdate;
 
 /// Why one family is being re-derived through the shared replay body.
@@ -59,6 +60,34 @@ fn sweep_owed_withdrawals<K: Clone + Eq + std::hash::Hash>(
         }
     }
     super::retire_hash_set(&mut answered, &mut || checkpoint(false));
+}
+
+/// Take the keys `matches` accepts out of `peer`'s refresh-stale inventory,
+/// dropping the peer's entry once it is empty. Checkpoints per visited key;
+/// the result is reserved from the inventory's size.
+fn take_refresh_stale<K: Clone + Eq + std::hash::Hash>(
+    inventory: &mut HashMap<PeerId, ShardedMap<K, ()>>,
+    peer: PeerId,
+    matches: impl Fn(&K) -> bool,
+    checkpoint: &mut impl FnMut(),
+) -> Vec<K> {
+    let Some(stale) = inventory.get_mut(&peer) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::with_capacity(stale.len());
+    checkpoint();
+    stale.retain(|key, ()| {
+        checkpoint();
+        let taken = matches(key);
+        if taken {
+            keys.push(key.clone());
+        }
+        !taken
+    });
+    if stale.is_empty() {
+        inventory.remove(&peer);
+    }
+    keys
 }
 
 /// Remove one family from a per-peer family set, dropping the peer's entry
@@ -2688,10 +2717,6 @@ impl RibManager {
     ///
     /// When `timed_out` is true, treats the timeout as an implicit end-of-
     /// refresh sweep and logs a warning before cleaning up unreplaced state.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "refresh finisher sweeps unreplaced unicast, FlowSpec, and EVPN routes and clears per-family tracking state"
-    )]
     pub(super) fn finish_route_refresh(
         &mut self,
         peer: PeerId,
@@ -2699,13 +2724,12 @@ impl RibManager {
         safi: Safi,
         timed_out: bool,
     ) {
-        let family = (afi, safi);
         self.refresh_deadlines.remove(&(peer, afi, safi));
 
         let active = self
             .refresh_in_progress
             .get(&peer)
-            .is_some_and(|families| families.contains(&family));
+            .is_some_and(|families| families.contains(&(afi, safi)));
         if !active {
             debug!(%peer, ?afi, ?safi, "End-of-RIB-Refresh without active refresh state, ignoring");
             return;
@@ -2724,152 +2748,144 @@ impl RibManager {
                 "enhanced route refresh timed out — sweeping unreplaced routes"
             );
         }
+        self.with_selection_readiness(|manager| {
+            manager.finish_route_refresh_with_readiness(peer, (afi, safi));
+        });
+        self.metrics
+            .observe_rib_route_refresh_finish_actor_duration(timed_out, started_at.elapsed());
+    }
 
-        let stale_route_keys: Vec<(Prefix, u32)> = self
-            .refresh_stale_routes
-            .get(&peer)
-            .map(|stale| {
-                stale
-                    .keys()
-                    .copied()
-                    .filter(|(prefix, _)| prefix_family(prefix) == family)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let stale_flowspec_keys: Vec<FlowSpecRouteKey> = self
-            .refresh_stale_flowspec
-            .get(&peer)
-            .map(|stale| {
-                stale
-                    .keys()
-                    .filter(|key| key.family() == (afi, safi))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        let stale_evpn_keys: Vec<EvpnRouteKey> = if family == (Afi::L2Vpn, Safi::Evpn) {
-            self.refresh_stale_evpn
-                .get(&peer)
-                .map(|stale| stale.keys().copied().collect())
-                .unwrap_or_default()
+    /// Withdraw the routes of `family` the peer did not re-advertise inside
+    /// its refresh window, close the window, then reselect and distribute,
+    /// under the changing-count readiness owner the caller holds. Key
+    /// collection, each withdrawal and the intern cleanup checkpoint per
+    /// entry; the affected sets are reserved from the collected keys.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "refresh finisher sweeps the unreplaced routes of all seven route tables and clears per-family tracking state"
+    )]
+    fn finish_route_refresh_with_readiness(&mut self, peer: PeerId, family: (Afi, Safi)) {
+        let (afi, safi) = family;
+        let readiness = self.replacement_readiness.clone();
+        let mut inventory =
+            || super::replacement_readiness_checkpoint_at(&readiness, "eorr_inventory", false);
+        let mut sweep =
+            || super::replacement_readiness_checkpoint_at(&readiness, "eorr_sweep", false);
+        let mut cleanup =
+            || super::replacement_readiness_checkpoint_at(&readiness, "eorr_intern_cleanup", false);
+
+        let mut stale_route_keys = take_refresh_stale(
+            &mut self.refresh_stale_routes,
+            peer,
+            |(prefix, _)| prefix_family(prefix) == family,
+            &mut inventory,
+        );
+        let mut stale_flowspec_keys = take_refresh_stale(
+            &mut self.refresh_stale_flowspec,
+            peer,
+            |key| key.family() == family,
+            &mut inventory,
+        );
+        let mut stale_evpn_keys = if family == (Afi::L2Vpn, Safi::Evpn) {
+            take_refresh_stale(&mut self.refresh_stale_evpn, peer, |_| true, &mut inventory)
         } else {
             Vec::new()
         };
-        let stale_bgpls_keys: Vec<crate::route::BgpLsRouteKey> =
-            if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
-                self.refresh_stale_bgpls
-                    .get(&peer)
-                    .map(|stale| {
-                        stale
-                            .keys()
-                            .filter(|key| key.family == bgpls_family)
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-        let stale_l3vpn_keys: Vec<crate::route::VpnRibRouteKey> = if safi == Safi::MplsVpn {
-            self.refresh_stale_vpn
-                .get(&peer)
-                .map(|stale| {
-                    stale
-                        .keys()
-                        .filter(|key| key.afi_safi() == family)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default()
+        let mut stale_bgpls_keys = if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi)
+        {
+            take_refresh_stale(
+                &mut self.refresh_stale_bgpls,
+                peer,
+                |key| key.family == bgpls_family,
+                &mut inventory,
+            )
         } else {
             Vec::new()
         };
-        let stale_labeled_keys: Vec<crate::route::LabeledRibRouteKey> =
-            if safi == Safi::LabeledUnicast {
-                self.refresh_stale_labeled
-                    .get(&peer)
-                    .map(|stale| {
-                        stale
-                            .keys()
-                            .filter(|key| key.afi_safi() == family)
-                            .copied()
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-        let stale_rtc_keys: Vec<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
-            self.refresh_stale_rtc
-                .get(&peer)
-                .map(|stale| stale.keys().cloned().collect())
-                .unwrap_or_default()
+        let mut stale_l3vpn_keys = if safi == Safi::MplsVpn {
+            take_refresh_stale(
+                &mut self.refresh_stale_vpn,
+                peer,
+                |key| key.afi_safi() == family,
+                &mut inventory,
+            )
+        } else {
+            Vec::new()
+        };
+        let mut stale_labeled_keys = if safi == Safi::LabeledUnicast {
+            take_refresh_stale(
+                &mut self.refresh_stale_labeled,
+                peer,
+                |key| key.afi_safi() == family,
+                &mut inventory,
+            )
+        } else {
+            Vec::new()
+        };
+        let mut stale_rtc_keys = if safi == Safi::RtConstrain {
+            take_refresh_stale(&mut self.refresh_stale_rtc, peer, |_| true, &mut inventory)
         } else {
             Vec::new()
         };
 
-        let mut affected = HashSet::new();
-        let mut fs_affected = HashSet::new();
-        let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
-        let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
-        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
-        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
-        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        let mut affected = HashSet::with_capacity(stale_route_keys.len());
+        inventory();
+        let mut fs_affected = HashSet::with_capacity(stale_flowspec_keys.len());
+        inventory();
+        let mut evpn_affected: HashSet<EvpnRouteKey> =
+            HashSet::with_capacity(stale_evpn_keys.len());
+        inventory();
+        let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
+            HashSet::with_capacity(stale_bgpls_keys.len());
+        inventory();
+        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
+            HashSet::with_capacity(stale_l3vpn_keys.len());
+        inventory();
+        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
+            HashSet::with_capacity(stale_labeled_keys.len());
+        inventory();
+        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
+            HashSet::with_capacity(stale_rtc_keys.len());
+        inventory();
         if let Some(rib) = self.ribs.get_mut(&peer) {
-            for (prefix, path_id) in &stale_route_keys {
-                if rib.withdraw(prefix, *path_id) {
-                    affected.insert(*prefix);
+            for (prefix, path_id) in stale_route_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw(&prefix, path_id) {
+                    affected.insert(prefix);
                 }
             }
-            for key in &stale_flowspec_keys {
-                if rib.withdraw_flowspec(key) {
+            for key in stale_flowspec_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw_flowspec(&key) {
                     fs_affected.insert(FlowSpecKey {
                         afi: key.afi,
                         rd: key.rd,
-                        rule: key.rule.clone(),
+                        rule: key.rule,
                     });
                 }
             }
-            for key in &stale_evpn_keys {
-                if rib.withdraw_evpn(key) {
-                    evpn_affected.insert(*key);
+            for key in stale_evpn_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw_evpn(&key) {
+                    evpn_affected.insert(key);
                 }
             }
-            for key in &stale_bgpls_keys {
-                if rib.withdraw_bgpls(key) {
-                    bgpls_affected.insert(key.clone());
+            for key in stale_bgpls_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw_bgpls(&key) {
+                    bgpls_affected.insert(key);
                 }
             }
-            for key in &stale_l3vpn_keys {
-                if rib.withdraw_vpn(key) {
-                    vpn_affected.insert(key.clone());
+            for key in stale_l3vpn_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw_vpn(&key) {
+                    vpn_affected.insert(key);
                 }
             }
-            for key in &stale_labeled_keys {
-                if rib.withdraw_labeled(key) {
-                    labeled_affected.insert(*key);
+            for key in stale_labeled_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw_labeled(&key) {
+                    labeled_affected.insert(key);
                 }
             }
-            for key in &stale_rtc_keys {
-                if rib.withdraw_rtc(key) {
-                    rtc_affected.insert(key.clone());
+            for key in stale_rtc_keys.drain(..).inspect(|_| sweep()) {
+                if rib.withdraw_rtc(&key) {
+                    rtc_affected.insert(key);
                 }
-            }
-            // Reclaim attribute interns dropped by the bulk withdraw —
-            // each withdraw above can leave a `strong_count==1` Arc in
-            // the intern table that wouldn't otherwise be GC'd until
-            // some unrelated future withdraw on this peer.
-            if !affected.is_empty()
-                || !fs_affected.is_empty()
-                || !evpn_affected.is_empty()
-                || !bgpls_affected.is_empty()
-                || !vpn_affected.is_empty()
-                || !labeled_affected.is_empty()
-                || !rtc_affected.is_empty()
-            {
-                self.attr_intern.gc();
-                self.metrics
-                    .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             }
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
@@ -2881,90 +2897,35 @@ impl RibManager {
                 &self.metrics,
                 &peer.label(),
                 crate::manager::helpers::FLOWSPEC_FAMILIES,
-                rib.flowspec_lens(),
+                rib.flowspec_lens_with_checkpoint(&mut sweep),
             );
             self.metrics
                 .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(rib.evpn_len()));
         }
+        // A missing Adj-RIB-In leaves the keys undrained; release them, and
+        // the drained buffers, between checkpoints.
+        super::retire_vec(&mut stale_route_keys, &mut inventory);
+        super::retire_vec(&mut stale_flowspec_keys, &mut inventory);
+        super::retire_vec(&mut stale_evpn_keys, &mut inventory);
+        super::retire_vec(&mut stale_bgpls_keys, &mut inventory);
+        super::retire_vec(&mut stale_l3vpn_keys, &mut inventory);
+        super::retire_vec(&mut stale_labeled_keys, &mut inventory);
+        super::retire_vec(&mut stale_rtc_keys, &mut inventory);
 
-        let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
-        {
-            stale.retain(|(prefix, _), ()| prefix_family(prefix) != family);
-            stale.is_empty()
-        } else {
-            false
-        };
-        if clear_route_stale_entry {
-            self.refresh_stale_routes.remove(&peer);
-        }
-
-        let clear_flowspec_stale_entry =
-            if let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer) {
-                stale.retain(|key, ()| key.family() != (afi, safi));
-                stale.is_empty()
-            } else {
-                false
-            };
-        if clear_flowspec_stale_entry {
-            self.refresh_stale_flowspec.remove(&peer);
-        }
-
-        if family == (Afi::L2Vpn, Safi::Evpn) {
-            self.refresh_stale_evpn.remove(&peer);
-        }
-        if safi == Safi::RtConstrain {
-            self.refresh_stale_rtc.remove(&peer);
-        }
-        if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
-            let clear_bgpls_stale_entry =
-                if let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer) {
-                    stale.retain(|key, ()| key.family != bgpls_family);
-                    stale.is_empty()
-                } else {
-                    false
-                };
-            if clear_bgpls_stale_entry {
-                self.refresh_stale_bgpls.remove(&peer);
-            }
-        }
-        if safi == Safi::MplsVpn {
-            let clear_vpn_stale_entry = if let Some(stale) = self.refresh_stale_vpn.get_mut(&peer) {
-                stale.retain(|key, ()| key.afi_safi() != family);
-                stale.is_empty()
-            } else {
-                false
-            };
-            if clear_vpn_stale_entry {
-                self.refresh_stale_vpn.remove(&peer);
-            }
-        }
-        if safi == Safi::LabeledUnicast {
-            let clear_labeled_stale_entry =
-                if let Some(stale) = self.refresh_stale_labeled.get_mut(&peer) {
-                    stale.retain(|key, ()| key.afi_safi() != family);
-                    stale.is_empty()
-                } else {
-                    false
-                };
-            if clear_labeled_stale_entry {
-                self.refresh_stale_labeled.remove(&peer);
-            }
-        }
         self.refresh_stale_counts.remove(&(peer, afi, safi));
-
-        let clear_refresh_entry = if let Some(families) = self.refresh_in_progress.get_mut(&peer) {
-            families.remove(&family);
-            families.is_empty()
-        } else {
-            false
-        };
-        if clear_refresh_entry {
-            self.refresh_in_progress.remove(&peer);
-        }
+        remove_family_drop_empty(&mut self.refresh_in_progress, peer, family);
         self.update_refresh_metrics(peer, afi, safi);
 
-        let changed = self.recompute_best(&affected);
+        let any_affected = !affected.is_empty()
+            || !fs_affected.is_empty()
+            || !evpn_affected.is_empty()
+            || !bgpls_affected.is_empty()
+            || !vpn_affected.is_empty()
+            || !labeled_affected.is_empty()
+            || !rtc_affected.is_empty();
+        let mut changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
+        super::retire_hash_set(&mut changed, &mut inventory);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
@@ -2973,36 +2934,34 @@ impl RibManager {
         }
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(&bgpls_affected);
-            // Reclaim attribute sets stranded by the stale-BGP-LS withdrawals
-            // above. The earlier intern gc ran before this recompute,
-            // while the Loc-RIB still held the selected-route Arc clones, so
-            // those orphans survived (gc only frees a set whose sole remaining
-            // holder is the intern table). Now that recompute_bgpls_keys has
-            // dropped the Loc-RIB clones, gc reclaims them — mirroring the
-            // receive path's recompute-then-gc ordering.
-            self.gc_attr_intern();
         }
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
-            // Same gc-after-recompute ordering as BGP-LS above: the swept VPN
-            // routes' interned attribute sets stay alive in the Loc-RIB clone
-            // until recompute_vpn_keys drops it, so gc must run after it.
-            self.gc_attr_intern();
         }
         if !labeled_affected.is_empty() {
             self.recompute_labeled_keys(&labeled_affected);
-            // Same gc-after-recompute ordering as VPN above.
-            self.gc_attr_intern();
         }
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
-            self.gc_attr_intern();
+        }
+        if any_affected {
+            // After every recompute: a withdrawn route's attribute set stays
+            // alive in the Loc-RIB clone until its family is reselected, and
+            // the collector only frees a set the intern table alone holds.
+            self.gc_attr_intern_with_checkpoint(&mut cleanup);
+        }
+        if !rtc_affected.is_empty() {
             // The sweep just mutated this peer's RTC Adj-RIB-In — its RT
             // membership shrank, so VPN routes no longer covered must be
             // withdrawn from this peer's Adj-RIB-Out.
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
-        self.metrics
-            .observe_rib_route_refresh_finish_actor_duration(timed_out, started_at.elapsed());
+        super::retire_hash_set(&mut affected, &mut inventory);
+        super::retire_hash_set(&mut fs_affected, &mut inventory);
+        super::retire_hash_set(&mut evpn_affected, &mut inventory);
+        super::retire_hash_set(&mut bgpls_affected, &mut inventory);
+        super::retire_hash_set(&mut vpn_affected, &mut inventory);
+        super::retire_hash_set(&mut labeled_affected, &mut inventory);
+        super::retire_hash_set(&mut rtc_affected, &mut inventory);
     }
 }
