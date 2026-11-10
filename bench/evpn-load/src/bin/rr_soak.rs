@@ -50,6 +50,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 
+#[path = "../qualification.rs"]
+mod qualification;
+
 /// Routes per UPDATE; a Type 2 MAC/IP NLRI is 37 bytes, so 40 fit 4096.
 const BATCH: usize = 40;
 /// Route Target 64512:100 and the RFC 9012 VXLAN encapsulation community.
@@ -138,6 +141,13 @@ struct Args {
     /// Hold time advertised in OPEN.
     #[arg(long, default_value_t = 90)]
     hold_time: u16,
+    /// Controlled recovery protocol on stdin; retain raw receiver UPDATEs here.
+    #[arg(long)]
+    qualification_control_dir: Option<PathBuf>,
+    /// After the finish acknowledgement, print a final receiver receipt and
+    /// fail unless the inventory is still exact (memory qualification).
+    #[arg(long, requires = "evidence_dir")]
+    final_inventory: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -212,6 +222,16 @@ fn validate(args: &Args) -> anyhow::Result<()> {
         args.hold_time == 0 || args.hold_time >= 3,
         "--hold-time must be 0 or at least 3"
     );
+    if args.qualification_control_dir.is_some() {
+        anyhow::ensure!(
+            args.epochs == 0 && args.reload_every == 0 && args.flap_every == 0,
+            "controlled qualification owns churn/reload and forbids scheduled epochs/flaps"
+        );
+        anyhow::ensure!(
+            args.evidence_dir.is_none() && args.start_file.is_none(),
+            "controlled qualification uses its stdin handshakes"
+        );
+    }
     Ok(())
 }
 
@@ -393,6 +413,9 @@ struct View {
     invalid: u64,
     parse_errors: u64,
     self_reflected: u64,
+    capture: Option<qualification::WireCapture>,
+    qualification_communities: Option<Vec<u16>>,
+    eors: u64,
 }
 
 impl View {
@@ -404,6 +427,9 @@ impl View {
             invalid: 0,
             parse_errors: 0,
             self_reflected: 0,
+            capture: None,
+            qualification_communities: None,
+            eors: 0,
         }
     }
 
@@ -439,6 +465,12 @@ impl View {
                 self.live += 1;
             }
         } else {
+            // Under the controlled qualification protocol a withdrawal of a
+            // route this receiver does not hold is a wire defect. The soak's
+            // flap and reload legs keep set semantics.
+            if self.qualification_communities.is_some() && !self.has(bit) {
+                self.invalid += 1;
+            }
             self.clear(bit);
         }
     }
@@ -460,6 +492,8 @@ struct Client {
     up: Arc<AtomicBool>,
     expect_down: Arc<AtomicBool>,
     shifts: u64,
+    io_control: Option<rustbgpd_evpn_load::PeerIoControl>,
+    submitted_messages: u64,
 }
 
 fn wall_us() -> u128 {
@@ -475,6 +509,13 @@ fn fail(message: &str) -> ! {
 
 async fn dial(args: &Args, i: u32) -> anyhow::Result<rustbgpd_evpn_load::PeerHandle> {
     let socket = TcpSocket::new_v4()?;
+    if args.qualification_control_dir.is_some() {
+        socket.set_recv_buffer_size(4096)?;
+        anyhow::ensure!(
+            socket.recv_buffer_size()? == 8192,
+            "qualification requires the fixed Linux receive buffer"
+        );
+    }
     socket.bind(SocketAddr::new(IpAddr::V4(source_addr(i)), 0))?;
     let stream: TcpStream = socket.connect(args.daemon).await?;
     stream.set_nodelay(true)?;
@@ -517,7 +558,12 @@ async fn connect(
             cap.as_millis()
         );
     };
-    let view = Arc::new(Mutex::new(View::new(shape)));
+    let mut view = View::new(shape);
+    if let Some(directory) = &args.qualification_control_dir {
+        view.capture = Some(qualification::WireCapture::new(directory, client.index)?);
+        view.qualification_communities = Some(vec![0; shape.clients as usize * shape.block()]);
+    }
+    let view = Arc::new(Mutex::new(view));
     let up = Arc::new(AtomicBool::new(true));
     let expect_down = Arc::new(AtomicBool::new(false));
     let mut rx = handle.rx;
@@ -537,18 +583,32 @@ async fn connect(
             let mut view = task_view
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(capture) = &mut view.capture
+                && let Err(error) = capture.update(&update)
+            {
+                fail(&format!("receiver {me} wire capture: {error}"));
+            }
             let Ok(parsed) = parsed else {
                 view.parse_errors += 1;
                 continue;
             };
+            let community = qualification_community(&parsed.attributes);
             for attr in &parsed.attributes {
                 match attr {
                     PathAttribute::MpReachNlri(mp) if mp.safi == Safi::Evpn => {
                         for route in &mp.evpn_announced {
                             view.apply(me, shape, route, true);
+                            if let Some((origin, offset)) = classify(route, shape)
+                                && let Some(communities) = &mut view.qualification_communities
+                            {
+                                communities[origin as usize * shape.block() + offset] = community;
+                            }
                         }
                     }
                     PathAttribute::MpUnreachNlri(mp) if mp.safi == Safi::Evpn => {
+                        if mp.evpn_withdrawn.is_empty() {
+                            view.eors += 1;
+                        }
                         for route in &mp.evpn_withdrawn {
                             view.apply(me, shape, route, false);
                         }
@@ -567,10 +627,26 @@ async fn connect(
     client.view = view;
     client.up = up;
     client.expect_down = expect_down;
+    client.io_control = Some(handle.io_control);
+    client.submitted_messages = 0;
     Ok(())
 }
 
-async fn send_all(client: &Client, messages: Vec<Message>) {
+fn qualification_community(attributes: &[PathAttribute]) -> u16 {
+    attributes
+        .iter()
+        .find_map(|attribute| {
+            if let PathAttribute::Communities(values) = attribute {
+                (values.len() == 1 && values[0] >> 16 == 65400)
+                    .then(|| u16::try_from(values[0] & 0xffff).unwrap_or(0))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
+async fn send_all(client: &mut Client, messages: Vec<Message>) {
     let Some(tx) = &client.tx else {
         fail(&format!("client {} has no session", client.index));
     };
@@ -578,10 +654,11 @@ async fn send_all(client: &Client, messages: Vec<Message>) {
         if tx.send(message).await.is_err() {
             fail(&format!("client {} writer closed", client.index));
         }
+        client.submitted_messages += 1;
     }
 }
 
-async fn announce_window(shape: Shape, client: &Client) {
+async fn announce_window(shape: Shape, client: &mut Client) {
     let i = client.index;
     let routes: Vec<EvpnRoute> = shape
         .window2(client.shifts)
@@ -843,7 +920,7 @@ async fn flap(args: &Args, shape: Shape, client: &mut Client, n: u32, lost: &Arc
     );
 }
 
-async fn finish(args: &Args, clients: &mut [Client]) {
+async fn finish(args: &Args, shape: Shape, clients: &mut [Client]) {
     if let Some(dir) = &args.evidence_dir {
         if let Err(error) = std::fs::create_dir_all(dir)
             .and_then(|()| std::fs::write(dir.join("ready"), b"ready\n"))
@@ -856,6 +933,24 @@ async fn finish(args: &Args, clients: &mut [Client]) {
                 fail("finish handshake: no ack");
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    // The caller settles between the receipt and this acknowledgement; an
+    // update in that interval must not leave the earlier receipt standing.
+    if args.final_inventory {
+        let result = check(shape, clients);
+        println!(
+            "evpn_final_receipt receivers={} min_live={} max_live={} invalid={} parse_errors={} \
+             self_reflected={}",
+            result.receivers,
+            result.min_live,
+            result.max_live,
+            result.invalid,
+            result.parse_errors,
+            result.self_reflected,
+        );
+        if !converged(&result, shape) {
+            fail("receiver state changed before finish acknowledgement");
         }
     }
     for client in clients.iter_mut() {
@@ -889,6 +984,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     validate(&args)?;
+    if let Some(directory) = &args.qualification_control_dir {
+        std::fs::create_dir(directory)?;
+    }
     let shape = Shape {
         clients: args.clients,
         type2: args.type2,
@@ -905,6 +1003,8 @@ async fn main() -> anyhow::Result<()> {
             up: Arc::new(AtomicBool::new(false)),
             expect_down: Arc::new(AtomicBool::new(false)),
             shifts: 0,
+            io_control: None,
+            submitted_messages: 0,
         })
         .collect();
 
@@ -913,7 +1013,10 @@ async fn main() -> anyhow::Result<()> {
     for client in &mut clients {
         connect(&args, shape, client, &lost, initial_cap).await?;
     }
-    for client in &clients {
+    if args.qualification_control_dir.is_some() {
+        return qualification::run(&args, shape, &mut clients, &lost).await;
+    }
+    for client in &mut clients {
         announce_window(shape, client).await;
     }
     let (ok, result, _) = converge(shape, &clients, &lost, initial_cap).await;
@@ -1034,7 +1137,7 @@ async fn main() -> anyhow::Result<()> {
         terminal.parse_errors,
         terminal.self_reflected,
     );
-    finish(&args, &mut clients).await;
+    finish(&args, shape, &mut clients).await;
     Ok(())
 }
 
@@ -1113,6 +1216,37 @@ mod tests {
         view.apply(1, s, &type2_route(2, 7), false);
         view.apply(1, s, &type2_route(2, 7), false);
         assert_eq!(view.live, 0);
+        assert_eq!(view.invalid, 1, "the soak keeps set semantics");
+        view.qualification_communities = Some(Vec::new());
+        view.apply(1, s, &type2_route(2, 7), false);
+        assert_eq!(
+            view.invalid, 2,
+            "a controlled run counts a withdrawal of a route it does not hold"
+        );
+    }
+
+    #[test]
+    fn an_unknown_withdrawal_cannot_be_hidden_by_a_later_announcement() {
+        let s = Shape {
+            clients: 3,
+            type2: 2,
+            type5: 1,
+            shift2: 1,
+            shift5: 1,
+        };
+        let clients = exact_fleet(s);
+        {
+            let mut view = clients[0].view.lock().unwrap();
+            view.qualification_communities = Some(Vec::new());
+            view.apply(0, s, &type2_route(1, 3), false);
+            view.apply(0, s, &type2_route(1, 3), true);
+            view.apply(0, s, &type2_route(1, 3), false);
+        }
+        let result = check(s, &clients);
+        assert_eq!(result.min_live, s.expected());
+        assert_eq!(result.max_live, s.expected());
+        assert_eq!(result.invalid, 1);
+        assert!(!converged(&result, s));
     }
 
     #[test]
@@ -1177,6 +1311,8 @@ mod tests {
                     up: Arc::new(AtomicBool::new(true)),
                     expect_down: Arc::new(AtomicBool::new(false)),
                     shifts: 0,
+                    io_control: None,
+                    submitted_messages: 0,
                 }
             })
             .collect()
@@ -1330,6 +1466,8 @@ mod tests {
             up: Arc::new(AtomicBool::new(false)),
             expect_down: Arc::new(AtomicBool::new(false)),
             shifts: 0,
+            io_control: None,
+            submitted_messages: 0,
         };
         let lost = Arc::new(AtomicBool::new(false));
         let outcome = tokio::time::timeout(
