@@ -683,6 +683,91 @@ async fn a_gate_release_keeps_route_before_marker_for_a_woken_dirty_peer() {
     assert!(!manager.dirty_peers.contains(&OTHER));
 }
 
+/// A session whose IPv4 is behind the RFC 5291 §6 gate (it negotiated ORF
+/// receive and has not refreshed), with its first End-of-RIB already sent.
+fn orf_gated(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, mut output) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: TARGET,
+        session_id: 2,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![V4],
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![V4],
+        negotiated_llgr_families: vec![],
+    });
+    assert!(manager.peer_orf_pending[&TARGET].contains(&V4));
+    assert_eq!(
+        markers_of(&mut output, V4),
+        1,
+        "the honest-empty marker is immediate"
+    );
+    output
+}
+
+/// A marker of a family still behind the ORF gate, with no hold of its own
+/// and no refused send, is what the tick would wait on until the peer
+/// refreshes. The peer's ROUTE-REFRESH is the release: it lifts the gate,
+/// and the marker follows its answer's table in that turn.
+#[test]
+fn a_refresh_releases_the_marker_of_an_orf_gated_family() {
+    let mut manager = plain_manager();
+    let mut output = orf_gated(&mut manager);
+    manager.owe_eor(TARGET, V4);
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: TARGET,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+    assert!(
+        !manager.peer_orf_pending.contains_key(&TARGET),
+        "the gate lifted"
+    );
+    assert_eq!(markers_of(&mut output, V4), 1);
+    assert!(!manager.eor.owes(TARGET, V4));
+    assert!(!manager.resync_tick_pending());
+}
+
+/// The check after an actor turn is stricter than the fallback about that
+/// gate: the tick waits for it, so a marker left behind it would stay
+/// invisible until the peer refreshed. A release sends such a marker at
+/// once, so the check rejects one that was not sent.
+#[test]
+#[should_panic(expected = "is owed with no hold and was not sent")]
+fn the_end_of_turn_check_rejects_an_unsent_marker_behind_the_orf_gate() {
+    let mut manager = plain_manager();
+    let _output = orf_gated(&mut manager);
+    manager.owe_eor(TARGET, V4);
+    manager.handle_update(RibUpdate::RetireEorGraceInterface {
+        interface: "swp9".into(),
+    });
+}
+
+/// The fallback itself keeps the tick's rule: it does not send a marker
+/// while its family is behind the gate.
+#[test]
+fn the_tick_fallback_waits_for_the_orf_gate() {
+    let mut manager = plain_manager();
+    let mut output = orf_gated(&mut manager);
+    manager.eor.allow_unsettled = true;
+    manager.owe_eor(TARGET, V4);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(markers_of(&mut output, V4), 0);
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    assert!(manager.eor.owes(TARGET, V4));
+}
+
 /// The production fallback: a marker left owed with no hold and no refused
 /// send (a release that did not send it) still leaves on the next resync
 /// tick, and the tick reports it. Actor turns never reach this silently in

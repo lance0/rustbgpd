@@ -4072,6 +4072,7 @@ impl RibManager {
         let rearm = with_executor_handoff(|| {
             self.with_replacement_readiness(Self::resync_dirty_peers_with_readiness)
         });
+        self.settle_eor_after_pass();
         // The lanes after the marker lane must not leave a marker for the
         // next tick either.
         #[cfg(test)]

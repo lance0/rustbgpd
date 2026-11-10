@@ -685,7 +685,7 @@ impl RibManager {
         };
         let session_id = self.outbound_session_ids.get(&peer).copied();
         let unsettled = if obligations {
-            self.eor_unsettled_ready(peer)
+            self.eor_unsettled_ready(peer, Offer::Retry)
         } else {
             Vec::new()
         };
@@ -748,9 +748,15 @@ impl RibManager {
     /// respects. The EVPN marker a current complete feed still owes is that
     /// feed's own tick retry, not a missed release. The tick's fallback and
     /// the test-build check both ask here, so they cannot disagree.
-    fn eor_unsettled(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+    ///
+    /// `offer` is the one difference: the fallback is a polling lane and
+    /// waits for an RFC 5291 §6 gate ([`Offer::Retry`]), as the tick always
+    /// has; the check asks as a release would ([`Offer::Release`]), because
+    /// a release sends such a marker at once and nothing else will until
+    /// the peer refreshes.
+    fn eor_unsettled(&self, peer: PeerId, family: (Afi, Safi), offer: Offer) -> bool {
         !self.eor.stored(peer, family).contains(EorHold::Writer)
-            && self.eor_retry_ready(peer, family)
+            && self.eor_free_for(peer, family, offer, HoldSet::EMPTY)
             && !(family == EVPN && self.evpn_feed_owed_markers(peer).0)
     }
 
@@ -762,13 +768,13 @@ impl RibManager {
     /// otherwise stay owed until the session ended, and logs it. A test
     /// build fails instead, here and at every checked point
     /// (`assert_eor_settled`).
-    fn eor_unsettled_ready(&self, peer: PeerId) -> Vec<(Afi, Safi)> {
+    fn eor_unsettled_ready(&self, peer: PeerId, offer: Offer) -> Vec<(Afi, Safi)> {
         if self.outbound_channel_gone(peer) || self.evpn_recovery_reset_pending(peer) {
             return Vec::new();
         }
         self.eor
             .families(peer)
-            .filter(|&family| self.eor_unsettled(peer, family))
+            .filter(|&family| self.eor_unsettled(peer, family, offer))
             .collect()
     }
 
@@ -784,7 +790,7 @@ impl RibManager {
         self.eor
             .families(peer)
             .any(|family| self.eor_refused_retry_ready(peer, family))
-            || !self.eor_unsettled_ready(peer).is_empty()
+            || !self.eor_unsettled_ready(peer, Offer::Retry).is_empty()
     }
 
     /// Whether a polling lane has a marker of `peer` to send now: a refused
@@ -847,7 +853,7 @@ impl RibManager {
             return;
         }
         for peer in self.eor.peers() {
-            let unsettled = self.eor_unsettled_ready(peer);
+            let unsettled = self.eor_unsettled_ready(peer, Offer::Release);
             assert!(
                 unsettled.is_empty(),
                 "End-of-RIB for {unsettled:?} toward {peer} is owed with no hold and was not sent: \
