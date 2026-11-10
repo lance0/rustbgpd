@@ -62,7 +62,8 @@ impl RibManager {
             } else {
                 self.recompute_and_distribute_evpn(&affected);
             }
-            self.gc_attr_intern();
+            self.defer_attr_gc(affected.len());
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -92,7 +93,7 @@ impl RibManager {
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
         let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
         let mut removed_stale_count = 0usize;
-        let mut any_replaced = false;
+        let mut replaced = 0usize;
         let evpn_len = {
             let rib = self
                 .ribs
@@ -103,7 +104,7 @@ impl RibManager {
                 let key = route.key();
                 affected.insert(key);
                 self.attr_intern.intern(&mut route.attributes);
-                any_replaced |= rib.insert_evpn(route);
+                replaced += usize::from(rib.insert_evpn(route));
                 // Enhanced Route Refresh: re-advertised key removes from
                 // the stale set so EoRR's sweep doesn't withdraw it.
                 if evpn_refresh_active
@@ -125,9 +126,7 @@ impl RibManager {
             } else {
                 self.recompute_and_distribute_evpn(&affected);
             }
-            if any_replaced {
-                self.attr_intern.gc();
-            }
+            self.defer_attr_gc(replaced);
             self.sync_attr_intern_gauge();
         }
     }
@@ -149,9 +148,7 @@ impl RibManager {
         let mut evpn_affected = HashSet::new();
         evpn_affected.insert(key);
         self.recompute_and_distribute_evpn(&evpn_affected);
-        if replaced {
-            self.attr_intern.gc();
-        }
+        self.defer_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
         let _ = reply.send(Ok(()));
     }
@@ -170,7 +167,8 @@ impl RibManager {
             let mut evpn_affected = HashSet::new();
             evpn_affected.insert(key);
             self.recompute_and_distribute_evpn(&evpn_affected);
-            self.gc_attr_intern();
+            self.defer_attr_gc(1);
+            self.sync_attr_intern_gauge();
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(

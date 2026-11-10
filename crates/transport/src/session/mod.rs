@@ -8,6 +8,7 @@ pub mod import_decision_cache;
 pub(crate) mod inbound;
 mod io;
 mod outbound;
+mod packing;
 mod refresh_accounting;
 pub mod rejected_routes;
 mod replay;

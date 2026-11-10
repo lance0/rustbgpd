@@ -642,13 +642,6 @@ impl RibManager {
                     mark();
                 }
             }
-            // GR entry can prune entire non-preserved families while keeping
-            // the peer Adj-RIB-In shell alive for preserved families. Reclaim
-            // attribute sets stranded by those removals now rather than
-            // waiting for an unrelated future withdraw on this peer.
-            self.attr_intern.gc_with_checkpoint(&mut cleanup);
-            self.metrics
-                .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
         }
 
         if let Some(rib) = self.ribs.get(&peer) {
@@ -730,28 +723,23 @@ impl RibManager {
         }
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(&bgpls_affected);
-            // Reclaim attribute sets stranded by the BGP-LS withdrawals above.
-            // The intern gc earlier in this method ran before this
-            // recompute, while the Loc-RIB still held the selected-route Arc
-            // clones, so those orphans survived (gc only frees a set whose sole
-            // remaining holder is the intern table). Now that recompute_bgpls_keys
-            // has dropped the Loc-RIB clones, gc reclaims them — mirroring the
-            // receive path's recompute-then-gc ordering.
-            self.gc_attr_intern_with_checkpoint(&mut cleanup);
         }
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
-            // Same recompute-then-gc ordering rationale as BGP-LS above.
-            self.gc_attr_intern_with_checkpoint(&mut cleanup);
         }
         if !labeled_affected.is_empty() {
             self.recompute_labeled_keys(&labeled_affected);
-            // Same recompute-then-gc ordering rationale as BGP-LS above.
-            self.gc_attr_intern_with_checkpoint(&mut cleanup);
         }
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
-            // Same recompute-then-gc ordering rationale as BGP-LS above.
+        }
+        if self.ribs.contains_key(&peer) {
+            // GR entry can prune entire non-preserved families while keeping
+            // the peer Adj-RIB-In shell alive for preserved families. Reclaim
+            // the attribute sets those removals stranded now, once, after
+            // every recompute: a selected route's Loc-RIB clone keeps its set
+            // alive until its family is recomputed, and a sweep only frees a
+            // set whose sole remaining holder is the intern table.
             self.gc_attr_intern_with_checkpoint(&mut cleanup);
         }
         super::retire_hash_set(&mut affected, &mut inventory);
