@@ -310,6 +310,7 @@ def fallback(feed, refusal, resume_us, limit_us):
     refusal whose feed no longer owes markers. The first eligible retry offer
     must send those markers before another observation of this peer: the offer
     and send are synchronous in the RIB actor, with no intervening producer.
+    A successful retry also proves capacity the receiver freed after its snapshot.
     """
     rows = [row for row in feed if row["peer"] == refusal["peer"]]
     counts = [marker_counts(row) for row in rows]
@@ -324,7 +325,8 @@ def fallback(feed, refusal, resume_us, limit_us):
     require(sent is None or sent["wall_us"] <= limit_us, "fill withdrawn before the fallback send")
     empty_us = drain_clock(rows, refusal["peer"], resume_us, limit_us)
     offered = next((index for index, row in enumerate(later) if row["event"] == "retry_offer"
-                    and positive(row) and row["capacity"] > 0), None)
+                    and positive(row) and (row["capacity"] > 0 or (index + 1 < len(later)
+                        and later[index + 1]["event"] == "retry_sent"))), None)
     offer = later[offered] if offered is not None else None
     first_offer_sent = (offer is not None and sent is not None and offered + 1 < len(later)
                         and later[offered + 1] == sent and refusal["wall_us"] < offer["wall_us"] <= sent["wall_us"]

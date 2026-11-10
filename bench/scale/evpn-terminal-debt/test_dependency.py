@@ -635,6 +635,16 @@ class DependencyChecks(unittest.TestCase):
                              (10, 15, "retry_sent"))
             self.assertEqual(good["work"]["inventory_visits"], 0)
             terminal.accept_report(good, "candidate", self.q)
+            with self.subTest(mode="capacity-freed-after-offer"):
+                rows = copy.deepcopy(feed)
+                rows[7]["capacity"] = rows[8]["capacity"] = 0
+                empty = rows.pop(6)
+                empty.update(wall_us=546, owed=0, markers=dict(rows[7]["markers"]))
+                rows.insert(8, empty)
+                observer(rows)
+                report = terminal.evidence(leg, record, self.q, self.r, self.wire)
+                self.assertEqual((report["fallback"]["drain_us"], report["fallback"]["tick_us"]), (16, 15))
+                terminal.accept_report(report, "candidate", self.q)
             for mode, failure in (("no-refusal", "no refused refresh-site"), ("no-drain-clock", "missing drain clock"),
                                   ("free-slot", "last outbound slot"), ("skipped-offer", "first eligible resync offer")):
                 with self.subTest(mode=mode):

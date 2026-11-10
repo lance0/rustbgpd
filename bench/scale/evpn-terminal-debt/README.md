@@ -65,7 +65,9 @@ dispatches (`mono_us`, microseconds).
     resync attempt with marker debt and channel capacity. The very next event
     for that peer must be `retry_sent`, with debt cleared, one added retry
     attempt and no added refusal. A skipped offer FAILs even if a later attempt
-    is fast. Retry and drain clocks remain diagnostic; either can occur first. The retry
+    is fast. An adjacent successful retry also proves capacity if the receiver
+    freed a slot after a zero-capacity offer snapshot.
+    Retry and drain clocks remain diagnostic; either can occur first. The retry
     may precede resume, but must follow the witnessed refusal.
     The controller waits for both under the existing 60-second bound. This
     prospective causal bar replaces the former one-second-plus-drain inequality;

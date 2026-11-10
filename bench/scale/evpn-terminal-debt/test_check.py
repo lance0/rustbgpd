@@ -279,13 +279,29 @@ class ForcedRefusalChecks(unittest.TestCase):
                     check.fallback(rows, forced_feed()[2] if position != 2 else rows[2], RESUME, UNFILL)
 
     def test_skipping_the_first_eligible_retry_offer_fails(self):
+        for later_capacity in (4096, 0):
+            with self.subTest(later_capacity=later_capacity):
+                rows = forced_feed()
+                refusal = check.refusal_witness(rows, "127.1.0.2", 70)
+                first = dict(rows[-2], wall_us=2_199_990)
+                rows[-2]["capacity"] = later_capacity
+                rows.insert(-2, first)
+                result = check.fallback(rows, refusal, RESUME, UNFILL)
+                self.assertLess(result["tick_us"], 1_000_000 + result["drain_us"], "the former timing bar would pass")
+                self.assertFalse(check.fallback_within_bar(result))
+
+    def test_capacity_freed_after_the_retry_offer_snapshot_passes(self):
         rows = forced_feed()
-        refusal = check.refusal_witness(rows, "127.1.0.2", 70)
-        first = dict(rows[-2], wall_us=2_199_990)
-        rows.insert(-2, first)
-        result = check.fallback(rows, refusal, RESUME, UNFILL)
-        self.assertLess(result["tick_us"], 1_000_000 + result["drain_us"], "the former timing bar would pass")
-        self.assertFalse(check.fallback_within_bar(result))
+        rows[-2]["capacity"] = rows[-1]["capacity"] = 0
+        empty = rows.pop(4)
+        empty.update(wall_us=2_300_000, owed=0, markers=dict(rows[-1]["markers"]))
+        rows.append(empty)
+        rows.insert(3, dict(rows[3], event="retry_offer", wall_us=1_000_095,
+                            markers=dict(rows[2]["markers"])))
+        result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, UNFILL)
+        self.assertLess(result["tick_us"], result["drain_us"])
+        self.assertEqual(result["eligible_offer_us"], rows[-3]["wall_us"])
+        self.assertTrue(check.fallback_within_bar(result))
 
     def test_retry_send_before_the_drain_sample_passes(self):
         rows = forced_feed()
