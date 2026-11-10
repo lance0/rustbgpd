@@ -712,13 +712,13 @@ pub struct RibManager {
     /// an Established session. Entries are removed by their session's own
     /// `PeerDown`/GR-down or by full peer teardown.
     live_sessions: HashMap<PeerId, Vec<LiveSessionRecord>>,
-    /// Per peer, the highest non-zero session id whose `PeerDown` or
-    /// `PeerGracefulRestart` was accepted. A session end can arrive after
-    /// its session was already retired here (an aborted session task
-    /// delivers what it held once the channel has room); with no live
-    /// session left, this is what tells such a late end from a current one.
-    /// Removed when the peer is deleted or its handle released.
-    ended_session_ids: HashMap<PeerId, u64>,
+    /// The session whose `PeerGracefulRestart` created the peer's current
+    /// GR/LLGR retention. With no session registered, only that session's
+    /// `PeerDown` may end the retention; a late `PeerDown` from another,
+    /// already retired session must not. Read only while retention exists,
+    /// overwritten by the next accepted restart end, and removed by every
+    /// full teardown of the peer (its `PeerDown`, retention expiry, deletion).
+    retention_owner: HashMap<PeerId, u64>,
     /// Physical live-session completion options, including collision records.
     /// Zero avoids fleet scans while EVPN completion control is inactive.
     evpn_feed_receipt_count: usize,
@@ -2816,7 +2816,7 @@ impl RibManager {
             actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
-            ended_session_ids: HashMap::new(),
+            retention_owner: HashMap::new(),
             evpn_feed_receipt_count: 0,
             pending_peer_export_context: HashMap::new(),
             pending_peer_withheld_families: HashMap::new(),

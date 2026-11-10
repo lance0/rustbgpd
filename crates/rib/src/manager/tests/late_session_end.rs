@@ -1,8 +1,9 @@
-//! A session end that arrives after its session was already retired (an
-//! aborted session task delivers what it held once the channel has room)
-//! must not abort, restart or double-mark retention that belongs to a later
-//! session. A repeated `PeerDown` for the newest ended session still runs
-//! the teardown: the peer manager relies on it to purge what that session
+//! A session end that finds no session registered for the peer (an aborted
+//! session task delivers what it held once the channel has room) is decided
+//! by who owns the peer's retained routes, not by the order of session ids:
+//! a restart end is discarded, and a `PeerDown` ends retention only when
+//! its own session created it. The peer manager's `PeerDown` after a
+//! session's own restart end therefore still purges what that session
 //! retained.
 use super::*;
 use crate::PeerId;
@@ -109,29 +110,28 @@ fn second_session_retained() -> RibManager {
     manager
 }
 
-/// Mutation-red: without the late-end check the `PeerDown` of session 1
-/// finds no registration and aborts session 2's retention.
+/// Mutation-red: without the owner check the `PeerDown` of session 1 finds
+/// no registration and aborts session 2's retention.
 #[test]
-fn late_peer_down_keeps_a_newer_sessions_retention() {
+fn late_peer_down_keeps_another_sessions_retention() {
     let mut manager = second_session_retained();
     peer_down(&mut manager, 1);
     assert_eq!(retention(&manager), (1, 1, true));
     assert!(discarded(&manager, 1));
 }
 
-/// Mutation-red: without the late-end check session 1's restart end marks
-/// the family stale a second time, which deletes the routes session 2 left.
+/// Mutation-red (with the owner check disabled as well, which also stops
+/// it): an accepted restart end from the unregistered session 1 marks the
+/// family stale a second time, which deletes the routes session 2 left.
 #[test]
-fn late_restart_end_does_not_mark_a_newer_sessions_routes_stale_twice() {
+fn late_restart_end_does_not_mark_another_sessions_routes_stale_twice() {
     let mut manager = second_session_retained();
     restart(&mut manager, 1);
     assert_eq!(retention(&manager), (1, 1, true));
-    assert!(discarded(&manager, 1));
 }
 
-/// Mutation-red: with a strict comparison for the retaining end, session
-/// 1's held restart end starts graceful-restart state for a session that
-/// was already torn down.
+/// Mutation-red: an accepted restart end from the unregistered session 1
+/// starts graceful-restart state for a session that was already torn down.
 #[test]
 fn late_restart_end_after_its_own_peer_down_starts_no_retention() {
     let mut manager = test_manager();
@@ -140,16 +140,15 @@ fn late_restart_end_after_its_own_peer_down_starts_no_retention() {
     peer_down(&mut manager, 1);
     restart(&mut manager, 1);
     assert_eq!(retention(&manager), (0, 0, false));
-    assert!(discarded(&manager, 1));
 }
 
 /// The peer manager's `PeerDown` after a session's own restart end (its
-/// fence after a NOTIFICATION that kept retention, and the source
-/// retirement barrier) still purges what that session retained.
-/// Mutation-red: an inclusive comparison for `PeerDown` discards it and the
-/// routes stay retained.
+/// fence after a NOTIFICATION that kept retention, the source retirement
+/// barrier, the link-down purge) still purges what that session retained.
+/// Mutation-red: discarding every `PeerDown` that finds retention leaves
+/// the routes retained.
 #[test]
-fn repeated_peer_down_still_purges_what_the_session_retained() {
+fn peer_down_from_the_owner_purges_what_it_retained() {
     let mut manager = test_manager();
     peer_up(&mut manager, 1);
     receive_route(&mut manager);
@@ -158,12 +157,89 @@ fn repeated_peer_down_still_purges_what_the_session_retained() {
     peer_down(&mut manager, 1);
     assert_eq!(retention(&manager), (0, 0, false));
     assert!(discarded(&manager, 0));
+    assert!(manager.retention_owner.is_empty());
+}
+
+/// A collision's survivor can be the older session id: 6 registers over 5
+/// and goes down, 5 takes the registration back, later retains, and its
+/// own `PeerDown` then purges.
+/// Mutation-red: a rule that discards an end older than the newest ended
+/// session id discards `PeerDown{5}` and the routes stay stale until the
+/// restart timer.
+#[test]
+fn older_collision_survivor_still_purges_its_own_retention() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 5);
+    peer_up(&mut manager, 6);
+    peer_down(&mut manager, 6);
+    receive_route(&mut manager);
+    restart(&mut manager, 5);
+    assert_eq!(retention(&manager), (1, 1, true));
+    peer_down(&mut manager, 5);
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert!(discarded(&manager, 0));
+}
+
+/// The peer manager fences a pending candidate (a higher id that never
+/// registered) and then the primary, with the primary already down under
+/// graceful restart. The candidate's `PeerDown` does not own the retention
+/// and leaves it; the primary's then purges it.
+/// Mutation-red: a rule keyed on id order lets the candidate's higher id
+/// block the primary's purge.
+#[test]
+fn candidate_fence_does_not_block_the_primarys_purge() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 5);
+    receive_route(&mut manager);
+    restart(&mut manager, 5);
+    peer_down(&mut manager, 6);
+    assert_eq!(retention(&manager), (1, 1, true));
+    peer_down(&mut manager, 5);
+    assert_eq!(retention(&manager), (0, 0, false));
+}
+
+/// A held restart end delivered between the neighbor's `PeerDeleted` and
+/// its `ReleasePeer` recreates nothing: no graceful-restart state and no
+/// metric series under the deleted peer's label.
+/// Mutation-red: an accepted restart end sets `bgp_gr_active` for the
+/// deleted peer and starts its restart timer.
+#[test]
+fn restart_end_after_deletion_recreates_nothing() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    receive_route(&mut manager);
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: peer(),
+        label: None,
+        keep_series: false,
+    });
+    restart(&mut manager, 1);
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert!(manager.gr_stale_deadlines.get(&peer()).is_none());
+    let label = peer().label();
+    let series: Vec<String> = manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| {
+            family.get_metric().iter().any(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == "peer" && pair.value() == label)
+            })
+        })
+        .map(|family| family.name().to_owned())
+        .collect();
+    assert_eq!(series, Vec::<String>::new());
+    manager.handle_update(RibUpdate::ReleasePeer { peer: peer() });
+    assert!(manager.retention_owner.is_empty());
 }
 
 /// A second `PeerDown` for the same session with no retention begun in
 /// between is accepted and finds nothing to tear down.
-/// Mutation-red: an inclusive comparison for `PeerDown` counts it as a
-/// discard.
+/// Mutation-red: discarding every unregistered `PeerDown` counts it.
 #[test]
 fn repeated_peer_down_without_retention_is_an_empty_teardown() {
     let mut manager = test_manager();
@@ -176,8 +252,9 @@ fn repeated_peer_down_without_retention_is_an_empty_teardown() {
 }
 
 /// One session task keeps its id across reconnects: a later epoch of an id
-/// that already ended is live again and ends normally. The late-end check
-/// applies only to a peer with no live session, so this pins that scope.
+/// that already ended is registered again and ends normally. The rule
+/// applies only to a peer with no session registered, so this pins that
+/// scope.
 #[test]
 fn a_session_id_that_re_establishes_ends_normally_again() {
     let mut manager = test_manager();
@@ -190,40 +267,20 @@ fn a_session_id_that_re_establishes_ends_normally_again() {
     assert!(discarded(&manager, 0));
 }
 
-/// Session id 0 names an emitter without identity and is never late.
-/// Mutation-red: dropping the id-0 exemption discards its restart end.
+/// Session id 0 names an emitter without identity and keeps the accept-all
+/// behaviour: its restart end retains without a registration, and its
+/// `PeerDown` ends retention whoever created it.
+/// Mutation-red: dropping the id-0 exemption discards both.
 #[test]
-fn session_id_zero_is_never_late() {
+fn session_id_zero_keeps_accept_all() {
     let mut manager = test_manager();
-    peer_up(&mut manager, 5);
-    peer_down(&mut manager, 5);
     receive_route(&mut manager);
     restart(&mut manager, 0);
     assert_eq!(retention(&manager), (1, 1, true));
-}
+    peer_down(&mut manager, 0);
+    assert_eq!(retention(&manager), (0, 0, false));
 
-/// The remembered id goes with the neighbor: a deletion or a released
-/// handle forgets it, so it cannot outlive a deleted or dynamic neighbor.
-/// Mutation-red: without the removal the map keeps the entry, and an older
-/// session id at the same handle is treated as late after the deletion.
-#[test]
-fn deletion_and_release_forget_the_ended_session_id() {
-    let mut manager = test_manager();
-    peer_up(&mut manager, 5);
-    peer_down(&mut manager, 5);
-    assert_eq!(manager.ended_session_ids.get(&peer()), Some(&5));
-    manager.handle_update(RibUpdate::PeerDeleted {
-        peer: peer(),
-        label: None,
-        keep_series: false,
-    });
-    assert!(manager.ended_session_ids.is_empty());
-    receive_route(&mut manager);
-    restart(&mut manager, 3);
-    assert_eq!(retention(&manager), (1, 1, true));
-
-    peer_down(&mut manager, 3);
-    assert_eq!(manager.ended_session_ids.get(&peer()), Some(&3));
-    manager.handle_update(RibUpdate::ReleasePeer { peer: peer() });
-    assert!(manager.ended_session_ids.is_empty());
+    let mut manager = second_session_retained();
+    peer_down(&mut manager, 0);
+    assert_eq!(retention(&manager), (0, 0, false));
 }
