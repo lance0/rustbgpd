@@ -1038,10 +1038,11 @@ pub struct TransportConfig {
     /// unassigned; the peer manager installs the neighbor's slot before
     /// spawning any session.
     pub rib_peer: RibPeerSlot,
-    /// The session this one replaces, sent with its `PeerUp` so the RIB
-    /// retires that session at once. The peer manager sets it on the copy
-    /// it spawns a replacement from, after it has retired the old session;
-    /// `None` for a first session and for a collision candidate.
+    /// Initial predecessor for this session's RIB registration publication.
+    /// Its `PeerUp` names that session so the RIB retires it at once. Before
+    /// starting a replacement or activating a promoted candidate, the peer
+    /// manager can inherit the joined actor's final registration through
+    /// [`crate::PeerHandle::inherit_rib_registration`]. `None` for a first session.
     pub supersedes_session: Option<u64>,
 }
 

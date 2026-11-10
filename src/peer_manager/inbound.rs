@@ -1455,6 +1455,7 @@ impl PeerManager {
         primary_notification_failures: u32,
     ) {
         let retained_connection = old_handle.retained_connection_state();
+        let registration = old_handle.rib_registration_state();
         let _ = self
             .quiesce_retiring_session(peer_key, old_session_id, old_handle, context, false)
             .await;
@@ -1464,6 +1465,9 @@ impl PeerManager {
             managed
                 .handle()
                 .inherit_retained_connection(&retained_connection);
+            managed
+                .handle()
+                .inherit_rib_registration(&registration, old_session_id);
         }
         self.activate_promoted_max_prefix_metrics(
             peer_key,
@@ -1551,10 +1555,8 @@ impl PeerManager {
                 .as_ref()
                 .map(|_| accepted_selected_owner(managed));
             let mut transport_config = managed.transport_config.clone();
-            // The old primary is retired below, before this session starts.
-            transport_config.supersedes_session = managed
-                .handle()
-                .rib_registration_owner(managed.session_id());
+            // Inherit the old primary's final registration after joining it below.
+            transport_config.supersedes_session = None;
             if let Some(keyring) = projected_keyring {
                 transport_config.tcp_ao = Some(keyring);
             }
@@ -1584,9 +1586,12 @@ impl PeerManager {
             return;
         };
         self.register_session(session_id, &peer_key);
+        #[cfg(test)]
+        self.hold_retirement_for_test().await;
 
         // Capture through shutdown: its final SessionDown may change retention.
         let retained_connection = old_handle.retained_connection_state();
+        let registration = old_handle.rib_registration_state();
         // Shut down the old session
         let _ = self
             .quiesce_retiring_session(
@@ -1608,6 +1613,9 @@ impl PeerManager {
             managed
                 .handle()
                 .inherit_retained_connection(&retained_connection);
+            managed
+                .handle()
+                .inherit_rib_registration(&registration, old_session_id);
         }
         if !managed.enabled {
             info!(peer = %peer_addr, "inbound replacement remains stopped by terminal peer latch");

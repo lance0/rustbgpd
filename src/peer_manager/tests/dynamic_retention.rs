@@ -2563,3 +2563,47 @@ fn source_context(peer: PeerId, session_id: u64, families: Vec<(Afi, Safi)>) -> 
         }),
     }
 }
+
+/// Normal owner publication does not install the optional history consumer.
+/// A retained reconnect that never establishes therefore has no retirement
+/// barrier that could end the predecessor's GR retention.
+#[tokio::test]
+async fn unestablished_retained_reconnect_with_a_published_owner_keeps_gr_routes() {
+    use rustbgpd_rib::dampening::{DampeningAdmission, DampeningOwner};
+    use std::num::NonZeroU64;
+
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let owner = Arc::new(DampeningOwner::new(NonZeroU64::new(1).unwrap()));
+    let (reply, response) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::PublishDampeningOwners {
+            publication: 1,
+            owners: vec![owner.clone()],
+            reply,
+        })
+        .await
+        .unwrap();
+    response.await.unwrap().unwrap();
+    assert!(!owner.records_wire_history());
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let retained_at = mgr.retained_dynamic[&key(MEMBER)].retained_at;
+    let _client = accept(&mut mgr).await;
+    mgr.peers
+        .get_mut(&key(MEMBER))
+        .unwrap()
+        .transport_config
+        .dampening_admission = Some(DampeningAdmission::new(owner.clone()));
+    mgr.reset_peer(key(MEMBER), None).await.unwrap();
+    while mgr.peers.contains_key(&key(MEMBER)) {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the unestablished reconnect ends")
+                .unwrap();
+        mgr.handle_session_notification(notification).await;
+    }
+    assert!(!owner.records_wire_history());
+    assert_eq!(mgr.retained_dynamic[&key(MEMBER)].retained_at, retained_at);
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
+    rib_task.abort();
+}
