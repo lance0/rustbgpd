@@ -107,6 +107,10 @@ for target in "${targets[@]}"; do
     continue
   fi
 
+  if [ "$key" = rustbgpd-rib/rib_ops ]; then
+    # The manager churn cells are feature-gated within this mixed target.
+    features=bench-internals
+  fi
   feature_args=()
   if [ -n "$features" ]; then
     feature_args=(--features "$features")

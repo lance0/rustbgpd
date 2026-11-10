@@ -2421,6 +2421,51 @@ impl RibManager {
         ]
     }
 
+    /// Displaced rows still awaiting the next deferred batch sweep.
+    #[must_use]
+    pub fn bench_attr_intern_displaced(&self) -> usize {
+        self.attr_intern_gc_displaced
+    }
+
+    /// Deliver a prepared VPN batch through the production dispatcher.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the source has not registered a session.
+    pub fn bench_apply_vpn_routes_received(
+        &mut self,
+        peer: PeerId,
+        announced: Vec<crate::route::VpnRibRoute>,
+        withdrawn: Vec<crate::route::VpnRibRouteKey>,
+    ) {
+        let session_id = self
+            .current_session_id(peer)
+            .expect("benchmark source must register before delivering routes");
+        self.handle_update(RibUpdate::VpnRoutesReceived {
+            peer,
+            session_id,
+            announced,
+            withdrawn,
+        });
+    }
+
+    /// Read a VPN fixture's attributes from Adj-RIB-In and Loc-RIB.
+    #[must_use]
+    pub fn bench_vpn_attributes(
+        &self,
+        expected: &crate::route::VpnRibRoute,
+    ) -> [Option<Arc<crate::attr_set::AttrSet>>; 2] {
+        [
+            self.ribs
+                .get(&expected.peer)
+                .and_then(|rib| rib.get_vpn(&expected.key()))
+                .map(|route| Arc::clone(&route.attributes)),
+            self.loc_rib
+                .get_vpn(&expected.nlri.key())
+                .map(|route| Arc::clone(&route.attributes)),
+        ]
+    }
+
     /// The neighbor whose route is best for `prefix`, if any.
     #[must_use]
     pub fn bench_best_peer(&self, prefix: Prefix) -> Option<PeerId> {
