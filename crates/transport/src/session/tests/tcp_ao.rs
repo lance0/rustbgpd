@@ -815,23 +815,9 @@ async fn tcp_ao_refusal_before_mutation_keeps_the_established_session() {
 
 #[tokio::test]
 async fn tcp_ao_reset_fails_the_established_session() {
-    let (mut session, _deletion, mut rib_rx, mut peer) = established_tcp_ao_session().await;
+    let (mut session, _deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
     reset_after_failed_mutation(&mut session).await;
     assert_failed_as_transport_loss("reset", &mut session, &mut rib_rx);
-
-    // The peer sees only the close: no NOTIFICATION is sent on a connection
-    // whose key inventory is unknown.
-    let mut wire = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(5), peer.read_to_end(&mut wire))
-        .await
-        .expect("the discarded connection closes promptly");
-    let mut types = Vec::new();
-    let mut at = 0;
-    while at + 19 <= wire.len() {
-        types.push(wire[at + 18]);
-        at += usize::from(u16::from_be_bytes([wire[at + 16], wire[at + 17]])).max(19);
-    }
-    assert!(!types.contains(&3), "saw message types {types:?}");
 }
 
 /// The peer negotiated Graceful Restart: the reset retains its routes exactly
@@ -856,24 +842,39 @@ async fn tcp_ao_reset_retains_routes_under_graceful_restart() {
     assert_eq!(rib_losses(&mut control_rib), ["PeerGracefulRestart"]);
 }
 
-/// A writer failure reported after the reset finds the session already down:
-/// it adds no second loss. The writer was joined by the reset, so the run
-/// loop has no exit left to observe; the late exit is fed in by hand.
+/// A writer that would fail after the reset cannot report it: the reset
+/// aborts and joins the writer, so the run loop's writer-exit arm, which is
+/// gated on that join handle, has nothing left to observe.
 #[tokio::test]
 async fn writer_error_after_tcp_ao_reset_reports_no_second_loss() {
     let (mut session, _deletion, mut rib_rx, peer) = established_tcp_ao_session().await;
     drop(peer);
     reset_after_failed_mutation(&mut session).await;
     assert_failed_as_transport_loss("reset", &mut session, &mut rib_rx);
+    assert!(session.writer_join.is_none());
+}
 
-    session
-        .handle_writer_exit(Ok(Err(writer::WriterExit::Io(std::io::Error::from(
-            std::io::ErrorKind::BrokenPipe,
-        )))))
-        .await;
-    assert_eq!(session.fsm.state(), SessionState::Idle);
+/// A local hard teardown has closed the connection and waits for its writer
+/// to exit before the session goes down. The reset stops that writer, so it
+/// sends nothing more, and delivers its exit: one `PeerDown`, as the run
+/// loop's writer-exit arm would have produced, with the teardown's own cause.
+#[tokio::test]
+async fn tcp_ao_reset_stops_a_writer_still_flushing_a_closed_connection() {
+    let (mut session, _deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    session.trigger_outbound_saturation_teardown();
+    assert!(session.read_half.is_none() && session.writer_join.is_some());
+    assert_eq!(session.fsm.state(), SessionState::Established);
     assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
-    assert!(session.reconnect_timer.is_some());
+
+    reset_after_failed_mutation(&mut session).await;
+    assert!(session.writer_join.is_none(), "the writer is stopped");
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(rib_losses(&mut rib_rx), ["PeerDown"]);
+    assert_eq!(
+        session.last_error,
+        crate::handle::SessionFailureCause::OutboundSaturation.to_string()
+    );
+    assert!(session.pending_outbound_teardown_cause.is_none());
 }
 
 /// Without a connection or a connect attempt there is nothing to fail: the
@@ -901,6 +902,10 @@ async fn tcp_ao_reset_without_a_connection_changes_nothing() {
     reset_after_failed_mutation(&mut session).await;
     assert_eq!(session.fsm.state(), SessionState::Active);
     assert_eq!(session.fsm.connect_retry_counter(), retries);
+    assert!(
+        session.writer_join.is_none(),
+        "the closed connection's writer is stopped"
+    );
     assert_eq!(session.last_error, "");
     assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
 }

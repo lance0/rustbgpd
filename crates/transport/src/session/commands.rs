@@ -457,9 +457,21 @@ impl PeerSession {
     /// key inventory unknown, so its connection (or a connect attempt still
     /// using the old inventory) is discarded as a local transport failure
     /// before the command is answered. Without either there is nothing to
-    /// fail, and the FSM is left alone.
+    /// fail, and the FSM is left alone; a writer still flushing a connection
+    /// that was already closed is stopped, so nothing more is sent on it.
     async fn discard_connection_after_tcp_ao_mutation(&mut self) {
         if self.read_half.is_none() && self.connect_task.is_none() {
+            if let Some(join) = self.writer_join.take() {
+                join.abort();
+                let exit = join.await;
+                if self.fsm.state() == SessionState::Established {
+                    // A local hard teardown is waiting for this exit to end
+                    // the session; deliver it as the run loop would have.
+                    self.handle_writer_exit(exit).await;
+                } else {
+                    self.pending_outbound_teardown_cause = None;
+                }
+            }
             return;
         }
         self.fail_connection_locally("TCP-AO key mutation failed; connection discarded".to_owned())
