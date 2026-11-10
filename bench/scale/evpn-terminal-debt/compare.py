@@ -26,8 +26,8 @@ import json
 import os
 from pathlib import Path
 import statistics
+import subprocess
 import sys
-from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -103,22 +103,28 @@ def load(output):
     return {"parent": parent, "candidate": candidate}, q, r, wire
 
 
-def prepare(args, bars):
+def one_campaign(*arguments):
+    """Each side is an ordinary campaign, frozen and built by the ordinary
+    runner in its own process: one process may load one qualification input."""
+    subprocess.run([sys.executable, "-B", str(HERE / "terminal.py"), *arguments], check=True)
+
+
+def prepare(args):
     output = Path(args.output).resolve()
     check.require(not output.exists(), "comparison directory must be new")
     output.mkdir(parents=True)
     for side, tree in (("parent", args.parent_input), ("candidate", args.candidate_input)):
-        pin = source.git(Path(tree).resolve(), "rev-parse", "HEAD")
-        source.prepare(SimpleNamespace(output=str(output / side), qualification_source=tree, base=pin,
-                                       daemon_cpus=source.DAEMON_CPUS, harness_cpus=source.HARNESS_CPUS,
-                                       window_start=args.window_start, window_end=args.window_end), bars)
+        window = ["--window-start", args.window_start, "--window-end", args.window_end] if args.window_start else []
+        one_campaign("prepare", str(output / side), "--qualification-source", tree,
+                     "--base", source.git(Path(tree).resolve(), "rev-parse", "HEAD"),
+                     "--daemon-cpus", source.DAEMON_CPUS, "--harness-cpus", source.HARNESS_CPUS, *window)
     return 0
 
 
 def build(args):
     output = Path(args.output).resolve()
     for side in SIDES:
-        source.build(SimpleNamespace(output=str(output / side)))
+        one_campaign("build", str(output / side))
     return verify(output, built=True)
 
 
@@ -216,8 +222,7 @@ def main():
             command.add_argument("--built", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
-        import terminal
-        return prepare(args, terminal.BARS)
+        return prepare(args)
     if args.command == "build":
         return build(args)
     if args.command == "verify":
