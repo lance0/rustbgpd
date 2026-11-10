@@ -72,9 +72,9 @@ impl PeerManager {
         // the mailbox is full, and it also clears a primary that was not
         // Established and so had no epoch of its own to close. When the
         // primary was Established the RIB therefore sees two PeerDowns for
-        // it. The second finds no registration and runs the full teardown
-        // again, which is empty unless the peer entered graceful-restart
-        // retention in between.
+        // it. With no later session the second runs an empty teardown; once
+        // a later session has ended, the RIB discards it as a retired
+        // session's late end, so it cannot abort that session's retention.
         // Reads stay queued while the peer's session identity is mid-swap.
         if self
             .send_rib_update(

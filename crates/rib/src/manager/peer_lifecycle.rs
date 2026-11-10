@@ -213,7 +213,7 @@ impl RibManager {
         peer: PeerId,
         session_id: u64,
     ) -> SessionTeardownDisposition {
-        let disposition = self.classify_session_teardown(peer, session_id, "PeerDown");
+        let disposition = self.classify_session_teardown(peer, session_id, "PeerDown", false);
         match disposition {
             SessionTeardownDisposition::DiscardStale => {}
             SessionTeardownDisposition::FailOver => {
@@ -236,12 +236,22 @@ impl RibManager {
     /// the event against the active registration. Discards are logged at
     /// INFO + counted in `bgp_rib_stale_peer_down_ignored_total`; a
     /// teardown for a peer with neither registration nor a live session
-    /// keeps the pre-stamping accept-all behavior and is never discarded.
+    /// keeps the pre-stamping accept-all behavior, with one exception: an
+    /// end from a session that an accepted end has already passed
+    /// (`ended_session_ids`). That is a retired session's late tail, and
+    /// running it would abort or restart retention that belongs to a later
+    /// session. A retaining end (`PeerGracefulRestart`) is late at or below
+    /// the accepted id: retention must not begin for a session already torn
+    /// down. A `PeerDown` is late only strictly below it, so a repeated
+    /// `PeerDown` for the newest ended session still runs the teardown; the
+    /// peer manager relies on that to purge what that session retained.
+    /// Session id 0 (emitters without identity) is never late.
     pub(super) fn classify_session_teardown(
         &mut self,
         peer: PeerId,
         session_id: u64,
         event: &str,
+        retains: bool,
     ) -> SessionTeardownDisposition {
         // Another transport may have staged its registration between this
         // session's final input and teardown. Only remove the ending session's
@@ -259,10 +269,26 @@ impl RibManager {
         self.pending_peer_policy_context.remove(&(peer, session_id));
         self.drop_evpn_feed_receipts(peer, Some(session_id));
         let Some(registered) = self.current_session_id(peer) else {
+            if let Some(&ended) = self.ended_session_ids.get(&peer)
+                && session_id != 0
+                && (session_id < ended || (retains && session_id == ended))
+            {
+                info!(
+                    %peer,
+                    event,
+                    stale_session_id = session_id,
+                    ended_session_id = ended,
+                    "discarding a late session teardown from a session already retired"
+                );
+                self.metrics
+                    .record_rib_stale_peer_down_ignored(&peer.label());
+                return SessionTeardownDisposition::DiscardStale;
+            }
             if let Some(selection) = self.selection_deferral.as_mut() {
                 selection.session_down(peer, session_id, &self.metrics);
             }
             self.live_sessions.remove(&peer);
+            self.note_session_ended(peer, session_id);
             return SessionTeardownDisposition::NoRegistration;
         };
         if registered != session_id {
@@ -287,6 +313,7 @@ impl RibManager {
         }
         // The active session went down. Prune it; if another live session
         // remains the registration fails over to it.
+        self.note_session_ended(peer, session_id);
         self.carry_helper_stale_exempt(peer, session_id);
         if let Some(selection) = self.selection_deferral.as_mut() {
             selection.session_down(peer, session_id, &self.metrics);
@@ -301,6 +328,13 @@ impl RibManager {
         } else {
             self.live_sessions.remove(&peer);
             SessionTeardownDisposition::TeardownActive
+        }
+    }
+
+    fn note_session_ended(&mut self, peer: PeerId, session_id: u64) {
+        if session_id != 0 {
+            let ended = self.ended_session_ids.entry(peer).or_default();
+            *ended = (*ended).max(session_id);
         }
     }
 
@@ -875,6 +909,7 @@ impl RibManager {
         keep_series: bool,
     ) {
         self.peer_down_teardown(peer);
+        self.ended_session_ids.remove(&peer);
         self.forget_idle_outbound_credit();
         // An interface-only neighbor's retired endpoint keeps its handle
         // (`keep_series`): a rebind to a new endpoint forgets the carry,
@@ -1112,6 +1147,7 @@ impl RibManager {
     /// it kept the series for a neighbor living on under another handle.
     pub(super) fn handle_release_peer(&mut self, peer: PeerId) {
         self.forget_helper_stale_exempt(peer);
+        self.ended_session_ids.remove(&peer);
         if !peer.release() {
             debug!(%peer, "release of a handle that was not live");
         }
