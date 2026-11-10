@@ -696,6 +696,154 @@ async fn a_gate_release_keeps_route_before_marker_for_a_woken_dirty_peer() {
     assert!(!manager.dirty_peers.contains(&OTHER));
 }
 
+/// A receiver that is dirty when its gate ends is resynced by the release
+/// pass, under the gate, and then owes nothing but the marker the gate
+/// held: no replay of the family is walked for it. Here its ordinary rows
+/// are at its row credit, so that replay would be refused and the receiver
+/// marked dirty again, for a second copy of its table on a later tick.
+#[tokio::test(start_paused = true)]
+async fn a_peer_resynced_by_the_release_pass_gets_its_marker_and_no_second_table() {
+    const FEED: PeerId = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_mins(2),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: SOURCE.into(),
+                families: vec![V4],
+            }],
+        })
+        .with_eor_grace(EorGraceConfig {
+            peers: vec![EorGracePeerConfig {
+                peer: TARGET.into(),
+                deadline: tokio::time::Instant::now() + WINDOW,
+                families: vec![V4],
+            }],
+            replay_owners: vec![],
+        });
+    manager.outbound_row_credit_override = Some(1);
+    // Add-Path send keeps the receiver out of an update group.
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: TARGET,
+        session_id: 2,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![V4],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (outbound_tx, mut output) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: TARGET,
+        session_id: 2,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![V4],
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![V4],
+        add_path_send_max: 2,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    assert!(manager.grouped_member_of(TARGET).is_none(), "ungrouped");
+    while output.try_recv().is_ok() {}
+    // One ordinary row the receiver never drains: its credit is spent.
+    std::mem::forget(connect_with(&mut manager, FEED, 4, vec![V4]));
+    announce(&mut manager, FEED, 4, 9);
+    let undrained: Vec<_> = std::iter::from_fn(|| output.try_recv().ok()).collect();
+    assert!(manager.outbound_credit_exhausted(TARGET));
+    // The waiter arms the gate and announces under it; grace then ends.
+    std::mem::forget(connect_with(&mut manager, SOURCE, 1, vec![V4]));
+    announce(&mut manager, SOURCE, 1, 7);
+    manager.expire_eor_holds(tokio::time::Instant::now() + WINDOW);
+    manager.mark_outbound_dirty(TARGET);
+    assert!(output.try_recv().is_err(), "the gate holds the marker");
+    assert!(manager.eor.owes(TARGET, V4));
+
+    manager.expire_selection_deferral();
+
+    assert!(!manager.dirty_peers.contains(&TARGET), "resynced once");
+    assert!(!manager.eor.owes(TARGET, V4));
+    assert!(manager.outbound_credit_exhausted(TARGET), "still spent");
+    assert_route_precedes_marker(&mut output, "resynced under the gate");
+    // The resync's envelopes are gone; nothing asks for the table again.
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(output.try_recv().is_err(), "no second table");
+    assert!(!manager.resync_tick_pending());
+    drop(undrained);
+}
+
+/// The same for a group member that joined under the armed gate, so it
+/// still carries the record of what its held initial table admitted: the
+/// release pass resyncs it, the marker follows, and the record is retired
+/// without the replay that would have checked the table against it.
+#[tokio::test(start_paused = true)]
+async fn a_group_member_resynced_by_the_release_pass_gets_its_marker_and_no_second_table() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_mins(2),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: SOURCE.into(),
+                families: vec![V4],
+            }],
+        });
+    // One route is selected before the gate arms, one is held under it.
+    std::mem::forget(connect_with(&mut manager, OTHER, 3, vec![V4]));
+    announce(&mut manager, OTHER, 3, 9);
+    std::mem::forget(connect_with(&mut manager, SOURCE, 1, vec![V4]));
+    announce(&mut manager, SOURCE, 1, 7);
+    let mut output = connect_with(&mut manager, TARGET, 2, vec![V4]);
+    assert!(manager.grouped_member_of(TARGET).is_some(), "grouped");
+    assert_eq!(markers_of(&mut output, V4), 0, "the gate holds the marker");
+    manager.mark_outbound_dirty(TARGET);
+    assert!(manager.pending_group_admitted.contains_key(&TARGET));
+
+    manager.expire_selection_deferral();
+
+    assert!(!manager.dirty_peers.contains(&TARGET), "resynced once");
+    assert!(!manager.pending_group_admitted.contains_key(&TARGET));
+    assert_route_precedes_marker(&mut output, "group member resynced under the gate");
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(output.try_recv().is_err(), "no second table");
+    assert!(!manager.resync_tick_pending());
+}
+
+/// The same for a receiver a second deferred family keeps dirty: the
+/// release pass resyncs it for the released family, whose marker follows
+/// in the release turn, and it is not woken for that family again.
+#[tokio::test(start_paused = true)]
+async fn a_dirty_peer_held_by_another_family_gets_the_released_marker_once() {
+    let (mut manager, mut outputs) = late_armed_gate(&[V4, V6], &[(TARGET, 2, &[V4, V6])]);
+    let mut output = outputs.remove(0);
+    manager.mark_outbound_dirty(TARGET);
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.dirty_peers.contains(&TARGET), "held by both gates");
+    while output.try_recv().is_ok() {}
+
+    source_end_of_rib(&mut manager, V4);
+
+    assert!(manager.selection_convergence_held(V6));
+    assert_route_precedes_marker(&mut output, "dirty for IPv6");
+    assert!(manager.dirty_peers.contains(&TARGET), "kept for IPv6");
+    assert_eq!(manager.eor_pending(TARGET), HashSet::from([V6]));
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(output.try_recv().is_err(), "no second partial resync");
+}
+
 /// A session whose IPv4 is behind the RFC 5291 §6 gate (it negotiated ORF
 /// receive and has not refreshed), with its first End-of-RIB already sent.
 fn orf_gated(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {

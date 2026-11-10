@@ -2878,6 +2878,13 @@ impl RibManager {
                 .is_some_and(|record| record.selection_partial_caught_up)
     }
 
+    /// Whether a dirty or forced resync of `peer` is still to run: one a
+    /// selection gate held for a family has caught up for the rest.
+    pub(super) fn resync_pending(&self, peer: PeerId) -> bool {
+        (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer))
+            && !self.selection_partial_caught_up(peer)
+    }
+
     pub(super) fn set_selection_partial_caught_up(&mut self, peer: PeerId, caught_up: bool) {
         if let Some(session) = self.outbound_session_ids.get(&peer).copied()
             && let Some(record) = self.newest_live_session_mut(peer, session)

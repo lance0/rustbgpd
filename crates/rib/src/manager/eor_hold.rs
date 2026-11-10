@@ -146,6 +146,17 @@ impl<'a> EorTrigger<'a> {
     pub(super) fn behind(operation: Option<&'a mut OutboundOperation>) -> Self {
         operation.map_or(Self::Release, Self::Table)
     }
+
+    fn offer(self) -> (Offer, Option<&'a mut OutboundOperation>) {
+        match self {
+            Self::Release => (Offer::Release, None),
+            Self::Table(operation) => (Offer::Table, Some(operation)),
+            Self::InitialTable {
+                operation,
+                evpn_covered,
+            } => (Offer::InitialTable { evpn_covered }, operation),
+        }
+    }
 }
 
 /// How the trigger changes which reasons count.
@@ -563,7 +574,17 @@ impl RibManager {
     /// sends the marker; inside another operation, or refused, the marker
     /// stays owed and the owed-key drain retries it.
     pub(super) fn settle_eor(&mut self, peer: PeerId, trigger: EorTrigger<'_>) {
-        self.settle_eor_as(peer, trigger, false);
+        let (offer, operation) = trigger.offer();
+        self.settle_eor_as(peer, offer, operation, false);
+    }
+
+    /// A resync of `peer` was admitted earlier in this turn while a
+    /// selection gate still held a family's marker, and that gate is now
+    /// released: the marker follows the table as a plain marker, even while
+    /// the peer stays dirty for another deferred family. A refused marker
+    /// waits for the tick's marker retry; the table is not sent again.
+    pub(super) fn settle_eor_behind_resync(&mut self, peer: PeerId) {
+        self.settle_eor_as(peer, Offer::Table, None, true);
     }
 
     /// A release from inside a refresh answer that absorbed a family's owed
@@ -572,18 +593,16 @@ impl RibManager {
     /// drain, and a refused marker for the tick's marker retry, with no
     /// resync.
     pub(super) fn settle_free_eor(&mut self, peer: PeerId) {
-        self.settle_eor_as(peer, EorTrigger::Release, true);
+        self.settle_eor_as(peer, Offer::Release, None, true);
     }
 
-    fn settle_eor_as(&mut self, peer: PeerId, trigger: EorTrigger<'_>, plain: bool) {
-        let (offer, operation) = match trigger {
-            EorTrigger::Release => (Offer::Release, None),
-            EorTrigger::Table(operation) => (Offer::Table, Some(operation)),
-            EorTrigger::InitialTable {
-                operation,
-                evpn_covered,
-            } => (Offer::InitialTable { evpn_covered }, operation),
-        };
+    fn settle_eor_as(
+        &mut self,
+        peer: PeerId,
+        offer: Offer,
+        operation: Option<&mut OutboundOperation>,
+        plain: bool,
+    ) {
         // Owed keys do not keep a marker out: this call absorbs them,
         // unless it must start no operation of its own.
         let owed_keys = if plain {

@@ -1591,7 +1591,7 @@ impl RibManager {
             // without a new RibUpdate. Fence every view before the release.
             manager.advance_all_route_pages();
             for &family in families {
-                manager.complete_selection_family(family, false, reason);
+                manager.complete_selection_family(family, None, reason);
             }
         });
     }
@@ -1623,6 +1623,10 @@ impl RibManager {
                     release_reason,
                 } => {
                     let armed = manager.selection_convergence_held(family);
+                    let mut resynced = HashSet::new();
+                    if armed {
+                        manager.wake_selection_partial_recovery(family);
+                    }
                     if armed && !already_staged {
                         // The family's routes are selected and sent while
                         // its gate is still armed, as on the staged path:
@@ -1632,14 +1636,25 @@ impl RibManager {
                         if let Some(selection) = manager.selection_deferral.as_mut() {
                             selection.stage_for_release(family);
                         }
-                        manager.wake_selection_partial_recovery(family);
+                        let pending: Vec<PeerId> = manager
+                            .dirty_peers
+                            .iter()
+                            .chain(&manager.force_outbound_peers)
+                            .copied()
+                            .filter(|&peer| manager.resync_pending(peer))
+                            .collect();
                         manager.recompute_released_selection_family(family);
+                        resynced.extend(
+                            pending
+                                .into_iter()
+                                .filter(|&peer| !manager.resync_pending(peer)),
+                        );
                     }
                     if let Some(selection) = manager.selection_deferral.as_mut() {
                         selection.release(family, release_reason, &manager.metrics);
                     }
                     if armed {
-                        manager.complete_selection_family(family, true, reason);
+                        manager.complete_selection_family(family, Some(&resynced), reason);
                     }
                 }
             }
@@ -1650,17 +1665,24 @@ impl RibManager {
         self.request_helper_stale_retire();
     }
 
+    /// Finish the release of `family`. `staged` is `None` when its routes
+    /// are still to be selected here; otherwise they were selected and sent
+    /// under the armed gate, and it names the peers whose pending resync
+    /// that pass admitted.
     fn complete_selection_family(
         &mut self,
         family: (Afi, Safi),
-        already_staged: bool,
+        staged: Option<&HashSet<PeerId>>,
         reason: &'static str,
     ) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
         checkpoint();
-        self.wake_selection_partial_recovery(family);
+        let already_staged = staged.is_some();
+        if !already_staged {
+            self.wake_selection_partial_recovery(family);
+        }
         // Release does not by itself purge the stale rows a GR helper keeps:
         // our End-of-RIB does, once it is sent, and replay grace can still
         // hold it. A carry stays while that End-of-RIB can be held and its
@@ -1705,6 +1727,19 @@ impl RibManager {
             if !evpn_coverage_required && !self.eor.owes(peer, family) {
                 // Recomputing this family can already admit its marker in
                 // a partial resync while another family stays held.
+                continue;
+            }
+            if staged.is_some_and(|resynced| resynced.contains(&peer)) {
+                // Its resync was admitted under the gate, which held only
+                // this marker back: the table is whole, so the marker
+                // follows it and no replay is owed.
+                self.settle_eor_behind_resync(peer);
+                if self.eor.owes(peer, family) && self.dirty_peers.contains(&peer) {
+                    // Something else kept the marker (a full writer, owed
+                    // keys) and the peer stays dirty for another deferred
+                    // family: its next resync carries it.
+                    self.set_selection_partial_caught_up(peer, false);
+                }
                 continue;
             }
             // An ORF gate defers the replay. A sendable family held by this
