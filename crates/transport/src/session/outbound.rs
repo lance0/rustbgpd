@@ -3,6 +3,7 @@ use super::export::{
     PreparedMpCandidate, PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri,
     SessionExportProfile, UnreachNlri, has_otc,
 };
+use super::packing::{ChunkSizer, entry_len, ipv4_entry_len, prefix_len};
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
     Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix, Route,
@@ -1953,11 +1954,19 @@ impl PeerSession {
                 deferred,
                 PendingGroup::new(GroupWire::Ipv4Body, v4_body_sources),
                 |session| {
-                    session.send_v4_chunked(&v4_body_withdraw, max_len, "withdraw", |chunk| {
-                        export
-                            .build_ipv4_body(&[], chunk, &[])
-                            .expect("IPv4 body withdrawal construction was previously infallible")
-                    })
+                    session.send_v4_chunked(
+                        &v4_body_withdraw,
+                        max_len,
+                        "withdraw",
+                        Some(&ipv4_entry_len(
+                            export.add_path_send((Afi::Ipv4, Safi::Unicast)),
+                        )),
+                        |chunk| {
+                            export.build_ipv4_body(&[], chunk, &[]).expect(
+                                "IPv4 body withdrawal construction was previously infallible",
+                            )
+                        },
+                    )
                 },
             ) {
                 return false;
@@ -1982,6 +1991,7 @@ impl PeerSession {
                         max_len,
                         "IPv4 unicast",
                         "withdrawal",
+                        Some(&entry_len(export.add_path_send((afi, safi)))),
                         |chunk| {
                             export.build_mp_unreach(
                                 afi,
@@ -2019,6 +2029,7 @@ impl PeerSession {
                         max_len,
                         "IPv6 unicast",
                         "withdrawal",
+                        Some(&entry_len(export.add_path_send((afi, safi)))),
                         |chunk| {
                             export.build_mp_unreach(
                                 afi,
@@ -2158,11 +2169,19 @@ impl PeerSession {
                     deferred,
                     PendingGroup::new(GroupWire::Ipv4Body, group.sources),
                     |session| {
-                        session.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                            export.build_ipv4_body(chunk, &[], attrs).expect(
-                                "IPv4 body announcement construction was previously infallible",
-                            )
-                        })
+                        session.send_v4_chunked(
+                            &group.prefixes,
+                            max_len,
+                            "announce",
+                            Some(&ipv4_entry_len(
+                                export.add_path_send((Afi::Ipv4, Safi::Unicast)),
+                            )),
+                            |chunk| {
+                                export.build_ipv4_body(chunk, &[], attrs).expect(
+                                    "IPv4 body announcement construction was previously infallible",
+                                )
+                            },
+                        )
                     },
                 ) {
                     return false;
@@ -2184,19 +2203,25 @@ impl PeerSession {
                         group.sources,
                     ),
                     |session| {
-                        session.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                            export
-                                .build_mp_reach(
-                                    Afi::Ipv4,
-                                    Safi::Unicast,
-                                    next_hop,
-                                    link_local_next_hop,
-                                    base_attrs,
-                                    ReachNlri::Unicast(chunk),
-                                    Ipv4UnicastMode::MpReach,
-                                )
-                                .expect("IPv4 MP_REACH construction was previously infallible")
-                        })
+                        session.send_v4_chunked(
+                            &group.prefixes,
+                            max_len,
+                            "announce",
+                            Some(&entry_len(export.add_path_send((Afi::Ipv4, Safi::Unicast)))),
+                            |chunk| {
+                                export
+                                    .build_mp_reach(
+                                        Afi::Ipv4,
+                                        Safi::Unicast,
+                                        next_hop,
+                                        link_local_next_hop,
+                                        base_attrs,
+                                        ReachNlri::Unicast(chunk),
+                                        Ipv4UnicastMode::MpReach,
+                                    )
+                                    .expect("IPv4 MP_REACH construction was previously infallible")
+                            },
+                        )
                     },
                 ) {
                     return false;
@@ -2291,6 +2316,7 @@ impl PeerSession {
                         max_len,
                         "IPv6 unicast",
                         "announcement",
+                        Some(&entry_len(export.add_path_send((Afi::Ipv6, Safi::Unicast)))),
                         |chunk| {
                             export.build_mp_reach(
                                 Afi::Ipv6,
@@ -2378,6 +2404,7 @@ impl PeerSession {
                             max_len,
                             "FlowSpec",
                             "withdrawal",
+                            None,
                             |chunk| {
                                 export.build_mp_unreach(
                                     afi,
@@ -2410,6 +2437,7 @@ impl PeerSession {
                             max_len,
                             "VPN FlowSpec",
                             "withdrawal",
+                            None,
                             |chunk| {
                                 export.build_mp_unreach(
                                     afi,
@@ -3081,6 +3109,7 @@ impl PeerSession {
                             max_len,
                             "FlowSpec",
                             "announcement",
+                            None,
                             |chunk| {
                                 export.build_mp_reach(
                                     afi,
@@ -3116,6 +3145,7 @@ impl PeerSession {
                             max_len,
                             "VPN FlowSpec",
                             "announcement",
+                            None,
                             |chunk| {
                                 export.build_mp_reach(
                                     afi,
@@ -3273,6 +3303,15 @@ impl PeerSession {
                     let build = |chunk: &[usize]| {
                         slice.build_chunk(group, chunk, &pending.update, export, &attrs)
                     };
+                    let add_path = export.add_path_send((afi, safi));
+                    let unicast_len = |&row: &usize| {
+                        let prefix = if matches!(slice.phase, OutboundPhase::Announce) {
+                            pending.update.announce[slice.source_start + row].prefix
+                        } else {
+                            slice.withdrawal(&pending.update, row).0
+                        };
+                        prefix_len(prefix, add_path)
+                    };
                     if matches!(wire, GroupWire::Ipv4Body)
                         || matches!(
                             (slice.phase, wire),
@@ -3287,7 +3326,7 @@ impl PeerSession {
                         )
                     {
                         let kind = if withdrawal { "withdraw" } else { "announce" };
-                        self.send_v4_chunked(rows, max_len, kind, |chunk| {
+                        self.send_v4_chunked(rows, max_len, kind, Some(&unicast_len), |chunk| {
                             build(chunk).expect("validated unicast chunk")
                         })?
                     } else if matches!(
@@ -3302,20 +3341,16 @@ impl PeerSession {
                         } else {
                             "announcement"
                         };
-                        self.send_mp_chunked(rows, max_len, family, kind, build)?
-                    } else {
-                        let initial_chunk = if matches!(
+                        let size: Option<&dyn Fn(&usize) -> usize> = matches!(
                             slice.phase,
-                            OutboundPhase::EvpnAnnounce | OutboundPhase::EvpnWithdraw
-                        ) {
-                            rows.len().clamp(1, 1000)
-                        } else {
-                            1000
-                        };
+                            OutboundPhase::Announce | OutboundPhase::Withdraw
+                        )
+                        .then_some(&unicast_len);
+                        self.send_mp_chunked(rows, max_len, family, kind, size, build)?
+                    } else {
                         self.send_resumed_family_chunked(
                             rows,
                             max_len,
-                            initial_chunk,
                             (family, withdrawal),
                             build,
                         )?
@@ -3335,25 +3370,28 @@ impl PeerSession {
         Ok(())
     }
 
-    /// The existing 1,000-entry (or shorter EVPN) probe and halving used by
-    /// typed MP families, applied to source indices on cold resume.
+    /// The typed MP family senders' byte-sized chunking, applied to source
+    /// indices on cold resume.
     fn send_resumed_family_chunked(
         &mut self,
         rows: &[usize],
         max_len: usize,
-        mut chunk_size: usize,
         (family, withdrawal): (&'static str, bool),
         mut build: impl FnMut(&[usize]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
     ) -> Result<usize, ()> {
+        let mut sizer = ChunkSizer::new(max_len);
         let mut next = 0;
         while next < rows.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(next);
             }
-            let end = (next + chunk_size).min(rows.len());
+            let end = next + sizer.next(&rows[next..], None);
             let message = build(&rows[next..end]).expect("previously validated family chunk");
+            if sizer.measured_only(Some(&message)) {
+                continue;
+            }
             if message.encoded_len() > max_len {
-                if chunk_size == 1 {
+                if end - next == 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = message.encoded_len(),
@@ -3366,9 +3404,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - next, Some(&message));
                 continue;
             }
+            sizer.accepted(&message, end - next);
             if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
                 warn!(
                     peer = %self.peer_label,
@@ -3387,44 +3426,44 @@ impl PeerSession {
 
     /// Split `entries` into as many wire UPDATEs as needed so each
     /// `build`-produced message fits `max_len`, enqueueing each in order.
-    /// The exact profile builder emits one message regardless of size, so a large
-    /// same-attribute IPv4 group (e.g. 1000 /24s ≈ 4114 bytes) exceeds the
-    /// 4096-byte limit: `enqueue_bulk` rejects it and the session logs and
-    /// abandons the rest of the batch, and — the actual defect — that partial
-    /// delivery is never reported back across the RIB/session boundary, so the
-    /// RIB believes the whole group was advertised. Chunking keeps every prefix
-    /// on the wire. On overflow the chunk halves down to one entry; a lone
-    /// entry that still cannot fit tears the session down (see below). `kind`
-    /// names the traffic for the failure log. Returns the successful entry
-    /// count, or an error so the caller stops. Used by all four IPv4-unicast paths (body/MP
-    /// announce and withdrawal); the per-family helpers below follow the same
-    /// shape.
+    /// The exact profile builder emits one message regardless of size, so a
+    /// large same-attribute IPv4 group (e.g. 1000 /24s ≈ 4114 bytes) exceeds
+    /// the 4096-byte limit: `enqueue_bulk` would reject it, and that partial
+    /// delivery is never reported back across the RIB/session boundary, so
+    /// the RIB would believe the whole group was advertised. Chunking keeps
+    /// every prefix on the wire. Each chunk is the longest run of entries
+    /// whose encoded bytes fit (see [`ChunkSizer`]); the exact
+    /// `encoded_len()` check still guards every enqueue, and a lone entry
+    /// that cannot fit tears the session down (see below). `kind` names the
+    /// traffic for the failure log. Returns the successful entry count, or
+    /// an error so the caller stops. Used by all four IPv4-unicast paths
+    /// (body/MP announce and withdrawal); the per-family helpers below
+    /// follow the same shape.
     fn send_v4_chunked<E, F>(
         &mut self,
         entries: &[E],
         max_len: usize,
         kind: &'static str,
+        size: Option<&dyn Fn(&E) -> usize>,
         mut build: F,
     ) -> Result<usize, ()>
     where
         F: FnMut(&[E]) -> UpdateMessage,
     {
-        // Optimistic starting chunk: aim to fill the negotiated message (4096,
-        // or the 65535-byte Extended Message) rather than a fixed count, then
-        // let the encoded_len() check and halving correct for attribute size,
-        // variable prefix lengths, and Add-Path path-IDs. `max_len / 2` is a
-        // probe, not an exact byte budget.
-        let mut chunk_size: usize = entries.len().min(max_len / 2).max(1);
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < entries.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(entries.len());
+            let end = idx + sizer.next(&entries[idx..], size);
             let msg = build(&entries[idx..end]);
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             let encoded_len = msg.encoded_len();
             if encoded_len > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     // A single entry plus its attributes exceeds the negotiated
                     // maximum. The RIB has already committed this batch to
                     // logical Adj-RIB-Out and this local encode failure is
@@ -3451,9 +3490,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             if let Err(e) = self.enqueue_bulk(&Message::Update(msg)) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send IPv4 {kind} UPDATE");
                 return Err(());
@@ -3467,61 +3507,43 @@ impl PeerSession {
 
     /// Fallible size-aware sender for `MP_REACH/MP_UNREACH` families whose
     /// structured NLRI codec can reject an individual entry (notably
-    /// `FlowSpec`). Both an encoded-size overflow and a structured-build error
-    /// shrink a multi-entry probe. A single entry that still fails is the
-    /// existing wire/RIB invariant breach: tear the session down so it cannot
-    /// remain Established with logical Adj-RIB-Out ahead of the wire. LAN-361
-    /// will move that single-entry decision before the RIB commit.
+    /// `FlowSpec`). Chunks are sized from encoded bytes like
+    /// [`Self::send_v4_chunked`]; `size` is `None` for families whose entry
+    /// size is not arithmetic. Both an encoded-size overflow and a
+    /// structured-build error shrink a multi-entry chunk. A single entry
+    /// that still fails is the existing wire/RIB invariant breach: tear the
+    /// session down so it cannot remain Established with logical
+    /// Adj-RIB-Out ahead of the wire. LAN-361 will move that single-entry
+    /// decision before the RIB commit.
     fn send_mp_chunked<E, F>(
         &mut self,
         entries: &[E],
         max_len: usize,
         family: &'static str,
         kind: &'static str,
+        size: Option<&dyn Fn(&E) -> usize>,
         mut build: F,
     ) -> Result<usize, ()>
     where
         F: FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
     {
-        // `max_len` is a byte budget, not an entry count. Keep every
-        // clone/encode probe bounded even when Extended Messages are
-        // negotiated, but grow beyond the conservative first 1,024 entries
-        // after an exact build proves that candidate fits. Remember the
-        // successful lower and failed upper bounds for the current region:
-        // after 1,024 succeeds and 2,048 fails, for example, probe 1,536,
-        // then binary-search between
-        // the proven bounds rather than retrying 2,048 or regressing below
-        // 1,024. Exact build/length checks still guard every enqueue.
-        const MAX_PROBE_ENTRIES: usize = 4096;
-        let mut chunk_size = entries.len().clamp(1, 1024);
-        let max_probe = entries.len().clamp(1, MAX_PROBE_ENTRIES);
-        let mut successful_lower: usize = 0;
-        let mut failed_upper: Option<usize> = None;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx = 0;
         while idx < entries.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(entries.len());
-            let probe_size = end - idx;
+            let end = idx + sizer.next(&entries[idx..], size);
             let candidate = build(&entries[idx..end]);
+            if sizer.measured_only(candidate.as_ref().ok()) {
+                continue;
+            }
             let needs_smaller = candidate
                 .as_ref()
                 .map_or(true, |message| message.encoded_len() > max_len);
             if needs_smaller {
-                if probe_size > 1 {
-                    failed_upper =
-                        Some(failed_upper.map_or(probe_size, |upper| upper.min(probe_size)));
-                    if successful_lower.saturating_add(1) >= probe_size {
-                        // Entry sizes can vary within a family. A count that
-                        // fitted an earlier slice is not proof for this one.
-                        successful_lower = 0;
-                    }
-                    chunk_size = if successful_lower + 1 < probe_size {
-                        successful_lower + (probe_size - successful_lower) / 2
-                    } else {
-                        (probe_size / 2).max(1)
-                    };
+                if end - idx > 1 {
+                    sizer.rejected(end - idx, candidate.as_ref().ok());
                     continue;
                 }
                 match candidate {
@@ -3544,6 +3566,7 @@ impl PeerSession {
                 return Err(());
             }
             let message = candidate.expect("successful MP build checked above");
+            sizer.accepted(&message, end - idx);
             if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
                 warn!(peer = %self.peer_label, %error, "failed to send {family} {kind} UPDATE");
                 return Err(());
@@ -3551,30 +3574,15 @@ impl PeerSession {
             self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
-            if idx < entries.len() {
-                successful_lower = successful_lower.max(probe_size);
-                // The next slice is a new size region. Entry widths vary, so
-                // an upper bound learned from the preceding slice is stale;
-                // retain the successful starting point but let this region
-                // grow until one of its own exact probes fails.
-                failed_upper = None;
-                chunk_size = match failed_upper {
-                    Some(upper) if successful_lower + 1 < upper => {
-                        successful_lower + (upper - successful_lower) / 2
-                    }
-                    Some(_) => successful_lower,
-                    None => successful_lower.saturating_mul(2).min(max_probe),
-                };
-            }
         }
         Ok(idx)
     }
 
     /// Send a batch of EVPN announcements as one or more `MP_REACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
-    /// Starts with a generous chunk size and halves on `MessageTooLong`,
-    /// down to a single route. Returns `false` on send error so the caller
-    /// can abort the whole route batch the same way the unicast path does.
+    /// Chunks are sized from measured bytes per route (see [`ChunkSizer`]).
+    /// Returns an error on send failure so the caller can abort the whole
+    /// route batch the same way the unicast path does.
     fn send_evpn_reach_chunked(
         &mut self,
         profile: &SessionExportProfile,
@@ -3583,16 +3591,13 @@ impl PeerSession {
         routes: &[EvpnRoute],
         max_len: usize,
     ) -> Result<usize, ()> {
-        // Initial chunk size: 1000 fits comfortably under the 65535-byte
-        // Extended Messages limit even for Type 5/IPv6 routes (~60 B each)
-        // and shrinks on overflow for the standard 4096-byte limit.
-        let mut chunk_size = routes.len().clamp(1, 1000);
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_reach(
                     Afi::L2Vpn,
@@ -3604,8 +3609,11 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 )
                 .expect("EVPN MP_REACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     // Single-route oversize: a single EVPN route plus its
                     // attribute set exceeds the negotiated maximum BGP
                     // message length. Previously the loop logged + skipped
@@ -3627,9 +3635,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
@@ -3652,18 +3661,21 @@ impl PeerSession {
         routes: &[EvpnRoute],
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size = routes.len().clamp(1, 1000);
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::Evpn(&routes[idx..end]), ipv4_mode)
                 .expect("EVPN MP_UNREACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -3675,9 +3687,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
@@ -3700,13 +3713,13 @@ impl PeerSession {
         profile: &SessionExportProfile,
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_reach(
                     Afi::BgpLs,
@@ -3718,8 +3731,11 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 )
                 .expect("BGP-LS MP_REACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -3731,9 +3747,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS announce UPDATE");
@@ -3756,18 +3773,21 @@ impl PeerSession {
         profile: &SessionExportProfile,
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::BgpLs(&routes[idx..end]), ipv4_mode)
                 .expect("BGP-LS MP_UNREACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -3779,9 +3799,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS withdrawal UPDATE");
@@ -3817,13 +3838,13 @@ impl PeerSession {
         profile: &SessionExportProfile,
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_reach(
                     afi,
@@ -3835,8 +3856,11 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 )
                 .expect("VPN MP_REACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -3848,9 +3872,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN announce UPDATE");
@@ -3874,18 +3899,21 @@ impl PeerSession {
         profile: &SessionExportProfile,
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::Vpn(&routes[idx..end]), ipv4_mode)
                 .expect("VPN MP_UNREACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -3897,9 +3925,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN withdrawal UPDATE");
@@ -3929,13 +3958,13 @@ impl PeerSession {
         profile: &SessionExportProfile,
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_reach(
                     afi,
@@ -3947,8 +3976,11 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 )
                 .expect("labeled-unicast MP_REACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -3960,9 +3992,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send labeled announce UPDATE");
@@ -3987,13 +4020,13 @@ impl PeerSession {
         profile: &SessionExportProfile,
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_unreach(
                     afi,
@@ -4002,8 +4035,11 @@ impl PeerSession {
                     ipv4_mode,
                 )
                 .expect("labeled-unicast MP_UNREACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -4015,9 +4051,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send labeled withdrawal UPDATE");
@@ -4040,13 +4077,13 @@ impl PeerSession {
         routes: &[rustbgpd_wire::RtcNlri],
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_reach(
                     Afi::Ipv4,
@@ -4058,8 +4095,11 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 )
                 .expect("RTC MP_REACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -4071,9 +4111,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send RTC announce UPDATE");
@@ -4097,18 +4138,21 @@ impl PeerSession {
         routes: &[rustbgpd_wire::RtcNlri],
         max_len: usize,
     ) -> Result<usize, ()> {
-        let mut chunk_size: usize = 1000;
+        let mut sizer = ChunkSizer::new(max_len);
         let mut idx: usize = 0;
         while idx < routes.len() {
             if !self.writer_frame_room(max_len)? {
                 return Ok(idx);
             }
-            let end = (idx + chunk_size).min(routes.len());
+            let end = idx + sizer.next(&routes[idx..], None);
             let msg = profile
                 .build_mp_unreach(afi, safi, UnreachNlri::Rtc(&routes[idx..end]), ipv4_mode)
                 .expect("RTC MP_UNREACH construction was previously infallible");
+            if sizer.measured_only(Some(&msg)) {
+                continue;
+            }
             if msg.encoded_len() > max_len {
-                if chunk_size <= 1 {
+                if end - idx <= 1 {
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
@@ -4120,9 +4164,10 @@ impl PeerSession {
                     );
                     return Err(());
                 }
-                chunk_size = (chunk_size / 2).max(1);
+                sizer.rejected(end - idx, Some(&msg));
                 continue;
             }
+            sizer.accepted(&msg, end - idx);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send RTC withdrawal UPDATE");
@@ -4538,13 +4583,12 @@ mod attr_group_index_tests {
     }
 }
 
-/// Baseline for how the chunkers fill UPDATEs: one same-attribute group of a
-/// full slice per case, with the frames read back off the wire and every
-/// chunk build counted, discarded oversize probes included. The figures are
-/// the current behaviour, not a target; a change to packing updates them on
-/// purpose.
+/// How the chunkers pack one same-attribute group: the frames are read back
+/// off the wire and every chunk build is counted, builds that were not sent
+/// included.
 #[cfg(test)]
-mod packing_baseline_tests {
+mod packing_tests {
+    use super::super::packing::BUILT;
     use super::*;
     use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
     use rustbgpd_wire::{
@@ -4556,7 +4600,7 @@ mod packing_baseline_tests {
     use tokio::time::timeout;
 
     /// The largest group the slicer hands a chunker.
-    const ROWS: usize = super::super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    const SLICE: usize = super::super::shared_group::PROGRESSIVE_SLICE_ROUTES;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Wire {
@@ -4574,11 +4618,6 @@ mod packing_baseline_tests {
         Mixed,
     }
 
-    /// `(messages, shortest, longest, total bytes)` on the wire, then
-    /// `(chunk builds, entries built)` where the chunker takes a build
-    /// closure. All for `ROWS` entries sent.
-    type Packing = ((usize, usize, usize, usize), Option<(usize, usize)>);
-
     fn base_attrs() -> Vec<PathAttribute> {
         vec![
             PathAttribute::Origin(Origin::Igp),
@@ -4590,8 +4629,8 @@ mod packing_baseline_tests {
         ]
     }
 
-    fn v4_entries(lengths: Lengths, add_path: bool) -> Vec<Ipv4NlriEntry> {
-        (0..u32::try_from(ROWS).unwrap())
+    fn v4_entries(rows: usize, lengths: Lengths, add_path: bool) -> Vec<Ipv4NlriEntry> {
+        (0..u32::try_from(rows).unwrap())
             .map(|i| Ipv4NlriEntry {
                 path_id: if add_path { i + 1 } else { 0 },
                 prefix: Ipv4Prefix::new(
@@ -4605,8 +4644,8 @@ mod packing_baseline_tests {
             .collect()
     }
 
-    fn v6_entries(lengths: Lengths, add_path: bool) -> Vec<NlriEntry> {
-        (0..u32::try_from(ROWS).unwrap())
+    fn v6_entries(rows: usize, lengths: Lengths, add_path: bool) -> Vec<NlriEntry> {
+        (0..u32::try_from(rows).unwrap())
             .map(|i| NlriEntry {
                 path_id: if add_path { i + 1 } else { 0 },
                 prefix: Prefix::V6(Ipv6Prefix::new(
@@ -4620,8 +4659,8 @@ mod packing_baseline_tests {
             .collect()
     }
 
-    fn evpn_routes() -> Vec<EvpnRoute> {
-        (0..u32::try_from(ROWS).unwrap())
+    fn evpn_routes(rows: usize) -> Vec<EvpnRoute> {
+        (0..u32::try_from(rows).unwrap())
             .map(|i| {
                 let [_, b, c, d] = i.to_be_bytes();
                 EvpnRoute::MacIp(EvpnMacIp {
@@ -4638,23 +4677,31 @@ mod packing_baseline_tests {
     }
 
     async fn frame_lengths(server: &mut TcpStream, count: usize) -> Vec<usize> {
-        let mut lengths = Vec::with_capacity(count);
+        let mut frames = Vec::with_capacity(count);
         for _ in 0..count {
             let mut header = [0_u8; 19];
             server.read_exact(&mut header).await.unwrap();
             let length = usize::from(u16::from_be_bytes([header[16], header[17]]));
             let mut body = vec![0_u8; length - header.len()];
             server.read_exact(&mut body).await.unwrap();
-            lengths.push(length);
+            frames.push(length);
         }
-        lengths
+        frames
     }
 
+    /// Frame lengths in wire order, chunk builds and entries built, for one
+    /// group of `rows` entries.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per chunker call shape, mirroring the production call sites"
     )]
-    async fn pack(wire: Wire, lengths: Lengths, add_path: bool, extended: bool) -> Packing {
+    async fn pack(
+        wire: Wire,
+        rows: usize,
+        lengths: Lengths,
+        add_path: bool,
+        extended: bool,
+    ) -> (Vec<usize>, usize, usize) {
         let family = match wire {
             Wire::V4Announce | Wire::V4Withdraw | Wire::SharedV4Announce => {
                 (Afi::Ipv4, Safi::Unicast)
@@ -4705,71 +4752,67 @@ mod packing_baseline_tests {
         let attrs = base_attrs();
         let mp_attrs = &attrs[..2];
         let next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
-        let (mut builds, mut built) = (0_usize, 0_usize);
-        let mut count = |entries: usize| {
-            builds += 1;
-            built += entries;
-        };
+        BUILT.set((0, 0));
         let sent = match wire {
-            Wire::V4Announce => {
-                let entries = v4_entries(lengths, add_path);
-                session.send_v4_chunked(&entries, max_len, "announce", |chunk| {
-                    count(chunk.len());
-                    profile.build_ipv4_body(chunk, &[], &attrs).unwrap()
-                })
-            }
-            Wire::V4Withdraw => {
-                let entries = v4_entries(lengths, add_path);
-                session.send_v4_chunked(&entries, max_len, "withdraw", |chunk| {
-                    count(chunk.len());
-                    profile.build_ipv4_body(&[], chunk, &[]).unwrap()
-                })
-            }
-            Wire::V6Announce => {
-                let entries = v6_entries(lengths, add_path);
-                session.send_mp_chunked(
-                    &entries,
-                    max_len,
-                    "IPv6 unicast",
-                    "announcement",
-                    |chunk| {
-                        count(chunk.len());
-                        profile.build_mp_reach(
-                            Afi::Ipv6,
-                            Safi::Unicast,
-                            next_hop,
-                            None,
-                            mp_attrs,
-                            ReachNlri::Unicast(chunk),
-                            Ipv4UnicastMode::Body,
-                        )
-                    },
-                )
-            }
-            Wire::V6Withdraw => {
-                let entries = v6_entries(lengths, add_path);
-                session.send_mp_chunked(&entries, max_len, "IPv6 unicast", "withdrawal", |chunk| {
-                    count(chunk.len());
+            Wire::V4Announce => session.send_v4_chunked(
+                &v4_entries(rows, lengths, add_path),
+                max_len,
+                "announce",
+                Some(&ipv4_entry_len(add_path)),
+                |chunk| profile.build_ipv4_body(chunk, &[], &attrs).unwrap(),
+            ),
+            Wire::V4Withdraw => session.send_v4_chunked(
+                &v4_entries(rows, lengths, add_path),
+                max_len,
+                "withdraw",
+                Some(&ipv4_entry_len(add_path)),
+                |chunk| profile.build_ipv4_body(&[], chunk, &[]).unwrap(),
+            ),
+            Wire::V6Announce => session.send_mp_chunked(
+                &v6_entries(rows, lengths, add_path),
+                max_len,
+                "IPv6 unicast",
+                "announcement",
+                Some(&entry_len(add_path)),
+                |chunk| {
+                    profile.build_mp_reach(
+                        Afi::Ipv6,
+                        Safi::Unicast,
+                        next_hop,
+                        None,
+                        mp_attrs,
+                        ReachNlri::Unicast(chunk),
+                        Ipv4UnicastMode::Body,
+                    )
+                },
+            ),
+            Wire::V6Withdraw => session.send_mp_chunked(
+                &v6_entries(rows, lengths, add_path),
+                max_len,
+                "IPv6 unicast",
+                "withdrawal",
+                Some(&entry_len(add_path)),
+                |chunk| {
                     profile.build_mp_unreach(
                         Afi::Ipv6,
                         Safi::Unicast,
                         UnreachNlri::Unicast(chunk),
                         Ipv4UnicastMode::Body,
                     )
-                })
-            }
+                },
+            ),
             Wire::EvpnAnnounce => session.send_evpn_reach_chunked(
                 &profile,
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 mp_attrs,
-                &evpn_routes(),
+                &evpn_routes(rows),
                 max_len,
             ),
             Wire::SharedV4Announce => {
                 // The update-group encoder publishes bytes instead of
                 // enqueueing; every member then sends the same chunks.
                 let template = super::super::tests::make_route(100);
-                let routes: Vec<Route> = v4_entries(lengths, add_path)
+                let routes: Vec<Route> = v4_entries(rows, lengths, add_path)
                     .into_iter()
                     .map(|entry| Route {
                         prefix: Prefix::V4(entry.prefix),
@@ -4780,101 +4823,209 @@ mod packing_baseline_tests {
                     &profile,
                     &mut PreparedAttrCache::default(),
                     &routes,
-                    &vec![None; ROWS],
-                    &(0..ROWS).collect::<Vec<_>>(),
+                    &vec![None; rows],
+                    &(0..rows).collect::<Vec<_>>(),
                 )
                 .expect("one same-attribute source encodes");
-                let lengths: Vec<usize> = chunks.iter().map(|chunk| chunk.bytes.len()).collect();
+                let (builds, built) = BUILT.get();
                 return (
-                    (
-                        lengths.len(),
-                        *lengths.iter().min().unwrap(),
-                        *lengths.iter().max().unwrap(),
-                        lengths.iter().sum(),
-                    ),
-                    None,
+                    chunks.iter().map(|chunk| chunk.bytes.len()).collect(),
+                    builds,
+                    built,
                 );
             }
         };
         assert_eq!(
             sent,
-            Ok(ROWS),
+            Ok(rows),
             "{wire:?}: the whole group is sent in one call"
         );
+        let (builds, built) = BUILT.get();
         let messages = usize::try_from(session.config.neighbor_counters.updates_sent()).unwrap();
-        let lengths = timeout(
+        let frames = timeout(
             Duration::from_secs(10),
             frame_lengths(&mut server, messages),
         )
         .await
         .expect("every enqueued UPDATE reaches the peer");
-        let total: usize = lengths.iter().sum();
-        assert_eq!(u64::try_from(total).unwrap(), session.writer_bulk_admitted);
-        (
-            (
-                messages,
-                *lengths.iter().min().unwrap(),
-                *lengths.iter().max().unwrap(),
-                total,
-            ),
-            (wire != Wire::EvpnAnnounce).then_some((builds, built)),
-        )
+        assert_eq!(
+            u64::try_from(frames.iter().sum::<usize>()).unwrap(),
+            session.writer_bulk_admitted
+        );
+        (frames, builds, built)
     }
 
+    /// The packing contract, for a full slice and for groups that fit one
+    /// message: at most one build that is not sent, a bounded number of
+    /// entries built, and every message but a group's last full to within
+    /// one entry. The pinned figures move only with a deliberate packing
+    /// change.
     #[tokio::test]
-    async fn records_fill_and_entries_built_per_full_slice() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of cases beside the checks every case must pass"
+    )]
+    async fn packs_groups_by_encoded_bytes() {
         use Lengths::{Mixed, Uniform};
+        // Case, largest entry in bytes, then the pinned `(messages,
+        // shortest, longest, total bytes, builds, entries built)`.
         let cases = [
-            (Wire::V4Announce, Uniform, false, false),
-            (Wire::V4Announce, Mixed, false, false),
-            (Wire::V4Announce, Uniform, true, false),
-            (Wire::V4Announce, Uniform, false, true),
-            (Wire::V4Withdraw, Uniform, false, false),
-            (Wire::V4Withdraw, Uniform, true, false),
-            (Wire::V6Announce, Uniform, false, false),
-            (Wire::V6Announce, Mixed, false, false),
-            (Wire::V6Announce, Uniform, true, false),
-            (Wire::V6Announce, Uniform, false, true),
-            (Wire::V6Withdraw, Uniform, false, false),
-            (Wire::V6Withdraw, Uniform, false, true),
-            (Wire::EvpnAnnounce, Uniform, false, false),
-            (Wire::EvpnAnnounce, Uniform, false, true),
-            (Wire::SharedV4Announce, Uniform, false, false),
+            // IPv4 body.
+            (
+                (Wire::V4Announce, SLICE, Uniform, false, false),
+                4,
+                (3, 202, 4_094, 8_390, 4, 2_049),
+            ),
+            (
+                (Wire::V4Announce, SLICE, Mixed, false, false),
+                4,
+                (2, 3_972, 4_096, 8_068, 3, 2_049),
+            ),
+            (
+                (Wire::V4Announce, SLICE, Uniform, true, false),
+                8,
+                (5, 354, 4_090, 16_714, 6, 2_049),
+            ),
+            (
+                (Wire::V4Announce, SLICE, Uniform, false, true),
+                4,
+                (1, 8_258, 8_258, 8_258, 1, 2_048),
+            ),
+            (
+                (Wire::V4Withdraw, SLICE, Uniform, false, false),
+                4,
+                (3, 71, 4_095, 8_261, 4, 2_049),
+            ),
+            (
+                (Wire::V4Withdraw, SLICE, Uniform, true, false),
+                8,
+                (5, 119, 4_095, 16_499, 6, 2_049),
+            ),
+            // MP_REACH / MP_UNREACH.
+            (
+                (Wire::V6Announce, SLICE, Uniform, false, false),
+                7,
+                (4, 2_330, 4_094, 14_612, 5, 2_049),
+            ),
+            (
+                (Wire::V6Announce, SLICE, Mixed, false, false),
+                7,
+                (4, 1_310, 4_094, 13_588, 5, 2_049),
+            ),
+            (
+                (Wire::V6Announce, SLICE, Uniform, true, false),
+                11,
+                (6, 2_467, 4_095, 22_942, 7, 2_049),
+            ),
+            (
+                (Wire::V6Announce, SLICE, Uniform, false, true),
+                7,
+                (1, 14_405, 14_405, 14_405, 1, 2_048),
+            ),
+            (
+                (Wire::V6Withdraw, SLICE, Uniform, false, false),
+                7,
+                (4, 2_186, 4_090, 14_456, 5, 2_049),
+            ),
+            (
+                (Wire::V6Withdraw, SLICE, Uniform, false, true),
+                7,
+                (1, 14_366, 14_366, 14_366, 1, 2_048),
+            ),
+            // A typed family, sized from measured bytes per route.
+            (
+                (Wire::EvpnAnnounce, SLICE, Uniform, false, false),
+                39,
+                (20, 3_606, 4_074, 81_012, 21, 2_049),
+            ),
+            (
+                (Wire::EvpnAnnounce, SLICE, Uniform, false, true),
+                39,
+                (2, 14_487, 65_499, 79_986, 3, 2_049),
+            ),
+            // The update-group encoder, always at the standard limit.
+            (
+                (Wire::SharedV4Announce, SLICE, Uniform, false, false),
+                4,
+                (3, 143, 4_095, 8_333, 4, 2_049),
+            ),
+            // Groups that fit one message are built exactly once.
+            (
+                (Wire::V4Announce, 1_000, Uniform, false, false),
+                4,
+                (1, 4_066, 4_066, 4_066, 1, 1_000),
+            ),
+            (
+                (Wire::V4Withdraw, 1_018, Uniform, false, false),
+                4,
+                (1, 4_095, 4_095, 4_095, 1, 1_018),
+            ),
+            (
+                (Wire::V6Announce, 500, Mixed, true, true),
+                11,
+                (1, 5_319, 5_319, 5_319, 1, 500),
+            ),
+            (
+                (Wire::V6Withdraw, 1, Uniform, false, false),
+                7,
+                (1, 36, 36, 36, 1, 1),
+            ),
+            (
+                (Wire::EvpnAnnounce, 64, Uniform, false, false),
+                39,
+                (1, 2_553, 2_553, 2_553, 1, 64),
+            ),
+            (
+                (Wire::SharedV4Announce, 1_000, Uniform, false, false),
+                4,
+                (1, 4_047, 4_047, 4_047, 1, 1_000),
+            ),
+            // Only the attributes push this one over, so the whole group is
+            // the one build that is not sent.
+            (
+                (Wire::V4Announce, 1_015, Uniform, false, false),
+                4,
+                (2, 98, 4_094, 4_192, 3, 2_030),
+            ),
         ];
-        let mut actual = Vec::new();
-        for (wire, lengths, add_path, extended) in cases {
-            actual.push((
-                (wire, lengths, add_path, extended),
-                pack(wire, lengths, add_path, extended).await,
-            ));
+        let mut moved = Vec::new();
+        for (case, entry, pinned) in cases {
+            let (wire, rows, lengths, add_path, extended) = case;
+            let limit = if extended { 65_535 } else { 4_096 };
+            let (frames, builds, built) = pack(wire, rows, lengths, add_path, extended).await;
+            let messages = frames.len();
+            assert!(
+                builds <= messages + 1,
+                "{case:?}: {builds} builds for {messages} messages"
+            );
+            // Without sizes a group of up to 64 entries is tried whole; with
+            // them, as many entries as fit a message that has no attributes.
+            let spare = if wire == Wire::EvpnAnnounce {
+                64
+            } else {
+                (limit - 23) / entry
+            };
+            assert!(
+                built <= rows + spare,
+                "{case:?}: {built} entries built to send {rows}"
+            );
+            let (last, full) = frames.split_last().unwrap();
+            assert!(
+                *last <= limit && full.iter().all(|frame| limit - frame < entry),
+                "{case:?}: a message before the last has room for an entry: {frames:?}"
+            );
+            let actual = (
+                messages,
+                *frames.iter().min().unwrap(),
+                *frames.iter().max().unwrap(),
+                frames.iter().sum::<usize>(),
+                builds,
+                built,
+            );
+            if actual != pinned {
+                moved.push(format!("{case:?}: {actual:?}"));
+            }
         }
-        // A /24 costs 4 bytes (8 with a path ID), an IPv6 /48 7 (11), this
-        // EVPN MAC/IP route 39. Byte-exact packing of the same groups needs
-        // 3, 2, 5, 1, 3, 5, 4, 4, 6, 1, 4, 1, 20, 2 and 3 messages.
-        let expected: [Packing; 15] = [
-            // IPv4 body: starts at min(len, max_len / 2) entries and halves.
-            ((4, 2_114, 2_114, 8_456), Some((6, 5_120))),
-            ((2, 4_034, 4_034, 8_068), Some((3, 4_096))),
-            ((8, 2_114, 2_114, 16_912), Some((11, 5_632))),
-            ((1, 8_258, 8_258, 8_258), Some((1, 2_048))),
-            ((4, 2_071, 2_071, 8_284), Some((6, 5_120))),
-            ((8, 2_071, 2_071, 16_568), Some((11, 5_632))),
-            // MP_REACH / MP_UNREACH: bisects, then doubles after each success.
-            ((4, 3_009, 4_073, 14_612), Some((13, 9_096))),
-            ((4, 2_409, 3_969, 13_588), Some((12, 8_528))),
-            ((7, 2_082, 4_095, 23_011), Some((32, 14_001))),
-            ((2, 7_237, 7_237, 14_474), Some((2, 2_048))),
-            ((4, 2_697, 4_083, 14_456), Some((15, 10_298))),
-            ((2, 7_198, 7_198, 14_396), Some((2, 2_048))),
-            // Typed families: start at 1,000 entries and halve, so 62 a
-            // message at 4,096 bytes and never more than 1,000 at 65,535.
-            ((34, 134, 2_475, 81_809), None),
-            ((3, 1_929, 39_057, 80_043), None),
-            // Update-group encoder: the IPv4 body shape at the standard limit.
-            ((4, 2_095, 2_095, 8_380), None),
-        ];
-        for ((case, packing), expected) in actual.iter().zip(expected) {
-            assert_eq!(*packing, expected, "{case:?}");
-        }
+        assert!(moved.is_empty(), "packing moved:\n{}", moved.join("\n"));
     }
 }

@@ -830,7 +830,7 @@ fn mixed_vpn_envelope() -> Vec<rustbgpd_rib::VpnRibRoute> {
 /// Hash-indexed VPN grouping emits exactly the frames of the reference
 /// grouping it replaced: a linear first-match scan by deep equality of
 /// (family, next hop, link-local, freshly prepared attributes), each group
-/// then chunked with the VPN sender's halving rule in first-arrival order.
+/// then cut in first-arrival order into the longest runs that fit a message.
 #[tokio::test]
 async fn vpn_announce_grouping_matches_linear_reference_bytes() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
@@ -874,25 +874,34 @@ async fn vpn_announce_grouping_matches_linear_reference_bytes() {
     let max_len = export.max_message_len();
     let mut expected = Vec::new();
     for ((afi, safi), next_hop, link_local, attrs, entries) in &groups {
-        let mut chunk_size = 1000usize;
-        let mut idx = 0;
-        while idx < entries.len() {
-            let end = (idx + chunk_size).min(entries.len());
-            let msg = export
+        let build = |chunk: &[rustbgpd_wire::VpnNlriEntry]| {
+            export
                 .build_mp_reach(
                     *afi,
                     *safi,
                     *next_hop,
                     *link_local,
                     attrs,
-                    export::ReachNlri::Vpn(&entries[idx..end]),
+                    export::ReachNlri::Vpn(chunk),
                     Ipv4UnicastMode::Body,
                 )
-                .unwrap();
-            if msg.encoded_len() > max_len {
-                chunk_size /= 2;
-                continue;
+                .unwrap()
+        };
+        let mut idx = 0;
+        while idx < entries.len() {
+            // Fitting is monotonic in length: bisect for the longest run.
+            let (mut fits, mut over) = (1, entries.len() - idx + 1);
+            while fits + 1 < over {
+                let mid = fits + (over - fits) / 2;
+                if build(&entries[idx..idx + mid]).encoded_len() <= max_len {
+                    fits = mid;
+                } else {
+                    over = mid;
+                }
             }
+            let end = idx + fits;
+            let msg = build(&entries[idx..end]);
+            assert!(msg.encoded_len() <= max_len);
             expected.push(Bytes::from(
                 rustbgpd_wire::encode_message_with_limit(
                     &Message::Update(msg),

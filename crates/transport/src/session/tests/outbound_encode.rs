@@ -1174,7 +1174,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
 /// 2,048 do not; the sender must remember that failed upper bound, make
 /// monotonic progress with a later in-between probe, and preserve exact order.
 #[tokio::test]
-async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
+async fn extended_ipv6_chunks_fill_the_message_without_reordering() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.route_server_client = true;
     let (client, mut server) = connected_stream_pair().await;
@@ -1271,16 +1271,14 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
         actual, expected,
         "IPv6 NLRI must be emitted exactly once in order"
     );
-    assert_eq!(chunk_sizes.first(), Some(&1024));
-    assert!(
-        chunk_sizes.iter().any(|size| *size > 1024),
-        "a proven Extended Message candidate must grow beyond 1,024: {chunk_sizes:?}"
-    );
+    // 17 bytes a /128 beside 36 KB of attributes: 1,733 fill a message.
+    assert_eq!(chunk_sizes, [1733, 1733, 34]);
 }
 
-/// Pin the same bounded-growth invariant for the fallible `FlowSpec` encoder.
+/// The same fill for the fallible `FlowSpec` encoder, whose rule sizes are
+/// measured from a built message instead of computed.
 #[tokio::test]
-async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
+async fn extended_flowspec_chunks_fill_the_message_and_preserve_exact_order() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
@@ -1373,24 +1371,16 @@ async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
         actual, rules,
         "FlowSpec rules must be emitted exactly once in order"
     );
-    assert_eq!(chunk_sizes.first(), Some(&1024));
-    assert!(
-        chunk_sizes.iter().any(|size| *size > 1024),
-        "a proven Extended Message candidate must grow beyond 1,024: {chunk_sizes:?}"
-    );
+    // 20 bytes a rule beside 36 KB of attributes: 1,474 fill a message.
+    assert_eq!(chunk_sizes, [1474, 1474, 552]);
 }
 
-/// Load-bearing: retaining `failed_upper` after a successful chunk leaves the
-/// first region's failed 1,024-entry probe as a permanent cap. This real
-/// `FlowSpec` encoder receipt starts with entries large enough to force a
-/// 512-entry chunk, then switches to small entries that must pack beyond that
-/// stale 1,024-entry upper bound without reordering or duplication.
+/// Rule sizes that change partway through a group: 700 large rules, then
+/// small ones. Chunks are sized from the bytes per rule of the last built
+/// message, so the count follows the change, without reordering or
+/// duplication and without a message over the limit.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one real-encoder mixed-entry receipt"
-)]
-async fn extended_flowspec_chunk_probe_resets_failed_upper_for_smaller_entries() {
+async fn flowspec_chunks_follow_a_change_in_rule_size() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
@@ -1492,15 +1482,10 @@ async fn extended_flowspec_chunk_probe_resets_failed_upper_for_smaller_entries()
     }
 
     assert_eq!(actual, rules, "FlowSpec rules must stay exact and ordered");
-    assert_eq!(
-        chunk_sizes.first(),
-        Some(&512),
-        "large first region must halve"
-    );
-    assert!(
-        chunk_sizes.contains(&4096),
-        "smaller later entries must reach the bounded 4,096-entry probe beyond the earlier failed upper bound: {chunk_sizes:?}"
-    );
+    // Two messages full of large rules; the second also carries the first
+    // small ones, so the third is sized from that mix and is short of full;
+    // the rest then fit one message.
+    assert_eq!(chunk_sizes, [559, 559, 2014, 8868]);
 }
 
 #[tokio::test]

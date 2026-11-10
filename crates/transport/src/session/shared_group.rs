@@ -56,6 +56,7 @@
 use super::export::{
     MpAttrCache, PreparedAttrCache, PreparedUnicastCandidate, ReachNlri, SessionExportProfile,
 };
+use super::packing::{ChunkSizer, entry_len, ipv4_entry_len};
 use super::{
     Afi, IpAddr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate,
     PathAttribute, PeerSession, Route, Safi, UpdateMessage, debug,
@@ -349,27 +350,32 @@ fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
         && !update.request_refresh_all_negotiated
 }
 
-/// Size-halving chunker mirroring `send_v4_chunked` / `send_mp_chunked`,
+/// Byte-sized chunker mirroring `send_v4_chunked` / `send_mp_chunked`,
 /// producing encoded bytes instead of enqueueing. `None` = unshareable
 /// (build failure or a single entry over the shared ceiling).
 fn encode_chunks<E>(
     entries: &[E],
     max_len: usize,
+    size: Option<&dyn Fn(&E) -> usize>,
     mut build: impl FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
 ) -> Option<Vec<Bytes>> {
     let mut out = Vec::new();
-    let mut chunk_size: usize = entries.len().min(max_len / 2).max(1);
+    let mut sizer = ChunkSizer::new(max_len);
     let mut idx: usize = 0;
     while idx < entries.len() {
-        let end = (idx + chunk_size).min(entries.len());
+        let end = idx + sizer.next(&entries[idx..], size);
         let msg = build(&entries[idx..end]).ok()?;
-        if msg.encoded_len() > max_len {
-            if chunk_size <= 1 {
-                return None;
-            }
-            chunk_size = (chunk_size / 2).max(1);
+        if sizer.measured_only(Some(&msg)) {
             continue;
         }
+        if msg.encoded_len() > max_len {
+            if end - idx <= 1 {
+                return None;
+            }
+            sizer.rejected(end - idx, Some(&msg));
+            continue;
+        }
+        sizer.accepted(&msg, end - idx);
         let encoded = rustbgpd_wire::encode_message_with_limit(
             &Message::Update(msg),
             rustbgpd_wire::MAX_MESSAGE_LEN,
@@ -525,9 +531,14 @@ pub(super) fn encode_shared_unicast_slice<'r>(
         let (afi, encoded) = match &group.body {
             SharedGroupBody::V4Body { attrs, entries } => (
                 Afi::Ipv4,
-                encode_chunks(entries, max_len, |chunk| {
-                    export.build_ipv4_body(chunk, &[], attrs)
-                }),
+                encode_chunks(
+                    entries,
+                    max_len,
+                    Some(&ipv4_entry_len(
+                        export.add_path_send((Afi::Ipv4, Safi::Unicast)),
+                    )),
+                    |chunk| export.build_ipv4_body(chunk, &[], attrs),
+                ),
             ),
             SharedGroupBody::Mp {
                 afi,
@@ -538,17 +549,22 @@ pub(super) fn encode_shared_unicast_slice<'r>(
                 entries,
             } => (
                 *afi,
-                encode_chunks(entries, max_len, |chunk| {
-                    export.build_mp_reach(
-                        *afi,
-                        Safi::Unicast,
-                        *next_hop,
-                        *link_local_next_hop,
-                        attrs,
-                        ReachNlri::Unicast(chunk),
-                        *ipv4_mode,
-                    )
-                }),
+                encode_chunks(
+                    entries,
+                    max_len,
+                    Some(&entry_len(export.add_path_send((*afi, Safi::Unicast)))),
+                    |chunk| {
+                        export.build_mp_reach(
+                            *afi,
+                            Safi::Unicast,
+                            *next_hop,
+                            *link_local_next_hop,
+                            attrs,
+                            ReachNlri::Unicast(chunk),
+                            *ipv4_mode,
+                        )
+                    },
+                ),
             ),
         };
         chunks.extend(encoded?.into_iter().map(|bytes| SharedAnnounceChunk {
@@ -602,6 +618,7 @@ pub(super) fn encode_shared_vpn_slice(
             let encoded = encode_chunks(
                 &entries,
                 usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                None,
                 |entries| {
                     export.build_mp_reach(
                         afi,
@@ -660,6 +677,7 @@ pub(super) fn encode_shared_evpn_slice(
             let encoded = encode_chunks(
                 &routes,
                 usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                None,
                 |routes| {
                     export.build_mp_reach(
                         afi,
