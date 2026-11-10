@@ -4745,7 +4745,7 @@ impl RibManager {
                 afi,
                 safi,
                 when,
-                entries,
+                groups,
                 reply,
             } => {
                 if self.stale_session_message(peer, session_id, "PeerOrfUpdate", Orf) {
@@ -4759,7 +4759,7 @@ impl RibManager {
                     )));
                 } else {
                     self.advance_advertised_pages();
-                    self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply);
+                    self.handle_peer_orf_update(peer, afi, safi, when, &groups, reply);
                 }
             }
             RibUpdate::PeerSlowState {

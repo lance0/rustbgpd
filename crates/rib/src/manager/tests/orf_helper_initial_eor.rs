@@ -161,14 +161,14 @@ fn permit_all_orf_to(manager: &mut RibManager, peer: PeerId, session_id: u64) {
         afi: FAMILY.0,
         safi: FAMILY.1,
         when: WhenToRefresh::Immediate,
-        entries: vec![AddressPrefixOrf {
+        groups: vec![vec![AddressPrefixOrf {
             action: OrfAction::Add,
             match_: OrfMatch::Permit,
             sequence: 1,
             min_len: 0,
             max_len: 32,
             prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
-        }],
+        }]],
         reply,
     });
     response.try_recv().unwrap().unwrap();

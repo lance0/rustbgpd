@@ -2245,7 +2245,7 @@ impl RibManager {
                 afi: family.0,
                 safi: family.1,
                 when: rustbgpd_wire::WhenToRefresh::Immediate,
-                entries,
+                groups: vec![entries],
                 reply,
             });
             response
@@ -2278,7 +2278,7 @@ impl RibManager {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             when: rustbgpd_wire::WhenToRefresh::Defer,
-            entries,
+            groups: vec![entries],
             reply,
         });
         response

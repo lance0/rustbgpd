@@ -3440,7 +3440,7 @@ fn push_orf(manager: &mut RibManager, entries: Vec<AddressPrefixOrf>) {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Defer,
-        entries,
+        groups: vec![entries],
         reply,
     });
     rx.try_recv().unwrap().unwrap();

@@ -786,14 +786,14 @@ async fn orf_gates_stop_pending_family_then_filtered_prefix() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Immediate,
-        entries: vec![AddressPrefixOrf {
+        groups: vec![vec![AddressPrefixOrf {
             action: OrfAction::Add,
             match_: OrfMatch::Permit,
             sequence: 10,
             min_len: 0,
             max_len: 32,
             prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 99, 0, 0), 16))),
-        }],
+        }]],
         reply: reply_tx,
     })
     .await

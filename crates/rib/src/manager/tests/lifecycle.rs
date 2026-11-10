@@ -1754,7 +1754,7 @@ async fn stale_orf_update_from_superseded_session_is_discarded() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Defer,
-        entries: vec![entry],
+        groups: vec![vec![entry]],
         reply: reply_tx,
     })
     .await
@@ -1773,7 +1773,7 @@ async fn stale_orf_update_from_superseded_session_is_discarded() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Defer,
-        entries: vec![entry],
+        groups: vec![vec![entry]],
         reply: reply_tx,
     })
     .await
@@ -1991,14 +1991,14 @@ fn unregistered_session_control_messages_are_discarded_and_counted() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Defer,
-        entries: vec![AddressPrefixOrf {
+        groups: vec![vec![AddressPrefixOrf {
             action: OrfAction::Add,
             match_: OrfMatch::Permit,
             sequence: 1,
             min_len: 24,
             max_len: 32,
             prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 0, 0), 24))),
-        }],
+        }]],
         reply,
     });
     let refusal = response

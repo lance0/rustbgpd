@@ -1967,7 +1967,7 @@ fn stale_peer_orf_update_does_not_advance_advertised_page_version() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Defer,
-        entries: vec![],
+        groups: vec![vec![]],
         reply,
     });
 
@@ -2014,7 +2014,7 @@ fn accepted_peer_orf_update_advances_advertised_page_version_once() {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when: WhenToRefresh::Immediate,
-        entries: vec![],
+        groups: vec![vec![]],
         reply,
     });
 

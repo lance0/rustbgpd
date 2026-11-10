@@ -860,14 +860,14 @@ fn push_v4_orf(manager: &mut RibManager, when: WhenToRefresh) {
         afi: V4.0,
         safi: V4.1,
         when,
-        entries: vec![AddressPrefixOrf {
+        groups: vec![vec![AddressPrefixOrf {
             action: OrfAction::Add,
             match_: OrfMatch::Permit,
             sequence: 1,
             min_len: 0,
             max_len: 32,
             prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
-        }],
+        }]],
         reply,
     });
     response

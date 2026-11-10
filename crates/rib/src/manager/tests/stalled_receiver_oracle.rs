@@ -1346,7 +1346,7 @@ impl Harness {
                             afi: Afi::Ipv4,
                             safi: Safi::Unicast,
                             when: WhenToRefresh::Immediate,
-                            entries: orf_entries(deny),
+                            groups: vec![orf_entries(deny)],
                             reply,
                         })
                         .await;

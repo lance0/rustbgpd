@@ -126,14 +126,17 @@ impl PeerSession {
             }
             return false;
         }
-        let mut accepted = false;
-        let mut failed = false;
+        // One message is one RIB command: its negotiated-type groups travel
+        // together in wire order, so a peer cannot multiply RIB work (and
+        // this reply wait) by splitting entries across groups. Groups are
+        // not capped at decode; the message length already bounds them.
+        let mut groups = Vec::new();
         for group in &orf.groups {
             // rustbgpd only negotiates/advertises the standard type 64.
             if group.orf_type != OrfType::AddressPrefix {
                 continue;
             }
-            let entries = match &group.entries {
+            groups.push(match &group.entries {
                 OrfEntries::AddressPrefix(entries) => entries.clone(),
                 // RFC 5291 §6: a malformed entry of a negotiated type removes
                 // the previously installed list of that type — emit a reset.
@@ -149,58 +152,57 @@ impl PeerSession {
                 // non-exhaustive, entry kinds this build does not model —
                 // are ignored (only type 64 is negotiated above).
                 _ => continue,
-            };
-            let (reply, rx) = oneshot::channel();
-            if self
-                .send_to_rib_admitted(RibUpdate::PeerOrfUpdate {
-                    peer: self.rib_peer(),
-                    session_id: self.session_identity.id,
-                    afi,
-                    safi,
-                    when: orf.when_to_refresh,
-                    entries,
-                    reply,
-                })
-                .await
-                .is_err()
-            {
-                warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
-                failed = true;
-                break;
+            });
+        }
+        if groups.is_empty() {
+            return false;
+        }
+        let (reply, rx) = oneshot::channel();
+        if self
+            .send_to_rib_admitted(RibUpdate::PeerOrfUpdate {
+                peer: self.rib_peer(),
+                session_id: self.session_identity.id,
+                afi,
+                safi,
+                when: orf.when_to_refresh,
+                groups,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
+            return false;
+        }
+        match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {
+            Ok(Ok(Ok(()))) => true,
+            Ok(Ok(Err(err))) => {
+                warn!(
+                    peer = %self.peer_label,
+                    ?afi, ?safi,
+                    error = %err,
+                    "RIB rejected ORF update — falling back to plain route refresh"
+                );
+                false
             }
-            match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    accepted = true;
-                }
-                Ok(Ok(Err(err))) => {
-                    failed = true;
-                    warn!(
-                        peer = %self.peer_label,
-                        ?afi, ?safi,
-                        error = %err,
-                        "RIB rejected ORF update — falling back to plain route refresh"
-                    );
-                }
-                Ok(Err(_)) => {
-                    failed = true;
-                    warn!(
-                        peer = %self.peer_label,
-                        ?afi, ?safi,
-                        "RIB dropped ORF update reply — falling back to plain route refresh"
-                    );
-                }
-                Err(_) => {
-                    failed = true;
-                    warn!(
-                        peer = %self.peer_label,
-                        ?afi, ?safi,
-                        timeout_ms = %ORF_RIB_REPLY_TIMEOUT.as_millis(),
-                        "RIB ORF update reply timed out — falling back to plain route refresh"
-                    );
-                }
+            Ok(Err(_)) => {
+                warn!(
+                    peer = %self.peer_label,
+                    ?afi, ?safi,
+                    "RIB dropped ORF update reply — falling back to plain route refresh"
+                );
+                false
+            }
+            Err(_) => {
+                warn!(
+                    peer = %self.peer_label,
+                    ?afi, ?safi,
+                    timeout_ms = %ORF_RIB_REPLY_TIMEOUT.as_millis(),
+                    "RIB ORF update reply timed out — falling back to plain route refresh"
+                );
+                false
             }
         }
-        accepted && !failed
     }
 
     /// Encode `msg` and enqueue it on the writer's **priority** channel

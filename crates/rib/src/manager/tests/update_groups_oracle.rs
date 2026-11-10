@@ -1578,7 +1578,7 @@ impl Oracle {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 when: WhenToRefresh::Immediate,
-                entries,
+                groups: vec![entries],
                 reply: reply_tx,
             })
             .await

@@ -651,7 +651,7 @@ fn apply(manager: &mut RibManager, channels: &mut Channels, op: &Op, received_at
                     } else {
                         WhenToRefresh::Defer
                     },
-                    entries,
+                    groups: vec![entries],
                     reply,
                 });
                 assert!(response.try_recv().unwrap().is_ok());
