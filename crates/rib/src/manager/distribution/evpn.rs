@@ -1182,7 +1182,11 @@ impl RibManager {
             checkpoint();
             // One member's commit is the unit of this loop, as one receiver's
             // is in `evpn_fanout_step`: serve the read-only lane at each
-            // member boundary. A no-op while an owner holds the lane.
+            // member boundary. The drain is a no-op while an owner holds the
+            // lane, and `checkpoint` was bound before this pass took its
+            // owner, so a member skipped without a commit is served by the
+            // live checkpoint.
+            self.replacement_checkpoint_at("selection_evpn", false);
             let transition_elapsed = self
                 .pending_clean_policy_transition
                 .as_ref()

@@ -412,14 +412,29 @@ async fn refused_owned_pass_lets_the_waiting_probe_task_run() {
             enqueued: Instant::now(),
         })
         .unwrap();
+    let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let probe = tokio::spawn({
         let completed = Arc::clone(&completed);
+        let parked = Arc::clone(&parked);
+        let mut response = response;
         async move {
-            response.await.unwrap().unwrap();
+            std::future::poll_fn(|cx| {
+                let reply = std::pin::Pin::new(&mut response).poll(cx);
+                // Its waker is registered: only a wake can resume it now.
+                parked.store(reply.is_pending(), Ordering::SeqCst);
+                reply
+            })
+            .await
+            .unwrap()
+            .unwrap();
             completed.store(true, Ordering::SeqCst);
         }
     });
-    // Let the probe park on its reply before the pass starts.
+    // The probe has polled its reply and found none. Then let that poll
+    // return, so the task is parked rather than still running.
+    while !parked.load(Ordering::SeqCst) {
+        tokio::task::yield_now().await;
+    }
     tokio::time::sleep(Duration::from_millis(20)).await;
     let ran_during_pass = Arc::new(std::sync::atomic::AtomicBool::new(false));
     pass.manager.replacement_readiness_test_hook = Some(Arc::new({
@@ -451,4 +466,43 @@ async fn refused_owned_pass_lets_the_waiting_probe_task_run() {
         "the probe task did not run until the pass returned"
     );
     probe.await.unwrap();
+}
+
+/// A member that is already dirty with a retained proof is skipped: its
+/// capture returns at once and it gets no commit. Under the pass's owner the
+/// boundary drain is inert and the caller's checkpoint was bound before the
+/// owner existed, so the loop's own checkpoint must serve each such member.
+#[test]
+fn skipped_dirty_members_of_an_owned_pass_each_pass_a_live_checkpoint() {
+    for members in [2_u8, 8] {
+        let mut pass = OwnedPass::new(members, 16, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        for peer in pass.peers.clone() {
+            pass.manager.mark_outbound_dirty_inner(peer, false);
+        }
+        let second = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 2), 9);
+        pass.manager
+            .loc_rib
+            .recompute_evpn(second.key(), [&second].into_iter());
+        let boundaries = Arc::new(AtomicUsize::new(0));
+        pass.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let boundaries = Arc::clone(&boundaries);
+            move |seam| {
+                if seam == "selection_evpn" {
+                    boundaries.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let peer = pass.peers[0];
+        pass.manager
+            .distribute_evpn_keys_to_peer(peer, &HashSet::from([second.key()]), &mut || {});
+        pass.manager.replacement_readiness_test_hook = None;
+        assert!(
+            boundaries.load(Ordering::SeqCst) >= usize::from(members),
+            "{members} skipped members passed {} live boundary checkpoints",
+            boundaries.load(Ordering::SeqCst)
+        );
+    }
 }

@@ -1573,8 +1573,11 @@ enum ReadinessOwnerKind {
     Replacement,
     SelectionRelease,
     PeerTeardown,
-    /// Table-sized work inside ordinary ingest. It answers as the actor
-    /// loop would and leaves no scope receipt or capacity record.
+    /// Table-sized work inside ordinary ingest. It answers under the actor
+    /// loop's seam and leaves no scope receipt or capacity record. Like
+    /// every owner it answers stalled once its own age, counted from the
+    /// start of a pending policy transition if there is one, passes the
+    /// healthy bound; the loop applies that bound to the transition only.
     Ingest,
 }
 
