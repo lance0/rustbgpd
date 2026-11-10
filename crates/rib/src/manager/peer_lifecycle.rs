@@ -231,7 +231,7 @@ impl RibManager {
     }
 
     /// Whether a session end delivered by a dropped session's hand-off
-    /// ([`RibUpdate::LateSessionEnd`]) must be discarded. The hand-off can
+    /// ([`crate::RibUpdate::LateSessionEnd`]) must be discarded. The hand-off can
     /// deliver after the peer manager fenced the session and after a later
     /// session ended, so with no session registered for the peer the end
     /// is no longer authoritative. A restart end is discarded: the session
