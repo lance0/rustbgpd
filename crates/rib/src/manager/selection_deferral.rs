@@ -1734,10 +1734,12 @@ impl RibManager {
                 // this marker back: the table is whole, so the marker
                 // follows it and no replay is owed.
                 self.settle_eor_behind_resync(peer);
-                if self.eor.owes(peer, family) && self.dirty_peers.contains(&peer) {
-                    // Something else kept the marker (a full writer, owed
-                    // keys) and the peer stays dirty for another deferred
-                    // family: its next resync carries it.
+                if self.dirty_peers.contains(&peer) && self.eor_resync_ready(peer).contains(&family)
+                {
+                    // The writer or the family's owed keys kept the marker
+                    // and the peer stays dirty for another deferred family:
+                    // its next resync carries it. A marker anything else
+                    // still holds is not one a resync could send.
                     self.set_selection_partial_caught_up(peer, false);
                 }
                 continue;
