@@ -73,6 +73,15 @@ fn each_message_turn_is_observed_under_its_kind() {
         ]),
         "one turn per handled message, under its own kind"
     );
+
+    // A late session end is accounted as the end it wraps.
+    manager.handle_update(RibUpdate::LateSessionEnd(Box::new(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })));
+    let counts = histogram_sample_counts_by_label(&metrics, TURN_METRIC, "kind");
+    assert_eq!(counts["peer_down"], 2);
+    assert_eq!(counts.get("peer_lifecycle").copied().unwrap_or(0), 0);
 }
 
 /// A test hook holds the turn for exactly the threshold, so the turn is slow

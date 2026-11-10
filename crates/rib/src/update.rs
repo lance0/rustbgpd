@@ -2860,6 +2860,14 @@ pub enum RibUpdate {
         /// id 0, which degrades to the pre-stamping behavior).
         session_id: u64,
     },
+    /// A `PeerDown` or `PeerGracefulRestart` that a session could not
+    /// deliver before its task ended, sent afterwards by the session's
+    /// hand-off. It can arrive after the peer manager retired the session
+    /// and after a later session came and went, so with no session
+    /// registered it must not start retention or end another session's;
+    /// otherwise it is handled as the end it wraps. Only the hand-off sends
+    /// it: every other session end keeps its authoritative handling.
+    LateSessionEnd(Box<RibUpdate>),
     /// Peer was *deleted* from the configuration (not a session flap):
     /// after clearing any remaining per-peer state, remove the peer's
     /// metric label sets so the exposition stops advertising a peer
@@ -4413,6 +4421,7 @@ impl RibUpdate {
             | Self::BeginRouteRefresh { peer, .. }
             | Self::EndRouteRefresh { peer, .. }
             | Self::RouteRefreshTimeout { peer, .. } => Some(*peer),
+            Self::LateSessionEnd(end) => end.session_peer(),
             _ => None,
         }
     }
@@ -4441,6 +4450,7 @@ impl RibUpdate {
             Self::PeerUp { .. } => RibActorTurnKind::PeerUp,
             Self::PeerDown { .. } => RibActorTurnKind::PeerDown,
             Self::PeerDeleted { .. }
+            | Self::LateSessionEnd(_)
             | Self::BeginClose
             | Self::RetireEorGraceInterface { .. }
             | Self::ReleasePeer { .. }

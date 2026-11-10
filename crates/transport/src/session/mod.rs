@@ -326,6 +326,10 @@ pub(crate) struct PeerSession {
     /// Reservation for the head of `rib_backlog`. It keeps its place in the
     /// channel's FIFO of waiting senders across run-loop turns.
     rib_reserve: Option<tokio_util::sync::PollSender<RibUpdate>>,
+    /// The RIB peer of an Established epoch whose `PeerUp` this session
+    /// emitted and whose `PeerDown` or `PeerGracefulRestart` it has not. A
+    /// session dropped inside one closes it (see the `Drop` impl).
+    rib_epoch: Option<PeerId>,
     /// Hold renewals spent while RIB-bound messages are held, since the
     /// last peer PDU processed.
     parked_hold_renewals: u8,
@@ -1110,14 +1114,19 @@ struct AcceptedTransport {
 /// A dropped session must not free a whole outbound inventory in that one
 /// turn, whether its task returned from `run()` or was cancelled at an await
 /// point (`abort_for_transport_safety`, a `shutdown_timeout` expiry): the remainder
-/// goes to the paced release task. Skipped without a runtime, where
-/// `tokio::spawn` would panic and nothing could run the release, and while
-/// unwinding. A runtime that is shutting down cancels the spawned task at
-/// once instead of panicking, which drops the inventory in that turn.
+/// goes to the paced release task. A cancelled session must also still end
+/// in the RIB: the RIB-bound messages it held, and the end of an Established
+/// epoch it never closed, are delivered by their own task (see
+/// [`PeerSession::hand_off_rib_backlog`]). Both are skipped without a
+/// runtime, where `tokio::spawn` would panic and nothing could run them,
+/// and while unwinding. A runtime that is shutting down cancels the spawned
+/// tasks at once instead of panicking, which drops the inventory in that
+/// turn and the held messages with the RIB actor they were bound for.
 impl Drop for PeerSession {
     fn drop(&mut self) {
         if !std::thread::panicking() && tokio::runtime::Handle::try_current().is_ok() {
             self.hand_off_retirement();
+            self.hand_off_rib_backlog();
         }
     }
 }
@@ -2445,6 +2454,7 @@ impl PeerSession {
             rib_tx,
             rib_backlog: VecDeque::new(),
             rib_reserve: None,
+            rib_epoch: None,
             parked_hold_renewals: 0,
             peer_label,
             peer_ip,

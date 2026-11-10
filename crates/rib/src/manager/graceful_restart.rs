@@ -327,6 +327,7 @@ impl RibManager {
         }
 
         info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
+        self.retention_owner.insert(peer, session_id);
 
         // RFC 9494 §4.2: a family in the LLGR capability but not in the GR
         // capability has a Restart Time of zero. It is retained and enters

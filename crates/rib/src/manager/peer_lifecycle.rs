@@ -230,6 +230,72 @@ impl RibManager {
         disposition
     }
 
+    /// Whether a session end delivered by a dropped session's hand-off
+    /// ([`crate::RibUpdate::LateSessionEnd`]) must be discarded. The
+    /// hand-off can deliver after the peer manager fenced the session,
+    /// after a later session ended, and after the neighbor was deleted, so
+    /// with no session registered for the peer the end is no longer
+    /// authoritative. A restart end is discarded: the session has no routes
+    /// left to retain. A `PeerDown` has work left only when its own
+    /// session's restart end created the peer's retention, which it then
+    /// purges; otherwise whatever removed the registration already tore the
+    /// session down, and running the teardown again would only republish
+    /// series for a peer that may be gone. Only the context the session
+    /// staged is dropped. A discard is counted when the retention belongs
+    /// to another session, and otherwise not, so nothing appears under a
+    /// deleted peer's label. With a session registered, the ordinary
+    /// session-identity dispatch decides. Session id 0 names an emitter
+    /// without identity and is never late.
+    pub(super) fn late_session_end_is_stale(&mut self, end: &crate::RibUpdate) -> bool {
+        let (peer, session_id, retains) = match *end {
+            crate::RibUpdate::PeerDown { peer, session_id } => (peer, session_id, false),
+            crate::RibUpdate::PeerGracefulRestart {
+                peer, session_id, ..
+            } => (peer, session_id, true),
+            _ => return false,
+        };
+        if session_id == 0 || self.current_session_id(peer).is_some() {
+            return false;
+        }
+        let owner = self
+            .retention_owner
+            .get(&peer)
+            .copied()
+            .filter(|_| self.in_graceful_restart(peer));
+        if !retains && owner == Some(session_id) {
+            return false;
+        }
+        self.drop_staged_session_context(peer, session_id);
+        if !retains && owner.is_some_and(|owner| owner != 0) {
+            info!(
+                %peer,
+                stale_session_id = session_id,
+                "discarding a late PeerDown — the retained routes belong to another session"
+            );
+            self.metrics
+                .record_rib_stale_peer_down_ignored(&peer.label());
+        } else {
+            debug!(%peer, session_id, retains, "discarding a late session end from a session that is not registered");
+        }
+        true
+    }
+
+    /// Forget what `session_id` staged for a registration it will not make.
+    fn drop_staged_session_context(&mut self, peer: PeerId, session_id: u64) {
+        self.pending_peer_export_context.remove(&(peer, session_id));
+        self.pending_peer_withheld_families
+            .remove(&(peer, session_id));
+        self.pending_peer_rs_control.remove(&(peer, session_id));
+        self.pending_peer_export_encoders
+            .remove(&(peer, session_id));
+        self.pending_peer_export_counters
+            .remove(&(peer, session_id));
+        self.pending_peer_gr_context.remove(&(peer, session_id));
+        self.pending_peer_source_context.remove(&(peer, session_id));
+        self.pending_peer_policy_context.remove(&(peer, session_id));
+        self.drop_evpn_feed_receipts(peer, Some(session_id));
+    }
+
     /// The session-identity dispatch shared by `handle_peer_down` and
     /// `handle_peer_graceful_restart`. Prunes the stamped session from
     /// `live_sessions` (it is down, whatever else happens) and classifies
@@ -246,18 +312,7 @@ impl RibManager {
         // Another transport may have staged its registration between this
         // session's final input and teardown. Only remove the ending session's
         // pending metadata; its replacement still needs the accepted context.
-        self.pending_peer_export_context.remove(&(peer, session_id));
-        self.pending_peer_withheld_families
-            .remove(&(peer, session_id));
-        self.pending_peer_rs_control.remove(&(peer, session_id));
-        self.pending_peer_export_encoders
-            .remove(&(peer, session_id));
-        self.pending_peer_export_counters
-            .remove(&(peer, session_id));
-        self.pending_peer_gr_context.remove(&(peer, session_id));
-        self.pending_peer_source_context.remove(&(peer, session_id));
-        self.pending_peer_policy_context.remove(&(peer, session_id));
-        self.drop_evpn_feed_receipts(peer, Some(session_id));
+        self.drop_staged_session_context(peer, session_id);
         let Some(registered) = self.current_session_id(peer) else {
             if let Some(selection) = self.selection_deferral.as_mut() {
                 selection.session_down(peer, session_id, &self.metrics);
@@ -576,6 +631,7 @@ impl RibManager {
         // GR expiry must preserve a replacement staged before its PeerUp.
         self.drop_evpn_feed_receipts(peer, None);
         self.live_sessions.remove(&peer);
+        self.retention_owner.remove(&peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         let successor = self.label_successor(peer);
         if self.gr_peers.remove(&peer).is_some() {
@@ -1112,6 +1168,7 @@ impl RibManager {
     /// it kept the series for a neighbor living on under another handle.
     pub(super) fn handle_release_peer(&mut self, peer: PeerId) {
         self.forget_helper_stale_exempt(peer);
+        self.retention_owner.remove(&peer);
         if !peer.release() {
             debug!(%peer, "release of a handle that was not live");
         }
