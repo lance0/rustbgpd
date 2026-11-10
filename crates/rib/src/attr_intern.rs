@@ -15,16 +15,16 @@
 //!
 //! Reclaim is the `Arc::strong_count` sweep the per-peer tables already
 //! used: an entry whose only reference is the table itself is dropped by
-//! [`AttrInternTable::gc`]. Large-table unicast UPDATE chunks and EVPN export
-//! commits amortize sweeps with a displaced-route limit and an actor deadline;
-//! explicit teardown, injection, other-family, GR/LLGR and refresh seams retain
-//! immediate sweeps.
+//! [`AttrInternTable::gc`]. On a large table, received batches of every
+//! family, local injections and EVPN export commits amortize sweeps with a
+//! displaced-route limit and an actor deadline; explicit teardown, final
+//! unicast withdrawal, GR/LLGR and refresh seams retain immediate sweeps.
 //! `Arc`'s reference count *is* the refcount; there is no separate bookkeeping
 //! to drift out of sync.
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
 //
-// ponytail: gc remains an O(table) sweep. Unicast hot-path frequency is bounded,
+// ponytail: gc remains an O(table) sweep. Receive-path frequency is bounded,
 // but each sweep still visits the global table. Revisit incremental sweeping
 // if a single large-table sweep exceeds the actor work budget.
 
@@ -41,6 +41,9 @@ pub struct AttrInternTable {
     /// Sharded because a rehash hashes every attribute set's full content
     /// again, and a route server's table holds hundreds of thousands of them.
     set: ShardedMap<Arc<AttrSet>, ()>,
+    /// Whole-table sweeps run, for work-count tests.
+    #[cfg(test)]
+    pub(crate) sweeps: usize,
 }
 
 impl AttrInternTable {
@@ -85,6 +88,10 @@ impl AttrInternTable {
 
     pub(crate) fn gc_with_checkpoint(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         checkpoint.checkpoint(RetirementProgress::Boundary);
+        #[cfg(test)]
+        {
+            self.sweeps += 1;
+        }
         self.set.retain(|a, ()| {
             checkpoint.checkpoint(RetirementProgress::Progress);
             Arc::strong_count(a) > 1

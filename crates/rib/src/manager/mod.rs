@@ -2648,11 +2648,13 @@ impl RibManager {
             .observe_rib_actor_work("attribute_gc", started.elapsed());
     }
 
-    /// Amortize the measured unicast UPDATE hot path without changing Arc
-    /// ownership or the point at which routes become visible. At most one route
-    /// chunk can take the displaced count over the limit before collection.
-    /// EVPN export commits feed their displaced rows here too.
-    fn defer_unicast_attr_gc(&mut self, displaced: usize) {
+    /// Amortize the whole-table sweep across received batches of every family
+    /// without changing Arc ownership or the point at which routes become
+    /// visible. At most one batch can take the displaced count over the limit
+    /// before collection. EVPN export commits feed their displaced rows here
+    /// too. Call it after the batch's recompute, so a sweep it triggers sees
+    /// the Loc-RIB clones already dropped.
+    fn defer_attr_gc(&mut self, displaced: usize) {
         if displaced == 0 {
             return;
         }
@@ -2674,10 +2676,10 @@ impl RibManager {
 
     /// EVPN export staging interns policy output, so a committed row that
     /// replaces or removes another can leave a set only the table holds.
-    /// Reclaim those on the amortized schedule unicast uses, and refresh the
+    /// Reclaim those on the amortized schedule receipts use, and refresh the
     /// gauge for the sets the export batch inserted.
     fn settle_export_attr_gc(&mut self, displaced: usize) {
-        self.defer_unicast_attr_gc(displaced);
+        self.defer_attr_gc(displaced);
         self.sync_attr_intern_gauge();
     }
 
@@ -6280,14 +6282,14 @@ impl RibManager {
             .unwrap_or_default();
         let mut affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
-        let mut needs_intern_gc = false;
+        let mut displaced = 0usize;
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
             for key in withdrawn {
                 let family = key.family.to_afi_safi();
                 if rib.withdraw_bgpls(&key) {
-                    needs_intern_gc = true;
+                    displaced += 1;
                     affected.insert(key.clone());
                 }
                 if active_refresh.contains(&family)
@@ -6302,7 +6304,7 @@ impl RibManager {
                 let key = route.key();
                 let family = route.family.to_afi_safi();
                 self.attr_intern.intern(&mut route.attributes);
-                needs_intern_gc |= rib.insert_bgpls(route);
+                displaced += usize::from(rib.insert_bgpls(route));
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
@@ -6319,9 +6321,7 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         self.recompute_bgpls_keys(&affected);
         if !affected.is_empty() {
-            if needs_intern_gc {
-                self.attr_intern.gc();
-            }
+            self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
         }
     }
@@ -6339,14 +6339,14 @@ impl RibManager {
             .unwrap_or_default();
         let mut affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
-        let mut needs_intern_gc = false;
+        let mut displaced = 0usize;
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
             for key in withdrawn {
                 let family = key.afi_safi();
                 if rib.withdraw_vpn(&key) {
-                    needs_intern_gc = true;
+                    displaced += 1;
                     affected.insert(key.clone());
                 }
                 if active_refresh.contains(&family)
@@ -6361,7 +6361,7 @@ impl RibManager {
                 let key = route.key();
                 let family = route.afi_safi();
                 self.attr_intern.intern(&mut route.attributes);
-                needs_intern_gc |= rib.insert_vpn(route);
+                displaced += usize::from(rib.insert_vpn(route));
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_vpn.get_mut(&peer)
@@ -6378,9 +6378,7 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         self.recompute_vpn_keys(&affected);
         if !affected.is_empty() {
-            if needs_intern_gc {
-                self.attr_intern.gc();
-            }
+            self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
         }
     }
@@ -6408,14 +6406,14 @@ impl RibManager {
             .unwrap_or_default();
         let mut affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
-        let mut needs_intern_gc = false;
+        let mut displaced = 0usize;
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
             for key in withdrawn {
                 let family = key.afi_safi();
                 if rib.withdraw_labeled(&key) {
-                    needs_intern_gc = true;
+                    displaced += 1;
                     affected.insert(key);
                 }
                 if active_refresh.contains(&family)
@@ -6430,7 +6428,7 @@ impl RibManager {
                 let key = route.key();
                 let family = route.afi_safi();
                 self.attr_intern.intern(&mut route.attributes);
-                needs_intern_gc |= rib.insert_labeled(route);
+                displaced += usize::from(rib.insert_labeled(route));
                 affected.insert(key);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
@@ -6447,9 +6445,7 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         self.recompute_labeled_keys(&affected);
         if !affected.is_empty() {
-            if needs_intern_gc {
-                self.attr_intern.gc();
-            }
+            self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
         }
     }
@@ -6477,13 +6473,13 @@ impl RibManager {
             .is_some_and(|families| families.contains(&family));
         let mut affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
         let mut removed_stale = 0usize;
-        let mut needs_intern_gc = false;
+        let mut displaced = 0usize;
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
             for key in withdrawn {
                 if rib.withdraw_rtc(&key) {
-                    needs_intern_gc = true;
+                    displaced += 1;
                     affected.insert(key.clone());
                 }
                 if active_refresh
@@ -6496,7 +6492,7 @@ impl RibManager {
             for mut route in announced {
                 let key = route.key();
                 self.attr_intern.intern(&mut route.attributes);
-                needs_intern_gc |= rib.insert_rtc(route);
+                displaced += usize::from(rib.insert_rtc(route));
                 if active_refresh
                     && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
                     && stale.remove(&key).is_some()
@@ -6511,9 +6507,7 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         self.recompute_rtc_keys(&affected);
         if !affected.is_empty() {
-            if needs_intern_gc {
-                self.attr_intern.gc();
-            }
+            self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
         }
         if !self.selection_deferred(family) {

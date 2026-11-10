@@ -56,7 +56,9 @@ fn evpn_announce_replace_reclaims_attr_intern() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
-    let moves = u32::try_from(EVPN_ROUTE_EVENT_HISTORY_CAPACITY).unwrap() + 2000;
+    let moves = u32::try_from(EVPN_ROUTE_EVENT_HISTORY_CAPACITY + ATTR_INTERN_GC_DISPLACED_LIMIT)
+        .unwrap()
+        + 2000;
     for seq in 0..moves {
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
         route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
@@ -64,9 +66,10 @@ fn evpn_announce_replace_reclaims_attr_intern() {
     }
 
     let intern = manager.attr_intern.len();
-    // Bounded by the event-history ring plus the single live route and the
-    // in-flight event (~ring + 2); pre-fix this grew to `moves` (6096).
-    let bound = EVPN_ROUTE_EVENT_HISTORY_CAPACITY + 16;
+    // Bounded by the event-history ring, the single live route, the in-flight
+    // event and the displaced sets still waiting for the amortized sweep;
+    // pre-fix this grew to `moves`.
+    let bound = EVPN_ROUTE_EVENT_HISTORY_CAPACITY + ATTR_INTERN_GC_DISPLACED_LIMIT + 16;
     assert!(
         intern <= bound,
         "EVPN re-advertise (replace, no withdraw) churn leaked the intern table: \
@@ -1134,6 +1137,209 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
     tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
     manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)], None);
     assert_eq!(manager.attr_intern.len(), 1);
+}
+
+/// Batches that each displace one row of a typed family, against a table
+/// large enough to defer: the whole-table sweeps are bounded by the displaced
+/// limit and the deadline, not by the batch count. `exact` also pins the table
+/// size, for families whose displaced sets nothing else retains.
+async fn assert_typed_family_sweeps_are_deferred(
+    exact: bool,
+    mut replace: impl FnMut(&mut RibManager, PeerId, u32),
+    mut withdraw: impl FnMut(&mut RibManager, PeerId, u32),
+) {
+    let (mut manager, _tx, peer) = diverse_unicast_fixture(BgpMetrics::new());
+    assert!(manager.attr_intern.capacity() > ATTR_INTERN_GC_DISPLACED_LIMIT);
+    replace(&mut manager, peer, 0);
+    let floor = manager.attr_intern.len();
+    let before = manager.attr_intern.sweeps;
+    let batches = 2 * ATTR_INTERN_GC_DISPLACED_LIMIT;
+    for batch in 1..=batches {
+        replace(&mut manager, peer, u32::try_from(batch).unwrap());
+        assert_eq!(
+            manager.attr_intern.sweeps - before,
+            batch / ATTR_INTERN_GC_DISPLACED_LIMIT,
+            "batch {batch}: one sweep per displaced limit, not one per batch"
+        );
+        assert_eq!(
+            manager.attr_intern_gc_displaced,
+            batch % ATTR_INTERN_GC_DISPLACED_LIMIT
+        );
+        if exact {
+            assert_eq!(
+                manager.attr_intern.len(),
+                floor + batch % ATTR_INTERN_GC_DISPLACED_LIMIT
+            );
+        }
+    }
+    assert!(manager.attr_intern_gc_deadline.is_none());
+
+    // A withdrawal waits the same way, and the deadline collects it on the
+    // next displacing batch (the idle actor's timer takes the same sweep).
+    let last = u32::try_from(batches).unwrap();
+    withdraw(&mut manager, peer, last);
+    replace(&mut manager, peer, last + 1);
+    assert_eq!(manager.attr_intern.sweeps - before, 2);
+    assert_eq!(manager.attr_intern_gc_displaced, 1);
+    assert!(manager.attr_intern_gc_deadline.is_some());
+    if exact {
+        assert_eq!(manager.attr_intern.len(), floor + 1);
+    }
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    replace(&mut manager, peer, last + 2);
+    assert_eq!(manager.attr_intern.sweeps - before, 3);
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    assert!(manager.attr_intern_gc_deadline.is_none());
+    if exact {
+        assert_eq!(manager.attr_intern.len(), floor);
+    }
+}
+
+const TYPED_PEER: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
+#[tokio::test(start_paused = true)]
+async fn vpn_receive_defers_attr_intern_sweeps() {
+    assert_typed_family_sweeps_are_deferred(
+        true,
+        |manager, peer, seq| {
+            let route = make_vpn_rib_route(TYPED_PEER, 21, 100, seq);
+            manager.handle_vpn_routes_received(peer, vec![route], vec![]);
+        },
+        |manager, peer, seq| {
+            let key = make_vpn_rib_route(TYPED_PEER, 21, 100, seq).key();
+            manager.handle_vpn_routes_received(peer, vec![], vec![key]);
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn labeled_receive_defers_attr_intern_sweeps() {
+    assert_typed_family_sweeps_are_deferred(
+        true,
+        |manager, peer, seq| {
+            let route = make_labeled_rib_route(TYPED_PEER, 21, 100, seq);
+            manager.handle_labeled_routes_received(peer, vec![route], vec![]);
+        },
+        |manager, peer, seq| {
+            let key = make_labeled_rib_route(TYPED_PEER, 21, 100, seq).key();
+            manager.handle_labeled_routes_received(peer, vec![], vec![key]);
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn rtc_receive_defers_attr_intern_sweeps() {
+    assert_typed_family_sweeps_are_deferred(
+        true,
+        |manager, peer, seq| {
+            let route = make_rtc_rib_route(TYPED_PEER, 21, seq);
+            manager.handle_rtc_routes_received(peer, vec![route], vec![]);
+        },
+        |manager, peer, seq| {
+            let key = make_rtc_rib_route(TYPED_PEER, 21, seq).key();
+            manager.handle_rtc_routes_received(peer, vec![], vec![key]);
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn bgpls_receive_defers_attr_intern_sweeps() {
+    assert_typed_family_sweeps_are_deferred(
+        true,
+        |manager, peer, seq| {
+            let route = make_bgpls_route(TYPED_PEER, 24, seq);
+            manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
+        },
+        |manager, peer, seq| {
+            let key = make_bgpls_route(TYPED_PEER, 24, seq).key();
+            manager.handle_bgpls_routes_received(peer, vec![], vec![key]);
+        },
+    )
+    .await;
+}
+
+fn typed_evpn_route(seq: u32) -> EvpnRibRoute {
+    let mut route = make_evpn_imet(TYPED_PEER, 100);
+    route.attributes = AttrSet::new(vec![PathAttribute::LocalPref(seq)]);
+    route
+}
+
+// The EVPN event history retains displaced sets, so these pin the sweeps and
+// the displaced count but not the table size.
+#[tokio::test(start_paused = true)]
+async fn evpn_receive_defers_attr_intern_sweeps() {
+    assert_typed_family_sweeps_are_deferred(
+        false,
+        |manager, peer, seq| manager.process_evpn_announce_chunk(peer, vec![typed_evpn_route(seq)]),
+        |manager, peer, seq| {
+            manager.process_evpn_withdraw_chunk(peer, vec![typed_evpn_route(seq).key()]);
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn evpn_injection_defers_attr_intern_sweeps() {
+    assert_typed_family_sweeps_are_deferred(
+        false,
+        |manager, _peer, seq| {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_inject_evpn(typed_evpn_route(seq), reply);
+            response.try_recv().unwrap().unwrap();
+        },
+        |manager, _peer, seq| {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_withdraw_evpn(typed_evpn_route(seq).key(), reply);
+            response.try_recv().unwrap().unwrap();
+        },
+    )
+    .await;
+}
+
+#[test]
+fn graceful_restart_entry_sweeps_attr_intern_once_after_all_recomputes() {
+    // Each non-retained typed family's selected routes hold a Loc-RIB clone
+    // until that family's recompute, so one sweep after the last recompute
+    // reclaims what a sweep per family did.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(TYPED_PEER);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    manager.handle_vpn_routes_received(
+        peer,
+        vec![make_vpn_rib_route(TYPED_PEER, 21, 100, 1)],
+        vec![],
+    );
+    manager.handle_labeled_routes_received(
+        peer,
+        vec![make_labeled_rib_route(TYPED_PEER, 21, 100, 2)],
+        vec![],
+    );
+    manager.handle_rtc_routes_received(peer, vec![make_rtc_rib_route(TYPED_PEER, 21, 3)], vec![]);
+    manager.handle_bgpls_routes_received(peer, vec![make_bgpls_route(TYPED_PEER, 24, 4)], vec![]);
+    manager.process_evpn_announce_chunk(peer, vec![typed_evpn_route(5)]);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 6)], None);
+    assert_eq!(manager.attr_intern.len(), 6);
+
+    let before = manager.attr_intern.sweeps;
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    assert_eq!(manager.attr_intern.sweeps - before, 1);
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    assert!(manager.attr_intern_gc_deadline.is_none());
+    // The retained unicast route, and the EVPN set its event history holds.
+    assert_eq!(manager.attr_intern.len(), 2);
 }
 
 /// Permit, adding `community`, for EVPN route type `evpn_route_type` (or
