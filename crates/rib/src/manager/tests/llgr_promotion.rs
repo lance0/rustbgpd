@@ -1959,3 +1959,209 @@ fn eor_flowspec_sweep_skips_the_unicast_slab() {
         "eor_sweep answered {small} with 8 unicast routes and {large} with 200"
     );
 }
+
+/// How an inbound enhanced-refresh window is closed.
+#[derive(Clone, Copy, Debug)]
+enum RefreshFinish {
+    /// The peer's End-of-RIB-Refresh.
+    Eorr,
+    /// The session's refresh-window timeout message.
+    TimeoutMessage,
+    /// The RIB's own refresh-window deadline.
+    TimerExpiry,
+}
+
+const REFRESH_FINISHES: [RefreshFinish; 3] = [
+    RefreshFinish::Eorr,
+    RefreshFinish::TimeoutMessage,
+    RefreshFinish::TimerExpiry,
+];
+
+/// The finish's key-collection, withdrawal and intern-cleanup units.
+const REFRESH_FINISH_UNITS: [&str; 3] = ["eorr_inventory", "eorr_sweep", "eorr_intern_cleanup"];
+
+/// Open a refresh window over `routes` routes of `family`, re-advertise
+/// nothing, and close it through `finish`'s actual caller under the
+/// readiness probe. Every answered count lies between the settled and the
+/// initial Loc-RIB count, steps down by one per completed unicast
+/// withdrawal and ends on the settled count.
+fn run_refresh_finish_case(
+    family: (Afi, Safi),
+    finish: RefreshFinish,
+    routes: u8,
+) -> BTreeMap<&'static str, usize> {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    for index in 5..5 + routes {
+        announce_case(&mut manager, family, index, false);
+    }
+    let (afi, safi) = family;
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi,
+        safi,
+    });
+    assert_eq!(
+        manager.refresh_stale_counts.get(&(peer, afi, safi)),
+        Some(&usize::from(routes)),
+        "{finish:?} {family:?}: the window snapshots every route"
+    );
+    let initial = manager.loc_rib.len();
+    let (answered, observations) =
+        run_with_readiness_observations(&mut manager, readiness_tx, |manager| match finish {
+            RefreshFinish::Eorr => manager.handle_update(RibUpdate::EndRouteRefresh {
+                session_id: 0,
+                peer,
+                afi,
+                safi,
+            }),
+            RefreshFinish::TimeoutMessage => {
+                manager.handle_update(RibUpdate::RouteRefreshTimeout {
+                    session_id: 0,
+                    peer,
+                    afi,
+                    safi,
+                });
+            }
+            RefreshFinish::TimerExpiry => manager
+                .expire_refresh_windows(tokio::time::Instant::now() + Duration::from_secs(3600)),
+        });
+    assert!(
+        !manager.refresh_in_progress.contains_key(&peer),
+        "{finish:?} {family:?}: the window is closed"
+    );
+    let rib = &manager.ribs[&peer];
+    assert_eq!(
+        rib.len()
+            + rib.flowspec_len()
+            + rib.evpn_len()
+            + rib.bgpls_len()
+            + rib.vpn_len()
+            + rib.labeled_len()
+            + rib.rtc_len(),
+        0,
+        "{finish:?} {family:?}: every unreplaced route is withdrawn"
+    );
+    let removed = if safi == Safi::Unicast {
+        usize::from(routes)
+    } else {
+        0
+    };
+    let settled = initial - removed;
+    assert_eq!(manager.loc_rib.len(), settled, "{finish:?} {family:?}");
+    let selections: Vec<_> = observations
+        .iter()
+        .filter_map(|&(stage, count)| (stage == "selection_recompute").then_some(count))
+        .collect();
+    assert_eq!(
+        selections,
+        (1..=removed).map(|step| initial - step).collect::<Vec<_>>(),
+        "{finish:?} {family:?}: every completed withdrawal publishes its exact count"
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|&(_, count)| (settled..=initial).contains(&count)),
+        "{finish:?} {family:?}: counts outside [{settled}, {initial}]: {observations:?}"
+    );
+    assert_eq!(
+        observations.last().map(|&(_, count)| count),
+        Some(settled),
+        "{finish:?} {family:?}: the final answer is the settled count"
+    );
+    answered
+}
+
+/// End-of-RIB-Refresh, the refresh-timeout message and the refresh-window
+/// timer each close a window nothing was re-advertised in under the
+/// readiness owner, for every family: a query queued before the finish and
+/// one queued at each checkpoint of its key collection, withdrawal and
+/// intern cleanup are answered inside it.
+#[test]
+fn refresh_finish_answers_readiness_inside_every_family_sweep() {
+    let mut failures = Vec::new();
+    for finish in REFRESH_FINISHES {
+        for family in FAMILIES {
+            let answered = run_refresh_finish_case(family, finish, 32);
+            for stage in std::iter::once(PRE_QUEUED).chain(REFRESH_FINISH_UNITS) {
+                let count = answered.get(stage).copied().unwrap_or(0);
+                if count < usize::from(stage != PRE_QUEUED) + 1 {
+                    failures.push((finish, family, stage, count));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(finish, family, unit, answered) without interior readiness service: {failures:?}"
+    );
+}
+
+/// Per-unit work-count control: from 8 to 40 unreplaced routes, the finish
+/// answers at least once more per added route while collecting keys and
+/// once more while withdrawing them, for every family and caller. No
+/// stretch between two answers grows with the window's size.
+#[test]
+fn refresh_finish_work_counts_grow_per_unit() {
+    let count = |answered: &BTreeMap<&str, usize>, stage| answered.get(stage).copied().unwrap_or(0);
+    let mut failures = Vec::new();
+    for finish in REFRESH_FINISHES {
+        for family in FAMILIES {
+            let small = run_refresh_finish_case(family, finish, 8);
+            let large = run_refresh_finish_case(family, finish, 40);
+            for unit in ["eorr_inventory", "eorr_sweep"] {
+                let (small, large) = (count(&small, unit), count(&large, unit));
+                if large < small + 32 {
+                    failures.push((finish, family, unit, small, large));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(finish, family, unit, small, large) answered counts do not grow with the work: {failures:?}"
+    );
+}
+
+/// Two windows due together close under one readiness owner each, so the
+/// timer arm answers readiness at the boundary between them.
+#[test]
+fn refresh_window_expiry_answers_readiness_between_windows() {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    let families = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::FlowSpec)];
+    for (afi, safi) in families {
+        for index in 5..13 {
+            announce_case(&mut manager, (afi, safi), index, false);
+        }
+        manager.handle_update(RibUpdate::BeginRouteRefresh {
+            session_id: 0,
+            peer,
+            afi,
+            safi,
+        });
+    }
+    manager.replacement_readiness_receipts.clear();
+    let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+        manager.expire_refresh_windows(tokio::time::Instant::now() + Duration::from_secs(3600));
+    });
+    assert!(manager.refresh_in_progress.is_empty());
+    let owners: Vec<_> = manager
+        .replacement_readiness_receipts
+        .iter()
+        .map(|receipt| (receipt.kind, receipt.serviced > 0))
+        .collect();
+    assert_eq!(
+        owners,
+        [(ReadinessOwnerKind::SelectionRelease, true); 2],
+        "each window closes under its own serviced owner"
+    );
+    assert_eq!(
+        answered.get("terminal_cleanup"),
+        Some(&2),
+        "a query queued as each window ends is answered: {answered:?}"
+    );
+}
