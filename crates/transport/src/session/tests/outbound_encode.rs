@@ -1169,10 +1169,9 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     );
 }
 
-/// Extended Messages should not freeze MP batches at the conservative 1,024
-/// entry first probe. Use a large shared attribute so 1,024 entries fit while
-/// 2,048 do not; the sender must remember that failed upper bound, make
-/// monotonic progress with a later in-between probe, and preserve exact order.
+/// An Extended Message carries as many entries as its bytes hold. A large
+/// shared attribute leaves room for 1,733 IPv6 /128s; the sender fills each
+/// message but the last and preserves exact order.
 #[tokio::test]
 async fn extended_ipv6_chunks_fill_the_message_without_reordering() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);

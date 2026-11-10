@@ -4689,26 +4689,13 @@ mod packing_tests {
         frames
     }
 
-    /// Frame lengths in wire order, chunk builds and entries built, for one
-    /// group of `rows` entries.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one arm per chunker call shape, mirroring the production call sites"
-    )]
-    async fn pack(
-        wire: Wire,
-        rows: usize,
-        lengths: Lengths,
+    /// A session with a live writer, the peer's end of its stream, and its
+    /// export profile.
+    async fn connected(
+        family: (Afi, Safi),
         add_path: bool,
         extended: bool,
-    ) -> (Vec<usize>, usize, usize) {
-        let family = match wire {
-            Wire::V4Announce | Wire::V4Withdraw | Wire::SharedV4Announce => {
-                (Afi::Ipv4, Safi::Unicast)
-            }
-            Wire::V6Announce | Wire::V6Withdraw => (Afi::Ipv6, Safi::Unicast),
-            Wire::EvpnAnnounce => (Afi::L2Vpn, Safi::Evpn),
-        };
+    ) -> (PeerSession, TcpStream, SessionExportProfile) {
         let mut peer_config = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
         peer_config.families = vec![family];
         let config =
@@ -4742,12 +4729,37 @@ mod packing_tests {
         let client = TcpStream::connect(listener.local_addr().unwrap())
             .await
             .unwrap();
-        let (mut server, _) = listener.accept().await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
         session.test_install_stream(client);
         let profile = SessionExportProfile::capture(&session).with_test_ebgp(true);
         let max_len = profile.max_message_len();
         assert_eq!(max_len, if extended { 65_535 } else { 4_096 });
         assert_eq!(profile.add_path_send(family), add_path);
+        (session, server, profile)
+    }
+
+    /// Frame lengths in wire order, chunk builds and entries built, for one
+    /// group of `rows` entries.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per chunker call shape, mirroring the production call sites"
+    )]
+    async fn pack(
+        wire: Wire,
+        rows: usize,
+        lengths: Lengths,
+        add_path: bool,
+        extended: bool,
+    ) -> (Vec<usize>, usize, usize) {
+        let family = match wire {
+            Wire::V4Announce | Wire::V4Withdraw | Wire::SharedV4Announce => {
+                (Afi::Ipv4, Safi::Unicast)
+            }
+            Wire::V6Announce | Wire::V6Withdraw => (Afi::Ipv6, Safi::Unicast),
+            Wire::EvpnAnnounce => (Afi::L2Vpn, Safi::Evpn),
+        };
+        let (mut session, mut server, profile) = connected(family, add_path, extended).await;
+        let max_len = profile.max_message_len();
 
         let attrs = base_attrs();
         let mp_attrs = &attrs[..2];
@@ -4841,13 +4853,7 @@ mod packing_tests {
             "{wire:?}: the whole group is sent in one call"
         );
         let (builds, built) = BUILT.get();
-        let messages = usize::try_from(session.config.neighbor_counters.updates_sent()).unwrap();
-        let frames = timeout(
-            Duration::from_secs(10),
-            frame_lengths(&mut server, messages),
-        )
-        .await
-        .expect("every enqueued UPDATE reaches the peer");
+        let frames = sent_frames(&session, &mut server).await;
         assert_eq!(
             u64::try_from(frames.iter().sum::<usize>()).unwrap(),
             session.writer_bulk_admitted
@@ -5027,5 +5033,187 @@ mod packing_tests {
             }
         }
         assert!(moved.is_empty(), "packing moved:\n{}", moved.join("\n"));
+    }
+    async fn sent_frames(session: &PeerSession, server: &mut TcpStream) -> Vec<usize> {
+        let messages = usize::try_from(session.config.neighbor_counters.updates_sent()).unwrap();
+        timeout(Duration::from_secs(10), frame_lengths(server, messages))
+            .await
+            .expect("every enqueued UPDATE reaches the peer")
+    }
+
+    /// EVPN type-2 routes: 35 bytes MAC-only, 39 with an IPv4 address, 51
+    /// with an IPv6 one.
+    fn evpn_route(i: u32, ip: Option<IpAddr>) -> EvpnRoute {
+        let [_, b, c, d] = i.to_be_bytes();
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0x02, 0, 0, b, c, d]),
+            ip,
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        })
+    }
+
+    /// `FlowSpec` rules: 4 bytes for one protocol match, 72 for a prefix
+    /// and thirty-two port matches.
+    fn flowspec_rule(i: u32, large: bool) -> FlowSpecRule {
+        use rustbgpd_wire::{FlowSpecComponent, FlowSpecPrefix, NumericMatch};
+        let term = |value: u64, last: bool| NumericMatch {
+            end_of_list: last,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value,
+        };
+        let components = if large {
+            vec![
+                FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0x0A00_0000 + i),
+                    32,
+                ))),
+                FlowSpecComponent::Port((0..32).map(|port| term(port, port == 31)).collect()),
+            ]
+        } else {
+            vec![FlowSpecComponent::IpProtocol(vec![term(
+                u64::from(i % 200),
+                true,
+            )])]
+        };
+        FlowSpecRule { components }
+    }
+
+    /// Whether entry `i` of a 2,048-entry group is a small one.
+    #[derive(Clone, Copy, Debug)]
+    enum Sizes {
+        /// 500 small entries, then large ones.
+        SmallThenLarge,
+        /// Runs of 100 small and 100 large entries.
+        Alternating,
+    }
+
+    impl Sizes {
+        fn small(self, i: u32) -> bool {
+            match self {
+                Self::SmallThenLarge => i < 500,
+                Self::Alternating => (i / 100).is_multiple_of(2),
+            }
+        }
+    }
+
+    /// `(messages, builds)` for one 2,048-entry typed group whose entry
+    /// sizes vary.
+    async fn pack_varying(flowspec: bool, sizes: Sizes, extended: bool) -> (usize, usize) {
+        let rows = u32::try_from(SLICE).unwrap();
+        let attrs = base_attrs();
+        let mp_attrs = &attrs[..2];
+        let family = if flowspec {
+            (Afi::Ipv4, Safi::FlowSpec)
+        } else {
+            (Afi::L2Vpn, Safi::Evpn)
+        };
+        let (mut session, mut server, profile) = connected(family, false, extended).await;
+        let max_len = profile.max_message_len();
+        BUILT.set((0, 0));
+        let sent = if flowspec {
+            let rules: Vec<_> = (0..rows)
+                .map(|i| flowspec_rule(i, !sizes.small(i)))
+                .collect();
+            session.send_mp_chunked(&rules, max_len, "FlowSpec", "announcement", None, |chunk| {
+                profile.build_mp_reach(
+                    Afi::Ipv4,
+                    Safi::FlowSpec,
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    None,
+                    mp_attrs,
+                    ReachNlri::FlowSpec(chunk),
+                    Ipv4UnicastMode::Body,
+                )
+            })
+        } else {
+            let large = IpAddr::V6("2001:db8::1".parse().unwrap());
+            let routes: Vec<_> = (0..rows)
+                .map(|i| evpn_route(i, (!sizes.small(i)).then_some(large)))
+                .collect();
+            session.send_evpn_reach_chunked(
+                &profile,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                mp_attrs,
+                &routes,
+                max_len,
+            )
+        };
+        assert_eq!(sent, Ok(SLICE));
+        let frames = sent_frames(&session, &mut server).await;
+        assert!(frames.iter().all(|frame| *frame <= max_len));
+        (frames.len(), BUILT.get().0)
+    }
+
+    /// Entry sizes that change within a typed group cost extra builds, but a
+    /// bounded number: one measurement, four rejections that raise the
+    /// assumed bytes per entry to what they measured, then rejections that
+    /// at least double it. The pinned figures are `(messages, builds)`; the
+    /// chunkers this replaced took (34, 38), (3, 3), (34, 38), (3, 3) for
+    /// EVPN and (37, 155), (3, 4), (29, 130), (2, 2) for `FlowSpec`.
+    #[tokio::test]
+    async fn varying_typed_groups_stay_within_the_build_bound() {
+        use Sizes::{Alternating, SmallThenLarge};
+        let cases = [
+            ((false, SmallThenLarge, false), (24, 27)),
+            ((false, SmallThenLarge, true), (2, 4)),
+            ((false, Alternating, false), (26, 30)),
+            ((false, Alternating, true), (2, 4)),
+            ((true, SmallThenLarge, false), (33, 36)),
+            ((true, SmallThenLarge, true), (2, 4)),
+            ((true, Alternating, false), (36, 40)),
+            ((true, Alternating, true), (2, 5)),
+        ];
+        let mut moved = Vec::new();
+        for (case, pinned) in cases {
+            let (flowspec, sizes, extended) = case;
+            let (messages, builds) = pack_varying(flowspec, sizes, extended).await;
+            // Measurement, exact rejections, then one doubling per power of
+            // two of the message limit.
+            let doublings = if extended { 16 } else { 12 };
+            assert!(
+                builds <= messages + 1 + 4 + doublings,
+                "{case:?}: {builds} builds for {messages} messages"
+            );
+            if (messages, builds) != pinned {
+                moved.push(format!("{case:?}: {:?}", (messages, builds)));
+            }
+        }
+        assert!(moved.is_empty(), "packing moved:\n{}", moved.join("\n"));
+    }
+
+    /// A group whose every build fails ends in the teardown without walking
+    /// a long group's chunk sizes down: the single-entry measurement is
+    /// itself the unsendable entry. A short group, tried whole, halves.
+    #[tokio::test]
+    async fn a_group_that_cannot_be_built_tears_down_without_a_walk() {
+        for (rows, expected) in [(SLICE, 1), (64, 7), (1, 1)] {
+            let (mut session, _server, profile) =
+                connected((Afi::Ipv4, Safi::FlowSpec), false, false).await;
+            let mut builds = 0;
+            let sent = session.send_mp_chunked(
+                &vec![(); rows],
+                profile.max_message_len(),
+                "FlowSpec",
+                "announcement",
+                None,
+                |_| {
+                    builds += 1;
+                    Err(rustbgpd_wire::EncodeError::ValueOutOfRange {
+                        field: "test",
+                        value: String::new(),
+                    })
+                },
+            );
+            assert_eq!(sent, Err(()));
+            assert!(session.writer_bulk_tx.is_none(), "torn down");
+            assert_eq!(builds, expected, "{rows} rows");
+        }
     }
 }
