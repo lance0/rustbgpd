@@ -514,13 +514,17 @@ async fn a_forced_resync_that_catches_up_under_the_gate_sends_the_marker_it_held
     }
 }
 
-/// A late-armed gate: each of `receivers` joins while the gate for
-/// `families` is dormant, with its markers held by a grace window, then the
-/// waiter `SOURCE` arms the gate and sends one IPv4 route under the hold.
-/// The grace windows are then ended, so only the gate holds the markers.
+/// A receiver of [`late_armed_gate`]: peer, session and its families.
+type GateReceiver<'a> = (PeerId, u64, &'a [(Afi, Safi)]);
+
+/// A late-armed gate: each of `receivers` joins with its own families
+/// while the gate for `families` is dormant, its markers held by a grace
+/// window, then the waiter `SOURCE` arms the gate and sends one IPv4 route
+/// under the hold. The grace windows are then ended, so only the gate holds
+/// the markers.
 fn late_armed_gate(
     families: &[(Afi, Safi)],
-    receivers: &[(PeerId, u64)],
+    receivers: &[GateReceiver<'_>],
 ) -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
@@ -534,22 +538,22 @@ fn late_armed_gate(
         .with_eor_grace(EorGraceConfig {
             peers: receivers
                 .iter()
-                .map(|&(peer, _)| EorGracePeerConfig {
+                .map(|&(peer, _, own)| EorGracePeerConfig {
                     peer: peer.into(),
                     deadline: tokio::time::Instant::now() + WINDOW,
-                    families: families.to_vec(),
+                    families: own.to_vec(),
                 })
                 .collect(),
             replay_owners: vec![],
         });
     let mut outputs: Vec<_> = receivers
         .iter()
-        .map(|&(peer, session)| connect_with(&mut manager, peer, session, families.to_vec()))
+        .map(|&(peer, session, own)| connect_with(&mut manager, peer, session, own.to_vec()))
         .collect();
     std::mem::forget(connect_with(&mut manager, SOURCE, 1, families.to_vec()));
     announce(&mut manager, SOURCE, 1, 7);
     manager.expire_eor_holds(tokio::time::Instant::now() + WINDOW);
-    for (output, &(peer, _)) in outputs.iter_mut().zip(receivers) {
+    for (output, &(peer, _, _)) in outputs.iter_mut().zip(receivers) {
         assert_eq!(markers_of(output, V4), 0, "the gate holds the marker");
         assert!(manager.eor.owes(peer, V4));
         assert!(manager.selection_resync_held(peer));
@@ -622,7 +626,7 @@ fn assert_route_precedes_marker(output: &mut mpsc::Receiver<OutboundRouteUpdate>
 async fn a_gate_release_sends_the_released_routes_before_the_marker_of_a_forced_peer() {
     for by_timer in [true, false] {
         let case = if by_timer { "timer" } else { "all End-of-RIB" };
-        let (mut manager, mut outputs) = late_armed_gate(&[V4], &[(TARGET, 2)]);
+        let (mut manager, mut outputs) = late_armed_gate(&[V4], &[(TARGET, 2, &[V4])]);
         let mut output = outputs.remove(0);
         force_under_the_gate(&mut manager, TARGET);
         while output.try_recv().is_ok() {}
@@ -639,24 +643,32 @@ async fn a_gate_release_sends_the_released_routes_before_the_marker_of_a_forced_
     }
 }
 
-/// The same while a second family of the receiver is still deferred: the
-/// released family's marker follows its routes, the other family's marker
-/// and the force bit wait for their own gate.
+/// The same while a second family of the receiver is still deferred, so
+/// its own forced resync stays deferred and only another receiver's makes
+/// the release run its empty pass. The released family's marker follows
+/// its routes; the other family's marker and the force bit wait for their
+/// own gate.
 #[tokio::test(start_paused = true)]
 async fn a_gate_release_keeps_route_before_marker_while_another_family_is_deferred() {
-    let (mut manager, mut outputs) = late_armed_gate(&[V4, V6], &[(TARGET, 2)]);
+    let (mut manager, mut outputs) =
+        late_armed_gate(&[V4, V6], &[(TARGET, 2, &[V4, V6]), (OTHER, 3, &[V4])]);
+    let mut other = outputs.remove(1);
     let mut output = outputs.remove(0);
     force_under_the_gate(&mut manager, TARGET);
+    force_under_the_gate(&mut manager, OTHER);
     while output.try_recv().is_ok() {}
+    while other.try_recv().is_ok() {}
     source_end_of_rib(&mut manager, V4);
     assert!(!manager.selection_convergence_held(V4));
     assert!(manager.selection_convergence_held(V6));
     assert_route_precedes_marker(&mut output, "second family deferred");
+    assert_route_precedes_marker(&mut other, "forced peer beside it");
     assert_eq!(manager.eor_pending(TARGET), HashSet::from([V6]));
     assert!(
         manager.force_outbound_peers.contains(&TARGET),
         "kept for IPv6"
     );
+    assert!(!manager.force_outbound_peers.contains(&OTHER));
 }
 
 /// The same for a dirty receiver with no force bit that the release wakes,
@@ -664,7 +676,8 @@ async fn a_gate_release_keeps_route_before_marker_while_another_family_is_deferr
 /// its empty pass first.
 #[tokio::test(start_paused = true)]
 async fn a_gate_release_keeps_route_before_marker_for_a_woken_dirty_peer() {
-    let (mut manager, mut outputs) = late_armed_gate(&[V4], &[(OTHER, 3), (TARGET, 2)]);
+    let (mut manager, mut outputs) =
+        late_armed_gate(&[V4], &[(OTHER, 3, &[V4]), (TARGET, 2, &[V4])]);
     let mut forced = outputs.remove(1);
     let mut output = outputs.remove(0);
     force_under_the_gate(&mut manager, TARGET);
