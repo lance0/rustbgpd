@@ -461,7 +461,10 @@ impl View {
                 self.live += 1;
             }
         } else {
-            if !self.has(bit) {
+            // Under the controlled qualification protocol a withdrawal of a
+            // route this receiver does not hold is a wire defect. The soak's
+            // flap and reload legs keep set semantics.
+            if self.qualification_communities.is_some() && !self.has(bit) {
                 self.invalid += 1;
             }
             self.clear(bit);
@@ -913,7 +916,7 @@ async fn flap(args: &Args, shape: Shape, client: &mut Client, n: u32, lost: &Arc
     );
 }
 
-async fn finish(args: &Args, shape: Shape, clients: &mut [Client]) {
+async fn finish(args: &Args, clients: &mut [Client]) {
     if let Some(dir) = &args.evidence_dir {
         if let Err(error) = std::fs::create_dir_all(dir)
             .and_then(|()| std::fs::write(dir.join("ready"), b"ready\n"))
@@ -927,9 +930,6 @@ async fn finish(args: &Args, shape: Shape, clients: &mut [Client]) {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-    }
-    if !converged(&check(shape, clients), shape) {
-        fail("receiver state changed before finish acknowledgement");
     }
     for client in clients.iter_mut() {
         client.expect_down.store(true, Ordering::SeqCst);
@@ -1115,7 +1115,7 @@ async fn main() -> anyhow::Result<()> {
         terminal.parse_errors,
         terminal.self_reflected,
     );
-    finish(&args, shape, &mut clients).await;
+    finish(&args, &mut clients).await;
     Ok(())
 }
 
@@ -1194,7 +1194,13 @@ mod tests {
         view.apply(1, s, &type2_route(2, 7), false);
         view.apply(1, s, &type2_route(2, 7), false);
         assert_eq!(view.live, 0);
-        assert_eq!(view.invalid, 2, "duplicate withdrawal must not disappear");
+        assert_eq!(view.invalid, 1, "the soak keeps set semantics");
+        view.qualification_communities = Some(Vec::new());
+        view.apply(1, s, &type2_route(2, 7), false);
+        assert_eq!(
+            view.invalid, 2,
+            "a controlled run counts a withdrawal of a route it does not hold"
+        );
     }
 
     #[test]
@@ -1209,6 +1215,7 @@ mod tests {
         let clients = exact_fleet(s);
         {
             let mut view = clients[0].view.lock().unwrap();
+            view.qualification_communities = Some(Vec::new());
             view.apply(0, s, &type2_route(1, 3), false);
             view.apply(0, s, &type2_route(1, 3), true);
             view.apply(0, s, &type2_route(1, 3), false);

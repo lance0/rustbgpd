@@ -353,7 +353,7 @@ pub(super) async fn run(
                     converged(&check(shape, clients), shape),
                     "final inventory changed"
                 );
-                finish(args, shape, clients).await;
+                finish(args, clients).await;
                 println!(
                     "evpn_control {}",
                     serde_json::json!({"command": "finish", "result": result})
