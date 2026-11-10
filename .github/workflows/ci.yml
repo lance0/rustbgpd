@@ -668,6 +668,19 @@ jobs:
           bash bench/tests/test-rrharness-driver.sh
           python3 -m unittest discover \
             -s bench/scale/enhanced-route-refresh -p 'test_*.py'
+          python3 -m unittest discover \
+            -s bench/scale/evpn-qualification -p 'test_*.py'
+          shellcheck -x bench/scale/evpn-qualification/run.sh
+          # The dependency tests apply the harness source patches to this
+          # commit, so a renamed anchor fails here.
+          git worktree add --detach "$RUNNER_TEMP/evpn-input" HEAD
+          QUALIFICATION_SOURCE="$RUNNER_TEMP/evpn-input" python3 -m unittest discover \
+            -s bench/scale/evpn-terminal-debt -p 'test_*.py' 2>&1 | tee "$RUNNER_TEMP/evpn-terminal-debt-tests.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/evpn-terminal-debt-tests.log"; then
+            echo "terminal-debt dependency tests were skipped" >&2
+            exit 1
+          fi
+          shellcheck -x bench/scale/evpn-terminal-debt/run.sh
           shellcheck bench/scale/headline/run-campaign.sh
           python3 -m unittest -v bench/scale/headline/test_headline.py
           shellcheck -x bench/scale/rpki-cell/run-rpki-cell.sh
