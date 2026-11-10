@@ -506,6 +506,7 @@ fn ipv4_sendable() -> Vec<(Afi, Safi)> {
 fn registering_peer_up(peer: PeerId, session_id: u64) -> RibUpdate {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65001,
@@ -1252,6 +1253,7 @@ async fn orr_client_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1444,6 +1446,7 @@ async fn rtc_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1489,6 +1492,7 @@ async fn vpn_rtc_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1644,6 +1648,7 @@ async fn llgr_gate_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

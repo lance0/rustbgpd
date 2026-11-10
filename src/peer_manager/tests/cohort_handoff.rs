@@ -1818,6 +1818,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             let (outbound_tx, _outbound_rx) = mpsc::channel(1);
             later_tx
                 .send(RibUpdate::PeerUp {
+                    supersedes: None,
                     peer: recreated,
                     session_id: 99,
                     peer_asn: 65002,

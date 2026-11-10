@@ -71,6 +71,7 @@ fn register_with_rtc(
         sendable_families.push((Afi::Ipv4, Safi::RtConstrain));
     }
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 7,
         peer_asn: 65000,
@@ -1369,6 +1370,7 @@ fn register_evpn_fixture_peer(
     }
     let add_path = matches!(mode, EvpnFixturePeer::AddPath);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 7,
         peer_asn: 65000,

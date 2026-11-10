@@ -84,6 +84,7 @@ async fn register_source(
         .unwrap();
     rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(peer),
             session_id: 1,
             peer_asn: 65002,

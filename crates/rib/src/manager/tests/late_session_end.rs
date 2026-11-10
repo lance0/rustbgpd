@@ -18,10 +18,16 @@ fn peer() -> PeerId {
 }
 
 fn peer_up(manager: &mut RibManager, session_id: u64) {
+    peer_up_superseding(manager, session_id, None);
+}
+
+/// A `PeerUp` whose session replaces the retired session `supersedes`.
+fn peer_up_superseding(manager: &mut RibManager, session_id: u64, supersedes: Option<u64>) {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         peer: peer(),
         session_id,
+        supersedes: supersedes.and_then(std::num::NonZeroU64::new),
         peer_asn: 65001,
         peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
         outbound_tx,
@@ -98,12 +104,37 @@ fn retention(manager: &RibManager) -> (usize, u64, bool) {
 
 /// Whether exactly `count` session ends were discarded as stale.
 fn discarded(manager: &RibManager, count: u32) -> bool {
+    counted(manager, "bgp_rib_stale_peer_down_ignored_total", count)
+}
+
+/// Whether the registration failed over exactly `count` times.
+fn failed_over(manager: &RibManager, count: u32) -> bool {
+    counted(
+        manager,
+        "bgp_rib_outbound_registration_failover_total",
+        count,
+    )
+}
+
+/// The peer's live-session records, oldest first.
+fn live(manager: &RibManager) -> Vec<u64> {
+    manager
+        .live_sessions
+        .get(&peer())
+        .into_iter()
+        .flatten()
+        .map(|record| record.session_id)
+        .collect()
+}
+
+/// Whether the counter family `name` sums to exactly `count`.
+fn counted(manager: &RibManager, name: &str, count: u32) -> bool {
     let total: f64 = manager
         .metrics
         .registry()
         .gather()
         .into_iter()
-        .find(|family| family.name() == "bgp_rib_stale_peer_down_ignored_total")
+        .find(|family| family.name() == name)
         .map_or(0.0, |family| {
             family
                 .get_metric()
@@ -356,4 +387,198 @@ fn release_forgets_the_retention_owner() {
     assert_eq!(manager.retention_owner.get(&peer()), Some(&1));
     manager.handle_update(RibUpdate::ReleasePeer { peer: peer() });
     assert!(manager.retention_owner.is_empty());
+}
+
+/// Session 1 was retired by the peer manager and its replacement, session
+/// 2, named it at `PeerUp`; session 2 then went down under graceful restart
+/// before anything more arrived from session 1.
+fn replacement_retained() -> RibManager {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    assert_eq!(live(&manager), [2]);
+    receive_route(&mut manager);
+    restart(&mut manager, 2);
+    manager
+}
+
+/// The reported order: the replaced session's `PeerDown` is still in
+/// transit when its replacement goes down under graceful restart. The
+/// replacement's routes are retained, and the old `PeerDown` then leaves
+/// them alone, whether it arrives plain or marked late.
+/// Mutation-red: with the superseded record kept, the restart end fails
+/// over to session 1 and nothing is retained; with the superseded check
+/// removed from the `PeerDown` handler, the plain `PeerDown` finds no
+/// registration and purges the retention.
+#[test]
+fn replacement_restart_end_retains_while_the_replaced_peer_down_is_in_transit() {
+    for late in [false, true] {
+        let mut manager = replacement_retained();
+        assert_eq!(retention(&manager), (1, 1, true));
+        assert!(failed_over(&manager, 0));
+        if late {
+            late_down(&mut manager, 1);
+        } else {
+            peer_down(&mut manager, 1);
+        }
+        assert_eq!(retention(&manager), (1, 1, true), "late: {late}");
+        assert!(discarded(&manager, 1));
+    }
+}
+
+/// A restart end from the superseded session after its replacement
+/// retained must not mark the family stale a second time.
+/// Mutation-red: with the superseded check removed from the restart-end
+/// handler, the plain restart end deletes the routes session 2 left.
+#[test]
+fn superseded_restart_end_does_not_touch_the_replacements_retention() {
+    for late in [false, true] {
+        let mut manager = replacement_retained();
+        if late {
+            late_restart(&mut manager, 1);
+        } else {
+            restart(&mut manager, 1);
+        }
+        assert_eq!(retention(&manager), (1, 1, true), "late: {late}");
+        assert_eq!(manager.retention_owner.get(&peer()), Some(&2));
+    }
+}
+
+/// A `PeerUp` that names no superseded session keeps the collision
+/// handling: either session may survive, so the first stays live and the
+/// second's end fails over to it, under graceful restart too. The second
+/// half is the reported order without the name, and it still fails over.
+#[test]
+fn peer_up_naming_no_session_keeps_the_collision_failover() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 5);
+    peer_up(&mut manager, 6);
+    assert_eq!(live(&manager), [5, 6]);
+    peer_down(&mut manager, 6);
+    assert_eq!(manager.current_session_id(peer()), Some(5));
+    assert!(failed_over(&manager, 1));
+
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    peer_up(&mut manager, 2);
+    receive_route(&mut manager);
+    restart(&mut manager, 2);
+    assert_eq!(manager.current_session_id(peer()), Some(1));
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert!(failed_over(&manager, 1));
+}
+
+/// A replacement that arrives while a collision is unresolved retires only
+/// the session it names. The collision candidate (9) stays live and still
+/// takes the registration when the replacement goes down.
+/// Mutation-red: retiring every other session at a superseding `PeerUp`
+/// leaves no survivor, so the replacement's end tears the peer down.
+#[test]
+fn replacement_during_a_collision_retires_only_the_named_session() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    peer_up(&mut manager, 9);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    assert_eq!(live(&manager), [9, 2]);
+    peer_down(&mut manager, 1);
+    assert_eq!(manager.current_session_id(peer()), Some(2));
+    peer_down(&mut manager, 2);
+    assert_eq!(manager.current_session_id(peer()), Some(9));
+    assert!(failed_over(&manager, 1));
+}
+
+/// While the replacement is registered, everything the superseded session
+/// still delivers is discarded and the replacement's route stays.
+/// Mutation-red: without the `PeerUp` check, session 1's `PeerUp` takes the
+/// registration back and resets the replacement's routes.
+#[test]
+fn superseded_session_messages_leave_the_registered_replacement_alone() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    receive_route(&mut manager);
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer(),
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    restart(&mut manager, 1);
+    peer_down(&mut manager, 1);
+    late_down(&mut manager, 1);
+    peer_up(&mut manager, 1);
+    assert_eq!(live(&manager), [2]);
+    assert_eq!(retention(&manager), (1, 0, false));
+    assert!(discarded(&manager, 3));
+    assert!(failed_over(&manager, 0));
+}
+
+/// An End-of-RIB the superseded session still delivers must not complete
+/// the sweep of the routes its replacement left retained.
+/// Mutation-red: with the superseded record kept there is no retention to
+/// sweep (the restart end failed over); the discard itself is the
+/// session-identity gate for a peer with no session registered.
+#[test]
+fn superseded_end_of_rib_does_not_sweep_the_replacements_retention() {
+    let mut manager = replacement_retained();
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer(),
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_eq!(retention(&manager), (1, 1, true));
+}
+
+/// A replacement over a session that already went down under graceful
+/// restart is the ordinary restart reconnect: the retained routes stay for
+/// the replacement's End-of-RIB.
+#[test]
+fn replacement_of_a_restarting_session_keeps_its_retention() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    receive_route(&mut manager);
+    restart(&mut manager, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    assert_eq!(retention(&manager), (1, 1, true));
+    late_down(&mut manager, 1);
+    assert_eq!(retention(&manager), (1, 1, true));
+    assert!(discarded(&manager, 1));
+}
+
+/// Context the superseded session staged for a registration it never made
+/// goes with it.
+/// Mutation-red: without the removal at `PeerUp` the entry stays.
+#[test]
+fn superseding_peer_up_drops_what_the_retired_session_staged() {
+    let mut manager = test_manager();
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer: peer(),
+        session_id: 1,
+        peer_group: None,
+    });
+    assert_eq!(manager.pending_peer_policy_context.len(), 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    assert!(manager.pending_peer_policy_context.is_empty());
+}
+
+/// A session cannot supersede itself.
+/// Mutation-red: without the filter its own id is recorded.
+#[test]
+fn superseding_itself_names_nothing() {
+    let mut manager = test_manager();
+    peer_up_superseding(&mut manager, 2, Some(2));
+    assert!(manager.superseded_session.is_empty());
+    assert_eq!(live(&manager), [2]);
+}
+
+/// The recorded superseded session goes with the neighbor's handle.
+/// Mutation-red: without the removal on release the entry stays.
+#[test]
+fn release_forgets_the_superseded_session() {
+    let mut manager = test_manager();
+    peer_up_superseding(&mut manager, 2, Some(1));
+    assert_eq!(manager.superseded_session.get(&peer()), Some(&1));
+    manager.handle_update(RibUpdate::ReleasePeer { peer: peer() });
+    assert!(manager.superseded_session.is_empty());
 }

@@ -167,11 +167,23 @@ async fn established_on(
     id: u64,
     rib_peer: Option<PeerId>,
 ) -> (PeerSession, mpsc::Sender<PeerCommand>, TcpStream) {
+    established_superseding(rib_tx, id, rib_peer, None).await
+}
+
+/// As [`established_on`], spawned as the replacement of the retired
+/// session `supersedes`.
+async fn established_superseding(
+    rib_tx: mpsc::Sender<RibUpdate>,
+    id: u64,
+    rib_peer: Option<PeerId>,
+    supersedes: Option<u64>,
+) -> (PeerSession, mpsc::Sender<PeerCommand>, TcpStream) {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.supersedes_session = supersedes;
     if let Some(peer) = rib_peer {
         config.rib_peer = crate::RibPeerSlot::assigned(peer);
     }
@@ -591,6 +603,10 @@ async fn held_peer_up_is_dropped_with_everything_behind_it() {
             .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
         "S1 holds its PeerUp, with its staged context ahead of it"
     );
+    assert!(
+        s2.established.registered() && !s1.established.registered(),
+        "only a PeerUp the RIB admitted marks its session registered"
+    );
     owned(s1, s1_commands)
         .abort_for_transport_safety_and_wait()
         .await;
@@ -675,4 +691,94 @@ async fn abort_inside_the_teardown_before_the_session_end_is_queued() {
 
     assert_eq!(rib.ends, [("PeerDown", 1)]);
     assert_eq!(rib.loc_rib_count().await, 0);
+}
+
+/// The aborted session's end is still behind the full relay when its
+/// replacement establishes and goes down under graceful restart. `named`
+/// is whether the replacement was spawned naming the session it replaces.
+/// Returns `(failovers, replacement routes retained after its restart end,
+/// retained once the old session's late end has drained)`.
+async fn replacement_ends_before_the_aborted_sessions_end(named: bool) -> (f64, usize, usize) {
+    let mut rib = GatedRib::spawn();
+    let (mut s1, s1_commands, _s1_peer) = established(&rib, 1).await;
+    let peer = s1.rib_peer();
+    receive(&mut s1, first());
+    s1.process_read_buffer().await;
+    rib.release().await;
+    assert_eq!(rib.loc_rib_count().await, 1, "S1's route is installed");
+
+    rib.hold_full();
+    tcp_fails(&mut s1).await;
+    shutdown_times_out(owned(s1, s1_commands)).await;
+
+    // The replacement reaches the RIB while S1's end is still held.
+    let (mut s2, _s2_commands, _s2_peer) =
+        established_superseding(rib.rib_tx.clone(), 2, Some(peer), named.then_some(1)).await;
+    negotiate_restart(&mut s2);
+    receive(&mut s2, second());
+    s2.process_read_buffer().await;
+    assert_eq!(rib.loc_rib_count().await, 1, "only S2's route is installed");
+    tcp_fails(&mut s2).await;
+    let retained = rib.retained_stale(peer).await;
+
+    rib.release().await;
+    assert_eq!(rib.ends, [("PeerDown", 1)]);
+    assert_eq!(rib.late_ends, 1);
+    (
+        rib.failovers(peer),
+        retained,
+        rib.retained_stale(peer).await,
+    )
+}
+
+/// A replacement that names the session it supersedes is not failed over
+/// to it: its routes are retained under graceful restart, and the aborted
+/// session's late `PeerDown` leaves them retained.
+/// Mutation-red: with the session not sending the id it was spawned with,
+/// this is the unnamed case below.
+#[tokio::test(start_paused = true)]
+async fn named_replacement_retains_ahead_of_the_aborted_sessions_end() {
+    assert_eq!(
+        Box::pin(replacement_ends_before_the_aborted_sessions_end(true)).await,
+        (0.0, 1, 1)
+    );
+}
+
+/// Without the name the RIB cannot tell the replacement from a collision
+/// and keeps the collision handling: the restart end fails over to the
+/// session that is already gone and nothing is retained.
+#[tokio::test(start_paused = true)]
+async fn unnamed_second_session_keeps_the_collision_failover() {
+    assert_eq!(
+        Box::pin(replacement_ends_before_the_aborted_sessions_end(false)).await,
+        (1.0, 0, 0)
+    );
+}
+
+/// A `PeerUp` held behind a full RIB channel outlives the session's own
+/// teardown: the session goes down while it is held, and the RIB admits it
+/// afterwards, with the `PeerDown` behind it. The session did register, so
+/// a replacement must name it.
+/// Mutation-red: with every held admission action cleared at teardown the
+/// session is never marked registered and a replacement names nothing.
+#[tokio::test(start_paused = true)]
+async fn peer_up_admitted_after_the_sessions_teardown_still_marks_it_registered() {
+    let mut rib = GatedRib::spawn();
+    rib.hold_full();
+    let (mut s1, _s1_commands, _s1_peer) = established(&rib, 1).await;
+    assert!(
+        s1.rib_backlog
+            .iter()
+            .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
+        "S1 holds its PeerUp"
+    );
+    tcp_fails(&mut s1).await;
+    assert!(!s1.established.registered());
+    assert_eq!(s1.established.rib_registration_owner(1), None);
+    let mark = rib.forwarded.len();
+
+    tokio::join!(s1.flush_rib_backlog(), rib.release());
+    assert_eq!(rib.forwarded_since(mark), [("PeerUp", 1), ("PeerDown", 1)]);
+    assert!(s1.established.registered());
+    assert_eq!(s1.established.rib_registration_owner(1), Some(1));
 }

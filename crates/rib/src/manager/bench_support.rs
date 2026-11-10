@@ -1724,6 +1724,7 @@ impl RibManager {
             self.handle_peer_up(
                 peer,
                 PeerUpRegistration {
+                    supersedes: None,
                     session_id,
                     peer_asn,
                     peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -2033,6 +2034,7 @@ impl RibManager {
         self.handle_peer_up(
             peer,
             PeerUpRegistration {
+                supersedes: None,
                 session_id,
                 peer_asn: 64_512,
                 peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -2170,6 +2172,7 @@ impl RibManager {
         self.handle_peer_up(
             peer,
             PeerUpRegistration {
+                supersedes: None,
                 session_id,
                 peer_asn: 64_512,
                 peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -2216,6 +2219,7 @@ impl RibManager {
         self.handle_peer_up(
             peer,
             PeerUpRegistration {
+                supersedes: None,
                 session_id,
                 peer_asn: 64_512,
                 peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -2331,6 +2335,7 @@ impl RibManager {
             self.handle_peer_up(
                 peer,
                 PeerUpRegistration {
+                    supersedes: None,
                     session_id,
                     peer_asn,
                     peer_router_id: Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
@@ -2470,6 +2475,7 @@ impl RibManager {
                 self.handle_peer_up(
                     peer,
                     PeerUpRegistration {
+                        supersedes: None,
                         session_id,
                         peer_asn,
                         peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -2554,6 +2560,7 @@ impl RibManager {
     pub fn bench_register_restarted_source(&mut self, peer: PeerId) {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
         self.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 64_512,

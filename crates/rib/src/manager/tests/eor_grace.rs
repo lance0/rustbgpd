@@ -137,6 +137,7 @@ fn session_messages(
                 local_llgr_stale_time: 0,
             },
             RibUpdate::PeerUp {
+                supersedes: None,
                 peer,
                 session_id,
                 peer_asn: 65_002,

@@ -37,6 +37,7 @@ fn up_session(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, output) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id,
@@ -1443,6 +1444,7 @@ fn peer_up_message(
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

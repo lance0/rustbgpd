@@ -210,6 +210,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
             .await
             .unwrap();
             tx.send(RibUpdate::PeerUp {
+                supersedes: None,
                 per_client_best: false,
                 interpret_rfc1997: true,
                 session_id,
@@ -239,6 +240,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
         let src = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(172, 20, 0, 10)));
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: src,
             session_id: 0,
             peer_asn: 65000,

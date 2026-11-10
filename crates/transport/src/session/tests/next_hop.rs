@@ -3290,6 +3290,7 @@ async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(session.peer_ip),
             session_id: 7,
             peer_asn: 65002,
@@ -3628,6 +3629,7 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
         session
             .rib_tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(session.peer_ip),
                 session_id: 7,
                 peer_asn: 65002,
@@ -3804,6 +3806,7 @@ async fn check_mpls_set_next_hop_keeps_link_local(safi: Safi, add_path: bool) {
         session
             .rib_tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(session.peer_ip),
                 session_id: 7,
                 peer_asn: 65002,
@@ -4220,6 +4223,7 @@ async fn action_only_replacement_frames(
         session
             .rib_tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(peer),
                 session_id: 0,
                 peer_asn: 65002,

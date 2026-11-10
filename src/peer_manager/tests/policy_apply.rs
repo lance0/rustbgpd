@@ -1698,6 +1698,7 @@ async fn cohort_commits_when_a_member_session_ends_after_accepting() {
         outbound.push(outbound_rx);
         rib_tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(peer),
                 session_id,
                 peer_asn: 65002,

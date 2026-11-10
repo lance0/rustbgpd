@@ -6072,6 +6072,7 @@ fn flap_window_peer_up(
     use rustbgpd_wire::{Afi, Safi};
 
     rustbgpd_rib::RibUpdate::PeerUp {
+        supersedes: None,
         peer: PeerId::from_addr(peer),
         session_id: 1,
         peer_asn: 65002,
@@ -9910,6 +9911,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
         rib_tx
             .send(rustbgpd_rib::RibUpdate::PeerUp {
+                supersedes: None,
                 peer,
                 session_id,
                 peer_asn: neighbor.transport_config.peer.remote_asn,
@@ -10288,6 +10290,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
         let add_path = (index == 4).then_some(vec![(Afi::Ipv4, Safi::Unicast)]);
         rib_tx
             .send(rustbgpd_rib::RibUpdate::PeerUp {
+                supersedes: None,
                 peer,
                 session_id,
                 peer_asn: neighbor.transport_config.peer.remote_asn,

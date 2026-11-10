@@ -1065,6 +1065,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
 
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

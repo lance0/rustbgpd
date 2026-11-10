@@ -8,6 +8,7 @@ pub(super) async fn register_peer(
 ) -> mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65001,

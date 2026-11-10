@@ -81,6 +81,7 @@ async fn rs_peer_up_with_policy(
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn,
@@ -351,6 +352,7 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
     .unwrap();
     let (out_tx, mut late_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: late,
         session_id: 0,
         peer_asn: 65001,
@@ -717,6 +719,7 @@ fn rs_member_up(
     });
     let (out_tx, mut out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 1,
         peer_asn,
@@ -873,6 +876,7 @@ fn explain_best_path_add_path_ranks_match_live_rs_control_staging() {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         receivers.push(outbound_rx);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65001,
@@ -953,6 +957,7 @@ async fn pcb_customer_rs_peer_up(
     .unwrap();
     let (out_tx, out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn,
@@ -1202,6 +1207,7 @@ async fn rs_client_up_full(
     .unwrap();
     let (out_tx, out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn,

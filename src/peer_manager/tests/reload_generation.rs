@@ -4972,6 +4972,7 @@ fn relay_conditional_sets_to_real_rib(
     let (outbound_tx, _outbound_rx) = mpsc::channel(1);
     real_tx
         .try_send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(IpAddr::V4(source)),
             session_id: 0,
             peer_asn: 65050,

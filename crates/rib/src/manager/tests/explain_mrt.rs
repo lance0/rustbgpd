@@ -22,6 +22,7 @@ async fn warm_mrt_snapshot_rejects_session_generation_change_at_rib_fence() {
     let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 42,
@@ -72,6 +73,7 @@ async fn warm_mrt_snapshot_excludes_routes_for_family_outside_exact_view() {
     let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 42,
@@ -171,6 +173,7 @@ async fn warm_mrt_snapshot_rejects_materialization_before_route_clone() {
     let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 42,
@@ -278,6 +281,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -798,6 +802,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -874,6 +879,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -976,6 +982,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1057,6 +1064,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
     // prefix → effective send_max should be 0.
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

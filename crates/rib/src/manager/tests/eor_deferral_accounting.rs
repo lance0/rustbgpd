@@ -38,6 +38,7 @@ fn peer_up_with_full_queue() -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>
     while manager.process_next_route_chunk() {}
     let (outbound_tx, out_rx) = mpsc::channel(1);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

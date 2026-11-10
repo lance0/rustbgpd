@@ -330,6 +330,7 @@ fn reregister_owned(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, output) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65000,

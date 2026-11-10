@@ -220,6 +220,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -499,6 +500,7 @@ async fn default_rtc_not_originated_to_non_rtc_peer() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1395,6 +1397,7 @@ async fn non_rtc_peer_reflection_unchanged() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1860,6 +1863,7 @@ async fn families_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2479,6 +2483,7 @@ async fn rtc_eor_hold_restarts_with_replacement_session() {
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 1,
@@ -2749,6 +2754,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: SESSION,

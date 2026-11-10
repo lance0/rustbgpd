@@ -84,6 +84,7 @@ fn peer_up(
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: SESSION,

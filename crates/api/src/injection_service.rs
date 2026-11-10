@@ -3126,6 +3126,7 @@ mod tests {
             let (outbound_tx, outbound_rx) = mpsc::channel(64);
             outbound.push(outbound_rx);
             RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
                 session_id: 0,
                 peer_asn: 65_010,
@@ -3315,6 +3316,7 @@ mod tests {
                 .unwrap();
             rib_tx
                 .send(RibUpdate::PeerUp {
+                    supersedes: None,
                     peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
                     session_id: 0,
                     peer_asn: 65_010,
@@ -3480,6 +3482,7 @@ mod tests {
             let (outbound_tx, outbound_rx) = mpsc::channel(64);
             outbound.push(outbound_rx);
             RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
                 session_id: 0,
                 peer_asn: 65_010,
@@ -5203,6 +5206,7 @@ mod tests {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
         rib_tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer: source,
                 session_id: 0,
                 peer_asn: 65001,

@@ -68,6 +68,7 @@ async fn unicast_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: if is_ebgp { 65100 } else { 65000 },
@@ -365,6 +366,7 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
     for (peer, interpret) in [(honor, true), (transparent, false)] {
         let (out_tx, mut out_rx) = mpsc::channel(32);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65100,
@@ -457,6 +459,7 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
     for (peer, interpret) in [(honor, true), (transparent, false)] {
         let (out_tx, mut out_rx) = mpsc::channel(32);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65100,
@@ -634,6 +637,7 @@ fn explain_best_path_add_path_ranks_match_live_llgr_stale_staging() {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         receivers.push(outbound_rx);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65100,
@@ -699,6 +703,7 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
     let peer = PeerId::from_addr("192.0.2.110".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65100,

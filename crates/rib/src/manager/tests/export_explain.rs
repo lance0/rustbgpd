@@ -86,6 +86,7 @@ async fn explain_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -117,6 +118,7 @@ async fn add_path_explain_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -744,6 +746,7 @@ async fn orf_gates_stop_pending_family_then_filtered_prefix() {
     // first ROUTE-REFRESH (RFC 5291 §6).
     let (out_tx, _rx_t) = mpsc::channel::<OutboundRouteUpdate>(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1566,6 +1569,7 @@ fn grouped_resync_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_000,
@@ -1878,6 +1882,7 @@ fn add_path_mirrors_probe_after_route_server_control_egress() {
         rs_control_asn: Some(64_512),
     });
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: receiver,
         session_id: 0,
         peer_asn: 65_004,
@@ -2001,6 +2006,7 @@ fn add_path_commit_probes_with_the_planning_snapshot() {
     let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 4));
     let (outbound_tx, mut outbound) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: receiver,
         session_id: 0,
         peer_asn: 65_004,
@@ -2114,6 +2120,7 @@ fn add_path_rank_past_gated_sibling(
     });
     let (outbound_tx, _outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65000,
@@ -2244,6 +2251,7 @@ fn per_client_best_explain_skips_an_llgr_stale_sibling_like_live_staging() {
     let target = PeerId::from_addr("192.0.2.150".parse().unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65000,
@@ -2344,6 +2352,7 @@ fn explain_best_path_add_path_ranks_match_live_otc_egress() {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         receivers.push(outbound_rx);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65160,

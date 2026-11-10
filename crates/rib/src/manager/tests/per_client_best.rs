@@ -90,6 +90,7 @@ async fn client_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         session_id: 0,
         peer,
         peer_asn: 65100,

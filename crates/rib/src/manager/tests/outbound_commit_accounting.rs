@@ -197,6 +197,7 @@ fn evpn_recovery_admission_is_a_refusal_not_a_drop() {
     let mut manager = manager();
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: PEER,
         session_id: 7,
         peer_asn: 65000,
@@ -258,6 +259,7 @@ fn peer_up(
     outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65000,

@@ -21,6 +21,7 @@ async fn llgr_target_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1819,6 +1820,7 @@ async fn peer_up_registers_llgr_families_and_teardown_clears() {
     manager.handle_peer_up(
         peer,
         PeerUpRegistration {
+            supersedes: None,
             session_id: 1,
             peer_asn: 65000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,

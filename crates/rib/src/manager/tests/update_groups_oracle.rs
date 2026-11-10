@@ -1507,6 +1507,7 @@ impl Oracle {
         };
         self.tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 per_client_best: features.per_client_best,
                 interpret_rfc1997: true,
                 session_id,

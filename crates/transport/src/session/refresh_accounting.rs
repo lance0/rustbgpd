@@ -260,9 +260,12 @@ impl PeerSession {
         self.refresh_accounting.windows.clear();
         self.refresh_accounting_timer = None;
         // Held markers of the torn-down connection still reach the RIB in
-        // order, but must not reopen or sweep this connection's windows.
+        // order, but must not reopen or sweep this connection's windows. A
+        // held `PeerUp` still registers the session when it is admitted.
         for (_, then) in &mut self.rib_backlog {
-            *then = super::inbound::OnRibAdmission::Nothing;
+            if !matches!(then, super::inbound::OnRibAdmission::Registered) {
+                *then = super::inbound::OnRibAdmission::Nothing;
+            }
         }
     }
 

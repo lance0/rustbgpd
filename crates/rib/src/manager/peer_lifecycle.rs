@@ -59,6 +59,7 @@ enum ActiveSessionRegistration {
 )]
 pub(super) struct PeerUpRegistration {
     pub(super) session_id: u64,
+    pub(super) supersedes: Option<std::num::NonZeroU64>,
     pub(super) peer_asn: u32,
     pub(super) peer_router_id: Ipv4Addr,
     pub(super) outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
@@ -213,6 +214,11 @@ impl RibManager {
         peer: PeerId,
         session_id: u64,
     ) -> SessionTeardownDisposition {
+        if self.superseded_session.get(&peer) == Some(&session_id)
+            && self.late_session_end_is_stale(peer, session_id, false)
+        {
+            return SessionTeardownDisposition::DiscardStale;
+        }
         let disposition = self.classify_session_teardown(peer, session_id, "PeerDown");
         match disposition {
             SessionTeardownDisposition::DiscardStale => {}
@@ -230,13 +236,15 @@ impl RibManager {
         disposition
     }
 
-    /// Whether a session end delivered by a dropped session's hand-off
-    /// ([`crate::RibUpdate::LateSessionEnd`]) must be discarded. The
-    /// hand-off can deliver after the peer manager fenced the session,
-    /// after a later session ended, and after the neighbor was deleted, so
-    /// with no session registered for the peer the end is no longer
-    /// authoritative. A restart end is discarded: the session has no routes
-    /// left to retain. A `PeerDown` has work left only when its own
+    /// Whether a late session end must be discarded: one delivered by a
+    /// dropped session's hand-off ([`crate::RibUpdate::LateSessionEnd`]),
+    /// or any end from the session the peer's replacement superseded
+    /// ([`crate::RibUpdate::PeerUp::supersedes`]). `retains` is true for a
+    /// restart end. Such an end can arrive after the peer manager retired
+    /// the session, after a later session ended, and after the neighbor
+    /// was deleted, so with no session registered for the peer the end is
+    /// no longer authoritative. A restart end is discarded: the session has
+    /// no routes left to retain. A `PeerDown` has work left only when its own
     /// session's restart end created the peer's retention, which it then
     /// purges; otherwise whatever removed the registration already tore the
     /// session down, and running the teardown again would only republish
@@ -246,14 +254,12 @@ impl RibManager {
     /// deleted peer's label. With a session registered, the ordinary
     /// session-identity dispatch decides. Session id 0 names an emitter
     /// without identity and is never late.
-    pub(super) fn late_session_end_is_stale(&mut self, end: &crate::RibUpdate) -> bool {
-        let (peer, session_id, retains) = match *end {
-            crate::RibUpdate::PeerDown { peer, session_id } => (peer, session_id, false),
-            crate::RibUpdate::PeerGracefulRestart {
-                peer, session_id, ..
-            } => (peer, session_id, true),
-            _ => return false,
-        };
+    pub(super) fn late_session_end_is_stale(
+        &mut self,
+        peer: PeerId,
+        session_id: u64,
+        retains: bool,
+    ) -> bool {
         if session_id == 0 || self.current_session_id(peer).is_some() {
             return false;
         }
@@ -1169,6 +1175,7 @@ impl RibManager {
     pub(super) fn handle_release_peer(&mut self, peer: PeerId) {
         self.forget_helper_stale_exempt(peer);
         self.retention_owner.remove(&peer);
+        self.superseded_session.remove(&peer);
         if !peer.release() {
             debug!(%peer, "release of a handle that was not live");
         }
@@ -1898,6 +1905,7 @@ impl RibManager {
     pub(super) fn handle_peer_up(&mut self, peer: PeerId, registration: PeerUpRegistration) {
         let PeerUpRegistration {
             session_id,
+            supersedes,
             peer_asn,
             peer_router_id,
             outbound_tx,
@@ -1913,6 +1921,20 @@ impl RibManager {
             negotiated_orf_recv,
             negotiated_llgr_families,
         } = registration;
+        // A retired session cannot come up again: the peer manager ended
+        // its task before starting the replacement that named it.
+        if session_id != 0 && self.superseded_session.get(&peer) == Some(&session_id) {
+            info!(
+                %peer,
+                stale_session_id = session_id,
+                "discarding a peer up from a session its replacement superseded"
+            );
+            self.drop_staged_session_context(peer, session_id);
+            return;
+        }
+        let supersedes = supersedes
+            .map(std::num::NonZeroU64::get)
+            .filter(|&old| old != session_id);
         // Two live sessions for one peer address can overlap during the
         // RFC 4271 §6.8 collision window. A `PeerUp` that finds a
         // still-registered sender is a NEW session taking over from a
@@ -1936,14 +1958,23 @@ impl RibManager {
             {
                 selection.session_down(peer, previous_session_id, &self.metrics);
             }
-            warn!(
-                %peer,
-                session_id,
-                "peer up replaced a still-registered outbound sender — concurrent \
-                 sessions for this peer (collision window); resetting the prior \
-                 session's state and keeping it live for failover; its PeerDown \
-                 will be matched by session id"
-            );
+            if supersedes.is_some() && supersedes == self.current_session_id(peer) {
+                info!(
+                    %peer,
+                    session_id,
+                    "peer up replaced the retired session it supersedes — \
+                     resetting that session's state"
+                );
+            } else {
+                warn!(
+                    %peer,
+                    session_id,
+                    "peer up replaced a still-registered outbound sender — concurrent \
+                     sessions for this peer (collision window); resetting the prior \
+                     session's state and keeping it live for failover; its PeerDown \
+                     will be matched by session id"
+                );
+            }
             self.metrics
                 .record_rib_outbound_registration_replaced(&peer.label());
             // The replaced session may have ended cleanly at a GR helper; its
@@ -1968,6 +1999,19 @@ impl RibManager {
                 "same-channel PeerUp replay for {peer} session {session_id}"
             );
             self.clear_outbound_peer_state(peer);
+        }
+        // The session this one names is already retired by the peer
+        // manager, unlike a collision's other side: drop its record now, so
+        // this session's own end is never failed over to it. Any other
+        // live session (an unresolved collision candidate) stays. What the
+        // retired session still delivers is discarded: its messages by the
+        // session-identity gate, its end as a late one.
+        if let Some(retired) = supersedes {
+            self.drop_staged_session_context(peer, retired);
+            if let Some(sessions) = self.live_sessions.get_mut(&peer) {
+                sessions.retain(|record| record.session_id != retired);
+            }
+            self.superseded_session.insert(peer, retired);
         }
 
         let local_role = self

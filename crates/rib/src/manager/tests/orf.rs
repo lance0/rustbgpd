@@ -125,6 +125,7 @@ async fn orf_setup() -> (
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -624,6 +625,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
     // Re-establish WITHOUT ORF: the initial dump must carry the full table.
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -703,6 +705,7 @@ async fn graceful_restart_clears_orf_filter() {
     // 10/8-only filter must not survive into the new session.
     let (out_tx, mut out_rx2) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -791,6 +794,7 @@ async fn gr_flap_and_reup(
 
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1002,6 +1006,7 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
     // among the owed End-of-RIB markers. No scheduler race or synthetic pending state.
     let (outbound_tx, mut out_rx) = mpsc::channel(1);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1091,6 +1096,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1214,6 +1220,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     // Session 1 (no ORF), then a GR flap.
     let (out_tx, _out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1245,6 +1252,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     // Session 2: the restarter comes back with ORF — the deferral arms.
     let (out_tx2, _out_rx2) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1285,6 +1293,7 @@ fn dual_stack_orf_manager(peer: PeerId) -> (RibManager, mpsc::Receiver<OutboundR
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 7,
@@ -1734,6 +1743,7 @@ fn explain_best_path_orf_case(afi: Afi, denied: Prefix, permitted: Prefix) {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 130));
     let (outbound_tx, _outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65100,

@@ -144,6 +144,7 @@ async fn a_rebind_purges_routes_retained_from_the_previous_endpoint() {
     let peer = scoped("fe80::1", "swp1");
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 1,
@@ -508,6 +509,7 @@ async fn register(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(256);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id,

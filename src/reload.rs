@@ -9593,6 +9593,7 @@ import_policy_chain = ["origin-guard"]
             .unwrap();
         rib_tx
             .send(rustbgpd_rib::RibUpdate::PeerUp {
+                supersedes: None,
                 peer,
                 session_id: 0,
                 peer_asn,

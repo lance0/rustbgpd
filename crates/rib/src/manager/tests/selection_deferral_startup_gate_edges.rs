@@ -21,6 +21,7 @@ fn connect_unicast(
     });
     let (outbound_tx, outbound_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65000,

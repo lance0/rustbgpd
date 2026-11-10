@@ -1038,6 +1038,11 @@ pub struct TransportConfig {
     /// unassigned; the peer manager installs the neighbor's slot before
     /// spawning any session.
     pub rib_peer: RibPeerSlot,
+    /// The session this one replaces, sent with its `PeerUp` so the RIB
+    /// retires that session at once. The peer manager sets it on the copy
+    /// it spawns a replacement from, after it has retired the old session;
+    /// `None` for a first session and for a collision candidate.
+    pub supersedes_session: Option<u64>,
 }
 
 /// Default slow-peer backlog threshold: half the writer's outbound
@@ -1172,6 +1177,7 @@ impl TransportConfig {
             link_state: crate::link::LinkStateFeed::default(),
             neighbor_counters: NeighborCounters::default(),
             rib_peer: RibPeerSlot::default(),
+            supersedes_session: None,
         }
     }
 }

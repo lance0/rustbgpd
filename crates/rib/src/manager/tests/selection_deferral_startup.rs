@@ -171,6 +171,7 @@ fn connect(
         local_llgr_stale_time: 0,
     });
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65000,

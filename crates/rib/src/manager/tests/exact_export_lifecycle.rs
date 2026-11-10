@@ -10,6 +10,7 @@ fn test_manager() -> RibManager {
 fn peer_up(manager: &mut RibManager, peer: PeerId, session_id: u64) {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65001,

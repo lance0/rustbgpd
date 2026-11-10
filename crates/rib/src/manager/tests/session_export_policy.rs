@@ -12,6 +12,7 @@ fn chain(action: PolicyAction) -> PolicyChain {
 fn register(manager: &mut RibManager, id: u64) {
     let (outbound_tx, _rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: peer(),
         session_id: id,
         peer_asn: 65000,
@@ -137,6 +138,7 @@ async fn replaced_session_policy_releases_compiled_body_after_last_owner() {
 fn register_ungrouped(manager: &mut RibManager, peer: PeerId, export_policy: Option<PolicyChain>) {
     let (outbound_tx, _rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 1,
         peer_asn: 65000,

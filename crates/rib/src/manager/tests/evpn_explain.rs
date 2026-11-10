@@ -596,6 +596,7 @@ fn srv6_p2mp_imet_replacement_withdrawal_and_recovery_reach_export_and_inspectio
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (outbound_tx, mut out) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

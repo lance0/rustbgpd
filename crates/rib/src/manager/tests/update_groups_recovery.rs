@@ -19,6 +19,7 @@ pub(super) fn peer_up(
     policy: Option<PolicyChain>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_000,

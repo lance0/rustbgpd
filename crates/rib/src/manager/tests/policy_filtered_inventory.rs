@@ -137,6 +137,7 @@ fn register_target(
         });
     }
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_100,

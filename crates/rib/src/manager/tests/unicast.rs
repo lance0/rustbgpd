@@ -112,6 +112,7 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
     tx.send(registering_peer_up(source, 0)).await.unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65_100,
@@ -309,6 +310,7 @@ async fn partial_community_attributes_survive_policy_update_group_and_wire_encod
     tx.send(registering_peer_up(source, 0)).await.unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65_100,
@@ -414,6 +416,7 @@ fn dual_stack_add_path_peer_up(
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65100,
@@ -596,6 +599,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     for peer in [target, sibling] {
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 7,
             peer_asn: 65100,
@@ -818,6 +822,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (peer, peer_context) in [(grouped_a, false), (grouped_b, false), (private, true)] {
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65100,
@@ -1026,6 +1031,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         .unwrap();
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 7,
             peer_asn: 65100,
@@ -1296,6 +1302,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: grouped,
         session_id: 8,
         peer_asn: 65100,
@@ -1345,6 +1352,7 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 7,
         peer_asn: 65100,
@@ -1459,6 +1467,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 8,
         peer_asn: 65100,
@@ -1593,6 +1602,7 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
 
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 7,
         peer_asn: 65100,
@@ -1730,6 +1740,7 @@ fn paths_limit_ignores_entries_outside_negotiated_send_families() {
     let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
 
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 7,
         peer_asn: 65100,
@@ -1781,6 +1792,7 @@ fn paths_limit_survives_collision_failback() {
     let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
     let peer_up = |session_id, outbound_tx| RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65100,
@@ -1903,6 +1915,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     let target = PeerId::from_addr("192.0.2.9".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 7,
         peer_asn: 65100,
@@ -2132,6 +2145,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2693,6 +2707,7 @@ async fn peer_up_triggers_initial_table_dump() {
     // Register target for outbound
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2732,6 +2747,7 @@ async fn route_change_distributes_to_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2787,6 +2803,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2849,6 +2866,7 @@ async fn split_horizon_prevents_echo() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2996,6 +3014,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3052,6 +3071,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3112,6 +3132,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3159,6 +3180,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     // Register iBGP target peer
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3253,6 +3275,7 @@ async fn local_route_sent_to_ibgp_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3351,6 +3374,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3392,6 +3416,7 @@ async fn peer_down_cleans_up_outbound() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3436,6 +3461,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3518,6 +3544,7 @@ async fn withdraw_injected_removes_and_distributes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3610,6 +3637,7 @@ async fn distribute_changes_filters_unsendable_families() {
 
     // Register peer with IPv4-only sendable families
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3739,6 +3767,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3826,6 +3855,7 @@ async fn dual_stack_peer_receives_both_families() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3854,6 +3884,10 @@ async fn dual_stack_peer_receives_both_families() {
     handle.await.unwrap();
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario keeps its registrations and assertions together"
+)]
 #[tokio::test]
 async fn rr_client_route_reflected_to_all_ibgp() {
     // When RR receives a route from a client, it should reflect to all
@@ -3870,6 +3904,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Register source as iBGP client
     let (out_tx_src, _) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3893,6 +3928,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Register client target
     let (client_tx, mut client_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3917,6 +3953,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Register non-client target
     let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3971,6 +4008,10 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     handle.await.unwrap();
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario keeps its registrations and assertions together"
+)]
 #[tokio::test]
 async fn rr_nonclient_route_reflected_to_clients_only() {
     // Route from non-client → reflect to clients only (not non-clients).
@@ -3986,6 +4027,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Register source as non-client
     let (out_tx_src, _) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -4009,6 +4051,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Register client target
     let (client_tx, mut client_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -4033,6 +4076,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Register non-client target
     let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -4102,6 +4146,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -4164,6 +4209,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -4226,6 +4272,7 @@ async fn rr_local_route_to_all_ibgp() {
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -4299,6 +4346,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65_000,
@@ -4389,6 +4437,7 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
     let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65_000,
@@ -4485,6 +4534,7 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
         .unwrap();
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 7,
             peer_asn: 65100,
@@ -4608,6 +4658,7 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     let target = PeerId::from_addr("192.0.2.91".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: 0,
         peer_asn: 65_100,
@@ -4774,6 +4825,7 @@ async fn install_vrp_10_0_0_0_24_as65000(tx: &mpsc::Sender<RibUpdate>) {
 async fn ebgp_target_up(tx: &mpsc::Sender<RibUpdate>) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: PeerId::from_addr("192.0.2.92".parse().unwrap()),
         session_id: 0,
         peer_asn: 65_100,

@@ -136,6 +136,7 @@ fn peer_up(manager: &mut RibManager, source: PeerId, session_id: u64) {
 fn peer_up_update(source: PeerId, session_id: u64, peer_asn: u32) -> RibUpdate {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     RibUpdate::PeerUp {
+        supersedes: None,
         peer: source,
         session_id,
         peer_asn,

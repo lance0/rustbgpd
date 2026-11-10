@@ -2930,6 +2930,16 @@ pub enum RibUpdate {
         /// `PeerDown`/`PeerGracefulRestart` events can be matched to the
         /// session that emitted them (see `PeerDown::session_id`).
         session_id: u64,
+        /// The session this one replaces, when the peer manager retired
+        /// that session before starting this one (an inbound replacement
+        /// of an idle primary, a respawn after an abort). The RIB manager
+        /// drops that session's record at once instead of keeping it for a
+        /// collision failover, and treats any session end it still
+        /// delivers as late. `None` for a first session and for either
+        /// side of an RFC 4271 §6.8 collision, where both sessions may
+        /// still be Established. Non-zero, so the variant stays within
+        /// the message size bound; id 0 names no session.
+        supersedes: Option<std::num::NonZeroU64>,
         /// Peer's remote ASN (for MRT `PEER_INDEX_TABLE`).
         peer_asn: u32,
         /// Peer's BGP router ID.

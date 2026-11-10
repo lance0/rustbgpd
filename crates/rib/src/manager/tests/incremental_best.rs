@@ -64,6 +64,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         let peer = peer_v4(Ipv4Addr::new(192, 0, 2, octet));
         let (outbound_tx, mut out) = mpsc::channel(16);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best,
             interpret_rfc1997: true,
             session_id: 0,
@@ -582,6 +583,7 @@ fn apply(manager: &mut RibManager, channels: &mut Channels, op: &Op, received_at
             }
             let (outbound_tx, outbound_rx) = mpsc::channel(8);
             manager.handle_update(RibUpdate::PeerUp {
+                supersedes: None,
                 per_client_best: false,
                 interpret_rfc1997: true,
                 session_id: 0,

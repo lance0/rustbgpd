@@ -53,6 +53,7 @@ fn peer_up_with(
         vec![]
     };
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_010,
@@ -1877,6 +1878,7 @@ fn deferred_unicast_peer(
         local_llgr_stale_time: 0,
     });
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_010,
@@ -3391,6 +3393,7 @@ fn orf_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: PeerId::from_addr(v4(octet)),
         session_id: 0,
         peer_asn: 65_010,

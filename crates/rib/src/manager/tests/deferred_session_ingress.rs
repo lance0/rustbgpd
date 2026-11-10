@@ -33,6 +33,7 @@ fn up(
     outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65001,

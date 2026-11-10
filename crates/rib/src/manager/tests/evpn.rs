@@ -21,6 +21,7 @@ fn smet_obeys_family_export_policy_and_rr_client_gates() {
         );
         let (outbound_tx, mut out) = mpsc::channel(4);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
@@ -81,6 +82,7 @@ fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() 
     let target = PeerId::from_addr("192.0.2.30".parse().unwrap());
     let (outbound_tx, mut out) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -194,6 +196,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
     let target = PeerId::from_addr("192.0.2.30".parse().unwrap());
     let (outbound_tx, mut out) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -435,6 +438,7 @@ async fn evpn_export_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997,
         session_id: 0,
@@ -477,6 +481,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     // Register target as RR client for L2VPN/EVPN (iBGP, same AS).
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -504,6 +509,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     // suppresses them at the stage step.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -600,6 +606,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     // Source is an RR client.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -624,6 +631,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     // A second RR client so reflection has somewhere to go.
     let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -713,6 +721,7 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
     for (peer, router_id) in [(closed, "192.0.2.30"), (full, "192.0.2.31")] {
         let (outbound_tx, mut out) = mpsc::channel(1);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
@@ -818,6 +827,7 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
     let peer = PeerId::from_addr("192.0.2.31".parse().unwrap());
     let (outbound_tx, mut out) = mpsc::channel(1);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -919,6 +929,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // We'll fill it, then the EVPN announce will fail and mark target dirty.
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -943,6 +954,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // Source as RR client so reflection isn't suppressed.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1119,6 +1131,7 @@ async fn deferred_evpn_churn_recovers_exact_announces_and_withdrawals() {
     for (peer, router_id, capacity) in [(target, 2, 1), (source.addr(), 1, 64)] {
         let (out_tx, mut out_rx) = mpsc::channel(capacity);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
@@ -1815,6 +1828,7 @@ async fn inject_evpn_reflects_to_peer() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1899,6 +1913,7 @@ async fn evpn_rr_client_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2252,6 +2267,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let early = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (early_out_tx, mut early_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2299,6 +2315,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let late = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (late_out_tx, mut late_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2585,6 +2602,7 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 31));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2755,6 +2773,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 32));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2944,6 +2963,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2967,6 +2987,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3048,6 +3069,7 @@ async fn partial_pmsi_survives_type3_imet_distribution_and_wire_encoding() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3071,6 +3093,7 @@ async fn partial_pmsi_survives_type3_imet_distribution_and_wire_encoding() {
 
     let (source_tx, mut source_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3780,6 +3803,7 @@ async fn session_up(
 ) {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id,
@@ -4047,6 +4071,7 @@ async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
     async fn up(tx: &mpsc::Sender<RibUpdate>, peer: PeerId, session_id: u64) {
         let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id,
@@ -4420,6 +4445,7 @@ fn evpn_refresh_answer_settles_the_owed_withdrawal() {
     manager.outbound_row_credit_override = None;
     let (outbound_tx, mut stuck_rx) = mpsc::channel(usize::try_from(SESSION_CHANNEL).unwrap());
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

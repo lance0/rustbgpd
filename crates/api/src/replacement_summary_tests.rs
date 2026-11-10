@@ -236,6 +236,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     let outbound_task = tokio::spawn(async move { while outbound_rx.recv().await.is_some() {} });
     rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65001,
@@ -680,6 +681,7 @@ fn export_peer_up(
     outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         peer: PeerId::from_addr(peer),
         session_id,
         peer_asn: 65001,

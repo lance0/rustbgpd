@@ -211,6 +211,7 @@ fn peer_up_direct_with_options(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id,
@@ -274,6 +275,7 @@ async fn seeded_manager() -> (
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 99));
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

@@ -1363,9 +1363,13 @@ impl PeerSession {
                     }
 
                     // Register with RIB manager for outbound updates
-                    let _ = self.send_to_rib(RibUpdate::PeerUp {
+                    let peer_up = RibUpdate::PeerUp {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,
+                        supersedes: self
+                            .config
+                            .supersedes_session
+                            .and_then(std::num::NonZeroU64::new),
                         peer_asn,
                         peer_router_id: self
                             .negotiated
@@ -1397,7 +1401,9 @@ impl PeerSession {
                                     .collect()
                             })
                             .unwrap_or_default(),
-                    });
+                    };
+                    let _ =
+                        self.send_to_rib_then(peer_up, super::inbound::OnRibAdmission::Registered);
                     let _ = self.send_to_rib(RibUpdate::PeerAddPathLimits {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,

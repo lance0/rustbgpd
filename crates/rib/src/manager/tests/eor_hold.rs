@@ -55,6 +55,7 @@ fn connect_with(
     });
     let (outbound_tx, outbound_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65_000,
@@ -715,6 +716,7 @@ fn connect_ungrouped(
     });
     let (outbound_tx, outbound_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65_000,
@@ -995,6 +997,7 @@ async fn a_dirty_peer_held_by_another_family_gets_the_released_marker_once() {
 fn orf_gated(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, mut output) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: TARGET,
         session_id: 2,
         peer_asn: 65_000,
