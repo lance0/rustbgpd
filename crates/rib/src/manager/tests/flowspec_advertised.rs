@@ -58,6 +58,7 @@ async fn advertised_flowspec_tracks_committed_policy_and_withdrawal() {
     ] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,

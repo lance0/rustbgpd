@@ -403,6 +403,7 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     for peer in [first, second] {
         let (outbound_tx, outbound_rx) = mpsc::channel(32);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65000,
@@ -504,6 +505,7 @@ fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
     let (outbound_tx, mut receiver) = mpsc::channel(4);
     let padding = outbound_tx.clone();
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: destination,
         session_id: 0,
         peer_asn: 65000,
@@ -605,6 +607,7 @@ fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
     let register = |manager: &mut RibManager, session_id| {
         let (outbound_tx, receiver) = mpsc::channel(16);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer: destination,
             session_id,
             peer_asn: 65000,
@@ -778,6 +781,7 @@ fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
     let destination = peer_v4(Ipv4Addr::new(192, 0, 2, 3));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1043,6 +1047,7 @@ fn register_destination(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

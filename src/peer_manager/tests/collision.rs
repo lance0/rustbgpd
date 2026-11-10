@@ -3109,6 +3109,21 @@ async fn establish_inbound(
     rib_rx: &mut mpsc::Receiver<rustbgpd_rib::RibUpdate>,
     peer_addr: IpAddr,
 ) -> (TcpStream, mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>) {
+    let (client, outbound_tx, _) = establish_inbound_superseding(mgr, rib_rx, peer_addr).await;
+    (client, outbound_tx)
+}
+
+/// As [`establish_inbound`], also returning the session its `PeerUp` named
+/// as superseded.
+async fn establish_inbound_superseding(
+    mgr: &mut PeerManager,
+    rib_rx: &mut mpsc::Receiver<rustbgpd_rib::RibUpdate>,
+    peer_addr: IpAddr,
+) -> (
+    TcpStream,
+    mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
+    Option<u64>,
+) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
@@ -3134,19 +3149,20 @@ async fn establish_inbound(
         client.write_all(&bytes).await.unwrap();
     }
     let session_id = mgr.peers[&key(peer_addr)].session_id();
-    let outbound_tx = loop {
+    let (outbound_tx, supersedes) = loop {
         let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
             .await
             .expect("the new session must establish")
             .expect("RIB channel open");
         if let rustbgpd_rib::RibUpdate::PeerUp {
             session_id: id,
+            supersedes,
             outbound_tx,
             ..
         } = update
             && id == session_id
         {
-            break outbound_tx;
+            break (outbound_tx, supersedes.map(std::num::NonZeroU64::get));
         }
     };
     assert_eq!(
@@ -3158,7 +3174,7 @@ async fn establish_inbound(
             .fsm_state,
         SessionState::Established
     );
-    (client, outbound_tx)
+    (client, outbound_tx, supersedes)
 }
 
 /// eBGP UPDATE from AS 65002 announcing `prefix`, plus `extra` attributes.
@@ -3493,6 +3509,146 @@ async fn replaced_session_behind_a_full_rib_mailbox_still_sends_its_peer_down() 
         Ok(true),
         "the replaced session's PeerDown must reach the RIB once it drains"
     );
+}
+
+/// The peer manager marks a replacement, not a collision promotion. The
+/// first inbound is a candidate beside a primary with no connection and is
+/// promoted: its `PeerUp` names no session. Its TCP then fails, the peer
+/// reconnects, and the Idle arm replaces it: that `PeerUp` names the
+/// session it replaced.
+/// Mutation-red: without the id set on the replacement's configuration its
+/// `PeerUp` names nothing.
+#[tokio::test]
+async fn inbound_replacement_names_the_session_it_supersedes() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4096);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let (first, _first_tx, promoted_names) =
+        establish_inbound_superseding(&mut mgr, &mut rib_rx, peer_addr).await;
+    let first_session = mgr.peers[&key(peer_addr)].session_id();
+    assert_eq!(
+        promoted_names, None,
+        "a promoted candidate names no session"
+    );
+
+    drop(first);
+    handle_until_primary_idle(&mut mgr).await;
+    let (_second, _second_tx, replacement_names) =
+        establish_inbound_superseding(&mut mgr, &mut rib_rx, peer_addr).await;
+    assert_ne!(mgr.peers[&key(peer_addr)].session_id(), first_session);
+    assert_eq!(replacement_names, Some(first_session));
+    assert_eq!(
+        mgr.peers[&key(peer_addr)]
+            .transport_config
+            .supersedes_session,
+        None,
+        "the managed configuration stays unmarked"
+    );
+}
+
+/// The respawn after an unstoppable primary is aborted is a replacement
+/// too: once the fresh session is started and establishes, its `PeerUp`
+/// names the aborted primary. The respawn is an active session, so the
+/// neighbor's remote address points at a listener the test owns.
+/// Mutation-red: without the id set on the respawn's configuration its
+/// `PeerUp` names nothing.
+#[tokio::test]
+async fn respawn_after_an_aborted_primary_names_the_session_it_supersedes() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4096);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let (_first, _first_tx) = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
+    let aborted = mgr.peers[&key(peer_addr)].session_id();
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    mgr.peers
+        .get_mut(&key(peer_addr))
+        .unwrap()
+        .transport_config
+        .remote_addr = listener.local_addr().unwrap();
+    mgr.replace_unstoppable_primary(&key(peer_addr)).await;
+    let respawned = mgr.peers[&key(peer_addr)].session_id();
+    assert_ne!(respawned, aborted);
+    mgr.peers[&key(peer_addr)]
+        .handle()
+        .start_timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let (mut peer_side, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the respawned session connects")
+        .unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    assert!(matches!(
+        read_bgp_message(&mut peer_side, &mut buf).await,
+        Message::Open(_)
+    ));
+    let mut bytes = encode_message(&Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)))).unwrap();
+    bytes.extend(encode_message(&Message::Keepalive).unwrap());
+    peer_side.write_all(&bytes).await.unwrap();
+    let named = loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+            .await
+            .expect("the respawned session must establish")
+            .expect("RIB channel open");
+        if let rustbgpd_rib::RibUpdate::PeerUp {
+            session_id,
+            supersedes,
+            ..
+        } = update
+            && session_id == respawned
+        {
+            break supersedes.map(std::num::NonZeroU64::get);
+        }
+    };
+    assert_eq!(named, Some(aborted));
 }
 
 fn permit_all_chain() -> PolicyChain {

@@ -25,6 +25,7 @@ async fn register_export_session(
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(session.peer_ip),
             session_id,
             peer_asn: 65002,

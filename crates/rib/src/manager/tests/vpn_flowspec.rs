@@ -94,6 +94,7 @@ async fn register(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -211,6 +212,7 @@ fn scope_admission_manager() -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (outbound_tx, out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -943,6 +945,7 @@ fn flowspec_refresh_window_counts_and_sweeps_by_identity() {
     let peer = peer_v4(source);
     let (outbound_tx, _outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 2,
@@ -1059,6 +1062,7 @@ fn withdrawing_one_rule_keeps_its_twin_stale(
     families.dedup();
     let (outbound_tx, _outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 2,

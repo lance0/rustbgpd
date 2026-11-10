@@ -92,6 +92,7 @@ async fn multipath_send_advertises_multiple_routes() {
     // Register multi-path target (send_max=5)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -168,6 +169,7 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -327,6 +329,7 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -504,6 +507,7 @@ async fn multipath_send_respects_send_max() {
     // Register target with send_max=2
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -557,6 +561,7 @@ async fn multipath_send_split_horizon() {
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -656,6 +661,7 @@ fn multipath_initial_dump_split_horizon_after_deferred_registration() {
     manager.initial_dump_defer_min_routes = 0;
     let (out_tx, mut out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -733,6 +739,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     // Register multi-path target first
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -877,6 +884,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     // Register single-best target (send_max=0)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -928,6 +936,7 @@ async fn multipath_peer_down_cleans_up_state() {
     // Register multi-path target
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -982,6 +991,7 @@ async fn multipath_peer_down_cleans_up_state() {
 
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1026,6 +1036,7 @@ async fn multipath_send_incremental_route_addition() {
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1160,6 +1171,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     // Register multi-path target
     let (multi_tx, mut multi_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1183,6 +1195,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     // Register single-best target
     let (single_tx, mut single_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1283,6 +1296,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1378,6 +1392,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1482,6 +1497,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1590,6 +1606,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1709,6 +1726,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1801,6 +1819,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

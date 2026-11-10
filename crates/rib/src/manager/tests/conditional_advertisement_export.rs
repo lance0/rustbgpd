@@ -135,6 +135,7 @@ fn peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(256);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: ip(peer),
         session_id: 0,
         peer_asn: if shape.ibgp { 65001 } else { 65100 },
@@ -573,6 +574,7 @@ async fn explain_best_path_gated_best_frees_the_only_add_path_slot() {
     );
     let (outbound_tx, mut rx) = mpsc::channel(256);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: ip(TARGET),
         session_id: 0,
         peer_asn: 65100,
@@ -1256,6 +1258,7 @@ async fn run_loop_withdraws_after_the_settle_window() {
     .await;
     let (outbound_tx, mut out_rx) = mpsc::channel(64);
     send(RibUpdate::PeerUp {
+        supersedes: None,
         peer: ip(TARGET),
         session_id: 0,
         peer_asn: 65100,
@@ -1394,6 +1397,7 @@ async fn same_address_neighbors_keep_their_own_conditional_attachments() {
     let mut receivers = [eth0, eth1].map(|peer| {
         let (outbound_tx, outbound_rx) = mpsc::channel(256);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65100,

@@ -710,7 +710,8 @@ pub struct RibManager {
     /// interleaving `PeerUp(winner)` → `PeerUp(loser)` →
     /// `PeerDown(loser)`) instead of tearing down a peer that still has
     /// an Established session. Entries are removed by their session's own
-    /// `PeerDown`/GR-down or by full peer teardown.
+    /// `PeerDown`/GR-down, by a replacement's `PeerUp` that names them as
+    /// superseded, or by full peer teardown.
     live_sessions: HashMap<PeerId, Vec<LiveSessionRecord>>,
     /// The session whose `PeerGracefulRestart` created the peer's current
     /// GR/LLGR retention. A late `PeerDown` delivered by another session's
@@ -719,6 +720,12 @@ pub struct RibManager {
     /// end, and removed by every full teardown of the peer (a `PeerDown`,
     /// retention expiry, deletion) and when its handle is released.
     retention_owner: HashMap<PeerId, u64>,
+    /// The session the peer's latest replacement named in
+    /// [`RibUpdate::PeerUp::supersedes`]. Its record is gone, and a session
+    /// end it still delivers is handled as a late one. One id per peer,
+    /// overwritten by the next replacement and removed when the peer's
+    /// handle is released.
+    superseded_session: HashMap<PeerId, u64>,
     /// Physical live-session completion options, including collision records.
     /// Zero avoids fleet scans while EVPN completion control is inactive.
     evpn_feed_receipt_count: usize,
@@ -2819,6 +2826,7 @@ impl RibManager {
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
             retention_owner: HashMap::new(),
+            superseded_session: HashMap::new(),
             evpn_feed_receipt_count: 0,
             pending_peer_export_context: HashMap::new(),
             pending_peer_withheld_families: HashMap::new(),
@@ -4623,7 +4631,16 @@ impl RibManager {
                 }
             }
             RibUpdate::LateSessionEnd(end) => {
-                if !self.late_session_end_is_stale(&end) {
+                let stale = match *end {
+                    RibUpdate::PeerDown { peer, session_id } => {
+                        self.late_session_end_is_stale(peer, session_id, false)
+                    }
+                    RibUpdate::PeerGracefulRestart {
+                        peer, session_id, ..
+                    } => self.late_session_end_is_stale(peer, session_id, true),
+                    _ => false,
+                };
+                if !stale {
                     self.handle_update_untimed(*end);
                 }
             }
@@ -4650,6 +4667,7 @@ impl RibManager {
             RibUpdate::PeerUp {
                 peer,
                 session_id,
+                supersedes,
                 peer_asn,
                 peer_router_id,
                 outbound_tx,
@@ -4668,6 +4686,7 @@ impl RibManager {
                 peer,
                 PeerUpRegistration {
                     session_id,
+                    supersedes,
                     peer_asn,
                     peer_router_id,
                     outbound_tx,

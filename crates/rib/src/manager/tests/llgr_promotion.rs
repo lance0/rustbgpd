@@ -1760,6 +1760,7 @@ fn run_rtc_restage_expiry_case(fresh: u16, vpn: u8) -> BTreeMap<&'static str, us
     let peer_up = |manager: &mut RibManager| {
         let (outbound_tx, outbound_rx) = mpsc::channel(4096);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,

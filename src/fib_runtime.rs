@@ -6755,6 +6755,7 @@ metric = 200
             outbound.push(out_rx);
             rib_tx
                 .send(RibUpdate::PeerUp {
+                    supersedes: None,
                     peer: PeerId::from_addr(ip(peer)),
                     session_id: 0,
                     peer_asn: 65000 + u32::from(octet),

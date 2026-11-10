@@ -23,6 +23,7 @@ fn peer_up_v4(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, mut output) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -272,6 +273,7 @@ fn up_session(
             .collect()
     };
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id,
@@ -789,6 +791,7 @@ fn owed_refreshes_in_several_families_answer_in_one_operation() {
 /// An IPv4 RR client registering with a running actor.
 fn actor_peer_up(peer: PeerId, outbound_tx: mpsc::Sender<OutboundRouteUpdate>) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

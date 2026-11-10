@@ -392,6 +392,7 @@ async fn run(
             primary_tx.send(RibUpdate::PeerUp {
                 peer: PeerId::from_addr(peer),
                 session_id: 0,
+                supersedes: None,
                 peer_asn: 65001,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
                 outbound_tx,

@@ -289,6 +289,7 @@ async fn setup(n_clients: u32, n_sources: u32) -> Harness {
         harness
             .tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer: PeerId::from_addr(IpAddr::V4(source_addr(index))),
                 session_id: 0,
                 peer_asn: 64512,
@@ -347,6 +348,7 @@ impl Harness {
                 .unwrap();
             self.tx
                 .send(RibUpdate::PeerUp {
+                    supersedes: None,
                     peer,
                     session_id: 1,
                     peer_asn: 64512,

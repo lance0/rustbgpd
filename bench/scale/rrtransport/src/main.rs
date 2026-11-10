@@ -144,6 +144,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
     peer.hold_time = 30;
     peer.families = vec![(Afi::Ipv4, Safi::Unicast)];
     TransportConfig {
+        supersedes_session: None,
         peer,
         remote_addr: remote,
         local_address: None,
@@ -374,6 +375,7 @@ fn checksum(prefixes: &BTreeSet<Ipv4Prefix>) -> u64 {
 fn source_peer_up(source: Ipv4Addr) -> RibUpdate {
     let (outbound_tx, _outbound_rx) = mpsc::channel(1);
     RibUpdate::PeerUp {
+        supersedes: None,
         peer: PeerId::from_ipv4(source),
         session_id: 0,
         peer_asn: 64512,

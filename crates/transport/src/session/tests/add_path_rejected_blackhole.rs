@@ -106,6 +106,7 @@ async fn setup_then(
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: receiver,
             session_id: RECEIVER_SESSION,
             peer_asn: 65_002,

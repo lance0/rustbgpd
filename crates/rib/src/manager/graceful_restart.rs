@@ -315,6 +315,11 @@ impl RibManager {
         // other live session exists, GR stale-path retention proceeds
         // exactly as before stamping.
         use super::peer_lifecycle::SessionTeardownDisposition;
+        if self.superseded_session.get(&peer) == Some(&session_id)
+            && self.late_session_end_is_stale(peer, session_id, true)
+        {
+            return false;
+        }
         match self.classify_session_teardown(peer, session_id, "PeerGracefulRestart") {
             SessionTeardownDisposition::DiscardStale => return false,
             SessionTeardownDisposition::FailOver => {

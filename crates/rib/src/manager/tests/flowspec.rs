@@ -30,6 +30,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -92,6 +93,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -149,6 +151,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -444,6 +447,7 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                 assert_eq!(manager.loc_rib.get_flowspec(&key).unwrap().peer, source);
                 let (out_tx, mut out_rx) = mpsc::channel(64);
                 manager.handle_update(RibUpdate::PeerUp {
+                    supersedes: None,
                     per_client_best: false,
                     interpret_rfc1997: true,
                     session_id: 0,
@@ -569,6 +573,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 100));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -724,6 +729,7 @@ async fn destinationless_v4_v6_rules_coexist_and_withdraw_independently() {
     let target = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -811,6 +817,7 @@ async fn flowspec_export_prefix_term_does_not_match_destination_less_rules() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -882,6 +889,7 @@ async fn flowspec_export_prefix_term_still_matches_real_destination_prefix() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1243,6 +1251,7 @@ async fn flowspec_export_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997,
         session_id: 0,
@@ -1295,6 +1304,7 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 41));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1544,6 +1554,7 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 42));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1839,6 +1850,7 @@ fn flowspec_selection_reads_the_full_scan_candidates(
     }
     let (out_tx, mut out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

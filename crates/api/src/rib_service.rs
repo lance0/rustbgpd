@@ -11516,6 +11516,7 @@ mod tests {
             let (outbound_tx, receiver) = mpsc::channel(1);
             receivers.push(receiver);
             tx.send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer,
                 session_id: 0,
                 peer_asn: 65001,

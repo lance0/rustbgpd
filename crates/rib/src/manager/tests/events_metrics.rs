@@ -1123,6 +1123,7 @@ fn peer_up_initializes_every_adj_rib_out_family_series() {
     manager.handle_peer_up(
         peer,
         PeerUpRegistration {
+            supersedes: None,
             session_id: 1,
             peer_asn: 65_000,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
@@ -1576,6 +1577,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
 
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1699,6 +1701,7 @@ async fn query_advertised_count() {
 
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

@@ -2799,6 +2799,7 @@ mod tests {
         outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
     ) -> RibUpdate {
         RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(std::net::IpAddr::V4(peer)),
             session_id: 0,
             peer_asn: 65000,

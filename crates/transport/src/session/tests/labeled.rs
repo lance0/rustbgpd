@@ -772,6 +772,7 @@ async fn one_to_two_label_replacement_withdraws_the_advertised_copy() {
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(session.peer_ip),
             session_id: 7,
             peer_asn: 65002,

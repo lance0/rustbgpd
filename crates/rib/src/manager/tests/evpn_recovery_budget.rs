@@ -56,6 +56,7 @@ fn register_session(
     session_id: u64,
 ) {
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65000,

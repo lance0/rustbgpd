@@ -75,6 +75,7 @@ fn register(
         context: source.context.clone().unwrap(),
     });
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: source.peer,
         session_id: source.session_id,
         peer_asn: source.peer_asn.unwrap(),

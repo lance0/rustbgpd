@@ -199,6 +199,7 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
     let destination = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(32);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: destination,
         session_id: 0,
         peer_asn: 65000,

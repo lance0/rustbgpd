@@ -288,6 +288,7 @@ fn register_growth_peer(
 ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(16);
     manager.handle_update(crate::RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65_000,
@@ -3883,6 +3884,7 @@ fn register_pcb_member(
 ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
     m.handle_update(crate::update::RibUpdate::PeerUp {
+        supersedes: None,
         peer: member,
         session_id: 0,
         peer_asn: TARGET_ASN,
@@ -4288,6 +4290,7 @@ fn grouped_vpn_non_full_encoder_refusal_keeps_the_owed_withdrawal() {
     let families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)];
     let (outbound, mut receiver) = tokio::sync::mpsc::channel(16);
     manager.handle_update(crate::update::RibUpdate::PeerUp {
+        supersedes: None,
         peer: MEMBER,
         session_id: 0,
         peer_asn: TARGET_ASN,
@@ -4358,6 +4361,7 @@ fn capacity_one_vpn_member() -> (
     );
     let (outbound, mut receiver) = tokio::sync::mpsc::channel(1);
     manager.handle_update(crate::update::RibUpdate::PeerUp {
+        supersedes: None,
         peer: MEMBER,
         session_id: 0,
         peer_asn: TARGET_ASN,
@@ -5423,6 +5427,7 @@ fn register_ungrouped_pcb_peer(
     m.slow_isolated_peers.insert(member);
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
     m.handle_update(crate::update::RibUpdate::PeerUp {
+        supersedes: None,
         peer: member,
         session_id: 0,
         peer_asn: TARGET_ASN,

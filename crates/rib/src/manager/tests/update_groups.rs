@@ -321,6 +321,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         });
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -536,6 +537,7 @@ async fn peer_up_with_capacity(
         vec![]
     };
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: spec.per_client_best,
         interpret_rfc1997: true,
         session_id: 0,
@@ -649,6 +651,7 @@ fn register_direct_exact_peer(
     });
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_000,
@@ -694,6 +697,7 @@ fn register_direct_peer_session(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65_000,
@@ -768,6 +772,7 @@ fn installed_export_chain_query_ignores_update_grouping() {
     for (peer, add_path_send_max) in [(grouped[0], 0), (grouped[1], 0), (ungrouped.addr(), 2)] {
         let (outbound_tx, outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65_000,
@@ -2781,6 +2786,7 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     // helper hard-codes IPv4-unicast.
     let (pcb_tx, mut pcb_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: true,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2808,6 +2814,7 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     // yet), so send PeerUp by hand instead of the helper.
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: spec.per_client_best,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3004,6 +3011,7 @@ async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
     ] {
         let (out_tx, _out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65001,
@@ -5480,6 +5488,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 5, 1));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -5552,6 +5561,10 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
 /// per-peer resync EMITS them; a successful resync must then drain the
 /// residue (gauge back to zero) — it must not floor at nonzero because
 /// the per-peer path never consumes the carried extras.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario keeps its registrations and assertions together"
+)]
 #[tokio::test]
 async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     tokio::time::pause();
@@ -5583,6 +5596,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 5, 1));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -6041,6 +6055,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     let (u_tx, mut u_rx) = mpsc::channel(2);
     for (peer, out_tx, vantage) in [(grouped, g_tx, None), (ungrouped, u_tx, Some(vantage))] {
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
@@ -6194,6 +6209,7 @@ fn direct_clean_transition_manager_with_policy(
         });
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -7008,6 +7024,7 @@ async fn snapshot_rows_carry_content_stable_policy_fingerprints() {
         peers.push(peer);
         let (outbound_tx, _outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -7504,6 +7521,7 @@ fn full_channel_manager(
     for peer in [stuck, live] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(FULL_CHANNEL_CAPACITY);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -7734,6 +7752,7 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
     for peer in [stuck, live] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(SESSION_CHANNEL);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -7886,6 +7905,7 @@ fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
     for (peer, capacity) in [(stuck, FULL_CHANNEL_CAPACITY), (live, 64)] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -8179,6 +8199,10 @@ enum ForcedSessionEnd {
 /// the next registration's initial table already carries every route; a
 /// leftover force bit made the first distribution pass after it replay the
 /// whole table a second time.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario keeps its registrations and assertions together"
+)]
 fn forced_resync_does_not_outlive_registration(end: ForcedSessionEnd, ungrouped: bool) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -8186,6 +8210,7 @@ fn forced_resync_does_not_outlive_registration(end: ForcedSessionEnd, ungrouped:
     let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
     let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));
     let peer_up = |peer, session_id, outbound_tx| RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65_000,
@@ -8792,6 +8817,7 @@ fn distribution_replacement_of_closed_receiver_routes_normally() {
     );
     let (outbound_tx, mut replacement_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 1,
         peer_asn: 65_000,
@@ -9412,6 +9438,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     let stranger = peer_v4(Ipv4Addr::new(10, 99, 0, 3));
     let (stranger_tx, mut stranger_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -9544,6 +9571,7 @@ async fn prestage_control_join_without_prestage() {
     let stranger = peer_v4(Ipv4Addr::new(10, 99, 0, 3));
     let (stranger_tx, mut stranger_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -10030,6 +10058,7 @@ fn register_direct_pcb_peer_capacity(
     });
     let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_100,
@@ -10699,6 +10728,7 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
         let peer = PeerId::from_addr("10.54.1.1".parse().unwrap());
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         let registration = RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 7,
             peer_asn: 65_000,
@@ -10960,6 +10990,7 @@ async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
     for peer in [stuck, live] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 0,
             peer_asn: 65_000,
@@ -18103,6 +18134,7 @@ fn register_direct_peer_with_policy(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_000,

@@ -27,6 +27,7 @@ fn route_refresh_actor_duration_counts_only_accepted_active_refresh_work() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 2,
@@ -141,6 +142,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -871,6 +873,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -998,6 +1001,7 @@ async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
     // Peer re-establishes — still awaiting End-of-RIB, routes GR-stale.
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1161,6 +1165,7 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
     // phase, routes keep their LLGR-stale flag).
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1255,6 +1260,7 @@ fn peer_down_mid_refresh_zeroes_refresh_gauges() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 2,
@@ -1321,6 +1327,7 @@ fn route_refresh_request_releases_its_queued_flag_on_dequeue() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1609,6 +1616,7 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
         {
             let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
             manager.handle_update(RibUpdate::PeerUp {
+                supersedes: None,
                 per_client_best: false,
                 interpret_rfc1997: true,
                 session_id: 0,

@@ -1366,6 +1366,10 @@ impl PeerSession {
                     let _ = self.send_to_rib(RibUpdate::PeerUp {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,
+                        supersedes: self
+                            .config
+                            .supersedes_session
+                            .and_then(std::num::NonZeroU64::new),
                         peer_asn,
                         peer_router_id: self
                             .negotiated

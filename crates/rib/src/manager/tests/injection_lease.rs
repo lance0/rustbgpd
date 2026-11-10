@@ -54,6 +54,7 @@ impl Harness {
         let manager = tokio::spawn(manager.run());
         let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
@@ -794,6 +795,7 @@ async fn late_expiry_of_an_old_generation_spares_a_retagged_key() {
     let manager = tokio::spawn(manager.run());
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1295,6 +1297,7 @@ async fn expiry_hands_the_prefix_to_a_learned_route() {
     let mut h = Harness::start().await;
     let (source_tx, _source_rx) = mpsc::channel(64);
     h.tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1682,6 +1685,7 @@ async fn expiry_batch_turn() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1745,6 +1749,7 @@ async fn peer_down_turn() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer_up = |peer: PeerId, asn: u32, outbound_tx| RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2647,6 +2652,7 @@ fn unchanged_readd_cost(existing: u16, guarded: bool) -> (usize, usize, Duration
     let mut manager = manager_for_keys();
     let (out_tx, mut out_rx) = mpsc::channel(4096);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

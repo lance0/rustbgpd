@@ -573,6 +573,7 @@ async fn vpn_flowspec_export_evidence_requires_negotiation_and_fences_scope_toke
             .unwrap();
         rib_tx
             .send(RibUpdate::PeerUp {
+                supersedes: None,
                 peer,
                 session_id: 0,
                 peer_asn: 65_010,

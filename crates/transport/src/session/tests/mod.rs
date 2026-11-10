@@ -1146,6 +1146,7 @@ async fn register_test_source(rib_tx: &mpsc::Sender<RibUpdate>, peer: PeerId, se
     let (outbound_tx, _outbound_rx) = mpsc::channel(1);
     rib_tx
         .send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id,
             peer_asn: 65002,

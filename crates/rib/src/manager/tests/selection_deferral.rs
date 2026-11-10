@@ -435,6 +435,7 @@ fn peer_up_with_families(
     sendable_families: Vec<(Afi, Safi)>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65000,

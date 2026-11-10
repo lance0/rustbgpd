@@ -186,6 +186,7 @@ fn register_peer_with_selection(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id: 0,
         peer_asn: 65_000,
@@ -2388,6 +2389,7 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     for peer in peers {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65_000,

@@ -39,6 +39,7 @@ fn connect(
     });
     let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65000,
@@ -472,6 +473,7 @@ fn connect_withheld_v6(
     });
     let (outbound_tx, target_rx) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         peer: target,
         session_id: TARGET_SESSION,
         peer_asn: 65001,

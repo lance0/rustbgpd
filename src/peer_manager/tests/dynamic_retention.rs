@@ -172,6 +172,7 @@ fn session(
             local_llgr_stale_time: 0,
         },
         RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id,
@@ -899,6 +900,42 @@ async fn helper_only_member_is_retained_from_its_sessions_own_end() {
     drop(client);
     loc_rib_count(&rib_tx).await;
     rib_task.abort();
+}
+
+/// A retained member's reconnect is a replacement of its last session,
+/// which the peer manager retired when it went idle: the reconnect's
+/// `PeerUp` names it, and the member's first session names none. The
+/// managed configuration, which is compared across reloads, stays unmarked.
+/// Red proof: without the id on the reconnect's configuration its `PeerUp`
+/// names nothing.
+#[tokio::test]
+async fn retained_reconnect_names_the_members_last_session() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(4096);
+    let mut mgr = manager_on(rib_tx);
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    let first = mgr.peers[&key(MEMBER)].session_id();
+    drop_until_idle(&mut mgr, client).await;
+    assert_eq!(mgr.retained_dynamic[&key(MEMBER)].last_session, first);
+
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    let managed = &mgr.peers[&key(MEMBER)];
+    let second = managed.session_id();
+    assert_eq!(managed.transport_config.supersedes_session, None);
+    let mut named = Vec::new();
+    while let Ok(update) = rib_rx.try_recv() {
+        if let RibUpdate::PeerUp {
+            session_id,
+            supersedes,
+            ..
+        } = update
+        {
+            named.push((session_id, supersedes.map(std::num::NonZeroU64::get)));
+        }
+    }
+    assert_eq!(named, [(first, None), (second, Some(first))]);
+    drop(client);
 }
 
 /// A reconnect from another AS starts its counters at zero, as a new

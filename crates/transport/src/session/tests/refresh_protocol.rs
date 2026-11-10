@@ -268,6 +268,7 @@ async fn gr_orf_first_refresh_sends_initial_eor_before_any_borr_on_tcp() {
     .await
     .unwrap();
     let peer_up = |outbound_tx| RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,

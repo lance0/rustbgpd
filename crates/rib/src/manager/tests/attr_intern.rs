@@ -1441,6 +1441,7 @@ fn evpn_export_fixture_for_receivers(
     {
         let (outbound_tx, outbound_rx) = mpsc::channel(4096);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,

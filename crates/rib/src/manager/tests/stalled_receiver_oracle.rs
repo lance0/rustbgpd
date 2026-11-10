@@ -1082,6 +1082,7 @@ impl Harness {
             arm.rx[peer] = Some(outbound_rx);
             let add_path = config.add_path != 0;
             arm.send(RibUpdate::PeerUp {
+                supersedes: None,
                 per_client_best: false,
                 interpret_rfc1997: true,
                 session_id,

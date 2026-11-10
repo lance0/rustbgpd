@@ -1037,6 +1037,7 @@ async fn peer_up_with_encoder(
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 7,
@@ -1167,6 +1168,7 @@ async fn vpn_peer_up_with_encoder(
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 9,
@@ -1205,6 +1207,7 @@ async fn add_path_peer_up_with_encoder(
     .unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 8,
@@ -2944,6 +2947,7 @@ fn grouped_operator_replay_withdraws_a_newly_rejected_route() {
         });
         let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 7,
@@ -3036,6 +3040,7 @@ fn sync_peer_up(
     });
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 7,

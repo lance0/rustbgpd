@@ -1251,6 +1251,7 @@ mod tests {
         let downstream = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)));
         let (out_tx, mut out_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             peer: downstream,
             session_id: 0,
             peer_asn: 65002,

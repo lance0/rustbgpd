@@ -3502,6 +3502,10 @@ mod tests {
     /// snapshot. The neighbor's session has ended under graceful restart:
     /// resolving its address in the encoder would file the retained routes
     /// under the new address.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario keeps its registrations and assertions together"
+    )]
     #[tokio::test]
     async fn a_snapshot_encoded_after_a_rebind_keeps_the_endpoint_it_was_built_with() {
         use rustbgpd_rib::update::RibUpdate;
@@ -3533,6 +3537,7 @@ mod tests {
         };
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
         tx.send(RibUpdate::PeerUp {
+            supersedes: None,
             peer,
             session_id: 1,
             peer_asn: 65001,

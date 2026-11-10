@@ -360,6 +360,7 @@ fn source_routes(announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> RibUpdate
 fn member_up(peer: PeerId, session_id: u64) -> (RibUpdate, mpsc::Receiver<OutboundRouteUpdate>) {
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     let update = RibUpdate::PeerUp {
+        supersedes: None,
         peer,
         session_id,
         peer_asn: 65_010,

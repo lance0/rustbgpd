@@ -18,6 +18,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -385,6 +386,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     // Source re-establishes — route should STILL be stale
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -493,6 +495,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     // Source re-establishes — timer resets to stale_routes_time (10s)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -873,6 +876,7 @@ async fn llgr_eor_clears_llgr_stale() {
     // Peer re-establishes during LLGR
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1153,6 +1157,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
 fn establish_peer(manager: &mut RibManager, peer: PeerId) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1488,6 +1493,7 @@ fn establish_ibgp_peer(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id,
@@ -1716,6 +1722,7 @@ async fn channel_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -2638,6 +2645,7 @@ fn reconnect_with_llgr_stale_time(
     });
     let (out_tx, out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -3529,6 +3537,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     {
         let (out_tx, out_rx) = mpsc::channel(256);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best,
             interpret_rfc1997: true,
             session_id: 0,
@@ -4107,6 +4116,7 @@ async fn readiness_probe_runs_during_mass_graceful_restart_entry() {
     for &peer in &peers {
         let (outbound_tx, outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 1,

@@ -82,6 +82,7 @@ async fn send_bgp_message(stream: &mut tokio::net::TcpStream, msg: &Message) {
 /// Create a TransportConfig pointing at the given listener address.
 fn transport_config(addr: SocketAddr) -> TransportConfig {
     TransportConfig {
+        supersedes_session: None,
         peer: test_peer_config(),
         remote_addr: addr,
         local_address: None,
