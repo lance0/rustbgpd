@@ -464,6 +464,19 @@ def probe_readiness():
         return {"status": 0, "http_error_code": None}
 
 
+def finish_cell(record, leg, scenario, driver, clients, routes, correctness):
+    """The memory snapshot is already taken. Acknowledge the driver, wait for
+    it, and only then read its receipts: it prints the final one after the
+    acknowledgement."""
+    (scenario / "finish/ack").touch()
+    status = driver.wait(timeout=60)
+    record["driver_exit"] = status
+    require(status == 0, "EVPN driver failed after finish handshake")
+    record.update(receipt((leg / "driver.log").read_text(), clients, routes))
+    if correctness:
+        record["initial_convergence_ms"] = None
+
+
 def run_cell(output, manifest, arm, clients, routes, index, correctness):
     leg = output / f"memory-{index:02}-{arm}-{clients}x{routes}"
     leg.mkdir()
@@ -525,7 +538,6 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
                     if time.monotonic() - ready_at >= (1 if correctness else manifest["settle_seconds"]):
                         break
                 time.sleep(.25)
-            record.update(receipt((leg / "driver.log").read_text(), clients, routes))
             _, body = fetch(19186, "/metrics")
             (leg / "metrics.txt").write_text(body)
             heap = metrics(body)
@@ -536,13 +548,7 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
             write_json(leg / "cgroup.json", cg)
             record["memory"] = None if correctness else {**cg, "jemalloc_allocated_bytes": heap["jemalloc_allocated_bytes"]}
             record["readiness"] = samples
-            if correctness:
-                record["initial_convergence_ms"] = None
-            (scenario / "finish/ack").touch()
-            status = driver.wait(timeout=60)
-            record["driver_exit"] = status
-            require(status == 0, "EVPN driver failed after finish handshake")
-            receipt((leg / "driver.log").read_text(), clients, routes)
+            finish_cell(record, leg, scenario, driver, clients, routes, correctness)
             accept(all(sample["status"] == 200 for sample in samples), "readiness failed during initial load/settle")
             record["status"] = "PASS"
     except Exception as error:

@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -271,6 +272,28 @@ class TestQualification(unittest.TestCase):
                     text + text):
             with self.assertRaises(ValueError):
                 Q.receipt(bad, 3, 10)
+
+    def test_cell_reads_the_receipts_after_the_driver_is_acknowledged(self):
+        # A real child in the driver's order: the final receipt is written
+        # only once the acknowledgement exists.
+        text = driver_text(3, 10)
+        final = text.splitlines(keepends=True)[-1]
+        for correctness in (True, False):
+            with self.subTest(correctness=correctness), tempfile.TemporaryDirectory() as temporary:
+                leg, scenario = Path(temporary) / "leg", Path(temporary) / "scenario"
+                leg.mkdir()
+                (scenario / "finish").mkdir(parents=True)
+                (leg / "driver.log").write_text(text.removesuffix(final))
+                with self.assertRaisesRegex(ValueError, "final receiver receipt"):
+                    Q.receipt((leg / "driver.log").read_text(), 3, 10)
+                with (leg / "driver.log").open("a") as log:
+                    driver = subprocess.Popen(
+                        ["sh", "-c", 'while [ ! -e "$1" ]; do sleep 0.05; done; printf %s "$2"',
+                         "driver", str(scenario / "finish/ack"), final], stdout=log)
+                record = {}
+                Q.finish_cell(record, leg, scenario, driver, 3, 10, correctness)
+                self.assertEqual(record, {"driver_exit": 0, "exact_receiver_keys": True,
+                                          "initial_convergence_ms": None if correctness else 42})
 
     def test_private_derivation_changes_only_candidate_constructor(self):
         main = "RibManager::new().with_readiness_queries(rib_readiness_rx);\n"
