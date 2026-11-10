@@ -11,6 +11,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
+use super::eor_hold::{EorHold, EorTrigger};
 use super::helpers::prefix_family;
 use super::{
     ExactExportKey, LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey,
@@ -1347,12 +1348,12 @@ impl RibManager {
                 };
                 if retired || self.advertises_unicast_key(peer, prefix, path_id) {
                     done.push(key);
-                } else if !self.eor_held(peer, family) {
-                    // `eor_held` covers the selection, RTC and grace holds
-                    // only. An End-of-RIB deferred behind an ORF table
-                    // (`gr_deferred_eor`) or queued by backpressure or a
-                    // deferral is neither held nor sent: its keys wait here,
-                    // and `helper_stale_needs_rescan` re-walks them once a
+                } else if !self.eor_withheld(peer, family) {
+                    // Only the selection, RTC and grace holds withhold the
+                    // marker. An End-of-RIB owed behind an ORF table, a
+                    // resync or a refused send is neither withheld nor
+                    // sent: its keys wait here, and
+                    // `helper_stale_needs_rescan` re-walks them once a
                     // hold covers the family or it retires.
                     if !gate_blocked.contains(&family) {
                         gate_blocked.push(family);
@@ -1550,7 +1551,7 @@ impl RibManager {
                     .is_some_and(|gated| gated.contains(family))
             })
             || carried.gate_blocked.iter().any(|&family| {
-                self.eor_held(peer, family) || self.helper_stale_family_retired(peer, family)
+                self.eor_withheld(peer, family) || self.helper_stale_family_retired(peer, family)
             })
             // A family whose End-of-RIB went out retires its keys, waiting
             // ones included.
@@ -1563,18 +1564,14 @@ impl RibManager {
     /// is not held and the current session has sent it, which purges the
     /// rows the helper kept.
     fn helper_stale_family_retired(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
-        let unicast_eor_queued = |queued: Option<&HashSet<(Afi, Safi)>>| {
-            queued.is_some_and(|families| families.contains(&family))
-        };
         !self.helper_stale_family_may_hold(peer, family)
-            || (!self.eor_held(peer, family)
+            || (!self.eor_withheld(peer, family)
                 && self.helper_stale_exempt_current(peer)
                 && !self
                     .peer_orf_pending
                     .get(&peer)
                     .is_some_and(|gated| gated.contains(&family))
-                && !unicast_eor_queued(self.pending_eor.get(&peer))
-                && !unicast_eor_queued(self.gr_deferred_eor.get(&peer)))
+                && !self.eor.owes(peer, family))
     }
 
     /// A later session is registered and has sent every row the hold lets
@@ -1758,21 +1755,17 @@ impl RibManager {
         // Φ-write function (design risk 1); no corrective emit — the
         // registration is being torn down.
         self.set_rt_membership(peer, None);
-        // The GR-deferred EoR is per-session too: the deferral pairs with
-        // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
-        self.gr_deferred_eor.remove(&peer);
+        // The owed End-of-RIB markers are per-session too, with the ORF
+        // table and RFC 4684 §6 holds they carry: a new session re-derives
+        // them on `PeerUp`.
+        self.forget_eor(peer);
         self.orf_eor_hold.remove(&peer);
         self.orf_eor_cap_passed.remove(&peer);
-        // So is the RFC 4684 §6 hold: its EoRs leave with `pending_eor`, and
-        // `PeerUp` arms a fresh cap for the new session.
-        self.rtc_eor_hold.remove(&peer);
-        self.rtc_eor_hold_ready.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.dirty_since.remove(&peer);
         // A forced resync is owed to the session whose channel it could not
         // reach; the next registration's initial table already sends it all.
         self.force_outbound_peers.remove(&peer);
-        self.pending_eor.remove(&peer);
         self.selection_deferred_refresh.remove(&peer);
         // Purge the peer's queued route batches. This upholds the
         // "peer rib must exist before chunk processing" expectation in
@@ -2297,7 +2290,6 @@ impl RibManager {
                 .as_ref()
                 .is_some_and(|context| context.peer_restart_state);
             // A new session's hold never inherits an earlier EoR.
-            self.rtc_eor_hold_ready.remove(&peer);
             let rtc_gated_negotiated = sendable_families
                 .iter()
                 .any(|&family| Self::rtc_gated_family(family));
@@ -2305,10 +2297,12 @@ impl RibManager {
                 && !peer_restarting
                 && membership == super::RtcMembership::default()
             {
-                self.rtc_eor_hold
-                    .insert(peer, tokio::time::Instant::now() + super::RTC_EOR_HOLD_CAP);
+                self.hold_eor_for_rt_membership(
+                    peer,
+                    tokio::time::Instant::now() + super::RTC_EOR_HOLD_CAP,
+                );
             } else {
-                self.rtc_eor_hold.remove(&peer);
+                self.release_eor_hold(peer, EorHold::RtMembership, EorTrigger::Release);
             }
             // Single Φ-write function (design risk 1); pre-registration,
             // so no corrective emit — the initial dump replays under Φ.
@@ -2317,8 +2311,7 @@ impl RibManager {
             // A replacement session that dropped the family must not
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
             self.set_rt_membership(peer, None);
-            self.rtc_eor_hold.remove(&peer);
-            self.rtc_eor_hold_ready.remove(&peer);
+            self.release_eor_hold(peer, EorHold::RtMembership, EorTrigger::Release);
         }
 
         // Classify only the startup-frozen waiter already present for this
@@ -3115,10 +3108,7 @@ impl RibManager {
             || (private_evpn_recovery.is_some() && private_evpn_feed.is_none())
         {
             // A missing owned producer is not an empty private inventory.
-            self.pending_eor
-                .entry(peer)
-                .or_default()
-                .insert((Afi::L2Vpn, Safi::Evpn));
+            self.owe_eor(peer, (Afi::L2Vpn, Safi::Evpn));
             if let Some(handle) = self.evpn_recovery_handle(peer) {
                 self.evpn_recovery.fail_admission(handle);
             }
@@ -3787,7 +3777,7 @@ impl RibManager {
         // EoR already sent by a session that joined while the roster was dormant.
         for family in negotiated_sendable.iter().flatten().copied() {
             if self.selection_convergence_held(family) {
-                self.pending_eor.entry(peer).or_default().insert(family);
+                self.owe_eor(peer, family);
                 if orf_gated.contains(&family) {
                     self.defer_orf_initial_eor(peer, family);
                 }
@@ -3897,19 +3887,19 @@ impl RibManager {
         // survivor has replayed its Adj-RIB-In. Send those staged routes, but
         // keep the family EoR queued until an associated peer EoRR (or the
         // original Selection_Deferral_Timer) proves convergence.
-        // The RFC 4684 §6 RT-membership hold (`rtc_eor_hold`) queues VPN/EVPN
-        // EoR the same way, until the peer's RT-Constrain EoR or the cap.
+        // The RFC 4684 §6 RT-membership hold queues VPN/EVPN EoR the same
+        // way, until the peer's RT-Constrain EoR or the cap, and so does
+        // the planned-restart grace window.
         let convergence_held: HashSet<_> = eor_families
             .iter()
             .copied()
-            .filter(|family| self.eor_held(peer, *family))
+            .filter(|family| self.eor_withheld(peer, *family))
             .collect();
         if !convergence_held.is_empty() {
             eor_families.retain(|family| !convergence_held.contains(family));
-            self.pending_eor
-                .entry(peer)
-                .or_default()
-                .extend(convergence_held);
+            for family in convergence_held {
+                self.owe_eor(peer, family);
+            }
         }
 
         if member_of.is_some() {
@@ -4030,7 +4020,7 @@ impl RibManager {
                 warn!(%peer, reason = failure.as_str(), "initial dump not sent — marking dirty");
             }
             for f in &eor_families {
-                self.pending_eor.entry(peer).or_default().insert(*f);
+                self.owe_eor(peer, *f);
             }
             self.mark_outbound_dirty(peer);
             super::retire_policy_filtered_routes_with_readiness(
@@ -4057,45 +4047,20 @@ impl RibManager {
             self.release_group_admitted_keys(peer);
         }
 
-        if !owned_evpn_covered && eor_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
-            self.pending_eor
-                .entry(peer)
-                .or_default()
-                .insert((Afi::L2Vpn, Safi::Evpn));
-            eor_families.retain(|family| *family != (Afi::L2Vpn, Safi::Evpn));
-        }
-
-        // Send End-of-RIB markers for all sendable families
-        if !eor_families.is_empty()
-            && let Some(tx) = self.outbound_peers.get(&peer).cloned()
-        {
-            let eor = OutboundRouteUpdate {
-                end_of_rib: eor_families.clone(),
-                ..OutboundRouteUpdate::default()
-            };
-            let sent = match operation
-                .as_mut()
-                .and_then(crate::outbound_credit::OutboundOperation::slot)
-            {
-                Some(slot) => {
-                    slot.send(eor);
-                    Ok(())
-                }
-                None => crate::outbound_credit::send_marker(&tx, eor),
-            };
-            if sent.is_err() {
-                warn!(%peer, "outbound channel full — `EoR` deferred");
-                self.metrics.record_outbound_eor_deferral(&peer.label());
-                for f in &eor_families {
-                    self.pending_eor.entry(peer).or_default().insert(*f);
-                }
-                if !self.evpn_feed_is_current(peer) {
-                    self.mark_outbound_dirty(peer);
-                }
-            } else {
-                let bits = Self::evpn_admitted_marker_bits(&eor_families, &[]);
-                self.evpn_feed_markers_admitted(peer, &tx, bits);
+        // The markers of the families this table covers follow it, in its
+        // operation. One that a hold kept out above stays owed, and so does
+        // the EVPN one while the table left its coverage open.
+        if !eor_families.is_empty() {
+            for family in eor_families {
+                self.owe_eor(peer, family);
             }
+            self.settle_eor(
+                peer,
+                EorTrigger::InitialTable {
+                    operation: operation.as_mut(),
+                    evpn_covered: owned_evpn_covered,
+                },
+            );
         }
     }
 }

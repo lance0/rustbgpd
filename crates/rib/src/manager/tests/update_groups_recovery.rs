@@ -434,11 +434,7 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
         let healthy_bytes = manager.pending_group_admitted.bytes();
         if already_dirty {
             assert!(manager.mark_outbound_dirty(member));
-            manager
-                .pending_eor
-                .entry(member)
-                .or_default()
-                .insert((Afi::Ipv6, Safi::Unicast));
+            manager.owe_eor(member, (Afi::Ipv6, Safi::Unicast));
         }
         let encoder = MockExactExportEncoder::accepting(1);
         encoder.set_profile(2, [ExactExportKey::Unicast(Prefix::V4(prefix(1)), 0)]);
@@ -474,7 +470,11 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
             assert!(manager.dirty_peers.contains(&member));
             assert!(manager.group_ribs[&gid].dirty_members.contains(&member));
             assert!(manager.group_recovery_fallback(member).is_some());
-            assert!(manager.pending_eor[&member].contains(&(Afi::Ipv6, Safi::Unicast)));
+            assert!(
+                manager
+                    .eor_pending(member)
+                    .contains(&(Afi::Ipv6, Safi::Unicast))
+            );
         } else {
             assert!(!manager.dirty_peers.contains(&member));
             assert!(!manager.group_ribs[&gid].dirty_members.contains(&member));
@@ -506,7 +506,11 @@ fn proof_refused_initial_dump_still_retries_a_failed_eor() {
         2
     );
     assert!(manager.dirty_peers.contains(&member));
-    assert!(manager.pending_eor[&member].contains(&(Afi::Ipv4, Safi::Unicast)));
+    assert!(
+        manager
+            .eor_pending(member)
+            .contains(&(Afi::Ipv4, Safi::Unicast))
+    );
     let mut delivered_eor = Vec::new();
     for _ in 0..4 {
         manager.resync_dirty_peers_bounded();
@@ -519,7 +523,7 @@ fn proof_refused_initial_dump_still_retries_a_failed_eor() {
     }
     assert_eq!(delivered_eor, ipv4_sendable());
     assert!(!manager.dirty_peers.contains(&member));
-    assert!(!manager.pending_eor.contains_key(&member));
+    assert!(manager.eor_pending(member).is_empty());
     assert_eq!(manager.group_recovery_fallback(member), None);
 }
 

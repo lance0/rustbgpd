@@ -2181,7 +2181,7 @@ fn orf_gated_family_waits_then_withdraws_once_its_hold_arms() {
 /// A session that is clean and caught up while its unicast End-of-RIB is
 /// queued but not held: production reaches this for an EVPN receiver
 /// whose feed is current, where a full writer at the End-of-RIB leaves the
-/// peer clean (`send_initial_table_with_readiness`, `flush_pending_eor`).
+/// peer clean (`send_initial_table_with_readiness`, `settle_eor`).
 /// The test reaches it with a writer that fits the table but not the
 /// End-of-RIB, then clears the dirty mark the plain unicast session gets.
 /// The carried key must wait for the hold, not retire as if the End-of-RIB
@@ -2208,10 +2208,7 @@ fn queued_unheld_end_of_rib_keeps_the_carry_for_the_hold() {
     // Room for the table only: the End-of-RIB queues behind it.
     let (_new_tx, mut new_rx) = register_dual_stack(&mut manager, 182, 1);
     assert!(
-        manager
-            .pending_eor
-            .get(&observer)
-            .is_some_and(|families| families.contains(&FAMILY)),
+        manager.eor_pending(observer).contains(&FAMILY),
         "the IPv4 End-of-RIB is queued"
     );
     // An EVPN receiver with a current feed stays clean here.

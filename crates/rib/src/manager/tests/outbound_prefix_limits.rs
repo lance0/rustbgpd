@@ -1783,18 +1783,14 @@ fn orf_pending_recovery_waits_for_a_normal_peer_refresh() {
 /// flushing that deferral.
 ///
 /// Load-bearing break: sharing the peer-refresh epilogue removes
-/// `gr_deferred_eor` and emits or queues a genuine `EoR`.
+/// the ORF table hold and emits or queues a genuine `EoR`.
 #[test]
 fn recovery_does_not_consume_or_flush_a_gr_deferred_eor() {
     let metrics = BgpMetrics::new();
     let (mut manager, peer, mut outbound_rx) =
         manager_with_queued_ipv4_recovery(metrics.clone(), 8);
     let family = (Afi::Ipv4, Safi::Unicast);
-    manager
-        .gr_deferred_eor
-        .entry(peer)
-        .or_default()
-        .insert(family);
+    manager.owe_eor_behind_orf_table(peer, family);
 
     assert!(manager.drain_outbound_limit_recovery());
     let recovery = outbound_rx
@@ -1804,13 +1800,10 @@ fn recovery_does_not_consume_or_flush_a_gr_deferred_eor() {
     assert_eq!(recovery.end_of_rib.len(), 0);
     assert_eq!(recovery.refresh_markers.len(), 0);
     assert!(
-        manager
-            .gr_deferred_eor
-            .get(&peer)
-            .is_some_and(|families| families.contains(&family)),
+        manager.eor_behind_orf_table(peer).contains(&family),
         "internal recovery must leave GR protocol deferral untouched"
     );
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert_eq!(manager.eor_pending(peer), HashSet::from([family]));
     assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
 }

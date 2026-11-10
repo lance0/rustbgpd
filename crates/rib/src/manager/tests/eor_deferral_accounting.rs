@@ -62,7 +62,7 @@ fn peer_up_with_full_queue() -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>
 #[test]
 fn initial_dump_eor_on_full_channel_is_counted() {
     let (manager, _out_rx) = peer_up_with_full_queue();
-    assert!(manager.pending_eor[&PEER].contains(&FAMILY));
+    assert!(manager.eor_pending(PEER).contains(&FAMILY));
     assert!((eor_deferrals(&manager.metrics) - 1.0).abs() < f64::EPSILON);
     assert!(
         counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).abs()
@@ -77,13 +77,13 @@ fn flush_pending_eor_on_full_channel_is_counted() {
     let (mut manager, mut out_rx) = peer_up_with_full_queue();
     // Standalone marker retries follow a successful resync.
     assert!(manager.dirty_peers.remove(&PEER));
-    manager.flush_pending_eor(PEER);
+    manager.settle_eor_now(PEER);
     assert!((eor_deferrals(&manager.metrics) - 2.0).abs() < f64::EPSILON);
-    assert!(manager.pending_eor[&PEER].contains(&FAMILY));
+    assert!(manager.eor_pending(PEER).contains(&FAMILY));
 
     assert!(!out_rx.try_recv().unwrap().announce.is_empty());
     assert!(manager.dirty_peers.remove(&PEER));
-    manager.flush_pending_eor(PEER);
+    manager.settle_eor_now(PEER);
     assert_eq!(out_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
     assert!((eor_deferrals(&manager.metrics) - 2.0).abs() < f64::EPSILON);
 }

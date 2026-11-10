@@ -121,11 +121,7 @@ impl Run {
     fn hold_open(&mut self, indices: &[usize], change: EvpnRibRoute) {
         for &index in indices {
             let peer = self.receivers[index].peer;
-            self.manager
-                .pending_eor
-                .entry(peer)
-                .or_default()
-                .insert(EVPN);
+            self.manager.owe_eor(peer, EVPN);
             self.block(index);
         }
         self.announce(vec![change]);
@@ -196,7 +192,7 @@ impl Run {
             }
             self.manager.resync_dirty_peers_bounded();
             for receiver in &self.receivers {
-                self.manager.flush_pending_eor(receiver.peer);
+                self.manager.settle_eor_now(receiver.peer);
             }
         }
         self.drain();
@@ -265,11 +261,7 @@ fn scenario(owned: bool, table: u32) -> (Vec<Phase>, Vec<Vec<EvpnRouteKey>>, usi
     // complete feed, so later deltas are admitted into that proof and its
     // withdrawals are checked against it.
     let held = run.receivers[1].peer;
-    run.manager
-        .pending_eor
-        .entry(held)
-        .or_default()
-        .insert(EVPN);
+    run.manager.owe_eor(held, EVPN);
     run.block(1);
     run.announce(vec![route(1020, 100)]);
     run.drain();
@@ -310,7 +302,7 @@ fn scenario(owned: bool, table: u32) -> (Vec<Phase>, Vec<Vec<EvpnRouteKey>>, usi
     run.withdraw((3000..3400).map(|tag| route(tag, 100).key()).collect());
     run.drain();
     let first = run.receivers[1].peer;
-    run.manager.flush_pending_eor(first);
+    run.manager.settle_eor_now(first);
     run.drain();
     if owned {
         run.compacted = compactions_for_test() > before;

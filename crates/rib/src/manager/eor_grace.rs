@@ -29,6 +29,7 @@ use rustbgpd_wire::{Afi, Safi};
 use tracing::{info, warn};
 
 use super::RibManager;
+use super::eor_hold::{EorHold, EorTrigger};
 use crate::injection_lease::LeaseConflict;
 use crate::update::RibCommandError;
 
@@ -303,20 +304,17 @@ impl RibManager {
         self.helper_stale_hold_ends = self.helper_stale_hold_ends.saturating_add(1);
         let mut held: Vec<&str> = grace
             .peer
-            .and_then(|peer| self.pending_eor.get(&peer))
             .into_iter()
-            .flatten()
+            .flat_map(|peer| self.eor.families(peer))
             .filter(|family| grace.helper_session && grace.families.contains(family))
-            .map(|&(afi, safi)| super::helpers::afi_safi_label(afi, safi))
+            .map(|(afi, safi)| super::helpers::afi_safi_label(afi, safi))
             .collect();
         held.sort_unstable();
         let held = held.join(",");
         self.metrics
             .record_gr_eor_grace_released(&target.label(), reason);
-        if let Some(peer) = grace.peer
-            && !self.dirty_peers.contains(&peer)
-        {
-            self.flush_pending_eor(peer);
+        if let Some(peer) = grace.peer {
+            self.release_eor_hold(peer, EorHold::Grace, EorTrigger::Release);
         }
         (grace.helper_session, held)
     }
@@ -381,16 +379,25 @@ impl RibManager {
             return;
         }
         self.eor_grace_deadlines.remove(&target);
-        if self.eor_grace.remove(&target).is_some() {
-            self.request_helper_stale_retire();
-        }
+        self.end_eor_grace(&target);
     }
 
     pub(super) fn retire_eor_grace_interface(&mut self, interface: Arc<str>) {
         let target = EorGraceTarget::Interface(interface);
         self.eor_grace_deadlines.remove(&target);
-        if self.eor_grace.remove(&target).is_some() {
-            self.request_helper_stale_retire();
+        self.end_eor_grace(&target);
+    }
+
+    /// Remove `target`'s window with its neighbor. The daemon tears a bound
+    /// peer down first, so the window normally covers no session by now;
+    /// if one is still registered, it gets the markers the window held.
+    fn end_eor_grace(&mut self, target: &EorGraceTarget) {
+        let Some(grace) = self.eor_grace.remove(target) else {
+            return;
+        };
+        self.request_helper_stale_retire();
+        if let Some(peer) = grace.peer {
+            self.release_eor_hold(peer, EorHold::Grace, EorTrigger::Release);
         }
     }
 

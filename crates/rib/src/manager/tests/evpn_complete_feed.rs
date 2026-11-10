@@ -3,6 +3,7 @@ use super::exportability::MockExactExportEncoder;
 use super::*;
 use crate::PeerId;
 use crate::manager::distribution::OutboundCommitBatch;
+use crate::manager::eor_hold::EorTrigger;
 use rustbgpd_wire::RouteRefreshSubtype;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,7 +29,7 @@ fn admit_waiting_for_marker(
     feed.seal.required_markers = if eorr {
         RibManager::evpn_admitted_marker_bits(&[], &[(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)])
     } else {
-        manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+        manager.owe_eor(peer, EVPN);
         RibManager::evpn_admitted_marker_bits(&[EVPN], &[])
     };
     assert!(
@@ -64,7 +65,7 @@ fn admitted_feed_keeps_proof_until_actual_ordered_marker_admission() {
     assert_eq!(data.end_of_rib, [] as [(Afi, Safi); 0]);
     assert!(output.try_recv().map(delivered).is_err());
     assert!(manager.evpn_advertised_resync_in_progress(peer));
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
     assert!(marker.evpn_announce.is_empty());
@@ -83,20 +84,18 @@ fn held_marker_survives_polls_without_data_replay_or_reset() {
     admit_waiting_for_eor(&mut manager, peer, gid, &received(1));
     output.try_recv().map(delivered).unwrap();
     // Controlled internal hold, released explicitly; no wall-clock race.
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
     for _ in 0..3 {
-        manager.flush_pending_eor(peer);
-        manager.retry_evpn_feed_markers_bounded();
+        manager.settle_eor_now(peer);
+        manager.retry_eor_markers_bounded();
         assert!(output.try_recv().map(delivered).is_err());
         assert!(manager.evpn_feed_is_current(peer));
         assert!(!manager.evpn_recovery_reset_pending(peer));
         assert!(!manager.dirty_peers.contains(&peer));
         assert!(!manager.resync_tick_pending());
     }
-    manager.rtc_eor_hold.remove(&peer);
-    manager.flush_pending_eor(peer);
+    manager.end_rt_membership_hold(peer);
+    manager.settle_eor_now(peer);
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
@@ -109,8 +108,8 @@ fn refused_marker_retries_on_existing_timer_without_data_dirty() {
     output.try_recv().map(delivered).unwrap();
     let sender = manager.outbound_peers[&peer].clone();
     while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
-    manager.flush_pending_eor(peer);
-    assert!(manager.pending_eor[&peer].contains(&EVPN));
+    manager.settle_eor_now(peer);
+    assert!(manager.eor_pending(peer).contains(&EVPN));
     assert!(manager.evpn_feed_is_current(peer));
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(!manager.evpn_recovery_reset_pending(peer));
@@ -131,10 +130,10 @@ fn invalidated_coverage_cannot_send_or_settle_a_pending_marker() {
     output.try_recv().map(delivered).unwrap();
     manager.invalidate_evpn_feed_completion(peer);
     for _ in 0..3 {
-        manager.flush_pending_eor(peer);
-        manager.retry_evpn_feed_markers_bounded();
+        manager.settle_eor_now(peer);
+        manager.retry_eor_markers_bounded();
         assert!(output.try_recv().map(delivered).is_err());
-        assert!(manager.pending_eor[&peer].contains(&EVPN));
+        assert!(manager.eor_pending(peer).contains(&EVPN));
         assert!(!manager.evpn_feed_is_current(peer));
         assert!(!manager.dirty_peers.contains(&peer));
         assert!(!manager.evpn_recovery_reset_pending(peer));
@@ -171,8 +170,8 @@ fn stale_completion_cannot_invalidate_a_newer_complete_feed() {
     assert!(manager.evpn_feed_is_current(peer));
     assert!(!manager.complete_evpn_feed_admitted(peer, old.seal, 0));
     assert!(manager.evpn_feed_is_current(peer));
-    assert!(manager.pending_eor[&peer].contains(&EVPN));
-    manager.flush_pending_eor(peer);
+    assert!(manager.eor_pending(peer).contains(&EVPN));
+    manager.settle_eor_now(peer);
     while let Ok(update) = output.try_recv().map(delivered) {
         assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
     }
@@ -190,7 +189,7 @@ fn retiring_provenance_drops_its_fixed_completion_receipt() {
             .iter()
             .all(|record| record.evpn_feed_completion.is_none())
     );
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     assert!(output.try_recv().map(delivered).is_err());
 }
 
@@ -314,13 +313,13 @@ fn owned_initial_missing_full_producer_cannot_emit_private_data_or_terminal() {
             "owned refusal aborts the mixed initial dump"
         );
         assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
-        assert!(manager.pending_eor[&peer].contains(&EVPN));
+        assert!(manager.eor_pending(peer).contains(&EVPN));
         assert!(!manager.evpn_feed_is_current(peer));
         assert!(manager.dirty_peers.contains(&peer));
         assert!(manager.evpn_recovery_reset_pending(peer));
-        manager.flush_pending_eor(peer);
+        manager.settle_eor_now(peer);
         assert!(output.try_recv().map(delivered).is_err());
-        assert!(manager.pending_eor[&peer].contains(&EVPN));
+        assert!(manager.eor_pending(peer).contains(&EVPN));
     }
 }
 
@@ -411,7 +410,7 @@ fn owned_reregistration_behind_a_live_operation_defers_without_reset() {
         assert_eq!(resets.load(Ordering::SeqCst), 0, "{collision}: no reset");
         assert!(!manager.evpn_recovery_reset_pending(peer), "{collision}");
         assert!(
-            manager.pending_eor[&peer].contains(&EVPN),
+            manager.eor_pending(peer).contains(&EVPN),
             "{collision}: EoR owed"
         );
         assert!(manager.dirty_peers.contains(&peer));
@@ -454,7 +453,7 @@ fn owned_member_with_a_queued_complete_feed() -> (
         .prepare_complete_evpn_feed(peer, gid, None, true)
         .unwrap();
     assert_eq!(feed.announce.len(), 1);
-    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    manager.owe_eor(peer, EVPN);
     feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
     assert!(
         manager
@@ -507,16 +506,16 @@ fn owned_initial_postadmission_mismatch_keeps_enqueue_truth_but_holds_terminal()
     );
     assert_eq!(data[0].key(), route.key());
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, 1);
-    assert!(manager.pending_eor[&peer].contains(&EVPN));
+    assert!(manager.eor_pending(peer).contains(&EVPN));
     assert!(!manager.evpn_feed_is_current(peer));
     assert!(manager.evpn_recovery_reset_pending(peer));
     for _ in 0..3 {
-        manager.flush_pending_eor(peer);
+        manager.settle_eor_now(peer);
         assert!(
             output.try_recv().map(delivered).is_err(),
             "marker polling must not replay data"
         );
-        assert!(manager.pending_eor[&peer].contains(&EVPN));
+        assert!(manager.eor_pending(peer).contains(&EVPN));
     }
 }
 
@@ -756,9 +755,10 @@ fn private_handoff_keeps_held_eor_and_eorr_then_rejoins_without_inherited_debt()
         admit_waiting_for_marker(&mut manager, peer, gid, &route, eorr);
         output.try_recv().map(delivered).unwrap();
         let resets = count_reset_attempts(&mut manager);
-        manager
-            .rtc_eor_hold
-            .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+        manager.hold_eor_for_rt_membership(
+            peer,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
         manager.handle_update(RibUpdate::PeerSlowState {
             peer,
             session_id: 7,
@@ -772,13 +772,13 @@ fn private_handoff_keeps_held_eor_and_eorr_then_rejoins_without_inherited_debt()
         let handle = manager.evpn_recovery_handle(peer).unwrap();
         assert!(!manager.evpn_recovery.is_dormant(handle));
         for _ in 0..2 {
-            manager.retry_evpn_feed_markers_bounded();
+            manager.retry_eor_markers_bounded();
             assert!(output.try_recv().map(delivered).is_err());
             assert!(!manager.dirty_peers.contains(&peer));
         }
-        manager.rtc_eor_hold.remove(&peer);
+        manager.end_rt_membership_hold(peer);
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
-        manager.retry_evpn_feed_markers_bounded();
+        manager.retry_eor_markers_bounded();
         let marker = output.try_recv().map(delivered).unwrap();
         assert_eq!(marker.end_of_rib, if eorr { vec![] } else { vec![EVPN] });
         assert_eq!(
@@ -825,7 +825,7 @@ fn private_handoff_keeps_held_eor_and_eorr_then_rejoins_without_inherited_debt()
             );
         }
         assert!(!manager.has_evpn_feed_completion(peer));
-        manager.retry_evpn_feed_markers_bounded();
+        manager.retry_eor_markers_bounded();
         assert!(output.try_recv().map(delivered).is_err());
         assert_eq!(resets.load(Ordering::SeqCst), 0);
     }
@@ -1009,10 +1009,11 @@ fn marker_retry_rotates_past_thirty_two_full_receivers_without_rebuilding_routes
             .get_mut(&group)
             .unwrap()
             .set_evpn_ownership_for_test(false);
-        manager.pending_eor.insert(peer, HashSet::from([EVPN]));
-        manager
-            .rtc_eor_hold
-            .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+        manager.owe_eor(peer, EVPN);
+        manager.hold_eor_for_rt_membership(
+            peer,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
         manager.mark_outbound_dirty_inner(peer, false);
         manager.resync_dirty_peers_bounded();
         while let Ok(update) = output.try_recv().map(delivered) {
@@ -1020,12 +1021,16 @@ fn marker_retry_rotates_past_thirty_two_full_receivers_without_rebuilding_routes
         }
         assert!(manager.evpn_feed_is_current(peer));
         assert!(!manager.dirty_peers.contains(&peer));
-        manager.rtc_eor_hold.remove(&peer);
-        if host < 72 {
-            while manager.outbound_peers[&peer]
-                .try_send(OutboundRouteUpdate::default())
-                .is_ok()
-            {}
+        // The release meets a full writer, so every marker is left to the
+        // tick's retry lane; only the last receiver gets room back.
+        while manager.outbound_peers[&peer]
+            .try_send(OutboundRouteUpdate::default())
+            .is_ok()
+        {}
+        manager.end_rt_membership_hold(peer);
+        assert!(!manager.dirty_peers.contains(&peer));
+        if host == 72 {
+            while output.try_recv().is_ok() {}
         }
         outputs.push((peer, output));
     }
@@ -1034,7 +1039,7 @@ fn marker_retry_rotates_past_thirty_two_full_receivers_without_rebuilding_routes
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     manager.evpn_marker_cursor = None;
     for _ in 0..32_usize.div_ceil(crate::manager::RESYNC_PEERS_PER_TICK) {
-        manager.retry_evpn_feed_markers_bounded();
+        manager.retry_eor_markers_bounded();
         assert!(
             outputs
                 .last_mut()
@@ -1045,7 +1050,7 @@ fn marker_retry_rotates_past_thirty_two_full_receivers_without_rebuilding_routes
                 .is_err()
         );
     }
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     let marker = outputs
         .last_mut()
         .unwrap()
@@ -1326,7 +1331,7 @@ fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
         if late_fault {
             assert!(output.try_recv().map(delivered).is_err());
-            manager.retry_evpn_feed_markers_bounded();
+            manager.retry_eor_markers_bounded();
             assert!(output.try_recv().map(delivered).is_err());
             assert!(manager.evpn_recovery_reset_pending(peer));
         } else {
@@ -1531,7 +1536,7 @@ fn sparse_renewals_while_recovery_is_retained_queue_without_a_resync() {
     let mut feed = manager
         .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
         .unwrap();
-    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    manager.owe_eor(peer, EVPN);
     feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
     assert!(
         manager
@@ -1547,9 +1552,7 @@ fn sparse_renewals_while_recovery_is_retained_queue_without_a_resync() {
             .is_ok()
     );
     while output.try_recv().map(delivered).is_ok() {}
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
     manager
         .ribs
         .entry(route.peer)
@@ -1611,7 +1614,7 @@ fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
                 &[(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)],
             )
         } else {
-            manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+            manager.owe_eor(peer, EVPN);
             RibManager::evpn_admitted_marker_bits(&[EVPN], &[])
         };
         assert!(
@@ -1628,9 +1631,10 @@ fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
                 .is_ok()
         );
         assert!(output.try_recv().map(delivered).is_err());
-        manager
-            .rtc_eor_hold
-            .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+        manager.hold_eor_for_rt_membership(
+            peer,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
         let rib = manager
             .ribs
             .entry(route.peer)
@@ -1658,8 +1662,8 @@ fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
         assert!(manager.evpn_feed_is_current(peer));
         assert!(!manager.dirty_peers.contains(&peer));
         assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
-        manager.rtc_eor_hold.remove(&peer);
-        manager.retry_evpn_feed_markers_bounded();
+        manager.end_rt_membership_hold(peer);
+        manager.retry_eor_markers_bounded();
         let marker = output.try_recv().map(delivered).unwrap();
         assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
         assert_eq!(marker.end_of_rib, if eorr { vec![] } else { vec![EVPN] });
@@ -1730,9 +1734,10 @@ fn review_forced_private_handoff_replay_preserves_held_marker_debt() {
         let route = received(100);
         admit_waiting_for_marker(&mut manager, peer, gid, &route, eorr);
         output.try_recv().map(delivered).unwrap();
-        manager
-            .rtc_eor_hold
-            .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+        manager.hold_eor_for_rt_membership(
+            peer,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
         manager.handle_update(RibUpdate::PeerSlowState {
             peer,
             session_id: 7,
@@ -1763,8 +1768,8 @@ fn review_forced_private_handoff_replay_preserves_held_marker_debt() {
             "a private completion seal must not consume explicit force"
         );
         assert!(manager.evpn_feed_is_current(peer));
-        manager.rtc_eor_hold.remove(&peer);
-        manager.retry_evpn_feed_markers_bounded();
+        manager.end_rt_membership_hold(peer);
+        manager.retry_eor_markers_bounded();
         let marker = output.try_recv().map(delivered).unwrap();
         assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
         assert_eq!(marker.end_of_rib, if eorr { vec![] } else { vec![EVPN] });
@@ -1828,9 +1833,8 @@ fn assert_review_dirty_mixed_resync_terminal(fault: u8) {
     let unicast = review_announce_unicast(&mut manager, 91);
     assert!(manager.dirty_peers.contains(&peer));
     while output.try_recv().map(delivered).is_ok() {}
-    manager
-        .pending_eor
-        .insert(peer, HashSet::from([(Afi::Ipv4, Safi::Unicast), EVPN]));
+    manager.owe_eor(peer, (Afi::Ipv4, Safi::Unicast));
+    manager.owe_eor(peer, EVPN);
     if fault == 0 {
         manager.group_ribs.get_mut(&gid).unwrap().evpn_table_stamp = 0;
     } else if fault == 1 {
@@ -1870,7 +1874,7 @@ fn assert_review_dirty_mixed_resync_terminal(fault: u8) {
             .all(|update| !update.end_of_rib.contains(&EVPN)),
         "dirty data admission cannot authorize EVPN EoR before current coverage"
     );
-    assert!(manager.pending_eor[&peer].contains(&EVPN));
+    assert!(manager.eor_pending(peer).contains(&EVPN));
     assert!(!manager.evpn_feed_is_current(peer));
     assert!(manager.dirty_peers.contains(&peer));
 }
@@ -1896,11 +1900,11 @@ fn review_mixed_family_marker_refusal_retries_every_ready_family_without_data() 
     admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
     output.try_recv().map(delivered).unwrap();
     let unicast = (Afi::Ipv4, Safi::Unicast);
-    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
+    manager.owe_eor(peer, unicast);
     let sender = manager.outbound_peers[&peer].clone();
     while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
-    manager.flush_pending_eor(peer);
-    assert_eq!(manager.pending_eor[&peer], HashSet::from([unicast, EVPN]));
+    manager.settle_eor_now(peer);
+    assert_eq!(manager.eor_pending(peer), HashSet::from([unicast, EVPN]));
     assert!(!manager.dirty_peers.contains(&peer));
     while output.try_recv().map(delivered).is_ok() {}
     assert!(manager.resync_tick_pending());
@@ -1916,7 +1920,7 @@ fn review_mixed_family_marker_refusal_retries_every_ready_family_without_data() 
         HashSet::from([unicast, EVPN]),
         "the EVPN receipt must not strand another ready family"
     );
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     assert!(!manager.has_evpn_feed_completion(peer));
     assert!(!manager.resync_tick_pending());
 }
@@ -1955,7 +1959,7 @@ fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
     }));
     for _ in 0..2 {
         assert!(!manager.resync_tick_pending());
-        manager.retry_evpn_feed_markers_bounded();
+        manager.retry_eor_markers_bounded();
     }
     assert_eq!(
         visits.load(Ordering::SeqCst),
@@ -1976,16 +1980,40 @@ fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
         visits.load(Ordering::SeqCst) > 0,
         "the visit observer must see real active debt"
     );
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     assert_eq!(output.try_recv().map(delivered).unwrap().end_of_rib, [EVPN]);
     visits.store(0, Ordering::SeqCst);
     assert!(!manager.resync_tick_pending());
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     assert_eq!(
         visits.load(Ordering::SeqCst),
         0,
         "settled actor turns must return to the zero-scan path"
     );
+}
+
+/// A dirty resync that completes an owned EVPN feed sends the EVPN
+/// End-of-RIB the session owes in its own operation, behind the feed. The
+/// resync envelope cannot carry that marker (its coverage is only known
+/// after admission), so the settle after the commit is what sends it;
+/// without it the marker would wait for the feed ledger's tick retry.
+#[test]
+fn dirty_resync_sends_the_evpn_marker_behind_the_feed_it_completes() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &received(100));
+    manager.owe_eor(peer, EVPN);
+    assert!(!manager.evpn_feed_is_current(peer));
+    manager.mark_outbound_dirty_inner(peer, false);
+    manager.resync_dirty_peers_bounded();
+    let sent: Vec<_> = std::iter::from_fn(|| output.try_recv().map(delivered).ok()).collect();
+    assert_eq!(
+        sent.last().map(|update| update.end_of_rib.as_slice()),
+        Some([EVPN].as_slice()),
+        "the marker closes the resync's own operation"
+    );
+    assert!(manager.eor_pending(peer).is_empty());
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.resync_tick_pending());
 }
 
 #[test]
@@ -1994,25 +2022,82 @@ fn review_ready_unicast_marker_does_not_wait_for_held_evpn() {
     admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
     output.try_recv().map(delivered).unwrap();
     let unicast = (Afi::Ipv4, Safi::Unicast);
-    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
-    assert!(manager.resync_tick_pending());
-    manager.resync_dirty_peers_bounded();
+    manager.owe_eor(peer, unicast);
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    // The event that owes the unicast marker offers it; no tick is involved.
+    manager.settle_eor_now(peer);
+    assert!(!manager.resync_tick_pending());
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [unicast]);
     assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
     assert!(marker.unicast_withdrawals().next().is_none() && marker.evpn_withdraw.is_empty());
-    assert_eq!(manager.pending_eor[&peer], HashSet::from([EVPN]));
+    assert_eq!(manager.eor_pending(peer), HashSet::from([EVPN]));
     assert!(manager.evpn_feed_is_current(peer));
     assert_eq!(manager.evpn_feed_receipt_count, 1);
     assert!(!manager.resync_tick_pending());
-    manager.rtc_eor_hold.remove(&peer);
+    manager.end_rt_membership_hold(peer);
     manager.resync_dirty_peers_bounded();
     assert_eq!(output.try_recv().map(delivered).unwrap().end_of_rib, [EVPN]);
     assert_eq!(manager.evpn_feed_receipt_count, 0);
     assert!(output.try_recv().map(delivered).is_err());
+}
+
+/// The EVPN End-of-RIB a current complete feed still owes is that feed's
+/// own tick retry, not a release that missed its marker: it passes the
+/// check after an actor turn, leaves on the next tick, and the fallback
+/// does not report it.
+#[test]
+fn feed_owed_evpn_marker_passes_the_checks_and_leaves_on_the_tick_unreported() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().map(delivered).unwrap();
+    assert!(manager.evpn_feed_is_current(peer));
+    assert_eq!(manager.eor_pending(peer), HashSet::from([EVPN]));
+    assert!(manager.eor_holds(peer, EVPN).is_empty());
+    manager.handle_update(RibUpdate::RetireEorGraceInterface {
+        interface: "unused0".into(),
+    });
+    assert!(output.try_recv().map(delivered).is_err());
+    manager.resync_dirty_peers_bounded();
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    assert!(manager.eor_pending(peer).is_empty());
+}
+
+/// The two ways a refused marker of an ORF-gated family is offered again
+/// keep their own rule: the resync tick waits for the RFC 5291 §6 gate,
+/// and a release does not (the family's honest-empty marker is immediate
+/// for a peer that never refreshes).
+#[test]
+fn refused_marker_of_an_orf_gated_family_waits_on_the_tick_but_not_on_a_release() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().map(delivered).unwrap();
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    manager.owe_eor(peer, unicast);
+    manager
+        .peer_orf_pending
+        .entry(peer)
+        .or_default()
+        .insert(unicast);
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    manager.settle_eor_now(peer);
+    assert!(!manager.dirty_peers.contains(&peer));
+    while output.try_recv().is_ok() {}
+
+    manager.resync_dirty_peers_bounded();
+    assert!(output.try_recv().is_err(), "the tick waits for the gate");
+    assert_eq!(manager.eor_pending(peer), HashSet::from([unicast, EVPN]));
+
+    manager.settle_eor_now(peer);
+    assert_eq!(
+        output.try_recv().map(delivered).unwrap().end_of_rib,
+        [unicast]
+    );
+    assert_eq!(manager.eor_pending(peer), HashSet::from([EVPN]));
 }
 
 #[test]
@@ -2021,10 +2106,8 @@ fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
     admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
     output.try_recv().map(delivered).unwrap();
     let unicast = (Afi::Ipv4, Safi::Unicast);
-    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.owe_eor(peer, unicast);
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
     let resets = count_reset_attempts(&mut manager);
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     let sender = manager.outbound_peers[&peer].clone();
@@ -2038,9 +2121,9 @@ fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
         Err(mpsc::error::TrySendError::Full(_))
     ));
 
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     assert!(manager.evpn_feed_is_current(peer));
-    assert_eq!(manager.pending_eor[&peer], HashSet::from([unicast, EVPN]));
+    assert_eq!(manager.eor_pending(peer), HashSet::from([unicast, EVPN]));
     assert_eq!(manager.evpn_feed_receipt_count, 1);
     assert_eq!(manager.evpn_admitted_count(peer), 1);
     assert!(!manager.dirty_peers.contains(&peer));
@@ -2057,19 +2140,19 @@ fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
     assert!(marker.announce.is_empty() && marker.unicast_withdrawals().next().is_none());
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert!(output.try_recv().map(delivered).is_err());
-    assert_eq!(manager.pending_eor[&peer], HashSet::from([EVPN]));
+    assert_eq!(manager.eor_pending(peer), HashSet::from([EVPN]));
     assert!(manager.evpn_feed_is_current(peer));
     assert!(!manager.resync_tick_pending());
 
     let handle = manager.evpn_recovery_handle(peer).unwrap();
-    manager.rtc_eor_hold.remove(&peer);
+    manager.end_rt_membership_hold(peer);
     manager.resync_dirty_peers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
     assert!(marker.announce.is_empty() && marker.unicast_withdrawals().next().is_none());
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert!(output.try_recv().map(delivered).is_err());
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     assert_eq!(manager.evpn_feed_receipt_count, 0);
     assert!(manager.evpn_recovery.is_dormant(handle));
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
@@ -2084,10 +2167,7 @@ fn review_held_unicast_marker_outlives_retired_evpn_proof_without_route_replay()
     output.try_recv().map(delivered).unwrap();
     let handle = manager.evpn_recovery_handle(peer).unwrap();
     let unicast = (Afi::Ipv4, Safi::Unicast);
-    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
-    manager
-        .gr_deferred_eor
-        .insert(peer, HashSet::from([unicast]));
+    manager.owe_eor_behind_orf_table(peer, unicast);
     manager.resync_dirty_peers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
@@ -2096,18 +2176,18 @@ fn review_held_unicast_marker_outlives_retired_evpn_proof_without_route_replay()
     assert!(manager.evpn_recovery.is_dormant(handle));
     assert_eq!(manager.evpn_feed_receipt_count, 0);
     assert!(!manager.has_evpn_feed_completion(peer));
-    assert_eq!(manager.pending_eor[&peer], HashSet::from([unicast]));
+    assert_eq!(manager.eor_behind_orf_table(peer), HashSet::from([unicast]));
     assert!(!manager.resync_tick_pending());
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
-    manager.gr_deferred_eor.remove(&peer);
-    assert!(manager.resync_tick_pending());
-    manager.resync_dirty_peers_bounded();
+    // The release of the hold sends the marker; no tick is involved.
+    manager.release_eor_orf_table(peer, [unicast], EorTrigger::Release);
+    assert!(!manager.resync_tick_pending());
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [unicast]);
     assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
     assert!(marker.unicast_withdrawals().next().is_none() && marker.evpn_withdraw.is_empty());
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     assert!(!manager.resync_tick_pending());
     assert!(output.try_recv().map(delivered).is_err());
 }
@@ -2155,10 +2235,6 @@ fn review_receipt_count_tracks_replacement_retirement_and_teardown() {
     assert_eq!(manager.evpn_feed_receipt_count, 0);
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one control keeps selection ingress, Stage, release and terminal assertions in their causal order"
-)]
 fn assert_review2_selection_release(nonempty: bool, staged: bool) {
     use crate::manager::selection_deferral::SelectionDeferralTransition;
     let (manager, peer, gid, mut output) = fixture();
@@ -2229,7 +2305,7 @@ fn assert_review2_selection_release(nonempty: bool, staged: bool) {
     }
     if staged {
         assert_eq!(eors, 0);
-        assert!(manager.eor_held(peer, EVPN));
+        assert!(manager.eor_withheld(peer, EVPN));
         let selection = manager.selection_deferral.as_mut().unwrap();
         assert!(selection.begin_route_refresh(survivor, 11, EVPN).is_none());
         let release = selection
@@ -2255,12 +2331,7 @@ fn assert_review2_selection_release(nonempty: bool, staged: bool) {
         eors, 1,
         "selection release owes one covered terminal even for an empty inventory"
     );
-    assert!(
-        !manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|families| families.contains(&EVPN))
-    );
+    assert!(!manager.eor_pending(peer).contains(&EVPN));
     assert!(!manager.has_evpn_feed_completion(peer));
     assert!(!manager.dirty_peers.contains(&peer));
     assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
@@ -2504,12 +2575,10 @@ fn review2_implicit_capture_allocation_refusal_returns_without_recursion() {
 fn assert_review2_selection_resync_terminal(private: bool) {
     let (mut manager, peer, gid, mut output) = fixture();
     assert!(manager.capture_private_evpn_admitted(peer));
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
     manager.send_initial_table(peer);
     assert!(manager.evpn_feed_is_current(peer));
-    assert!(manager.pending_eor[&peer].contains(&EVPN));
+    assert!(manager.eor_pending(peer).contains(&EVPN));
     while output.try_recv().map(delivered).is_ok() {}
     let sender = manager.outbound_peers[&peer].clone();
     while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
@@ -2536,7 +2605,7 @@ fn assert_review2_selection_resync_terminal(private: bool) {
             families: vec![EVPN],
         }],
     });
-    manager.rtc_eor_hold.remove(&peer);
+    manager.end_rt_membership_hold(peer);
     let metrics = manager.metrics.clone();
     let selection = manager.selection_deferral.as_mut().unwrap();
     assert_eq!(
@@ -2556,10 +2625,7 @@ fn assert_review2_selection_resync_terminal(private: bool) {
         "the resync's admitted terminal cannot be reinserted"
     );
     assert!(
-        !manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|families| families.contains(&EVPN)),
+        !manager.eor_pending(peer).contains(&EVPN),
         "completed selection must not recreate terminal debt"
     );
     assert!(!manager.has_evpn_feed_completion(peer));
@@ -2611,7 +2677,7 @@ fn owned_debt_churn_checkpoints(untouched: u32, withdraw_ends: bool) -> usize {
         .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
         .unwrap();
     assert!(feed.announce.is_empty() && feed.withdraw.is_empty());
-    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    manager.owe_eor(peer, EVPN);
     feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
     assert!(
         manager
@@ -2625,9 +2691,7 @@ fn owned_debt_churn_checkpoints(untouched: u32, withdraw_ends: bool) -> usize {
             .is_ok()
     );
     assert!(output.try_recv().map(delivered).is_err());
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
     let rib = manager
         .ribs
         .entry(route.peer)
@@ -2670,8 +2734,8 @@ fn owned_debt_churn_checkpoints(untouched: u32, withdraw_ends: bool) -> usize {
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
     assert_eq!(resets.load(Ordering::SeqCst), 0);
     // The renewed feed still settles on its owed marker.
-    manager.rtc_eor_hold.remove(&peer);
-    manager.retry_evpn_feed_markers_bounded();
+    manager.end_rt_membership_hold(peer);
+    manager.retry_eor_markers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert!(marker.evpn_announce.is_empty() && marker.end_of_rib == vec![EVPN]);
     assert!(
@@ -2716,7 +2780,7 @@ fn current_feed_owing_eor() -> (
     let mut feed = manager
         .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
         .unwrap();
-    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    manager.owe_eor(peer, EVPN);
     feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
     assert!(
         manager
@@ -2829,11 +2893,9 @@ fn exact_rejection_outlives_its_source_while_the_loc_rib_keeps_the_row() {
     let mut feed = manager
         .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
         .unwrap();
-    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    manager.owe_eor(peer, EVPN);
     feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
-    manager
-        .rtc_eor_hold
-        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
     assert!(
         manager
             .try_send_and_commit_outbound_update(
@@ -2937,7 +2999,7 @@ fn refused_refresh_marker_falls_back_to_the_resync_tick() {
         data.refresh_markers,
         [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
     );
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert_eq!(marker.end_of_rib, [EVPN]);
@@ -2976,7 +3038,7 @@ fn sparse_renewal_inherits_the_owed_marker_behind_its_data() {
             .is_ok()
     );
     assert!(manager.evpn_feed_is_current(peer));
-    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.eor_pending(peer).is_empty());
     while output.try_recv().map(delivered).is_ok() {}
     let changed = imet_with_tag(5);
     manager.process_evpn_announce_chunk(changed.peer, vec![changed.clone()]);
@@ -2988,7 +3050,7 @@ fn sparse_renewal_inherits_the_owed_marker_behind_its_data() {
         manager.evpn_feed_is_current(peer),
         "the renewal kept the owed marker"
     );
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(
         marker.refresh_markers,
@@ -3024,16 +3086,11 @@ fn owned_initial_dump_settles_its_marker_once_and_refresh_keeps_demarcation() {
         .filter(|update| update.end_of_rib.contains(&EVPN))
         .count();
     assert_eq!(eors, 1, "exactly one EVPN End-of-RIB");
-    assert!(
-        !manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|families| families.contains(&EVPN))
-    );
+    assert!(!manager.eor_pending(peer).contains(&EVPN));
     assert!(!manager.pending_group_admitted.contains_key(&peer));
     assert!(!manager.dirty_peers.contains(&peer));
     manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     let refresh = drain_all(&mut output);
     let has = |subtype| {
         refresh
@@ -3060,7 +3117,7 @@ fn private_handoff_initial_dump_sends_one_marker() {
     assert!(manager.has_private_evpn_handoff(peer));
     manager.send_initial_table(peer);
     let mut updates = drain_all(&mut output);
-    manager.retry_evpn_feed_markers_bounded();
+    manager.retry_eor_markers_bounded();
     updates.extend(drain_all(&mut output));
     let eors = updates
         .iter()
@@ -3077,7 +3134,7 @@ fn evpn_refresh_markers_leave_other_families_pending_eor() {
     let route = received(100);
     admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
     let unicast = (Afi::Ipv4, Safi::Unicast);
-    manager.pending_eor.insert(peer, HashSet::from([unicast]));
+    manager.owe_eor(peer, unicast);
     manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
     let updates = drain_all(&mut output);
     let marker = updates.last().unwrap();
@@ -3091,6 +3148,6 @@ fn evpn_refresh_markers_leave_other_families_pending_eor() {
             .iter()
             .all(|update| !update.end_of_rib.contains(&unicast))
     );
-    assert!(manager.pending_eor[&peer].contains(&unicast));
+    assert!(manager.eor_pending(peer).contains(&unicast));
     assert!(!manager.has_evpn_feed_completion(peer));
 }

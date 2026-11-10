@@ -1677,6 +1677,7 @@ mod deferred_session_ingress;
 mod distribution_window;
 mod eor_deferral_accounting;
 mod eor_grace;
+mod eor_hold;
 mod events_metrics;
 mod evpn;
 mod evpn_complete_feed;
