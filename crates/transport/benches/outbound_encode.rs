@@ -20,12 +20,15 @@
 //! `outbound_admission` drives the production pending cursor with completed
 //! writer watermarks between steps. It includes slicing and encoding;
 //! large-frame cells exercise the byte limit under both message-size modes.
+//! `shared_arc_extended`, `add_path_shared_arc`, `withdraw` and
+//! `ipv6_shared_arc` are 10,000-entry same-attribute groups that split into
+//! several UPDATEs each slice.
 //!
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench outbound_encode
 
 use rustbgpd_rib::PeerId;
 use std::hint::black_box;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -34,8 +37,8 @@ use rustbgpd_rib::{EvpnRibRoute, OutboundRouteUpdate, Route, RouteOrigin, VpnRib
 use rustbgpd_transport::{OutboundEncodeBench, OutboundGroupBench};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute,
-    EvpnIpPrefixValue, EvpnRoute, Ipv4Prefix, MplsLabel, MplsLabelEntry, Origin, PathAttribute,
-    Prefix, Safi, VpnNlri, VpnPrefix,
+    EvpnIpPrefixValue, EvpnRoute, Ipv4Prefix, Ipv6Prefix, MplsLabel, MplsLabelEntry, Origin,
+    PathAttribute, Prefix, Safi, VpnNlri, VpnPrefix,
 };
 
 /// Benches link the allocator the daemon ships with, so allocation-heavy
@@ -120,6 +123,80 @@ fn admission(c: &mut Criterion) {
             });
         });
     }
+    // Same-attribute groups in the shapes the message packing differs for:
+    // the Extended Message limit, Add-Path NLRI, a withdrawal burst and
+    // IPv6 `MP_REACH_NLRI`.
+    let announce = routes(10_000, "shared_arc");
+    let mut bench = OutboundEncodeBench::new(4_096);
+    group.throughput(Throughput::Elements(10_000));
+    group.bench_function("shared_arc_extended", |b| {
+        b.iter_custom(|iterations| {
+            (0..iterations)
+                .map(|_| bench.send_paced(black_box(&announce), true))
+                .sum()
+        });
+    });
+    let mut add_path = routes(10_000, "shared_arc");
+    for (path_id, route) in (1..).zip(Arc::make_mut(&mut add_path)) {
+        route.path_id = path_id;
+    }
+    let mut bench = OutboundEncodeBench::new(4_096);
+    bench.negotiate_add_path_send((Afi::Ipv4, Safi::Unicast));
+    group.bench_function("add_path_shared_arc", |b| {
+        b.iter_custom(|iterations| {
+            (0..iterations)
+                .map(|_| bench.send_paced(black_box(&add_path), false))
+                .sum()
+        });
+    });
+    let withdraw: Vec<(Prefix, u32)> = announce.iter().map(|route| (route.prefix, 0)).collect();
+    let mut bench = OutboundEncodeBench::new(4_096);
+    group.bench_function("withdraw", |b| {
+        b.iter_custom(|iterations| {
+            (0..iterations)
+                .map(|_| {
+                    bench.send_paced_update(
+                        OutboundRouteUpdate {
+                            withdraw: black_box(&withdraw).clone(),
+                            ..OutboundRouteUpdate::default()
+                        },
+                        (Afi::Ipv4, Safi::Unicast),
+                        false,
+                    )
+                })
+                .sum()
+        });
+    });
+    let next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
+    let ipv6: Arc<Vec<Route>> = (0..10_000u32)
+        .map(|i| Route {
+            prefix: Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::from((0x2001_0db8_u128 << 96) | (u128::from(i) << 80)),
+                48,
+            )),
+            next_hop,
+            ..announce[0].clone()
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let mut bench = OutboundEncodeBench::new(4_096);
+    group.bench_function("ipv6_shared_arc", |b| {
+        b.iter_custom(|iterations| {
+            (0..iterations)
+                .map(|_| {
+                    bench.send_paced_update(
+                        OutboundRouteUpdate {
+                            announce: Arc::clone(black_box(&ipv6)),
+                            next_hop_override: vec![None; ipv6.len()].into(),
+                            ..OutboundRouteUpdate::default()
+                        },
+                        (Afi::Ipv6, Safi::Unicast),
+                        false,
+                    )
+                })
+                .sum()
+        });
+    });
     for (shape, extended, communities) in [
         ("large_standard", false, 1_000u32),
         ("large_extended", true, 16_350),
