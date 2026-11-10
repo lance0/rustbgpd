@@ -772,12 +772,13 @@ pub enum PeerCommand {
     },
     /// Shut the task down unless its session is Established, deciding in one
     /// actor turn so no KEEPALIVE can land between the check and the
-    /// shutdown. Replies `false` and keeps running when Established;
-    /// otherwise replies `true` and ends exactly as [`Self::Shutdown`] would
-    /// for a session that is not Established, so it can never establish.
+    /// shutdown. Replies `Ok(false)` and keeps running when Established;
+    /// otherwise replies `Ok(true)` and ends exactly as [`Self::Shutdown`]
+    /// would for a session that is not Established, so it can never establish.
+    /// Held RIB admission is refused before retirement.
     ShutdownUnlessEstablished {
-        /// Whether the task was shut down.
-        reply: oneshot::Sender<bool>,
+        /// Whether the task was shut down, or why retirement was refused.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
         /// Withdrawn by a caller whose wait ended: the command is then a
         /// no-op.
         ticket: CommandTicket,
@@ -786,8 +787,8 @@ pub enum PeerCommand {
     /// `OpenSent` or `OpenConfirm`: only an Idle, Connect or Active session,
     /// with no connection past TCP, is shut down.
     ShutdownUnlessConnected {
-        /// Whether the task was shut down.
-        reply: oneshot::Sender<bool>,
+        /// Whether the task was shut down, or why retirement was refused.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
         /// Withdrawn by a caller whose wait ended: the command is then a
         /// no-op.
         ticket: CommandTicket,
@@ -798,11 +799,12 @@ pub enum PeerCommand {
     /// one actor turn so no KEEPALIVE can land between the check and the
     /// dump. RFC 4271 §6.8: an Established connection wins a collision, so a
     /// primary that established while the manager resolved the collision is
-    /// kept. Replies `false` and keeps running when Established; otherwise
-    /// replies `true` and ends as [`Self::CollisionDump`] does.
+    /// kept. Replies `Ok(false)` and keeps running when Established; otherwise
+    /// replies `Ok(true)` and ends as [`Self::CollisionDump`] does. Held RIB
+    /// admission is refused before retirement.
     CollisionDumpUnlessEstablished {
-        /// Whether the session was dumped.
-        reply: oneshot::Sender<bool>,
+        /// Whether the session was dumped, or why retirement was refused.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
         /// Withdrawn by a caller whose wait ended: the command is then a
         /// no-op.
         ticket: CommandTicket,
@@ -856,20 +858,6 @@ impl PeerCommand {
             Self::QueryImportPolicyTermHits { reply } => reply.is_closed(),
             _ => false,
         }
-    }
-
-    /// Session closes that must not wait for a full RIB channel to drain: a
-    /// parked session still sends their NOTIFICATION and closes TCP at once.
-    /// Their RIB-bound messages queue behind the held ones, in order.
-    pub(crate) fn runs_while_rib_parked(&self) -> bool {
-        matches!(
-            self,
-            Self::Shutdown
-                | Self::Stop { .. }
-                | Self::AdministrativeReset { .. }
-                | Self::PurgeReset
-                | Self::BfdDown
-        )
     }
 
     /// Wake shared-output consumers when their deferred snapshot is abandoned.
@@ -2302,6 +2290,8 @@ impl PeerHandle {
     /// timeout means the session never acted and never will: the command is
     /// withdrawn ([`CommandTicket`]), and the session keeps running in its
     /// current state, which the caller must re-check.
+    /// Held RIB admission returns [`PeerCommandError::CommandFailed`] before
+    /// retirement, leaving the live session owned by this handle.
     ///
     /// # Errors
     ///
@@ -2345,7 +2335,10 @@ impl PeerHandle {
     /// its reply is awaited.
     async fn conditional_shutdown(
         &self,
-        command: impl FnOnce(oneshot::Sender<bool>, CommandTicket) -> PeerCommand,
+        command: impl FnOnce(
+            oneshot::Sender<Result<bool, PeerCommandError>>,
+            CommandTicket,
+        ) -> PeerCommand,
         operation: &'static str,
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
@@ -2360,7 +2353,7 @@ impl PeerHandle {
                 .map_err(|_| PeerCommandError::SessionExited)?;
             (&mut shut_down)
                 .await
-                .map_err(|_| PeerCommandError::ReplyDropped)
+                .map_err(|_| PeerCommandError::ReplyDropped)?
         })
         .await;
         match outcome {
@@ -2370,7 +2363,9 @@ impl PeerHandle {
                 deadline,
             }),
             // The session claimed it first and replies in the same turn.
-            Err(_elapsed) => shut_down.await.map_err(|_| PeerCommandError::ReplyDropped),
+            Err(_elapsed) => shut_down
+                .await
+                .map_err(|_| PeerCommandError::ReplyDropped)?,
         }
     }
 
@@ -4086,7 +4081,7 @@ mod tests {
             };
             assert!(ticket.claim(), "the session claims it first");
             tokio::time::sleep(deadline * 2).await;
-            let _ = reply.send(true);
+            let _ = reply.send(Ok(true));
         });
         let result = handle.shutdown_unless_established_timeout(deadline).await;
         assert!(matches!(result, Ok(true)), "{result:?}");

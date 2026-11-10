@@ -178,13 +178,23 @@ fn sorted_family_limits<T>(
 }
 
 impl PeerSession {
+    /// The existing reconnect timer owns accepted starts until the previous
+    /// epoch's held RIB messages are admitted; a later stop cancels it.
+    async fn start_after_rib_admission(&mut self) {
+        self.reconnect_timer = None;
+        if self.fsm.state() == SessionState::Idle && !self.rib_backlog.is_empty() {
+            self.reconnect_timer = Some(Box::pin(tokio::time::sleep(std::time::Duration::ZERO)));
+        } else {
+            self.drive_fsm(Event::ManualStart).await;
+        }
+    }
+
     async fn administrative_reset(&mut self, reason: Option<bytes::Bytes>) {
         if self.fsm.state() == SessionState::Idle {
             info!(peer = %self.peer_label, "administrative reset requested while idle");
             self.notification_idle_failures = 0;
             if !self.stop_requested {
-                self.reconnect_timer = None;
-                self.drive_fsm(Event::ManualStart).await;
+                self.start_after_rib_admission().await;
             }
         } else {
             info!(peer = %self.peer_label, "administrative reset requested");
@@ -1452,15 +1462,60 @@ impl PeerSession {
         if cmd.is_canceled_read() {
             return ControlFlow::Continue(());
         }
+        if !self.rib_backlog.is_empty() {
+            let refused = || {
+                PeerCommandError::CommandFailed(
+                    "session has pending RIB admission; retry the command".into(),
+                )
+            };
+            match cmd {
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::ApplyTcpAoAddOnly { reply, .. }
+                | PeerCommand::PreflightTcpAoAddOnly { reply, .. }
+                | PeerCommand::PreflightTcpAoSelection { reply, .. }
+                | PeerCommand::ApplyTcpAoSelection { reply, .. }
+                | PeerCommand::ObserveTcpAoSelection { reply, .. }
+                | PeerCommand::CommitTcpAoSelection { reply, .. }
+                | PeerCommand::PreflightTcpAoDelete { reply, .. }
+                | PeerCommand::ApplyTcpAoDelete { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
+                    let _ = reply.send(Err(refused()));
+                    return ControlFlow::Continue(());
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Err(refused()));
+                    return ControlFlow::Continue(());
+                }
+                PeerCommand::ReplayOutbound { reply } => {
+                    let _ = reply.send(Err(PeerCommandError::ReplayUnavailable(
+                        "outbound replay requires pending RIB admission to finish".into(),
+                    )));
+                    return ControlFlow::Continue(());
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply, ticket }
+                | PeerCommand::ShutdownUnlessConnected { reply, ticket }
+                | PeerCommand::CollisionDumpUnlessEstablished { reply, ticket } => {
+                    // A refusal keeps the live actor owned by its caller;
+                    // dropping the reply would falsely report retirement.
+                    if ticket.claim() {
+                        let _ = reply.send(Err(refused()));
+                    }
+                    return ControlFlow::Continue(());
+                }
+                // Reads, bounded refresh/revalidation scheduling, promotion,
+                // and terminal commands retain their actual acknowledgements.
+                _ => {}
+            }
+        }
         match cmd {
             PeerCommand::Start => {
                 // RFC 4271 §8.2.2 ignores a start event outside Idle: a
                 // running session keeps its NOTIFICATION backoff streak.
                 if self.fsm.state() == SessionState::Idle {
                     self.stop_requested = false;
-                    self.reconnect_timer = None;
                     self.notification_idle_failures = 0;
-                    self.drive_fsm(Event::ManualStart).await;
+                    self.start_after_rib_admission().await;
                 }
                 ControlFlow::Continue(())
             }
@@ -1468,9 +1523,8 @@ impl PeerSession {
                 notification_idle_failures,
             } => {
                 self.stop_requested = false;
-                self.reconnect_timer = None;
                 self.notification_idle_failures = notification_idle_failures;
-                self.drive_fsm(Event::ManualStart).await;
+                self.start_after_rib_admission().await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Stop { reason } => {
@@ -1508,7 +1562,7 @@ impl PeerSession {
             | PeerCommand::ShutdownUnlessConnected { reply, .. }
                 if self.fsm.state() == SessionState::Established =>
             {
-                let _ = reply.send(false);
+                let _ = reply.send(Ok(false));
                 ControlFlow::Continue(())
             }
             PeerCommand::ShutdownUnlessConnected { reply, .. }
@@ -1517,7 +1571,7 @@ impl PeerSession {
                     SessionState::OpenSent | SessionState::OpenConfirm
                 ) =>
             {
-                let _ = reply.send(false);
+                let _ = reply.send(Ok(false));
                 ControlFlow::Continue(())
             }
             PeerCommand::ShutdownUnlessEstablished { reply, .. }
@@ -1530,7 +1584,7 @@ impl PeerSession {
                 info!(peer = %self.peer_label, "shutdown requested while not Established");
                 self.close_tcp();
                 self.timers.stop_all();
-                let _ = reply.send(true);
+                let _ = reply.send(Ok(true));
                 ControlFlow::Break(())
             }
             PeerCommand::Shutdown => {
@@ -1770,10 +1824,9 @@ impl PeerSession {
             PeerCommand::UpdateExportPolicy { policy, reply } => {
                 // Queue the accepting session's replay state before acknowledging
                 // the command. The peer manager still owns the outbound commit.
-                self.flush_rib_backlog().await;
-                let Ok(permit) = self.rib_tx.reserve().await else {
+                let Ok(permit) = self.rib_tx.clone().try_reserve_owned() else {
                     let _ = reply.send(Err(PeerCommandError::CommandFailed(
-                        "RIB channel closed while updating export policy".to_string(),
+                        "RIB admission unavailable while updating export policy".to_string(),
                     )));
                     return ControlFlow::Continue(());
                 };
@@ -1802,6 +1855,21 @@ impl PeerSession {
                     local_ipv6_nexthop,
                     remove_private_as,
                 } = *config;
+                let ipv6_unlock = self.negotiated.clone().filter(|neg| {
+                    self.ipv6_unicast_withheld
+                        && !self.withholds_ipv6_unicast_export(neg, local_ipv6_nexthop)
+                });
+                let unlock_permit = if ipv6_unlock.is_some() {
+                    let Ok(permit) = self.rib_tx.clone().try_reserve_owned() else {
+                        let _ = reply.send(Err(PeerCommandError::CommandFailed(
+                            "RIB admission unavailable while enabling IPv6 export".into(),
+                        )));
+                        return ControlFlow::Continue(());
+                    };
+                    Some(permit)
+                } else {
+                    None
+                };
                 // LAN-341 hot-apply: these knobs are read from
                 // `self.config` on every evaluation (see the command's
                 // doc) — no FSM event, no TCP impact. A lowered
@@ -1861,10 +1929,7 @@ impl PeerSession {
                 // outbound refresh follow. The reverse change keeps the
                 // family; its routes are then refused one at a time.
                 let mut ipv6_unlock_only = false;
-                if let Some(neg) = self.negotiated.clone()
-                    && self.ipv6_unicast_withheld
-                    && !self.withholds_ipv6_unicast_export(&neg)
-                {
+                if let (Some(neg), Some(permit)) = (ipv6_unlock, unlock_permit) {
                     // Scoped IPv4 Extended Next Hop may already be exporting
                     // with the socket's link-local address. The new global
                     // IPv6 next hop changes that existing family too.
@@ -1883,20 +1948,17 @@ impl PeerSession {
                         family = "ipv6_unicast",
                         "local_ipv6_nexthop now provides an IPv6 next hop: exporting IPv6 unicast"
                     );
-                    let queued = self
-                        .send_to_rib_admitted(RibUpdate::PeerFamilySendable {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            family,
-                            add_path_send_limit: neg
-                                .effective_add_path_send_limits
-                                .get(&family)
-                                .copied()
-                                .filter(|_| self.config.peer.add_path_send),
-                        })
-                        .await
-                        .is_ok();
-                    ipv6_unlock_only = queued && !ipv4_next_hop_changes;
+                    permit.send(RibUpdate::PeerFamilySendable {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        family,
+                        add_path_send_limit: neg
+                            .effective_add_path_send_limits
+                            .get(&family)
+                            .copied()
+                            .filter(|_| self.config.peer.add_path_send),
+                    });
+                    ipv6_unlock_only = !ipv4_next_hop_changes;
                 }
                 info!(peer = %self.peer_label, "hot-applied runtime config knobs");
                 let _ = reply.send(Ok(ipv6_unlock_only));
@@ -2019,11 +2081,11 @@ impl PeerSession {
             PeerCommand::CollisionDumpUnlessEstablished { reply, .. }
                 if self.fsm.state() == SessionState::Established =>
             {
-                let _ = reply.send(false);
+                let _ = reply.send(Ok(false));
                 ControlFlow::Continue(())
             }
             PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
-                let _ = reply.send(true);
+                let _ = reply.send(Ok(true));
                 self.collision_dump()
             }
             PeerCommand::CollisionDump => self.collision_dump(),

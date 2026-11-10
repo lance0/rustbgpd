@@ -202,7 +202,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                     break;
                 }
                 PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
-                    let _ = reply.send(true);
+                    let _ = reply.send(Ok(true));
                     dumps.fetch_add(1, Ordering::SeqCst);
                     break;
                 }

@@ -548,7 +548,10 @@ async fn shutdown_unless_established_decides_in_one_actor_turn() {
             ticket: crate::handle::CommandTicket::default(),
         })
         .await;
-    assert!(shut_down.await.unwrap(), "OpenConfirm is shut down");
+    assert!(
+        shut_down.await.unwrap().unwrap(),
+        "OpenConfirm is shut down"
+    );
     assert_eq!(flow, std::ops::ControlFlow::Break(()), "the task ends");
 
     let (mut session, _server, _rib_rx) = open_confirm_session().await;
@@ -561,7 +564,7 @@ async fn shutdown_unless_established_decides_in_one_actor_turn() {
             ticket: crate::handle::CommandTicket::default(),
         })
         .await;
-    assert!(!shut_down.await.unwrap(), "Established is refused");
+    assert!(!shut_down.await.unwrap().unwrap(), "Established is refused");
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
     assert_eq!(session.fsm.state(), SessionState::Established, "kept");
 }
@@ -597,7 +600,7 @@ async fn collision_dump_unless_established_keeps_an_established_session() {
             ticket: crate::handle::CommandTicket::default(),
         })
         .await;
-    assert!(dumped.await.unwrap(), "OpenConfirm is dumped");
+    assert!(dumped.await.unwrap().unwrap(), "OpenConfirm is dumped");
     assert_eq!(flow, std::ops::ControlFlow::Break(()), "the task ends");
     assert!(session.stop_requested, "dumped as a collision loser");
 
@@ -611,7 +614,7 @@ async fn collision_dump_unless_established_keeps_an_established_session() {
             ticket: crate::handle::CommandTicket::default(),
         })
         .await;
-    assert!(!dumped.await.unwrap(), "Established is kept");
+    assert!(!dumped.await.unwrap().unwrap(), "Established is kept");
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
     assert_eq!(session.fsm.state(), SessionState::Established, "kept");
     assert!(
@@ -674,7 +677,7 @@ async fn shutdown_unless_connected_keeps_a_handshake() {
             ticket: crate::handle::CommandTicket::default(),
         })
         .await;
-    assert!(!shut_down.await.unwrap(), "OpenConfirm is kept");
+    assert!(!shut_down.await.unwrap().unwrap(), "OpenConfirm is kept");
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
     assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
 
@@ -692,7 +695,7 @@ async fn shutdown_unless_connected_keeps_a_handshake() {
         })
         .await;
     assert!(
-        shut_down.await.unwrap(),
+        shut_down.await.unwrap().unwrap(),
         "no connection past TCP is shut down"
     );
     assert_eq!(flow, std::ops::ControlFlow::Break(()));

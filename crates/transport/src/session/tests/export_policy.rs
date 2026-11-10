@@ -166,7 +166,7 @@ async fn accepted_export_policy_is_queued_before_ack_even_if_reply_dropped() {
 }
 
 #[tokio::test]
-async fn accepted_export_policy_waits_for_capacity_and_rejects_closed_rib() {
+async fn export_policy_refuses_full_mailbox_before_mutation_and_can_retry() {
     let (mut session, _rx) =
         make_test_session_with_metrics_and_identity(BgpMetrics::new(), SessionIdentity::primary(7));
     let old = export_chain(PolicyAction::Deny);
@@ -180,25 +180,35 @@ async fn accepted_export_policy_waits_for_capacity_and_rejects_closed_rib() {
     .unwrap();
     session.rib_tx = tx;
     let (reply, mut accepted) = oneshot::channel();
-    {
+    let completion = {
         let command = session.handle_command(PeerCommand::UpdateExportPolicy {
             policy: None,
             reply,
         });
         tokio::pin!(command);
-        tokio::select! {
-            biased;
-            _ = &mut command => panic!("full RIB channel must delay acceptance"),
-            () = tokio::task::yield_now() => {},
-        }
-        assert!(matches!(
-            accepted.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-    }
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(command.as_mut(), cx))
+        })
+        .await
+    };
     assert_eq!(session.export_policy, Some(old.clone()));
-    assert!(accepted.await.is_err(), "canceled wait did not acknowledge");
-    drop(rx.recv().await);
+    assert!(session.rib_backlog.is_empty());
+    assert!(
+        matches!(
+            completion,
+            std::task::Poll::Ready(ControlFlow::Continue(()))
+        ),
+        "a full mailbox must refuse without waiting"
+    );
+    assert!(matches!(
+        accepted.try_recv(),
+        Ok(Err(PeerCommandError::CommandFailed(_)))
+    ));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        RibUpdate::PeerDown { session_id: 99, .. }
+    ));
+    assert!(rx.try_recv().is_err(), "the refused command sent nothing");
     let (reply, accepted) = oneshot::channel();
     let _ = session
         .handle_command(PeerCommand::UpdateExportPolicy {
@@ -207,6 +217,16 @@ async fn accepted_export_policy_waits_for_capacity_and_rejects_closed_rib() {
         })
         .await;
     assert_eq!(accepted.await.unwrap(), Ok(()));
+    assert!(
+        matches!(
+            rx.try_recv().unwrap(),
+            RibUpdate::SetPeerSessionExportPolicy {
+                export_policy: None,
+                ..
+            }
+        ),
+        "the retry must be admitted before its success acknowledgement"
+    );
     drop(rx);
     // The next update must fail without changing the accepted permit-all state.
     let (reply, accepted) = oneshot::channel();

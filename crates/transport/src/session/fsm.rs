@@ -1,5 +1,5 @@
 use super::{
-    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr,
+    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr, Ipv6Addr,
     MAX_PARKED_HOLD_RENEWALS, Message, NotificationCode, PARKED_HOLD_PROBE, PeerDownReason,
     PeerSession, RibUpdate, Safi, SessionDownReason, SessionLifecycleNotification,
     SessionNotification, SessionNotificationDirection, SessionState, cease_subcode, debug, info,
@@ -268,6 +268,7 @@ impl PeerSession {
     pub(super) fn withholds_ipv6_unicast_export(
         &self,
         neg: &rustbgpd_fsm::NegotiatedSession,
+        local_ipv6_nexthop: Option<Ipv6Addr>,
     ) -> bool {
         if neg.peer_asn == self.config.peer.local_asn
             || self.config.route_server_client
@@ -286,7 +287,7 @@ impl PeerSession {
                 IpAddr::V4(_) => None,
             });
         super::SessionExportProfile::usable_ipv6_unicast_next_hop(
-            self.config.local_ipv6_nexthop.or(local_ipv6),
+            local_ipv6_nexthop.or(local_ipv6),
             neg.link_local_next_hop && self.is_scoped_link_local_peer(),
         )
         .is_none()
@@ -1137,7 +1138,8 @@ impl PeerSession {
                     // with the reason export explain reports for it.
                     let mut withheld_families = Vec::new();
                     let mut sendable_families = if is_ebgp {
-                        let withhold_v6 = self.withholds_ipv6_unicast_export(neg);
+                        let withhold_v6 =
+                            self.withholds_ipv6_unicast_export(neg, self.config.local_ipv6_nexthop);
                         self.ipv6_unicast_withheld = withhold_v6;
                         if withhold_v6 {
                             // Once per session: the family is withheld before
