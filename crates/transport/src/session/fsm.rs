@@ -391,6 +391,22 @@ impl PeerSession {
             state = %self.fsm.state(),
             "fast external failover: interface down, closing session without NOTIFICATION"
         );
+        self.suppress_gr_retention = true;
+        self.fail_connection_locally(down.teardown_cause()).await;
+        // Only an Established teardown reaches `SessionDown`, which clears
+        // the latch; a pre-Established close must not leak it forward.
+        self.suppress_gr_retention = false;
+    }
+
+    /// Close the connection from this side without a NOTIFICATION and give
+    /// the FSM the transport failure, so the session leaves its state at
+    /// once: an Established one goes down through `SessionDown` (`PeerDown`,
+    /// or Graceful Restart retention as for any transport loss) and then
+    /// reconnects. Closing the socket alone would leave the FSM where it was,
+    /// with the read arm disabled and a cleanly exited writer, until the hold
+    /// timer; with a hold time of zero, for good. The writer is aborted and
+    /// joined, so no later writer exit can refer to this connection.
+    pub(super) async fn fail_connection_locally(&mut self, cause: String) {
         if self.fsm.state() == SessionState::Established {
             self.last_down_reason = Some(PeerDownReason::LocalNoNotification(
                 super::AUTOMATIC_STOP_FSM_EVENT,
@@ -398,14 +414,10 @@ impl PeerSession {
             self.session_telemetry_metric_lease
                 .latch_down_reason(SessionDownReason::LocalNoNotification);
         }
-        self.record_transport_cause(down.teardown_cause());
+        self.record_transport_cause(cause);
         self.abort_connection().await;
-        self.suppress_gr_retention = true;
         self.handle_tcp_disconnect();
         self.drive_fsm(Event::TcpConnectionFails).await;
-        // Only an Established teardown reaches `SessionDown`, which clears
-        // the latch; a pre-Established close must not leak it forward.
-        self.suppress_gr_retention = false;
     }
 
     /// Run the check the FSM asked for when the peer's ASN became known.

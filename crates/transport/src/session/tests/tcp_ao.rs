@@ -26,16 +26,16 @@ fn recreated_active_session_starts_at_committed_tcp_ao_generation() {
     assert_eq!(session.tcp_ao_generation, generation);
 }
 
-#[test]
-fn disconnected_tcp_ao_deletion_commits_exact_metadata_and_is_idempotent() {
+#[tokio::test]
+async fn disconnected_tcp_ao_deletion_commits_exact_metadata_and_is_idempotent() {
     let (mut session, deletion) = tcp_ao_deletion_test_fixture();
-    session.apply_tcp_ao_delete(&deletion).unwrap();
+    session.apply_tcp_ao_delete(&deletion).await.unwrap();
     assert_eq!(session.tcp_ao_generation, deletion.generation);
     assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 1);
     let expected_metadata = super::tcp_ao_key_metadata(&session.config, None, None);
     assert!(session.tcp_ao_key_metadata == expected_metadata);
 
-    session.apply_tcp_ao_delete(&deletion).unwrap();
+    session.apply_tcp_ao_delete(&deletion).await.unwrap();
     assert_eq!(session.tcp_ao_generation, deletion.generation);
     assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 1);
     assert_eq!(session.tcp_ao_key_metadata.len(), 1);
@@ -46,17 +46,16 @@ async fn connected_tcp_ao_deletion_preserves_session_on_current_rnext_refusal() 
     let (mut session, deletion) = tcp_ao_deletion_test_fixture();
     install_test_tcp_stream(&mut session).await;
     let original_metadata = session.tcp_ao_key_metadata.clone();
-    let result = session.apply_tcp_ao_delete_with(
-        &deletion,
-        |_stream, current, desired, _connected_peer| {
+    let result = session
+        .apply_tcp_ao_delete_with(&deletion, |_stream, current, desired, _connected_peer| {
             assert_eq!(current[0].keyring.0.len(), 2);
             assert!(current[0].keyring.0[0].deprecated);
             assert_eq!(desired[0].keyring.0.len(), 1);
             Err(PeerCommandError::CommandFailed(
                 "refusing to delete a Current/RNext MKT".to_string(),
             ))
-        },
-    );
+        })
+        .await;
 
     assert!(matches!(result, Err(PeerCommandError::CommandFailed(_))));
     assert!(session.read_half.is_some());
@@ -72,14 +71,13 @@ async fn connected_tcp_ao_deletion_preserves_session_on_current_rnext_refusal() 
 async fn mutation_started_tcp_ao_deletion_closes_and_reset_discards_replacement_stream() {
     let (mut session, deletion) = tcp_ao_deletion_test_fixture();
     install_test_tcp_stream(&mut session).await;
-    let result = session.apply_tcp_ao_delete_with(
-        &deletion,
-        |_stream, _current, _desired, _connected_peer| {
+    let result = session
+        .apply_tcp_ao_delete_with(&deletion, |_stream, _current, _desired, _connected_peer| {
             Err(PeerCommandError::TcpAoMutationFailed(
                 "DEL_KEY began before inventory verification failed".to_string(),
             ))
-        },
-    );
+        })
+        .await;
     assert!(matches!(
         result,
         Err(PeerCommandError::TcpAoMutationFailed(_))
@@ -106,8 +104,8 @@ async fn mutation_started_tcp_ao_deletion_closes_and_reset_discards_replacement_
     assert!(session.read_half.is_none());
 }
 
-#[test]
-fn disconnected_active_session_accepts_only_immediate_append_only_generation() {
+#[tokio::test]
+async fn disconnected_active_session_accepts_only_immediate_append_only_generation() {
     let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let old = crate::TcpAoConfig {
@@ -148,28 +146,33 @@ fn disconnected_active_session_accepts_only_immediate_append_only_generation() {
             active_keyring: Some(crate::TcpAoKeyring(vec![old.clone(), successor])),
             accepted_owners: Vec::new().into(),
         })
+        .await
         .unwrap();
     assert_eq!(session.tcp_ao_generation, generation_two);
     assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 2);
 
-    let skipped = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
-        generation: crate::TcpAoRotationGeneration::new(4).unwrap(),
-        active_keyring: Some(crate::TcpAoKeyring(vec![old.clone()])),
-        accepted_owners: Vec::new().into(),
-    });
+    let skipped = session
+        .apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+            generation: crate::TcpAoRotationGeneration::new(4).unwrap(),
+            active_keyring: Some(crate::TcpAoKeyring(vec![old.clone()])),
+            accepted_owners: Vec::new().into(),
+        })
+        .await;
     assert!(skipped.is_err());
 
-    let removal = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
-        generation: crate::TcpAoRotationGeneration::new(3).unwrap(),
-        active_keyring: Some(crate::TcpAoKeyring(vec![old])),
-        accepted_owners: Vec::new().into(),
-    });
+    let removal = session
+        .apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+            generation: crate::TcpAoRotationGeneration::new(3).unwrap(),
+            active_keyring: Some(crate::TcpAoKeyring(vec![old])),
+            accepted_owners: Vec::new().into(),
+        })
+        .await;
     assert!(removal.is_err());
     assert_eq!(session.tcp_ao_generation, generation_two);
 }
 
-#[test]
-fn disconnected_protected_session_cannot_advance_without_active_owner_inventory() {
+#[tokio::test]
+async fn disconnected_protected_session_cannot_advance_without_active_owner_inventory() {
     let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.tcp_ao = Some(crate::TcpAoKeyring(vec![crate::TcpAoConfig {
@@ -198,11 +201,13 @@ fn disconnected_protected_session_cannot_advance_without_active_owner_inventory(
         SessionIdentity::default(),
         crate::TcpAoRotationGeneration::STARTUP,
     );
-    let result = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
-        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
-        active_keyring: None,
-        accepted_owners: Vec::new().into(),
-    });
+    let result = session
+        .apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+            generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+            active_keyring: None,
+            accepted_owners: Vec::new().into(),
+        })
+        .await;
     assert!(result.is_err());
     assert_eq!(
         session.tcp_ao_generation,
@@ -250,11 +255,13 @@ async fn tcp_ao_generation_does_not_advance_past_inflight_old_inventory_connect(
     successor.key = "successor-secret".into();
     successor.send_id = 2;
     successor.recv_id = 12;
-    let result = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
-        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
-        active_keyring: Some(crate::TcpAoKeyring(vec![old, successor])),
-        accepted_owners: Vec::new().into(),
-    });
+    let result = session
+        .apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+            generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+            active_keyring: Some(crate::TcpAoKeyring(vec![old, successor])),
+            accepted_owners: Vec::new().into(),
+        })
+        .await;
     assert!(result.is_err());
     assert_eq!(
         session.tcp_ao_generation,
@@ -555,4 +562,456 @@ fn non_tcp_ao_query_does_not_invoke_inspector() {
         panic!("non-AO session must not inspect TCP_AO_INFO")
     });
     assert!(session.tcp_ao_info.is_none());
+}
+
+// A TCP-AO key mutation that fails after it started discards the connection.
+// The session must take that as a transport failure at once, not stay in its
+// FSM state on a closed socket until the hold timer.
+
+const TCP_AO_MUTATION_CAUSE: &str = "TCP-AO key mutation failed; connection discarded";
+
+fn open_with_hold(hold_time: u16) -> rustbgpd_wire::OpenMessage {
+    rustbgpd_wire::OpenMessage {
+        version: 4,
+        my_as: 65002,
+        hold_time,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities: vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs { asn: 65002 },
+        ],
+    }
+}
+
+async fn establish_with(session: &mut PeerSession, open: rustbgpd_wire::OpenMessage) {
+    session.drive_fsm(Event::ManualStart).await;
+    session.drive_fsm(Event::OpenReceived(open)).await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// The TCP-AO fixture session with a RIB receiver, connected over loopback;
+/// the peer's end is returned so the connection stays open from its side.
+async fn connected_tcp_ao_session() -> (
+    PeerSession,
+    crate::TcpAoSessionDeletion,
+    mpsc::Receiver<RibUpdate>,
+    TcpStream,
+) {
+    let (mut session, deletion) = tcp_ao_deletion_test_fixture();
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    session.rib_tx = rib_tx;
+    let (client, peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    (session, deletion, rib_rx, peer)
+}
+
+async fn established_tcp_ao_session() -> (
+    PeerSession,
+    crate::TcpAoSessionDeletion,
+    mpsc::Receiver<RibUpdate>,
+    TcpStream,
+) {
+    let (mut session, deletion, mut rib_rx, peer) = connected_tcp_ao_session().await;
+    establish_with(&mut session, open_with_hold(90)).await;
+    while rib_rx.try_recv().is_ok() {}
+    (session, deletion, rib_rx, peer)
+}
+
+fn selection_of(session: &PeerSession) -> crate::TcpAoSessionSelection {
+    crate::TcpAoSessionSelection {
+        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+        active_keyring: session.config.tcp_ao.clone(),
+        accepted_owners: Vec::new().into(),
+        accepted_selected_owner: None,
+    }
+}
+
+fn add_only_of(session: &PeerSession) -> crate::TcpAoSessionGeneration {
+    let mut keyring = session.config.tcp_ao.clone().unwrap();
+    keyring.0.push(crate::TcpAoConfig {
+        key: "added-secret".into(),
+        send_id: 3,
+        recv_id: 13,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: false,
+        deprecated: false,
+    });
+    crate::TcpAoSessionGeneration {
+        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+        active_keyring: Some(keyring),
+        accepted_owners: Vec::new().into(),
+    }
+}
+
+fn mutation_failed<T>() -> Result<T, PeerCommandError> {
+    Err(PeerCommandError::TcpAoMutationFailed(
+        "injected failure after the mutation started".to_string(),
+    ))
+}
+
+fn mutation_not_started<T>() -> Result<T, PeerCommandError> {
+    Err(PeerCommandError::CommandFailed(
+        "injected refusal before any mutation".to_string(),
+    ))
+}
+
+/// Every session-loss message queued for the RIB, in order.
+fn rib_losses(rib_rx: &mut mpsc::Receiver<RibUpdate>) -> Vec<&'static str> {
+    std::iter::from_fn(|| rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::PeerDown { .. } => Some("PeerDown"),
+            RibUpdate::PeerGracefulRestart { .. } => Some("PeerGracefulRestart"),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn reset_after_failed_mutation(session: &mut PeerSession) {
+    let (reply, acknowledged) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::ResetTcpAoAfterFailedMutation {
+                desired_generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    acknowledged.await.expect("the reset is still acknowledged");
+}
+
+/// The Established session went down as for a transport loss: Idle, one
+/// `PeerDown`, socket and writer gone, no hold timer left, reconnect armed.
+fn assert_failed_as_transport_loss(
+    site: &str,
+    session: &mut PeerSession,
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+) {
+    assert_eq!(session.fsm.state(), SessionState::Idle, "{site}");
+    assert_eq!(rib_losses(rib_rx), ["PeerDown"], "{site}");
+    assert!(session.read_half.is_none(), "{site}: socket discarded");
+    assert!(
+        session.writer_join.is_none(),
+        "{site}: the writer is aborted and joined, so it cannot report an exit later"
+    );
+    assert!(
+        session.timers.hold.is_none(),
+        "{site}: no hold timer is left to end the session a second time"
+    );
+    assert!(
+        session.reconnect_timer.is_some(),
+        "{site}: the session reconnects"
+    );
+    assert_eq!(session.last_error, TCP_AO_MUTATION_CAUSE, "{site}");
+    let downs = counter_samples(&session.metrics, "bgp_session_down_total");
+    assert!(
+        downs.iter().any(|(labels, value)| {
+            labels.get("reason").map(String::as_str) == Some("local_no_notification")
+                && (*value - 1.0).abs() < f64::EPSILON
+        }),
+        "{site}: {downs:?}"
+    );
+}
+
+fn assert_mutation_failed(result: &Result<(), PeerCommandError>) {
+    assert!(matches!(
+        result,
+        Err(PeerCommandError::TcpAoMutationFailed(_))
+    ));
+}
+
+#[tokio::test]
+async fn failed_tcp_ao_selection_fails_the_established_session() {
+    let (mut session, _deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    let desired = selection_of(&session);
+    let result = session
+        .apply_tcp_ao_selection_with(desired, |_, _, _, _| mutation_failed())
+        .await;
+    assert_mutation_failed(&result);
+    assert_failed_as_transport_loss("selection", &mut session, &mut rib_rx);
+    assert!(session.tcp_ao_pending_selection.is_none());
+}
+
+#[tokio::test]
+async fn failed_tcp_ao_deletion_fails_the_established_session() {
+    let (mut session, deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    let result = session
+        .apply_tcp_ao_delete_with(&deletion, |_, _, _, _| mutation_failed())
+        .await;
+    assert_mutation_failed(&result);
+    assert_failed_as_transport_loss("deletion", &mut session, &mut rib_rx);
+    assert_eq!(
+        session.tcp_ao_generation,
+        crate::TcpAoRotationGeneration::STARTUP
+    );
+}
+
+#[tokio::test]
+async fn tcp_ao_deletion_without_a_snapshot_fails_the_established_session() {
+    let (mut session, deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    let result = session
+        .apply_tcp_ao_delete_with(&deletion, |_, _, _, _| Ok(None))
+        .await;
+    assert_mutation_failed(&result);
+    assert_failed_as_transport_loss("deletion without snapshot", &mut session, &mut rib_rx);
+}
+
+#[tokio::test]
+async fn failed_tcp_ao_add_only_fails_the_established_session() {
+    let (mut session, _deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    let desired = add_only_of(&session);
+    let result = session
+        .apply_tcp_ao_add_only_with(desired, |_, _, _, _| mutation_failed())
+        .await;
+    assert_mutation_failed(&result);
+    assert_failed_as_transport_loss("add-only", &mut session, &mut rib_rx);
+    assert_eq!(
+        session.tcp_ao_generation,
+        crate::TcpAoRotationGeneration::STARTUP
+    );
+}
+
+#[tokio::test]
+async fn tcp_ao_add_only_without_a_snapshot_fails_the_established_session() {
+    let (mut session, _deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    let desired = add_only_of(&session);
+    let result = session
+        .apply_tcp_ao_add_only_with(desired, |_, _, _, _| Ok(None))
+        .await;
+    assert_mutation_failed(&result);
+    assert_failed_as_transport_loss("add-only without snapshot", &mut session, &mut rib_rx);
+}
+
+/// Control: a refusal before any key changed keeps the connection and the
+/// Established session, for each of the three mutations.
+#[tokio::test]
+async fn tcp_ao_refusal_before_mutation_keeps_the_established_session() {
+    let (mut session, deletion, mut rib_rx, _peer) = established_tcp_ao_session().await;
+    let selection = selection_of(&session);
+    let add_only = add_only_of(&session);
+    let results = [
+        session
+            .apply_tcp_ao_selection_with(selection, |_, _, _, _| mutation_not_started())
+            .await,
+        session
+            .apply_tcp_ao_delete_with(&deletion, |_, _, _, _| mutation_not_started())
+            .await,
+        session
+            .apply_tcp_ao_add_only_with(add_only, |_, _, _, _| mutation_not_started())
+            .await,
+    ];
+    for result in results {
+        assert!(matches!(result, Err(PeerCommandError::CommandFailed(_))));
+    }
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert!(session.read_half.is_some());
+    assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
+    assert_eq!(session.last_error, "");
+}
+
+#[tokio::test]
+async fn tcp_ao_reset_fails_the_established_session() {
+    let (mut session, _deletion, mut rib_rx, mut peer) = established_tcp_ao_session().await;
+    reset_after_failed_mutation(&mut session).await;
+    assert_failed_as_transport_loss("reset", &mut session, &mut rib_rx);
+
+    // The peer sees only the close: no NOTIFICATION is sent on a connection
+    // whose key inventory is unknown.
+    let mut wire = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), peer.read_to_end(&mut wire))
+        .await
+        .expect("the discarded connection closes promptly");
+    let mut types = Vec::new();
+    let mut at = 0;
+    while at + 19 <= wire.len() {
+        types.push(wire[at + 18]);
+        at += usize::from(u16::from_be_bytes([wire[at + 16], wire[at + 17]])).max(19);
+    }
+    assert!(!types.contains(&3), "saw message types {types:?}");
+}
+
+/// The peer negotiated Graceful Restart: the reset retains its routes exactly
+/// as an ordinary transport loss does.
+#[tokio::test]
+async fn tcp_ao_reset_retains_routes_under_graceful_restart() {
+    let (mut session, _deletion, mut rib_rx, _peer) = connected_tcp_ao_session().await;
+    session.config.peer.graceful_restart = true;
+    establish_with(&mut session, notification_gr_open(false)).await;
+    while rib_rx.try_recv().is_ok() {}
+    reset_after_failed_mutation(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(rib_losses(&mut rib_rx), ["PeerGracefulRestart"]);
+    assert!(session.reconnect_timer.is_some());
+
+    let (mut control, _deletion, mut control_rib, _peer) = connected_tcp_ao_session().await;
+    control.config.peer.graceful_restart = true;
+    establish_with(&mut control, notification_gr_open(false)).await;
+    while control_rib.try_recv().is_ok() {}
+    control.handle_tcp_disconnect();
+    control.drive_fsm(Event::TcpConnectionFails).await;
+    assert_eq!(rib_losses(&mut control_rib), ["PeerGracefulRestart"]);
+}
+
+/// A writer failure reported after the reset finds the session already down:
+/// it adds no second loss. The writer was joined by the reset, so the run
+/// loop has no exit left to observe; the late exit is fed in by hand.
+#[tokio::test]
+async fn writer_error_after_tcp_ao_reset_reports_no_second_loss() {
+    let (mut session, _deletion, mut rib_rx, peer) = established_tcp_ao_session().await;
+    drop(peer);
+    reset_after_failed_mutation(&mut session).await;
+    assert_failed_as_transport_loss("reset", &mut session, &mut rib_rx);
+
+    session
+        .handle_writer_exit(Ok(Err(writer::WriterExit::Io(std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe,
+        )))))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
+    assert!(session.reconnect_timer.is_some());
+}
+
+/// Without a connection or a connect attempt there is nothing to fail: the
+/// reset is acknowledged and the FSM, its timers and the recorded error stay
+/// as they were, in Idle and in Active.
+#[tokio::test]
+async fn tcp_ao_reset_without_a_connection_changes_nothing() {
+    let (mut session, _deletion, mut rib_rx) = {
+        let (mut session, deletion) = tcp_ao_deletion_test_fixture();
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        session.rib_tx = rib_tx;
+        (session, deletion, rib_rx)
+    };
+    reset_after_failed_mutation(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(session.last_error, "");
+
+    let (client, _peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session.handle_tcp_disconnect();
+    session.drive_fsm(Event::TcpConnectionFails).await;
+    assert_eq!(session.fsm.state(), SessionState::Active);
+    let retries = session.fsm.connect_retry_counter();
+    reset_after_failed_mutation(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Active);
+    assert_eq!(session.fsm.connect_retry_counter(), retries);
+    assert_eq!(session.last_error, "");
+    assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
+}
+
+/// Before Established there is no RIB registration to withdraw: the reset
+/// discards the connection, or the connect attempt still in flight, and the
+/// FSM takes the failure, with no `PeerDown`.
+#[tokio::test]
+async fn tcp_ao_reset_before_established_reports_no_loss() {
+    // Connect: the attempt dials a loopback listener and is never polled.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.remote_addr = listener.local_addr().unwrap();
+    session.drive_fsm(Event::ManualStart).await;
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    assert!(session.connect_task.is_some());
+    reset_after_failed_mutation(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Active);
+    assert!(session.connect_task.is_none());
+    assert_eq!(session.last_error, TCP_AO_MUTATION_CAUSE);
+    assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
+
+    let (mut session, _deletion, mut rib_rx, _peer) = connected_tcp_ao_session().await;
+    session.drive_fsm(Event::ManualStart).await;
+    assert_eq!(session.fsm.state(), SessionState::OpenSent);
+    reset_after_failed_mutation(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Active);
+    assert!(session.read_half.is_none());
+    assert!(session.writer_join.is_none());
+    assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
+
+    let (mut session, _deletion, mut rib_rx, _peer) = connected_tcp_ao_session().await;
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(open_with_hold(90)))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    while rib_rx.try_recv().is_ok() {}
+    reset_after_failed_mutation(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.read_half.is_none());
+    assert_eq!(rib_losses(&mut rib_rx), [""; 0]);
+}
+
+async fn query_fsm_state(commands: &mpsc::Sender<PeerCommand>) -> SessionState {
+    let (reply, state) = oneshot::channel();
+    commands
+        .send(PeerCommand::QueryState { reply })
+        .await
+        .unwrap();
+    state.await.unwrap().fsm_state
+}
+
+/// The reset through the run loop, for a session Established with
+/// `hold_time`. By the time the reset is acknowledged the RIB has its
+/// `PeerDown` and the session reports Idle, the state in which the peer
+/// manager accepts the peer's reconnect instead of dropping it against an
+/// Established session. Nothing reports the loss a second time afterwards.
+/// The listener stays bound and unaccepted, so the session's own reconnect
+/// attempts stay on loopback and never complete a handshake.
+async fn tcp_ao_reset_in_the_run_loop(hold_time: u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+    let _peer = accepted.unwrap().0;
+    let (mut session, commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    session.config.remote_addr = addr;
+    session.test_install_stream(client.unwrap());
+    establish_with(&mut session, open_with_hold(hold_time)).await;
+    assert_eq!(session.timers.hold.is_some(), hold_time != 0);
+    while rib_rx.try_recv().is_ok() {}
+    let task = tokio::spawn(async move { session.run().await });
+
+    let (reply, acknowledged) = oneshot::channel();
+    commands
+        .send(PeerCommand::ResetTcpAoAfterFailedMutation {
+            desired_generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+            reply,
+        })
+        .await
+        .unwrap();
+    acknowledged.await.expect("the reset is still acknowledged");
+    assert_eq!(rib_losses(&mut rib_rx), ["PeerDown"]);
+    assert_eq!(query_fsm_state(&commands).await, SessionState::Idle);
+
+    // Past the hold time the session had, and past its first reconnect.
+    let second_loss = tokio::time::timeout(Duration::from_secs(200), async {
+        loop {
+            match rib_rx.recv().await {
+                Some(RibUpdate::PeerDown { .. } | RibUpdate::PeerGracefulRestart { .. }) => break,
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await;
+    assert!(second_loss.is_err(), "the loss is reported once");
+
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    task.await
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+}
+
+#[tokio::test(start_paused = true)]
+async fn tcp_ao_reset_ends_an_established_session_in_the_run_loop() {
+    tcp_ao_reset_in_the_run_loop(90).await;
+}
+
+/// With a hold time of zero no timer would ever end the session.
+#[tokio::test(start_paused = true)]
+async fn tcp_ao_reset_ends_an_established_session_with_hold_time_zero() {
+    tcp_ao_reset_in_the_run_loop(0).await;
 }

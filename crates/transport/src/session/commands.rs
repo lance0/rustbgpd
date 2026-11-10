@@ -453,6 +453,19 @@ impl PeerSession {
         })
     }
 
+    /// A TCP-AO key mutation that failed after it started leaves the socket's
+    /// key inventory unknown, so its connection (or a connect attempt still
+    /// using the old inventory) is discarded as a local transport failure
+    /// before the command is answered. Without either there is nothing to
+    /// fail, and the FSM is left alone.
+    async fn discard_connection_after_tcp_ao_mutation(&mut self) {
+        if self.read_half.is_none() && self.connect_task.is_none() {
+            return;
+        }
+        self.fail_connection_locally("TCP-AO key mutation failed; connection discarded".to_owned())
+            .await;
+    }
+
     fn preflight_tcp_ao_selection(
         &self,
         desired: &crate::config::TcpAoSessionSelection,
@@ -476,10 +489,60 @@ impl PeerSession {
         })
     }
 
-    fn apply_tcp_ao_selection(
+    async fn apply_tcp_ao_selection(
         &mut self,
         desired: crate::config::TcpAoSessionSelection,
     ) -> Result<(), PeerCommandError> {
+        self.apply_tcp_ao_selection_with(
+            desired,
+            |stream, owners, selected_owner, connected_peer| {
+                let preflight = crate::socket_opts::preflight_tcp_ao_rnext(
+                    stream,
+                    owners,
+                    selected_owner,
+                    connected_peer,
+                )
+                .map_err(|error| {
+                    PeerCommandError::CommandFailed(format!(
+                        "failed to preflight exact TCP-AO selection inventory: {error}"
+                    ))
+                })?;
+                crate::socket_opts::apply_tcp_ao_rnext(
+                    stream,
+                    &preflight,
+                    selected_owner,
+                    connected_peer,
+                )
+                .map_err(|error| {
+                    let mutation_started = error.mutation_started();
+                    let message = format!(
+                        "failed to select TCP-AO successor RNext: {}",
+                        error.into_inner()
+                    );
+                    if mutation_started {
+                        PeerCommandError::TcpAoMutationFailed(message)
+                    } else {
+                        PeerCommandError::CommandFailed(message)
+                    }
+                })
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn apply_tcp_ao_selection_with<F>(
+        &mut self,
+        desired: crate::config::TcpAoSessionSelection,
+        select_connected: F,
+    ) -> Result<(), PeerCommandError>
+    where
+        F: FnOnce(
+            &tokio::net::TcpStream,
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+            crate::listener::TcpAoSelectedOwner,
+            std::net::IpAddr,
+        ) -> Result<crate::socket_opts::TcpAoRnextApplied, PeerCommandError>,
+    {
         let plan = self.prepare_tcp_ao_selection(&desired)?;
         if self.tcp_ao_pending_selection.as_ref() == Some(&desired)
             && (self.read_half.is_none() || self.tcp_ao_successor_pkt_good_baseline.is_some())
@@ -488,35 +551,12 @@ impl PeerSession {
         }
         if let Some(stream) = self.read_half.as_ref() {
             let owners = tcp_ao_owner_views(&plan.owners);
-            let preflight = crate::socket_opts::preflight_tcp_ao_rnext(
+            let applied = select_connected(
                 stream.as_ref(),
                 &owners,
                 plan.selected_owner,
                 plan.connected_peer,
-            )
-            .map_err(|error| {
-                PeerCommandError::CommandFailed(format!(
-                    "failed to preflight exact TCP-AO selection inventory: {error}"
-                ))
-            })?;
-            let applied = crate::socket_opts::apply_tcp_ao_rnext(
-                stream.as_ref(),
-                &preflight,
-                plan.selected_owner,
-                plan.connected_peer,
-            )
-            .map_err(|error| {
-                let mutation_started = error.mutation_started();
-                let message = format!(
-                    "failed to select TCP-AO successor RNext: {}",
-                    error.into_inner()
-                );
-                if mutation_started {
-                    PeerCommandError::TcpAoMutationFailed(message)
-                } else {
-                    PeerCommandError::CommandFailed(message)
-                }
-            });
+            );
             match applied {
                 Ok(applied) => {
                     self.tcp_ao_info = Some(applied.snapshot);
@@ -524,7 +564,7 @@ impl PeerSession {
                         Some(applied.successor_pkt_good_baseline);
                 }
                 Err(error @ PeerCommandError::TcpAoMutationFailed(_)) => {
-                    self.close_tcp();
+                    self.discard_connection_after_tcp_ao_mutation().await;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
@@ -786,7 +826,7 @@ impl PeerSession {
         })
     }
 
-    pub(super) fn apply_tcp_ao_delete(
+    pub(super) async fn apply_tcp_ao_delete(
         &mut self,
         deletion: &crate::TcpAoSessionDeletion,
     ) -> Result<(), PeerCommandError> {
@@ -819,9 +859,10 @@ impl PeerSession {
                 )
             })
         })
+        .await
     }
 
-    pub(super) fn apply_tcp_ao_delete_with<F>(
+    pub(super) async fn apply_tcp_ao_delete_with<F>(
         &mut self,
         deletion: &crate::TcpAoSessionDeletion,
         mutate_connected: F,
@@ -851,13 +892,13 @@ impl PeerSession {
             match result {
                 Ok(Some(snapshot)) => self.tcp_ao_info = Some(snapshot),
                 Ok(None) => {
-                    self.close_tcp();
+                    self.discard_connection_after_tcp_ao_mutation().await;
                     return Err(PeerCommandError::TcpAoMutationFailed(
                         "connected TCP-AO deletion returned no socket snapshot".to_string(),
                     ));
                 }
                 Err(error @ PeerCommandError::TcpAoMutationFailed(_)) => {
-                    self.close_tcp();
+                    self.discard_connection_after_tcp_ao_mutation().await;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
@@ -1046,10 +1087,59 @@ impl PeerSession {
         })
     }
 
-    pub(super) fn apply_tcp_ao_add_only(
+    pub(super) async fn apply_tcp_ao_add_only(
         &mut self,
         desired: crate::TcpAoSessionGeneration,
     ) -> Result<(), PeerCommandError> {
+        self.apply_tcp_ao_add_only_with(desired, |stream, current, desired, connected_peer| {
+            crate::socket_opts::preflight_tcp_ao_add_only(
+                stream,
+                current,
+                desired,
+                Some(connected_peer),
+            )
+            .map_err(|error| {
+                PeerCommandError::CommandFailed(format!(
+                    "failed to preflight complete TCP-AO session inventory: {error}"
+                ))
+            })
+            .and_then(|preflight| {
+                crate::socket_opts::apply_tcp_ao_add_only(
+                    stream,
+                    preflight,
+                    desired,
+                    Some(connected_peer),
+                )
+                .map_err(|error| {
+                    let mutation_started = error.mutation_started();
+                    let message = format!(
+                        "failed to apply complete TCP-AO session inventory: {}",
+                        error.into_inner()
+                    );
+                    if mutation_started {
+                        PeerCommandError::TcpAoMutationFailed(message)
+                    } else {
+                        PeerCommandError::CommandFailed(message)
+                    }
+                })
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn apply_tcp_ao_add_only_with<F>(
+        &mut self,
+        desired: crate::TcpAoSessionGeneration,
+        mutate_connected: F,
+    ) -> Result<(), PeerCommandError>
+    where
+        F: FnOnce(
+            &tokio::net::TcpStream,
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+            std::net::IpAddr,
+        ) -> Result<Option<crate::TcpAoInfoSnapshot>, PeerCommandError>,
+    {
         let Some(plan) = self.prepare_tcp_ao_add_only(&desired)? else {
             return Ok(());
         };
@@ -1059,54 +1149,21 @@ impl PeerSession {
             desired_metadata,
         } = plan;
 
-        if self.read_half.is_some() {
+        if let Some(stream) = self.read_half.as_ref() {
             let current_owners = current_tcp_ao_owner_keyrings(&owners, &self.tcp_ao_key_metadata)?;
-            let apply = {
-                let stream = self.read_half.as_ref().expect("checked connected stream");
-                let current = tcp_ao_owner_views(&current_owners);
-                let desired_views = tcp_ao_owner_views(&owners);
-                crate::socket_opts::preflight_tcp_ao_add_only(
-                    stream.as_ref(),
-                    &current,
-                    &desired_views,
-                    Some(connected_peer),
-                )
-                .map_err(|error| {
-                    PeerCommandError::CommandFailed(format!(
-                        "failed to preflight complete TCP-AO session inventory: {error}"
-                    ))
-                })
-                .and_then(|preflight| {
-                    crate::socket_opts::apply_tcp_ao_add_only(
-                        stream.as_ref(),
-                        preflight,
-                        &desired_views,
-                        Some(connected_peer),
-                    )
-                    .map_err(|error| {
-                        let mutation_started = error.mutation_started();
-                        let message = format!(
-                            "failed to apply complete TCP-AO session inventory: {}",
-                            error.into_inner()
-                        );
-                        if mutation_started {
-                            PeerCommandError::TcpAoMutationFailed(message)
-                        } else {
-                            PeerCommandError::CommandFailed(message)
-                        }
-                    })
-                })
-            };
+            let current = tcp_ao_owner_views(&current_owners);
+            let desired_views = tcp_ao_owner_views(&owners);
+            let apply = mutate_connected(stream.as_ref(), &current, &desired_views, connected_peer);
             match apply {
                 Ok(Some(snapshot)) => self.tcp_ao_info = Some(snapshot),
                 Ok(None) => {
-                    self.close_tcp();
+                    self.discard_connection_after_tcp_ao_mutation().await;
                     return Err(PeerCommandError::TcpAoMutationFailed(
                         "connected TCP-AO apply returned no socket snapshot".to_string(),
                     ));
                 }
                 Err(error @ PeerCommandError::TcpAoMutationFailed(_)) => {
-                    self.close_tcp();
+                    self.discard_connection_after_tcp_ao_mutation().await;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
@@ -1842,7 +1899,7 @@ impl PeerSession {
             }
             PeerCommand::ApplyTcpAoAddOnly { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.apply_tcp_ao_add_only(*desired);
+                let result = self.apply_tcp_ao_add_only(*desired).await;
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "applied TCP-AO add-only generation");
                 }
@@ -1861,7 +1918,7 @@ impl PeerSession {
             }
             PeerCommand::ApplyTcpAoSelection { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.apply_tcp_ao_selection(*desired);
+                let result = self.apply_tcp_ao_selection(*desired).await;
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "selected TCP-AO successor RNext");
                 }
@@ -1889,7 +1946,7 @@ impl PeerSession {
             }
             PeerCommand::ApplyTcpAoDelete { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.apply_tcp_ao_delete(desired.as_ref());
+                let result = self.apply_tcp_ao_delete(desired.as_ref()).await;
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "applied TCP-AO deletion generation");
                 }
@@ -1905,7 +1962,7 @@ impl PeerSession {
                     generation = desired_generation.as_u64(),
                     "discarding TCP stream after partial TCP-AO generation mutation"
                 );
-                self.close_tcp();
+                self.discard_connection_after_tcp_ao_mutation().await;
                 let _ = reply.send(());
                 ControlFlow::Continue(())
             }
