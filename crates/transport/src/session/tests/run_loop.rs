@@ -270,7 +270,7 @@ enum LocalCease8 {
 
 /// Negotiate graceful restart for IPv4 unicast on an Established session,
 /// with or without the RFC 8538 N bit.
-fn negotiate_graceful_restart(session: &mut PeerSession, notification_gr: bool) {
+pub(super) fn negotiate_graceful_restart(session: &mut PeerSession, notification_gr: bool) {
     session.config.peer.graceful_restart = true;
     let mut negotiated = (*session.negotiated.clone().unwrap()).clone();
     negotiated.peer_gr_capable = true;

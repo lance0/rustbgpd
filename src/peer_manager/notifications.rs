@@ -59,13 +59,18 @@ impl PeerManager {
         else {
             return;
         };
-        // Join cancellation before publishing PeerDown. Without this strict
-        // ordering the old actor could complete an in-flight RIB send after the
-        // fence and repopulate routes under its now-unregistered generation.
+        // Join cancellation before publishing PeerDown, so the old actor
+        // emits nothing new behind the fence. What it already held follows
+        // from its own hand-off, ending with its PeerDown when it was
+        // Established; the RIB drops route messages from a session it no
+        // longer registers.
         aborted.abort_for_transport_safety_and_wait().await;
 
-        // The aborted actor cannot execute SessionDown. Fence its exact RIB
-        // generation before a later Enable can emit PeerUp from the replacement.
+        // The aborted session retires itself in the RIB, but this send stays:
+        // it is on this actor's ordered lane, ahead of the barrier or Enable
+        // that follows, where the session's hand-off has no fixed place while
+        // the mailbox is full, and it also clears a primary that was not
+        // Established and so had no epoch of its own to close.
         // Reads stay queued while the peer's session identity is mid-swap.
         if self
             .send_rib_update(

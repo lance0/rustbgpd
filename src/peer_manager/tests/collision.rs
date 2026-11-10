@@ -3403,6 +3403,93 @@ async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
     }
 }
 
+/// The reported replacement sequence through the real peer manager. The RIB
+/// mailbox is full when the Established session's TCP fails, so its
+/// `PeerDown` is held; the peer reconnects and the Idle arm replaces the old
+/// session, whose bounded shutdown runs out behind the mailbox and aborts
+/// the task. Once the RIB drains it still receives that `PeerDown`.
+/// Mutation-red: with the aborted task's held messages dropped, the mailbox
+/// drains without it.
+#[tokio::test]
+async fn replaced_session_behind_a_full_rib_mailbox_still_sends_its_peer_down() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let first = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
+    let first_session = mgr.peers[&key(peer_addr)].session_id();
+
+    // The RIB stops draining, then the session's TCP fails.
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx
+        .try_send(rustbgpd_rib::RibUpdate::ReleasePeer {
+            peer: rustbgpd_rib::PeerId::UNASSIGNED,
+        })
+        .is_ok()
+    {}
+    drop(first);
+    handle_until_primary_idle(&mut mgr).await;
+
+    // The peer reconnects: the Idle arm replaces the old session and its
+    // shutdown runs out the lifecycle bound behind the full mailbox.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let _client = client.await.unwrap();
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
+    assert_ne!(
+        mgr.peers[&key(peer_addr)].session_id(),
+        first_session,
+        "the reconnect must replace the old session"
+    );
+
+    // The RIB drains. The replacement keeps the channel open, so the wait
+    // is bounded rather than ended by a closed channel.
+    let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rib_rx.recv().await {
+                Some(rustbgpd_rib::RibUpdate::PeerDown { session_id, .. })
+                    if session_id == first_session =>
+                {
+                    return true;
+                }
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        delivered,
+        Ok(true),
+        "the replaced session's PeerDown must reach the RIB once it drains"
+    );
+}
+
 fn permit_all_chain() -> PolicyChain {
     use rustbgpd_policy::{Policy, PolicyAction};
     PolicyChain::new(vec![Policy {

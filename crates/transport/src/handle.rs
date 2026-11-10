@@ -1496,6 +1496,8 @@ impl PeerHandle {
     /// safety boundary. Normal lifecycle code should use bounded shutdown;
     /// this escape hatch is reserved for cases where the command channel
     /// itself cannot acknowledge discarding a potentially mutated socket.
+    /// The aborted session still ends in the RIB: the messages it held and
+    /// the `PeerDown` of an open Established epoch are delivered after it.
     #[doc(hidden)]
     pub fn abort_for_transport_safety(&self) {
         self.task.abort();
@@ -1504,7 +1506,10 @@ impl PeerHandle {
     /// Abort the owned session task and wait until cancellation has completed.
     ///
     /// This consuming variant is for ownership-fence paths that must prove the
-    /// old actor can no longer publish before transferring its RIB generation.
+    /// old actor no longer runs before transferring its RIB generation. What
+    /// it already held for the RIB may still arrive, in session order and
+    /// ending with its own `PeerDown`; the RIB orders that tail by session
+    /// identity.
     #[doc(hidden)]
     pub async fn abort_for_transport_safety_and_wait(self) {
         self.task.abort();
@@ -2132,7 +2137,9 @@ impl PeerHandle {
     /// re-applied per phase — so the total wait never exceeds `deadline`. If the
     /// deadline expires in either phase, the session task is aborted before
     /// returning [`PeerShutdownError::TimedOut`]. This avoids the actor-wedge fix
-    /// turning into an unowned live-session leak.
+    /// turning into an unowned live-session leak. The aborted session still
+    /// ends in the RIB: its held messages, its `PeerDown` included, are
+    /// delivered once the RIB channel has room, without the caller waiting.
     ///
     /// # Errors
     ///

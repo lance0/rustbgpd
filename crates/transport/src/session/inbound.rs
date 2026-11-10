@@ -1267,6 +1267,19 @@ impl PeerSession {
         update: RibUpdate,
         then: OnRibAdmission,
     ) -> Result<(), ()> {
+        // Every `PeerUp` and session end this session emits passes here, so
+        // the open epoch is tracked where no emitter can miss it. A purge of
+        // routes retained from an earlier connection names that session.
+        match &update {
+            RibUpdate::PeerUp { peer, .. } => self.rib_epoch = Some(*peer),
+            RibUpdate::PeerDown { session_id, .. }
+            | RibUpdate::PeerGracefulRestart { session_id, .. }
+                if *session_id == self.session_identity.id =>
+            {
+                self.rib_epoch = None;
+            }
+            _ => {}
+        }
         if !self.rib_backlog.is_empty() {
             self.rib_backlog.push_back((update, then));
             return Ok(());
@@ -1314,29 +1327,65 @@ impl PeerSession {
     /// session task ends, and before an admission-ordered send.
     pub(super) async fn flush_rib_backlog(&mut self) {
         // The head goes through the queued reservation, keeping its place
-        // among waiting senders. Cancel-safe: the reservation and the
-        // backlog stay as they were until the wait completes.
-        if let Some(reserve) = self.rib_reserve.as_mut() {
+        // among waiting senders. Cancel-safe for every message: each stays
+        // in the backlog until its slot is reserved, so a task cancelled
+        // mid-flush still holds whatever was not admitted.
+        while !self.rib_backlog.is_empty() {
+            let reserve = self
+                .rib_reserve
+                .get_or_insert_with(|| tokio_util::sync::PollSender::new(self.rib_tx.clone()));
             let reserved = std::future::poll_fn(|cx| reserve.poll_reserve(cx))
                 .await
                 .is_ok();
-            if let Some((update, then)) = self.rib_backlog.pop_front() {
-                if reserved && reserve.send_item(update).is_ok() {
-                    self.on_rib_admission(then);
-                } else {
-                    self.drop_rib_backlog();
-                }
-            }
-        }
-        // An unused reservation would hold capacity the sends below wait for.
-        self.rib_reserve = None;
-        while let Some((update, then)) = self.rib_backlog.pop_front() {
-            if self.rib_tx.send(update).await.is_ok() {
+            let Some((update, then)) = self.rib_backlog.pop_front() else {
+                break;
+            };
+            if reserved && reserve.send_item(update).is_ok() {
                 self.on_rib_admission(then);
             } else {
                 self.drop_rib_backlog();
             }
         }
+        // An unused reservation would hold capacity later sends wait for.
+        self.rib_reserve = None;
+    }
+
+    /// A session dropped with RIB-bound messages still held, or inside an
+    /// Established epoch it never closed, would otherwise leave the RIB
+    /// serving that session's routes and counting it live with nothing left
+    /// to retire it: its task was cancelled (a bounded shutdown that ran out
+    /// its deadline behind a full RIB channel, a transport-safety abort), or
+    /// its command channel closed. Their delivery moves to its own task: the
+    /// held messages in session order, the head through its queued
+    /// reservation, then a `PeerDown` for the open epoch. The RIB orders a
+    /// late teardown by session identity, so one that arrives after a
+    /// replacement registered is discarded without touching the replacement.
+    /// The task ends when the last message is admitted or the RIB is gone.
+    pub(super) fn hand_off_rib_backlog(&mut self) {
+        if let Some(peer) = self.rib_epoch {
+            let _ = self.send_to_rib(RibUpdate::PeerDown {
+                peer,
+                session_id: self.session_identity.id,
+            });
+        }
+        if self.rib_backlog.is_empty() {
+            return;
+        }
+        let backlog = std::mem::take(&mut self.rib_backlog);
+        let mut reserve = self
+            .rib_reserve
+            .take()
+            .unwrap_or_else(|| tokio_util::sync::PollSender::new(self.rib_tx.clone()));
+        tokio::spawn(async move {
+            for (update, _) in backlog {
+                let reserved = std::future::poll_fn(|cx| reserve.poll_reserve(cx))
+                    .await
+                    .is_ok();
+                if !reserved || reserve.send_item(update).is_err() {
+                    return;
+                }
+            }
+        });
     }
 
     /// The RIB manager is gone: like a failed blocking send, the held
