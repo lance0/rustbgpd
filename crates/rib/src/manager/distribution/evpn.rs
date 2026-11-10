@@ -1151,6 +1151,14 @@ impl RibManager {
             .collect();
         for peer in members {
             checkpoint();
+            // One member's commit is the unit of this loop, as one receiver's
+            // is in `evpn_fanout_step`: serve the read-only lane at each
+            // member boundary. A no-op while an owner holds the lane.
+            let transition_elapsed = self
+                .pending_clean_policy_transition
+                .as_ref()
+                .map(super::PendingCleanPolicyTransition::elapsed);
+            self.drain_readiness_queries(transition_elapsed);
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;

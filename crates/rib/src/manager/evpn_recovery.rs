@@ -1160,6 +1160,24 @@ impl RibManager {
             }
             Ok(true) => {}
         }
+        // The walk is table-sized. Ordinary ingest holds no readiness owner,
+        // which would leave every checkpoint below inert, so the walk takes
+        // the lane itself: it serves at its start and end and at its stride.
+        // Inside an owner (a refresh, a resync) this installs nothing.
+        let installed = self.begin_replacement_readiness();
+        let captured = self.walk_evpn_capture(peer, private, old_deltas, gid, handle);
+        self.finish_readiness_owner(installed);
+        captured
+    }
+
+    fn walk_evpn_capture(
+        &mut self,
+        peer: PeerId,
+        private: bool,
+        old_deltas: &[super::update_groups::EvpnGroupDelta],
+        gid: Option<usize>,
+        handle: ProvenanceHandle,
+    ) -> bool {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = std::cell::RefCell::new(|| {
             super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
