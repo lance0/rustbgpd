@@ -70,7 +70,11 @@ impl PeerManager {
         // it is on this actor's ordered lane, ahead of the barrier or Enable
         // that follows, where the session's hand-off has no fixed place while
         // the mailbox is full, and it also clears a primary that was not
-        // Established and so had no epoch of its own to close.
+        // Established and so had no epoch of its own to close. When the
+        // primary was Established the RIB therefore sees two PeerDowns for
+        // it. The second finds no registration and runs the full teardown
+        // again, which is empty unless the peer entered graceful-restart
+        // retention in between.
         // Reads stay queued while the peer's session identity is mid-swap.
         if self
             .send_rib_update(

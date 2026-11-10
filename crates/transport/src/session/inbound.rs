@@ -1361,7 +1361,27 @@ impl PeerSession {
     /// late teardown by session identity, so one that arrives after a
     /// replacement registered is discarded without touching the replacement.
     /// The task ends when the last message is admitted or the RIB is gone.
+    ///
+    /// A `PeerUp` still held was never admitted, so the RIB never saw that
+    /// epoch and has nothing of it to close. It is dropped with the
+    /// registration context staged ahead of it and everything behind it:
+    /// delivered late, it would replace a successor's registration and reset
+    /// the routes the successor installed.
     pub(super) fn hand_off_rib_backlog(&mut self) {
+        if let Some(mut unseen) = self
+            .rib_backlog
+            .iter()
+            .position(|(update, _)| matches!(update, RibUpdate::PeerUp { .. }))
+        {
+            while unseen > 0 && is_registration_context(&self.rib_backlog[unseen - 1].0) {
+                unseen -= 1;
+            }
+            self.rib_backlog.truncate(unseen);
+            self.rib_epoch = None;
+            if self.rib_backlog.is_empty() {
+                self.rib_reserve = None;
+            }
+        }
         if let Some(peer) = self.rib_epoch {
             let _ = self.send_to_rib(RibUpdate::PeerDown {
                 peer,
@@ -4259,6 +4279,21 @@ pub(super) enum OnRibAdmission {
     BeginRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
     /// A peer `EoRR` or a local refresh timeout: close and sweep the window.
     EndRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+}
+
+/// The context a session stages for the RIB right before its `PeerUp`.
+fn is_registration_context(update: &RibUpdate) -> bool {
+    matches!(
+        update,
+        RibUpdate::SetPeerExportContext { .. }
+            | RibUpdate::SetPeerRsControl { .. }
+            | RibUpdate::SetPeerExportEncoder { .. }
+            | RibUpdate::SetPeerExportPolicyCounters { .. }
+            | RibUpdate::SetPeerGracefulRestartContext { .. }
+            | RibUpdate::SetPeerPolicyContext { .. }
+            | RibUpdate::SetPeerSourceContext { .. }
+            | RibUpdate::SetPeerWithheldFamilies { .. }
+    )
 }
 
 /// Poll the backlog's reservation. Cancel-safe: the reservation keeps its

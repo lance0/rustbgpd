@@ -12,7 +12,11 @@
   failed over to the dead session instead of retaining its routes. The
   held messages, and a `PeerDown` for an Established session that had not
   queued one, are now delivered in session order as soon as the mailbox
-  has room, without the peer manager waiting for them.
+  has room, without the peer manager waiting for them. An aborted
+  Established session that had not queued its own end is closed with a
+  plain `PeerDown`, so its routes are withdrawn rather than retained under
+  graceful restart. A session whose `PeerUp` was itself still held is not
+  announced to the RIB at all.
   **Operator-visible:** after a session is replaced or stopped under RIB
   backpressure, its routes are withdrawn, or retained as its graceful
   restart capability says, and

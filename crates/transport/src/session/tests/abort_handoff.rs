@@ -29,6 +29,8 @@ struct GatedRib {
     ends: Vec<(&'static str, u64)>,
     /// Every forwarded message from a session, as `(kind, session id)`.
     forwarded: Vec<(&'static str, u64)>,
+    /// Every message forwarded through the relay other than its fillers.
+    from_sessions: usize,
 }
 
 impl GatedRib {
@@ -47,6 +49,7 @@ impl GatedRib {
             metrics,
             ends: Vec::new(),
             forwarded: Vec::new(),
+            from_sessions: 0,
         }
     }
 
@@ -78,6 +81,10 @@ impl GatedRib {
                 }
                 _ => None,
             };
+            self.from_sessions += usize::from(!matches!(
+                &update,
+                RibUpdate::RoutesReceived { session_id: 0, .. }
+            ));
             if let Some(seen) = seen {
                 self.forwarded.push(seen);
                 if seen.0 == "PeerDown" || seen.0 == "PeerGracefulRestart" {
@@ -526,15 +533,13 @@ async fn slot_freed_mid_flush_keeps_the_session_end_held() {
 /// keeps its sender alive.
 #[tokio::test(start_paused = true)]
 async fn pending_hand_off_ends_when_the_rib_is_gone() {
-    let (rib_tx, rib_rx) = mpsc::channel(1);
-    rib_tx.try_send(placeholder_routes_received()).unwrap();
-    let (s1, s1_commands, _s1_peer) = established_on(rib_tx.clone(), 1, None).await;
-    assert!(
-        s1.rib_backlog
-            .iter()
-            .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
-        "PeerUp is held behind the full channel"
-    );
+    let (rib_tx, rib_rx) = mpsc::channel(RELAY);
+    let (mut s1, s1_commands, _s1_peer) = established_on(rib_tx.clone(), 1, None).await;
+    assert!(s1.rib_backlog.is_empty(), "PeerUp was admitted");
+    while rib_tx.try_send(placeholder_routes_received()).is_ok() {}
+    receive(&mut s1, first());
+    s1.process_read_buffer().await;
+    assert_eq!(s1.rib_backlog.len(), 1, "the UPDATE is held");
     let senders = rib_tx.downgrade();
     drop(rib_tx);
 
@@ -549,6 +554,79 @@ async fn pending_hand_off_ends_when_the_rib_is_gone() {
     // Paused clock: this elapses only once every task is idle.
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(senders.upgrade().is_none(), "the hand-off task has ended");
+}
+
+/// The session established while the RIB mailbox was full, so its `PeerUp`
+/// was never admitted, and a successor registered before the task was
+/// aborted. Nothing of the unseen epoch is delivered, neither the context
+/// staged ahead of the `PeerUp` nor the epoch's end: a late `PeerUp` would
+/// replace the successor's registration and reset the route it installed.
+/// Mutation-red: delivering the whole backlog replaces the successor's
+/// registration, and the `PeerDown` behind it then fails over.
+#[tokio::test(start_paused = true)]
+async fn held_peer_up_is_dropped_with_everything_behind_it() {
+    let mut rib = GatedRib::spawn();
+    let (mut s2, _s2_commands, _s2_peer) = established_on(rib.rib_tx.clone(), 2, None).await;
+    let peer = s2.rib_peer();
+    receive(&mut s2, second());
+    s2.process_read_buffer().await;
+    assert_eq!(rib.loc_rib_count().await, 1, "S2's route is installed");
+
+    rib.hold_full();
+    let (s1, s1_commands, _s1_peer) = established(&rib, 1).await;
+    assert!(
+        s1.rib_backlog
+            .iter()
+            .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
+        "S1 holds its PeerUp, with its staged context ahead of it"
+    );
+    owned(s1, s1_commands)
+        .abort_for_transport_safety_and_wait()
+        .await;
+    rib.release().await;
+
+    assert_eq!(
+        (
+            rib.from_sessions,
+            rib.loc_rib_count().await,
+            rib.failovers(peer),
+            counter_value(
+                &rib.metrics,
+                "bgp_rib_outbound_registration_replaced_total",
+                &peer.label(),
+            ),
+        ),
+        (0, 1, 0.0, 0.0),
+        "(messages from S1 delivered, routes installed, failovers, replaced registrations)"
+    );
+}
+
+/// An earlier epoch's end held ahead of a held `PeerUp` is still delivered:
+/// only the epoch the RIB never saw is dropped.
+/// Mutation-red: dropping the whole backlog when it holds a `PeerUp` loses
+/// the earlier epoch's `PeerDown` and leaves its route installed.
+#[tokio::test(start_paused = true)]
+async fn end_of_an_earlier_epoch_ahead_of_a_held_peer_up_is_delivered() {
+    let mut rib = GatedRib::spawn();
+    let (mut s1, s1_commands, _s1_peer) = established(&rib, 1).await;
+    receive(&mut s1, first());
+    s1.process_read_buffer().await;
+    rib.release().await;
+    assert_eq!(rib.loc_rib_count().await, 1);
+
+    rib.hold_full();
+    tcp_fails(&mut s1).await;
+    let (client, _s1_peer_again) = connected_stream_pair().await;
+    s1.test_install_stream(client);
+    establish_test_session(&mut s1, 65002).await;
+    let mark = rib.forwarded.len();
+    owned(s1, s1_commands)
+        .abort_for_transport_safety_and_wait()
+        .await;
+    rib.release().await;
+
+    assert_eq!(rib.forwarded_since(mark), [("PeerDown", 1)]);
+    assert_eq!(rib.loc_rib_count().await, 0);
 }
 
 /// The task is aborted inside its own teardown, before the session end is
