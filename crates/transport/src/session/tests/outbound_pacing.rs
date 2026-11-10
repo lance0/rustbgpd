@@ -3787,8 +3787,9 @@ async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
         frames_per_form.iter().all(|&frames| frames > 1),
         "each form's one group spans several frames: {frames_per_form:?}"
     );
-    // FNV-1a over every frame, pinned before prepared attributes were held
-    // in one form, so the bytes are compared across that change too.
+    // FNV-1a over every frame. Re-pinned when chunks began to fill the
+    // message: the same routes and attributes, with each group's frame
+    // boundaries moved so that every frame but its last is full.
     let digest = reference
         .iter()
         .flatten()
@@ -3797,7 +3798,7 @@ async fn parked_unicast_groups_resume_in_their_own_attribute_form() {
         });
     assert_eq!(
         (frames_per_form, digest),
-        ([2, 2, 3], 0xb2fb_6486_bcd8_20fa),
+        ([2, 2, 3], 0x236f_36eb_ab10_302d),
         "pinned unpressured frames"
     );
 

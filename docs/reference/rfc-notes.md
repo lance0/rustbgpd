@@ -296,10 +296,14 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   validation (is the attribute set RFC-compliant?). See ADR-0012.
 - Outbound IPv4/IPv6 unicast and IPv4/IPv6 FlowSpec announcements and
   withdrawals are chunked by the peer's negotiated 4096/65535-byte message
-  limit. MP chunking starts with at most 1,024 entries, grows through exactly
-  built and size-checked candidates up to a 4,096-entry probe ceiling, and
-  retains successful/failed bounds; it does not promise to fill every Extended
-  Message. Structured FlowSpec construction is fallible; an individually
+  limit. Each UPDATE of a same-attribute group carries the longest run of
+  entries whose encoded bytes fit, so every UPDATE of the group except its
+  last is full to within one entry. Unicast entry sizes are computed; FlowSpec
+  and the other typed families are sized from the bytes per entry of a built
+  message, so a group whose entry sizes vary can leave an UPDATE short. Every
+  UPDATE is still size-checked exactly before it is queued. Groups are formed
+  per outbound slice, and UPDATE boundaries are not part of the export
+  contract. Structured FlowSpec construction is fallible; an individually
   unencodable NLRI fails the session rather than partially committing a batch.
 - EVPN MP_REACH/MP_UNREACH is likewise chunked to the negotiated ceiling. A
   single announcement or withdrawal that still cannot fit invokes the

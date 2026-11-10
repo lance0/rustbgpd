@@ -156,6 +156,17 @@ impl OutboundEncodeBench {
         elapsed
     }
 
+    /// Negotiate Add-Path send for `family`, so its NLRI carry path IDs.
+    ///
+    /// # Panics
+    ///
+    /// If the fixed benchmark session is missing negotiation.
+    pub fn negotiate_add_path_send(&mut self, family: (Afi, Safi)) {
+        Arc::make_mut(self.session.negotiated.as_mut().unwrap())
+            .add_path_families
+            .insert(family, rustbgpd_wire::AddPathMode::Send);
+    }
+
     fn complete(&mut self) {
         while self.bulk_rx.try_recv().is_ok() {}
         self.completed
