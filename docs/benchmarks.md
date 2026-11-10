@@ -1168,7 +1168,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1544 bytes |
+| `AdjRibIn` | 1552 bytes |
 | `LocRib` | 1120 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1227,6 +1227,9 @@ process-wide peer table resolves to the neighbor's address and interface.
 `AdjRibIn` then grew from 1536 to 1544 bytes when its route slab split into
 fixed segments (a segment list plus a slot count instead of one slot vector),
 so a full table grows one segment at a time instead of copying every route.
+It grew again from 1544 to 1552 bytes with a flag that records whether the
+peer ever stored a FlowSpec route under a non-zero Add-Path ID, so FlowSpec
+selection can read one row per rule instead of the peer's whole table.
 
 `Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

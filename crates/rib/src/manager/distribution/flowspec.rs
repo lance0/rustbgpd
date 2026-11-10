@@ -268,9 +268,7 @@ impl RibManager {
         };
         // An identical re-add has already joined or extended the lease and
         // retagged the key; as for unicast, it returns before touching the
-        // stored rule. A recompute would change nothing, but with validation
-        // disabled its candidate scan reads every FlowSpec row, so a
-        // controller reconciling N rules would pay O(N^2).
+        // stored rule, because a recompute would change nothing.
         if outcome == InjectOutcome::Unchanged {
             debug!(afi = ?key.afi, safi = ?key.family().1, rd = ?key.rd, rule = %key.rule, ?outcome, "injected local FlowSpec route");
             if let Some((tag, lease_seconds)) = &started {

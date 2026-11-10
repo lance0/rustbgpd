@@ -1813,3 +1813,207 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Drive one rule through duplicates from several peers, an Add-Path
+/// sibling, a local rule, and withdrawals of the best and of a non-best
+/// path. After each step the candidates selection reads must be the rows a
+/// filter of every stored `FlowSpec` row yields, in the same order, and the
+/// selected path and the downstream update must be the expected ones.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one rule's whole candidate history is checked step by step against the same full scan"
+)]
+fn flowspec_selection_reads_the_full_scan_candidates(
+    rd: Option<rustbgpd_wire::RouteDistinguisher>,
+    validation: bool,
+) {
+    let [a, b, c] = [1, 2, 3].map(|octet| Ipv4Addr::new(10, 0, 0, octet));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 100));
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    if validation {
+        manager = manager.with_flowspec_validation(65000);
+    }
+    for source in [a, b, c] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv4, Safi::FlowSpec),
+            (Afi::Ipv4, Safi::FlowSpecVpn),
+        ],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+
+    let path = |source: Ipv4Addr, protocol: u8, path_id: u32, local_pref: u32| {
+        let mut route = make_destless_flowspec_route(Afi::Ipv4, source, protocol);
+        route.rd = rd;
+        route.path_id = path_id;
+        route.attributes = vec![PathAttribute::LocalPref(local_pref)];
+        route
+    };
+    let key = path(a, 6, 0, 0).selection_key();
+    let other = path(a, 17, 0, 0).selection_key();
+    let receive = |manager: &mut RibManager,
+                   source: Ipv4Addr,
+                   announced: Vec<FlowSpecRoute>,
+                   withdrawn: Vec<crate::route::FlowSpecKey>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(source),
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: announced,
+            flowspec_withdrawn: withdrawn,
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(manager);
+    };
+    // After a step: the selected `(peer, path ID)` of `key`, and the paths
+    // of `key` announced downstream by that step.
+    let mut check =
+        |manager: &RibManager, step: &str, best: (PeerId, u32), sent: &[(PeerId, u32)]| {
+            for key in [&key, &other] {
+                let read = manager.flowspec_validation.selection_candidates(
+                    key,
+                    &manager.ribs,
+                    &manager.loc_rib,
+                    &|| {},
+                );
+                let scanned: Vec<&FlowSpecRoute> = manager
+                    .ribs
+                    .values()
+                    .flat_map(crate::adj_rib_in::AdjRibIn::iter_flowspec)
+                    .filter(|route| route.selection_key() == *key)
+                    .collect();
+                assert_eq!(read.len(), scanned.len(), "{step}: candidate count");
+                assert!(
+                    read.iter().zip(&scanned).all(|(a, b)| std::ptr::eq(*a, *b)),
+                    "{step}: candidate rows or their order differ from the full scan"
+                );
+            }
+            let selected = manager.loc_rib.get_flowspec(&key).unwrap();
+            assert_eq!((selected.peer, selected.path_id), best, "{step}: best");
+            let updates: Vec<_> = std::iter::from_fn(|| out_rx.try_recv().ok()).collect();
+            let announced: Vec<_> = updates
+                .iter()
+                .flat_map(|update| &update.flowspec_announce)
+                .filter(|route| route.selection_key() == key)
+                .map(|route| (route.peer, route.path_id, route.local_pref()))
+                .collect();
+            let expected: Vec<_> = sent
+                .iter()
+                .map(|&(peer, path_id)| (peer, path_id, selected.local_pref()))
+                .collect();
+            assert_eq!(announced, expected, "{step}: announced downstream");
+            assert!(
+                updates
+                    .iter()
+                    .all(|update| update.flowspec_withdraw.is_empty()),
+                "{step}: withdrawn downstream"
+            );
+        };
+    let [pa, pb, pc] = [a, b, c].map(peer_v4);
+
+    // Unrelated rows: another rule from two peers, and the same components
+    // in the other scope.
+    let mut twin = path(a, 6, 0, 500);
+    twin.rd = match rd {
+        Some(_) => None,
+        None => Some(rustbgpd_wire::RouteDistinguisher([
+            0, 0, 0xad, 0x77, 0, 0, 0, 40,
+        ])),
+    };
+    receive(
+        &mut manager,
+        a,
+        vec![path(a, 17, 0, 100), twin, path(a, 6, 0, 100)],
+        vec![],
+    );
+    receive(&mut manager, c, vec![path(c, 17, 0, 100)], vec![]);
+    check(&manager, "first path", (pa, 0), &[(pa, 0)]);
+    receive(&mut manager, b, vec![path(b, 6, 0, 200)], vec![]);
+    check(&manager, "better duplicate", (pb, 0), &[(pb, 0)]);
+    receive(&mut manager, c, vec![path(c, 6, 0, 150)], vec![]);
+    check(&manager, "worse duplicate", (pb, 0), &[]);
+    receive(&mut manager, a, vec![], vec![key.clone()]);
+    check(&manager, "non-best withdrawn", (pb, 0), &[]);
+    receive(&mut manager, b, vec![], vec![key.clone()]);
+    check(&manager, "best withdrawn", (pc, 0), &[(pc, 0)]);
+    receive(&mut manager, a, vec![path(a, 6, 7, 120)], vec![]);
+    check(&manager, "worse Add-Path sibling", (pc, 0), &[]);
+    receive(&mut manager, a, vec![path(a, 6, 0, 300)], vec![]);
+    check(&manager, "best beside its sibling", (pa, 0), &[(pa, 0)]);
+    receive(&mut manager, a, vec![], vec![key.clone()]);
+    check(
+        &manager,
+        "best withdrawn beside its sibling",
+        (pc, 0),
+        &[(pc, 0)],
+    );
+
+    let mut local = path(Ipv4Addr::UNSPECIFIED, 6, 0, 400);
+    local.peer = LOCAL_PEER;
+    local.origin_type = crate::route::RouteOrigin::Local;
+    local.peer_router_id = Ipv4Addr::UNSPECIFIED;
+    let (reply, mut inject_rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectFlowSpec {
+        route: local,
+        reply,
+    });
+    inject_rx.try_recv().unwrap().unwrap();
+    check(&manager, "local rule", (LOCAL_PEER, 0), &[(LOCAL_PEER, 0)]);
+    let (reply, mut withdraw_rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawFlowSpec {
+        key: key.clone(),
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(withdraw_rx.try_recv().unwrap().unwrap().removed);
+    check(&manager, "local rule withdrawn", (pc, 0), &[(pc, 0)]);
+    // Only the Add-Path sibling is left: a lookup of path ID 0 alone would
+    // withdraw the rule downstream here.
+    receive(&mut manager, c, vec![], vec![key.clone()]);
+    check(&manager, "only the sibling left", (pa, 7), &[(pa, 7)]);
+
+    // The other rule loses both of its paths and is withdrawn downstream.
+    receive(&mut manager, a, vec![], vec![other.clone()]);
+    receive(&mut manager, c, vec![], vec![other.clone()]);
+    assert!(manager.loc_rib.get_flowspec(&other).is_none());
+    let withdrawn: Vec<_> = std::iter::from_fn(|| out_rx.try_recv().ok())
+        .flat_map(|update| update.flowspec_withdraw)
+        .collect();
+    assert_eq!(withdrawn, [other]);
+}
+
+#[test]
+fn flowspec_selection_reads_the_full_scan_candidates_global() {
+    flowspec_selection_reads_the_full_scan_candidates(None, false);
+}
+
+#[test]
+fn flowspec_selection_reads_the_full_scan_candidates_vpn() {
+    let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 41]);
+    flowspec_selection_reads_the_full_scan_candidates(Some(rd), false);
+    flowspec_selection_reads_the_full_scan_candidates(Some(rd), true);
+}
