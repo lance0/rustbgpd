@@ -1411,6 +1411,14 @@ impl EstablishedPublication {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
+        if self.registered.load(Ordering::Acquire) {
+            Some(session_id)
+        } else {
+            self.supersedes
+        }
+    }
+
     fn set_end_retention(&self, retention: SessionEndRetention) {
         *self
             .end_retention
@@ -1444,6 +1452,12 @@ impl EstablishedPublisher {
     #[cfg(test)]
     pub(crate) fn registered(&self) -> bool {
         self.0.registered.load(Ordering::Acquire)
+    }
+
+    /// What a replacement of this session (`session_id`) would name.
+    #[cfg(test)]
+    pub(crate) fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
+        self.0.rib_registration_owner(session_id)
     }
 }
 
@@ -3102,11 +3116,7 @@ impl PeerHandle {
     /// registered therefore does not hide the session before it.
     #[must_use]
     pub fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
-        if self.established.registered.load(Ordering::Acquire) {
-            Some(session_id)
-        } else {
-            self.established.supersedes
-        }
+        self.established.rib_registration_owner(session_id)
     }
 
     /// Record how this session's Established period ended, as the session

@@ -754,3 +754,31 @@ async fn unnamed_second_session_keeps_the_collision_failover() {
         (1.0, 0, 0)
     );
 }
+
+/// A `PeerUp` held behind a full RIB channel outlives the session's own
+/// teardown: the session goes down while it is held, and the RIB admits it
+/// afterwards, with the `PeerDown` behind it. The session did register, so
+/// a replacement must name it.
+/// Mutation-red: with every held admission action cleared at teardown the
+/// session is never marked registered and a replacement names nothing.
+#[tokio::test(start_paused = true)]
+async fn peer_up_admitted_after_the_sessions_teardown_still_marks_it_registered() {
+    let mut rib = GatedRib::spawn();
+    rib.hold_full();
+    let (mut s1, _s1_commands, _s1_peer) = established(&rib, 1).await;
+    assert!(
+        s1.rib_backlog
+            .iter()
+            .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
+        "S1 holds its PeerUp"
+    );
+    tcp_fails(&mut s1).await;
+    assert!(!s1.established.registered());
+    assert_eq!(s1.established.rib_registration_owner(1), None);
+    let mark = rib.forwarded.len();
+
+    tokio::join!(s1.flush_rib_backlog(), rib.release());
+    assert_eq!(rib.forwarded_since(mark), [("PeerUp", 1), ("PeerDown", 1)]);
+    assert!(s1.established.registered());
+    assert_eq!(s1.established.rib_registration_owner(1), Some(1));
+}
