@@ -861,8 +861,9 @@ impl RibManager {
         // the session still owed was waiting for. It goes out as an ordinary
         // marker on this operation: the session writes the terminal's own
         // End-of-RIB only while the replay token is valid, so the terminal
-        // cannot stand in for it.
-        self.settle_eor(peer, EorTrigger::Table(&mut operation));
+        // cannot stand in for it. A family the replay did not cover keeps
+        // its marker.
+        self.settle_eor_of(peer, &families, EorTrigger::Table(&mut operation));
         let slot = operation.slot().ok_or_else(|| {
             RibCommandError::internal("outbound replay terminal envelope could not be admitted")
         })?;

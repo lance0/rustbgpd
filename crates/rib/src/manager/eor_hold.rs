@@ -575,7 +575,19 @@ impl RibManager {
     /// stays owed and the owed-key drain retries it.
     pub(super) fn settle_eor(&mut self, peer: PeerId, trigger: EorTrigger<'_>) {
         let (offer, operation) = trigger.offer();
-        self.settle_eor_as(peer, offer, operation, false);
+        self.settle_eor_as(peer, None, offer, operation, false);
+    }
+
+    /// [`Self::settle_eor`] for the markers of `families` only: the table
+    /// the trigger admitted covers no other family.
+    pub(super) fn settle_eor_of(
+        &mut self,
+        peer: PeerId,
+        families: &[(Afi, Safi)],
+        trigger: EorTrigger<'_>,
+    ) {
+        let (offer, operation) = trigger.offer();
+        self.settle_eor_as(peer, Some(families), offer, operation, false);
     }
 
     /// A resync of `peer` was admitted earlier in this turn while a
@@ -584,7 +596,7 @@ impl RibManager {
     /// the peer stays dirty for another deferred family. A refused marker
     /// waits for the tick's marker retry; the table is not sent again.
     pub(super) fn settle_eor_behind_resync(&mut self, peer: PeerId) {
-        self.settle_eor_as(peer, Offer::Table, None, true);
+        self.settle_eor_as(peer, None, Offer::Table, None, true);
     }
 
     /// A release from inside a refresh answer that absorbed a family's owed
@@ -593,12 +605,13 @@ impl RibManager {
     /// drain, and a refused marker for the tick's marker retry, with no
     /// resync.
     pub(super) fn settle_free_eor(&mut self, peer: PeerId) {
-        self.settle_eor_as(peer, Offer::Release, None, true);
+        self.settle_eor_as(peer, None, Offer::Release, None, true);
     }
 
     fn settle_eor_as(
         &mut self,
         peer: PeerId,
+        only: Option<&[(Afi, Safi)]>,
         offer: Offer,
         operation: Option<&mut OutboundOperation>,
         plain: bool,
@@ -613,6 +626,7 @@ impl RibManager {
         let mut ready: Vec<(Afi, Safi)> = self
             .eor
             .families(peer)
+            .filter(|family| only.is_none_or(|only| only.contains(family)))
             .filter(|&family| self.eor_free_for(peer, family, offer, owed_keys))
             .collect();
         if ready.is_empty() {
