@@ -290,6 +290,8 @@ CONTROL_WITHDRAW_ROWS = "        for (prefix, path_id) in update.withdraw {\n"
 HARNESS_SHARED_WITHDRAW_EMPTY = "            && update.shared_withdraw.is_empty()\n"
 HARNESS_DRAINED_WITHDRAWALS = "update.unicast_withdrawals().count()"
 CONTROL_DRAINED_WITHDRAWALS = "update.withdraw.len()"
+SUPERSEDES_FIELD = "        supersedes: Option<"
+HARNESS_SUPERSEDES = re.compile(r"^[ \t]*supersedes: None,\n", re.M)
 PEER_ID_IMPORT = re.compile(r"^[ \t]*use rustbgpd_rib::PeerId;\n", re.M)
 PEER_ID_FROM_ADDR = "PeerId::from_addr("
 PEER_ID_ADDR = "peer.addr()"
@@ -333,7 +335,10 @@ def derive_control_api(tree: Path) -> None:
     `PeerId::from_addr`/`addr` conversions become identities there. Every role
     therefore still runs the same operation. A control whose outbound
     envelope predates shared group withdrawals carries every withdrawal in
-    its own vector, so the harness reads only that vector there.
+    its own vector, so the harness reads only that vector there. A control
+    whose `PeerUp` predates the superseded-session field drops
+    `supersedes: None`: `None` is the collision handling, the only one such a
+    control has.
     """
     update = (tree / "crates/rib/src/update.rs").read_text(encoding="utf-8")
     require(update.count(REEVALUATE_VARIANT) == 1, "unexpected export re-evaluation request")
@@ -362,6 +367,11 @@ def derive_control_api(tree: Path) -> None:
         text = (text.replace(HARNESS_SHARED_WITHDRAW_ROWS, CONTROL_WITHDRAW_ROWS)
                 .replace(HARNESS_SHARED_WITHDRAW_EMPTY, ""))
         main = main.replace(HARNESS_DRAINED_WITHDRAWALS, CONTROL_DRAINED_WITHDRAWALS)
+    if SUPERSEDES_FIELD not in update:
+        require(all(source.count("supersedes") == len(HARNESS_SUPERSEDES.findall(source))
+                    for source in (text, main)),
+                "a historical control cannot name a superseded session")
+        text, main = HARNESS_SUPERSEDES.sub("", text), HARNESS_SUPERSEDES.sub("", main)
     changes = [(harness, text), (entrypoint, main)]
     lib = (tree / "crates/rib/src/lib.rs").read_text(encoding="utf-8")
     if PEER_ID_EXPORT not in lib:

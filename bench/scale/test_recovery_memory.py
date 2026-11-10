@@ -544,6 +544,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertIn("RibUpdate::QueryLocRibCount { reply }", derived)
         for path in (entrypoint, harness):
             self.assertNotIn("PeerId", path.read_text(encoding="utf-8"))
+            self.assertNotIn("supersedes", path.read_text(encoding="utf-8"))
 
     def test_control_api_refuses_peer_id_uses_without_a_one_to_one_mapping(self) -> None:
         for main in (
@@ -616,6 +617,41 @@ class RecoveryReceiptTests(unittest.TestCase):
                            encoding="utf-8")
         original = (harness.read_bytes(), entrypoint.read_bytes())
         with self.assertRaisesRegex(receipt.InvalidReceipt, "shared withdrawal"):
+            receipt.derive_control_api(tree)
+        self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+
+    def test_control_api_drops_no_superseded_session_only_before_the_field(self) -> None:
+        peer_up = "    send(RibUpdate::PeerUp {\n        supersedes: None,\n        peer,\n    });\n"
+
+        def superseding_tree(field: bool, named: str = "None") -> tuple[Path, Path, Path]:
+            tree, harness = self.control_api_tree(swaps=True)
+            if field:
+                update = tree / "crates/rib/src/update.rs"
+                update.write_text(
+                    update.read_text(encoding="utf-8")
+                    + "    PeerUp {\n" + receipt.SUPERSEDES_FIELD + "NonZeroU64>,\n    },\n",
+                    encoding="utf-8",
+                )
+            source = peer_up.replace("None", named)
+            harness.write_text(harness.read_text(encoding="utf-8") + source, encoding="utf-8")
+            entrypoint = harness.parent / "main.rs"
+            entrypoint.write_text(source, encoding="utf-8")
+            return tree, harness, entrypoint
+
+        tree, harness, entrypoint = superseding_tree(field=True)
+        original = (harness.read_bytes(), entrypoint.read_bytes())
+        receipt.derive_control_api(tree)
+        self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+        tree, harness, entrypoint = superseding_tree(field=False)
+        receipt.derive_control_api(tree)
+        self.assertEqual(
+            entrypoint.read_text(encoding="utf-8"), peer_up.replace("        supersedes: None,\n", "")
+        )
+        self.assertNotIn("supersedes", harness.read_text(encoding="utf-8"))
+        # A named session has no meaning for such a control: refused, nothing changed.
+        tree, harness, entrypoint = superseding_tree(field=False, named="NonZeroU64::new(1)")
+        original = (harness.read_bytes(), entrypoint.read_bytes())
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "superseded session"):
             receipt.derive_control_api(tree)
         self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
 
