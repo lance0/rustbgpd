@@ -646,7 +646,7 @@ impl PeerManager {
                 session_transport.supersedes_session = self
                     .retained_dynamic
                     .get(&dynamic_peer_key)
-                    .map(|retained| retained.last_session);
+                    .and_then(|retained| retained.last_session);
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     session_transport,
                     self.metrics.clone(),
@@ -1552,7 +1552,9 @@ impl PeerManager {
                 .map(|_| accepted_selected_owner(managed));
             let mut transport_config = managed.transport_config.clone();
             // The old primary is retired below, before this session starts.
-            transport_config.supersedes_session = Some(managed.session_id());
+            transport_config.supersedes_session = managed
+                .handle()
+                .rib_registration_owner(managed.session_id());
             if let Some(keyring) = projected_keyring {
                 transport_config.tcp_ao = Some(keyring);
             }

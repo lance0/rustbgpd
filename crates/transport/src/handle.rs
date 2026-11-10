@@ -1387,11 +1387,16 @@ pub struct SessionEndRetention {
 /// the peer manager can count Established peers without a `QueryState` round
 /// trip to every session. The actor publishes after every FSM event and
 /// clears it when it ends, however it ends. It also publishes what its last
-/// Established period left retained, readable after the actor ends.
+/// Established period left retained, readable after the actor ends, and
+/// whether the RIB admitted a `PeerUp` from it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EstablishedPublication {
     established: Arc<AtomicBool>,
     end_retention: Arc<Mutex<SessionEndRetention>>,
+    /// The RIB channel admitted a `PeerUp` from this session. Never cleared.
+    registered: Arc<AtomicBool>,
+    /// The session this one was spawned to replace, as its `PeerUp` names it.
+    supersedes: Option<u64>,
 }
 
 impl EstablishedPublication {
@@ -1427,9 +1432,18 @@ impl EstablishedPublisher {
         self.0.set_end_retention(retention);
     }
 
+    pub(crate) fn publish_registered(&self) {
+        self.0.registered.store(true, Ordering::Release);
+    }
+
     #[cfg(test)]
     pub(crate) fn end_retention(&self) -> SessionEndRetention {
         self.0.end_retention()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registered(&self) -> bool {
+        self.0.registered.load(Ordering::Acquire)
     }
 }
 
@@ -1775,7 +1789,10 @@ impl PeerHandle {
         let (import_publication, import_policy_counters) = watch::channel(None);
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
-        let established = EstablishedPublication::default();
+        let established = EstablishedPublication {
+            supersedes: config.supersedes_session,
+            ..EstablishedPublication::default()
+        };
         let publisher = EstablishedPublisher(established.clone());
         let span = peer_session_span(&config);
         let task = tokio::spawn(
@@ -1957,7 +1974,10 @@ impl PeerHandle {
         let (import_publication, import_policy_counters) = watch::channel(None);
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
-        let established = EstablishedPublication::default();
+        let established = EstablishedPublication {
+            supersedes: config.supersedes_session,
+            ..EstablishedPublication::default()
+        };
         let publisher = EstablishedPublisher(established.clone());
         let span = peer_session_span(&config);
         let task = tokio::spawn(
@@ -3073,6 +3093,20 @@ impl PeerHandle {
     #[must_use]
     pub fn session_end_retention(&self) -> SessionEndRetention {
         self.established.end_retention()
+    }
+
+    /// The last session that can own the neighbor's RIB registration, for
+    /// a replacement of this session (`session_id`) to name as superseded:
+    /// this session once the RIB admitted its `PeerUp`, otherwise the one
+    /// it was itself spawned to replace. A replacement that never
+    /// registered therefore does not hide the session before it.
+    #[must_use]
+    pub fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
+        if self.established.registered.load(Ordering::Acquire) {
+            Some(session_id)
+        } else {
+            self.established.supersedes
+        }
     }
 
     /// Record how this session's Established period ended, as the session

@@ -3569,6 +3569,90 @@ async fn inbound_replacement_names_the_session_it_supersedes() {
     );
 }
 
+/// A replacement that never registered with the RIB does not hide the
+/// session before it. Session 1 establishes and its TCP fails; replacement
+/// 2 reaches `OpenConfirm` and its connection closes; replacement 3
+/// establishes. The RIB never saw session 2, so 3 must name session 1, the
+/// last session that can still own the registration.
+/// Mutation-red: naming the immediate predecessor makes 3 name session 2,
+/// and the RIB keeps session 1 live for a failover.
+#[tokio::test]
+async fn replacement_names_the_last_session_the_rib_registered() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4096);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let (first, _first_tx) = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
+    let registered = mgr.peers[&key(peer_addr)].session_id();
+    drop(first);
+    handle_until_primary_idle(&mut mgr).await;
+
+    // Replacement 2 reaches OpenConfirm, then its connection closes: it
+    // goes idle without ever being Established.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let mut client = client.await.unwrap();
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
+    let unregistered = mgr.peers[&key(peer_addr)].session_id();
+    assert_ne!(unregistered, registered);
+    let mut buf = BytesMut::with_capacity(4096);
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(
+        &mut client,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            while let Ok(notification) = mgr.session_notify_rx.try_recv() {
+                mgr.handle_session_notification(notification).await;
+            }
+            let state = mgr.peers[&key(peer_addr)].handle().query_state().await;
+            if state.unwrap().fsm_state == SessionState::Idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the unregistered replacement goes idle");
+    assert_eq!(mgr.peers[&key(peer_addr)].session_id(), unregistered);
+
+    let (_third, _third_tx, named) =
+        establish_inbound_superseding(&mut mgr, &mut rib_rx, peer_addr).await;
+    assert_ne!(mgr.peers[&key(peer_addr)].session_id(), unregistered);
+    assert_eq!(named, Some(registered));
+}
+
 /// The respawn after an unstoppable primary is aborted is a replacement
 /// too: once the fresh session is started and establishes, its `PeerUp`
 /// names the aborted primary. The respawn is an active session, so the

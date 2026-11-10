@@ -1363,7 +1363,7 @@ impl PeerSession {
                     }
 
                     // Register with RIB manager for outbound updates
-                    let _ = self.send_to_rib(RibUpdate::PeerUp {
+                    let peer_up = RibUpdate::PeerUp {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         supersedes: self
@@ -1401,7 +1401,9 @@ impl PeerSession {
                                     .collect()
                             })
                             .unwrap_or_default(),
-                    });
+                    };
+                    let _ =
+                        self.send_to_rib_then(peer_up, super::inbound::OnRibAdmission::Registered);
                     let _ = self.send_to_rib(RibUpdate::PeerAddPathLimits {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,

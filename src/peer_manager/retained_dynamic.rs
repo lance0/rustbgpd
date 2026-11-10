@@ -38,9 +38,9 @@ pub(super) struct RetainedDynamicPeer {
     /// The neighbor's resolved slot, handed back when a reconnect that never
     /// reached Established goes idle.
     pub(super) slot: RibPeerSlot,
-    /// The neighbor's last Established session, which its reconnect names
-    /// as superseded when it registers with the RIB.
-    pub(super) last_session: u64,
+    /// The last session of the neighbor that registered with the RIB, which
+    /// its reconnect names as superseded when it registers in turn.
+    pub(super) last_session: Option<u64>,
     /// The neighbor's counter block. A reconnect counts in a fresh block,
     /// which continues this one only once it proves the same neighbor.
     pub(super) counters: NeighborCounters,
@@ -126,7 +126,7 @@ impl PeerManager {
         &mut self,
         peer: &PeerKey,
         managed: &ManagedPeerState,
-        last_session: u64,
+        last_session: Option<u64>,
         end: SessionEndRetention,
     ) -> bool {
         let Some(accepted) = managed.accepted_dynamic_range.clone() else {

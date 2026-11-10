@@ -1305,6 +1305,7 @@ impl PeerSession {
     fn on_rib_admission(&mut self, then: OnRibAdmission) {
         match then {
             OnRibAdmission::Nothing => {}
+            OnRibAdmission::Registered => self.established.publish_registered(),
             OnRibAdmission::BeginRefreshAccounting(afi, safi) => {
                 self.begin_refresh_accounting(afi, safi);
             }
@@ -4277,6 +4278,8 @@ impl PeerSession {
 #[derive(Clone, Copy)]
 pub(super) enum OnRibAdmission {
     Nothing,
+    /// The session's `PeerUp`: the RIB now knows this session.
+    Registered,
     /// A peer `BoRR`: open the local refresh window when the RIB opens its own.
     BeginRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
     /// A peer `EoRR` or a local refresh timeout: close and sweep the window.

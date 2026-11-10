@@ -603,6 +603,10 @@ async fn held_peer_up_is_dropped_with_everything_behind_it() {
             .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
         "S1 holds its PeerUp, with its staged context ahead of it"
     );
+    assert!(
+        s2.established.registered() && !s1.established.registered(),
+        "only a PeerUp the RIB admitted marks its session registered"
+    );
     owned(s1, s1_commands)
         .abort_for_transport_safety_and_wait()
         .await;

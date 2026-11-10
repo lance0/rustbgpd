@@ -916,7 +916,7 @@ async fn retained_reconnect_names_the_members_last_session() {
     establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
     let first = mgr.peers[&key(MEMBER)].session_id();
     drop_until_idle(&mut mgr, client).await;
-    assert_eq!(mgr.retained_dynamic[&key(MEMBER)].last_session, first);
+    assert_eq!(mgr.retained_dynamic[&key(MEMBER)].last_session, Some(first));
 
     let mut client = accept(&mut mgr).await;
     establish_from(&mut mgr, &mut client, MEMBER_ASN).await;

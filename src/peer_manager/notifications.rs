@@ -17,6 +17,7 @@ impl PeerManager {
     ) {
         let Some((
             old_session_id,
+            superseded,
             mut transport,
             import_policy,
             export_policy,
@@ -25,6 +26,9 @@ impl PeerManager {
         )) = self.peers.get(peer_key).map(|managed| {
             (
                 managed.session_id(),
+                managed
+                    .handle()
+                    .rib_registration_owner(managed.session_id()),
                 managed.transport_config.clone(),
                 managed.import_policy.clone(),
                 managed.export_policy.clone(),
@@ -37,7 +41,7 @@ impl PeerManager {
         };
 
         self.admit_deferred_rib_updates_for(peer_key).await;
-        transport.supersedes_session = Some(old_session_id);
+        transport.supersedes_session = superseded;
         let new_session_id = self.allocate_session_id();
         let replacement = PeerHandle::spawn_at_tcp_ao_generation(
             transport,
@@ -373,6 +377,7 @@ impl PeerManager {
                         // Final: the session reported BackToIdle after leaving
                         // Established.
                         let end_retention = primary_handle.session_end_retention();
+                        let superseded = primary_handle.rib_registration_owner(primary_session_id);
                         self.retiring_sessions
                             .insert(primary_session_id, peer_key.clone());
                         let mut retired_sessions = vec![primary_session_id];
@@ -432,7 +437,7 @@ impl PeerManager {
                             self.admit_deferred_rib_updates_for(&peer_key).await;
                             let session_id = self.allocate_session_id();
                             let mut transport = managed.transport_config.clone();
-                            transport.supersedes_session = Some(primary_session_id);
+                            transport.supersedes_session = superseded;
                             let handle = PeerHandle::spawn_at_tcp_ao_generation(
                                 transport,
                                 self.metrics.clone(),
@@ -463,7 +468,7 @@ impl PeerManager {
                         } else if self.retain_dynamic_identity(
                             &peer_key,
                             &managed,
-                            primary_session_id,
+                            superseded,
                             end_retention,
                         ) {
                             // Graceful restart may still hold routes on either
