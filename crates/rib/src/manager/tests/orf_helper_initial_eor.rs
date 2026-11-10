@@ -410,13 +410,13 @@ async fn session_end_and_delete_drop_the_held_eor() {
     let mut manager = manager();
     let (rx, _rib) = flapped(&mut manager, Open::HelperOnly);
     let peer = peer_v4(OBSERVER);
-    assert!(manager.gr_deferred_eor.contains_key(&peer));
+    assert!(!manager.eor_behind_orf_table(peer).is_empty());
     manager.handle_update(RibUpdate::PeerDown {
         peer,
         session_id: 182,
     });
     drop(rx);
-    assert!(!manager.gr_deferred_eor.contains_key(&peer));
+    assert!(manager.eor_behind_orf_table(peer).is_empty());
     assert_eq!(manager.next_eor_hold_deadline(), None);
     // The ended session was a helper too, so the next one would hold.
     assert!(manager.peer_may_hold_stale.contains(&peer));
@@ -496,7 +496,7 @@ async fn assert_held_refresh_keeps_table_first(old: Open, refresh_before_cap: bo
     let (mut manager, _waiter, _tx) = held_manager();
     let (mut rx, mut rib) = flapped(&mut manager, old);
     let peer = peer_v4(OBSERVER);
-    assert!(manager.gr_deferred_eor[&peer].contains(&FAMILY));
+    assert!(manager.eor_behind_orf_table(peer).contains(&FAMILY));
     if refresh_before_cap {
         refresh(&mut manager, 182);
     }
@@ -626,7 +626,7 @@ async fn refused_refresh_across_the_cap_sends_one_eor_after_the_table() {
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(queued(&manager.pending_refresh, peer));
     assert!(!queued(&manager.peer_orf_pending, peer), "the gate lifted");
-    assert!(queued(&manager.gr_deferred_eor, peer));
+    assert!(manager.eor_behind_orf_table(peer).contains(&FAMILY));
     tokio::time::advance(ORF_EOR_HOLD_CAP).await;
     manager.expire_eor_holds(tokio::time::Instant::now());
     let mut seen = apply(&mut rx, &mut rib);
@@ -647,7 +647,7 @@ async fn dirty_at_release_then_cap_keeps_table_first() {
     let (mut manager, _waiter, _tx) = held_manager();
     let peer = peer_v4(OBSERVER);
     let (tx, mut rx, mut rib) = flapped_of(&mut manager, OBSERVER, Open::HelperOnly, 4);
-    assert!(queued(&manager.gr_deferred_eor, peer));
+    assert!(manager.eor_behind_orf_table(peer).contains(&FAMILY));
     refresh(&mut manager, 182);
     assert!(queued(&manager.selection_deferred_refresh, peer));
     fill(&tx);
@@ -793,7 +793,7 @@ async fn held_marker_of_a_non_retaining_peer_has_the_cap() {
 /// A stale-holding peer's registration waits past its cap and then dumps
 /// inside our selection hold: the selection-held marker is not recorded for
 /// a table after the cap, so it goes out when the hold ends. Red proof:
-/// recording it into `gr_deferred_eor` regardless of the cap leaves it with
+/// owing it behind the ORF table regardless of the cap leaves it with
 /// no timer.
 #[tokio::test(start_paused = true)]
 async fn selection_held_marker_after_the_cap_goes_out_at_release() {
@@ -831,7 +831,7 @@ async fn selection_held_marker_after_the_cap_goes_out_at_release() {
 /// stages it) and unlocks after the cap, while our selection hold still
 /// holds its marker: the marker is not recorded for a table, so it goes out
 /// when the hold ends. Red proof: the unlock's held branch recording it into
-/// `gr_deferred_eor` regardless of the cap leaves it with no timer.
+/// behind the ORF table regardless of the cap leaves it with no timer.
 #[tokio::test(start_paused = true)]
 async fn unlock_after_the_cap_under_a_hold_goes_out_at_release() {
     let (mut manager, _waiter, _tx) = held_manager();
@@ -959,7 +959,7 @@ async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
 
     let mut rx = register_dual_stack(&mut manager, 182, SESSION_CHANNEL);
     assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
-    assert!(queued(&manager.gr_deferred_eor, peer));
+    assert!(manager.eor_behind_orf_table(peer).contains(&FAMILY));
     let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
     let route = local(crate::test_support::make_v6_route(
         prefix,

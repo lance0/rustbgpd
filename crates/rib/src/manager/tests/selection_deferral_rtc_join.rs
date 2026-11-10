@@ -82,10 +82,6 @@ fn assert_vpn_still_held(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the transcript distinguishes empty initial interest from a route becoming eligible during a held dirty resync"
-)]
 fn rtc_interest_added_during_vpn_hold_survives_an_empty_dirty_resync() {
     let (_tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
@@ -158,7 +154,7 @@ fn rtc_interest_added_during_vpn_hold_survives_an_empty_dirty_resync() {
     );
     // Complete the independent RTC membership marker before the VPN gate.
     eor(&mut manager, LATE, LATE_SESSION, RTC);
-    assert!(manager.pending_eor[&late].contains(&VPN));
+    assert!(manager.eor_pending(late).contains(&VPN));
     assert_vpn_still_held(&mut late_rx);
 
     eor(&mut manager, WAITER, WAITER_SESSION, VPN);
@@ -189,12 +185,7 @@ fn rtc_interest_added_during_vpn_hold_survives_an_empty_dirty_resync() {
     assert_eq!(announced, vec![key]);
     assert_eq!(vpn_eors, 1);
     assert!(!manager.dirty_peers.contains(&late));
-    assert!(
-        !manager
-            .pending_eor
-            .get(&late)
-            .is_some_and(|families| families.contains(&VPN))
-    );
+    assert!(!manager.eor_pending(late).contains(&VPN));
     assert!(!manager.retain_initial_group_admitted(late));
     assert!(!manager.pending_group_admitted.contains_record(late));
 }

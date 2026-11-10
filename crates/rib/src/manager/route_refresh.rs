@@ -6,13 +6,14 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
 use super::distribution::{OutboundCommitBatch, OutboundCommitFailure};
+use super::eor_hold::EorTrigger;
 use super::helpers::{afi_safi_label, gauge_val, prefix_family};
 use super::peer_lifecycle::{GroupReplay, MAX_JOIN_COHORT, group_replay_rs_inert};
 use super::{PolicyFilteredRouteKey, RibManager, RibUpdate};
 use crate::ERR_REFRESH_TIMEOUT;
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
-use crate::outbound_credit::{OutboundOperation, send_marker};
+use crate::outbound_credit::OutboundOperation;
 use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
 use crate::update::OutboundRouteUpdate;
 
@@ -780,8 +781,9 @@ impl RibManager {
             || families.iter().any(|&(afi, safi)| {
                 !matches!((afi, safi), (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
                     // The replay terminates in a wire End-of-RIB, so every
-                    // EoR hold refuses it, including the restart grace window.
-                    || self.eor_held(peer, (afi, safi))
+                    // hold that withholds one refuses it, including the
+                    // restart grace window.
+                    || self.eor_withheld(peer, (afi, safi))
                     || self
                         .peer_orf_pending
                         .get(&peer)
@@ -805,9 +807,11 @@ impl RibManager {
             ));
         }
         // One envelope per family, one per family whose owed keys are
-        // absorbed ahead of it (`outbound_owing`), and the terminal.
+        // absorbed ahead of it (`outbound_owing`), one for the End-of-RIB
+        // the session still owes for a replayed family, and the terminal.
         let absorbed = self.owed_absorptions(peer, &families);
-        let envelopes = families.len() + absorbed + 1;
+        let owed_marker = families.iter().any(|&family| self.eor.owes(peer, family));
+        let envelopes = families.len() + absorbed + usize::from(owed_marker) + 1;
         let mut operation =
             match self
                 .begin_outbound_operation(peer, envelopes)
@@ -853,6 +857,13 @@ impl RibManager {
                 ));
             }
         }
+        // The replayed tables, owed keys included, are what an End-of-RIB
+        // the session still owed was waiting for. It goes out as an ordinary
+        // marker on this operation: the session writes the terminal's own
+        // End-of-RIB only while the replay token is valid, so the terminal
+        // cannot stand in for it. A family the replay did not cover keeps
+        // its marker.
+        self.settle_eor_of(peer, &families, EorTrigger::Table(&mut operation));
         let slot = operation.slot().ok_or_else(|| {
             RibCommandError::internal("outbound replay terminal envelope could not be admitted")
         })?;
@@ -956,16 +967,13 @@ impl RibManager {
                         .get(&peer)
                         .is_some_and(|gated| gated.contains(&family));
                     if first_refresh
-                        && self
-                            .pending_eor
-                            .get(&peer)
-                            .is_some_and(|pending| pending.contains(&family))
+                        && self.eor.owes(peer, family)
                         && self
                             .peer_sendable_families
                             .get(&peer)
                             .is_some_and(|sendable| sendable.contains(&family))
                     {
-                        self.gr_deferred_eor.entry(peer).or_default().insert(family);
+                        self.owe_eor_behind_orf_table(peer, family);
                     }
                     debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
                     return FamilyReplayOutcome::Deferred;
@@ -975,10 +983,7 @@ impl RibManager {
                 self.lift_orf_gate(peer, family);
                 // GR or selection release may owe the ORF-gated initial
                 // flood. Only the peer refresh may consume this obligation.
-                let deferred_eor = self
-                    .gr_deferred_eor
-                    .get(&peer)
-                    .is_some_and(|families| families.contains(&family));
+                let deferred_eor = self.eor.behind_orf_table(peer, family);
                 (suppress_eor, deferred_eor)
             }
             FamilyReplayKind::PrefixLimitRecovery
@@ -1027,16 +1032,11 @@ impl RibManager {
             None if !latched => None,
             None => match self.begin_outbound_operation(
                 peer,
-                1 + usize::from(
-                    deferred_eor
-                        || self
-                            .pending_eor
-                            .get(&peer)
-                            .is_some_and(|families| families.contains(&family)),
-                ) + usize::from(
-                    matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
-                        && self.owes(peer, family),
-                ),
+                1 + usize::from(self.eor.owes(peer, family))
+                    + usize::from(
+                        matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
+                            && self.owes(peer, family),
+                    ),
             ) {
                 Ok(operation) => Some(own_operation.insert(operation)),
                 Err(failure) => {
@@ -1061,12 +1061,20 @@ impl RibManager {
             // are absorbed into this operation ahead of the table. A refusal
             // leaves them owed and defers the answer.
             Some(operation) => {
-                if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
-                    && self.absorb_owed_family(peer, family, operation).is_err()
-                {
+                let refresh = matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. });
+                if refresh && self.absorb_owed_family(peer, family, operation).is_err() {
                     None
+                } else if let Some(slot) = operation.slot() {
+                    Some((Some(operation), Some(slot)))
                 } else {
-                    operation.slot().map(|slot| (Some(operation), Some(slot)))
+                    // The absorption took the last slot, and the answer is
+                    // deferred with no resync. A marker that waited only for
+                    // those keys is offered now; a full writer leaves it to
+                    // the marker retry, as the deferral leaves the answer.
+                    if refresh {
+                        self.settle_free_eor(peer);
+                    }
+                    None
                 }
             }
         };
@@ -2376,11 +2384,7 @@ impl RibManager {
             });
         // An ORF-deferred or backpressured initial dump still owes its first
         // EoR. RFC 7313 §4 forbids BoRR before that marker reaches the queue.
-        let initial_eor_owed = deferred_eor
-            || self
-                .pending_eor
-                .get(&peer)
-                .is_some_and(|families| families.contains(&family));
+        let initial_eor_owed = deferred_eor || self.eor.owes(peer, family);
         let (mut end_of_rib, mut refresh_markers) = match replay_kind {
             FamilyReplayKind::PeerRefresh { .. } => (
                 if initial_eor_owed || suppress_eor {
@@ -2535,19 +2539,16 @@ impl RibManager {
             // response must not leave (or create) an empty entry.
             remove_family_drop_empty(&mut self.pending_refresh, peer, family);
             self.pending_refresh_suppress_eor.remove(&(peer, family));
-            if deferred_eor {
-                if let Some(families) = self.gr_deferred_eor.get_mut(&peer) {
-                    families.remove(&family);
-                    if families.is_empty() {
-                        self.gr_deferred_eor.remove(&peer);
-                    }
-                }
-                self.pending_eor.entry(peer).or_default().insert(family);
-            }
-            // The flood above completes an initial marker owed through either
-            // selection deferral or the GR-specific ORF hold.
-            if (initial_eor_owed || deferred_eor) && !self.dirty_peers.contains(&peer) {
-                self.flush_pending_eor_in(peer, operation);
+            // The flood above is the table an ORF-held initial marker
+            // waited for, and completes one owed through selection deferral.
+            // A peer still dirty keeps its markers for the resync.
+            if initial_eor_owed {
+                let trigger = if self.dirty_peers.contains(&peer) {
+                    EorTrigger::Release
+                } else {
+                    EorTrigger::behind(operation)
+                };
+                self.release_eor_orf_table(peer, deferred_eor.then_some(family), trigger);
             }
             if family == (Afi::L2Vpn, Safi::Evpn) {
                 self.send_evpn_refresh_markers(peer);
@@ -2568,147 +2569,6 @@ impl RibManager {
             self.retire_completed_initial_group_admitted(peer);
         }
         FamilyReplayOutcome::Committed
-    }
-
-    /// Already-pending initial markers also wait for their family's ORF flood.
-    pub(super) fn pending_eor_held(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
-        self.eor_held(peer, family)
-            || self
-                .gr_deferred_eor
-                .get(&peer)
-                .is_some_and(|held| held.contains(&family))
-    }
-
-    /// Try to send any deferred `EoR` markers for a peer.
-    ///
-    /// Called after a successful dirty-peer resync. If the send fails again,
-    /// the peer is re-marked dirty for another attempt.
-    pub(super) fn flush_pending_eor(&mut self, peer: PeerId) {
-        self.flush_pending_eor_in(peer, None);
-    }
-
-    /// [`Self::flush_pending_eor`] on a slot of `operation`, the whole-table
-    /// operation whose data the markers follow, so a marker it reserved
-    /// never escalates to a dirty resync.
-    pub(super) fn flush_pending_eor_in(
-        &mut self,
-        peer: PeerId,
-        operation: Option<&mut OutboundOperation>,
-    ) {
-        if operation.is_none()
-            && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer))
-        {
-            return;
-        }
-        let Some(families) = self.pending_eor.remove(&peer) else {
-            return;
-        };
-        let (blocked, ready): (HashSet<_>, HashSet<_>) = families.into_iter().partition(|family| {
-            self.pending_eor_held(peer, *family)
-                || (*family == (Afi::L2Vpn, Safi::Evpn)
-                    && (self.evpn_grouped_member_of(peer).is_some()
-                        || self.has_private_evpn_handoff(peer))
-                    && !self.evpn_feed_is_current(peer))
-        });
-        if !blocked.is_empty() {
-            self.pending_eor.entry(peer).or_default().extend(blocked);
-        }
-        if ready.is_empty() {
-            return;
-        }
-        let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
-            return;
-        };
-        // A family that owes keys sends its marker only behind them: one
-        // operation absorbs them, then sends the marker. Refused, or inside
-        // another operation, the marker stays pending without a resync;
-        // the owed-key drain retries it once the latch is free.
-        let owed: Vec<(Afi, Safi)> = ready
-            .iter()
-            .copied()
-            .filter(|&family| self.owes(peer, family))
-            .collect();
-        let mut ready = ready;
-        let mut own_operation = None;
-        let operation = if owed.is_empty() {
-            operation
-        } else if operation.is_some() {
-            self.keep_pending_eor(peer, &mut ready, &owed);
-            operation
-        } else {
-            let envelopes = owed.len() + 1;
-            if let Some(mut absorbing) = self
-                .begin_outbound_operation(peer, envelopes)
-                .ok()
-                .filter(|operation| operation.reserved() == envelopes)
-            {
-                for &family in &owed {
-                    if self
-                        .absorb_owed_family(peer, family, &mut absorbing)
-                        .is_err()
-                    {
-                        self.keep_pending_eor(peer, &mut ready, &[family]);
-                    }
-                }
-                // One failed absorption escalates every family to the
-                // resync; no later marker may overtake that fallback.
-                if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
-                    self.pending_eor.entry(peer).or_default().extend(ready);
-                    return;
-                }
-                Some(own_operation.insert(absorbing))
-            } else {
-                debug!(%peer, ?owed, "End-of-RIB waits to absorb owed keys: a whole-table update is still live or the channel is full");
-                self.keep_pending_eor(peer, &mut ready, &owed);
-                None
-            }
-        };
-        if ready.is_empty() {
-            return;
-        }
-        let evpn_marker = ready.contains(&(Afi::L2Vpn, Safi::Evpn));
-        let marker_only = self.evpn_feed_is_current(peer);
-        let eor = OutboundRouteUpdate {
-            end_of_rib: ready.iter().copied().collect(),
-            ..OutboundRouteUpdate::default()
-        };
-        let sent = match operation.and_then(OutboundOperation::slot) {
-            Some(slot) => {
-                slot.send(eor);
-                Ok(())
-            }
-            None => send_marker(&tx, eor),
-        };
-        if sent.is_err() {
-            warn!(%peer, "outbound channel full — `EoR` still deferred");
-            self.metrics.record_outbound_eor_deferral(&peer.label());
-            self.pending_eor.entry(peer).or_default().extend(ready);
-            if !marker_only {
-                self.mark_outbound_dirty(peer);
-            }
-        } else {
-            if evpn_marker {
-                let bits = Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
-                self.evpn_feed_markers_admitted(peer, &tx, bits);
-            }
-            self.complete_initial_selection_replay(peer);
-            self.retire_completed_initial_group_admitted(peer);
-        }
-    }
-
-    /// Move `families` out of `ready` back to `peer`'s pending End-of-RIB:
-    /// they wait for their owed keys to be absorbed.
-    fn keep_pending_eor(
-        &mut self,
-        peer: PeerId,
-        ready: &mut HashSet<(Afi, Safi)>,
-        families: &[(Afi, Safi)],
-    ) {
-        for family in families {
-            if ready.remove(family) {
-                self.pending_eor.entry(peer).or_default().insert(*family);
-            }
-        }
     }
 
     /// Owe `peer` the answer to its ROUTE-REFRESH for `family`, keeping
@@ -2749,15 +2609,7 @@ impl RibManager {
         } else {
             let markers = families
                 .iter()
-                .filter(|family| {
-                    self.gr_deferred_eor
-                        .get(&peer)
-                        .is_some_and(|owed| owed.contains(family))
-                        || self
-                            .pending_eor
-                            .get(&peer)
-                            .is_some_and(|owed| owed.contains(family))
-                })
+                .filter(|&&family| self.eor.owes(peer, family))
                 .count();
             let families_owed: Vec<_> = families.iter().copied().collect();
             let absorbed = self.owed_absorptions(peer, &families_owed);

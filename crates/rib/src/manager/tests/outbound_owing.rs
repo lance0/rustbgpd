@@ -864,9 +864,9 @@ fn pending_marker_waits_behind_owed_keys() {
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
-    manager.pending_eor.entry(peer).or_default().insert(V4);
+    manager.owe_eor(peer, V4);
     for _ in 0..3 {
-        manager.retry_evpn_feed_markers_bounded();
+        manager.retry_eor_markers_bounded();
         manager.resync_dirty_peers_bounded();
     }
     assert!(
@@ -875,12 +875,7 @@ fn pending_marker_waits_behind_owed_keys() {
             .all(|update| !update.end_of_rib.contains(&V4)),
         "no End-of-RIB while the key is owed and the latch is live"
     );
-    assert!(
-        manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|f| f.contains(&V4))
-    );
+    assert!(manager.eor_pending(peer).contains(&V4));
     drop(dump);
     drop(charge);
     manager.resync_dirty_peers_bounded();
@@ -1195,6 +1190,198 @@ fn refused_replay_leaves_owed_keys_and_accepted_replay_absorbs_them() {
         .expect("terminal");
     assert_eq!(terminal, sent.len() - 1);
     assert!(manager.owing(peer).is_none(), "absorbed");
+}
+
+/// An operator replay sends each replayed family's whole table, owed keys
+/// included, so it is what an End-of-RIB the session still owed was waiting
+/// for. That marker goes out as its own ordinary envelope behind the
+/// tables: the session writes the terminal's End-of-RIB only while the
+/// replay token is valid, so a terminal that is discarded (the token
+/// expired or was cancelled first) must not be the only copy.
+#[test]
+fn operator_replay_sends_the_owed_marker_as_an_ordinary_envelope() {
+    let mut manager = manager(8);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 28, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable());
+    send_all(&mut rx);
+    let filler = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 1);
+    manager.owe_eor(peer, V4);
+    drop(charge);
+    let (token, _enrolled) = rustbgpd_bmp::BmpReplay::new(Duration::from_secs(5));
+    let (ack, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplayPeerOutbound {
+        peer,
+        session_id: 0,
+        families: vec![V4],
+        replay: Arc::clone(&token),
+        reply: ack,
+    });
+    assert!(response.try_recv().expect("synchronous response").is_ok());
+    // The replay is cancelled before the session reaches the terminal, so
+    // the session will discard the terminal's own End-of-RIB.
+    token.cancel();
+    let sent = send_all(&mut rx);
+    let table = sent
+        .iter()
+        .position(|update| update.announce.iter().any(|r| r.prefix == route_prefix(0)))
+        .expect("the owed route is replayed");
+    let ordinary: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, update)| update.replay.is_none() && update.end_of_rib.contains(&V4))
+        .map(|(index, _)| index)
+        .collect();
+    let terminal = sent
+        .iter()
+        .position(|update| update.replay.is_some())
+        .expect("terminal");
+    assert_eq!(
+        ordinary.len(),
+        1,
+        "exactly one End-of-RIB that cannot be discarded"
+    );
+    assert!(table < ordinary[0] && ordinary[0] < terminal);
+    assert_eq!(terminal, sent.len() - 1);
+    assert!(!sent[terminal].replay.as_ref().unwrap().is_valid());
+    assert!(manager.owing(peer).is_none(), "absorbed");
+    assert!(manager.eor_pending(peer).is_empty());
+    manager.resync_dirty_peers_bounded();
+    assert!(
+        send_all(&mut rx)
+            .iter()
+            .all(|update| update.end_of_rib.is_empty()),
+        "nothing further"
+    );
+}
+
+/// A marker waits only for its family's owed key, and a release cannot
+/// absorb the key while the receiver's last operation is live. The source
+/// then withdraws the route: the key was never sent, so it is cancelled,
+/// and that cancellation is what frees the marker. It leaves in that turn.
+#[test]
+fn cancelling_the_last_owed_key_sends_the_marker_it_held() {
+    let mut manager = manager(8);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    received(&mut manager, vec![route(5, 0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 29, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable());
+    // The receiver does not read its initial table: its operation stays live.
+    let dump = held(&mut rx);
+    assert!(manager.outbound_operation_live(peer));
+    let filler = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 1);
+    manager.owe_eor(peer, V4);
+    manager.settle_eor_now(peer);
+    assert!(
+        held(&mut rx).is_empty(),
+        "the key is owed and cannot be absorbed"
+    );
+
+    received(
+        &mut manager,
+        vec![],
+        vec![(route_prefix(0), 0)],
+        vec![],
+        vec![],
+    );
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 0, "cancelled, never sent");
+    let sent = held(&mut rx);
+    assert_eq!(rows(&sent), 0);
+    let markers: Vec<_> = sent.iter().flat_map(|update| &update.end_of_rib).collect();
+    assert_eq!(markers, [&V4]);
+    assert!(manager.eor_pending(peer).is_empty());
+    assert!(!manager.dirty_peers.contains(&peer));
+    drop(dump);
+    drop(charge);
+}
+
+/// A ROUTE-REFRESH absorbs the family's owed key on the writer's only free
+/// slot, so its answer is deferred, with no resync. The marker that waited
+/// only for that key is offered at once; the full writer refuses it, which
+/// leaves it to the tick's marker retry like any refused marker, not to a
+/// later unrelated event. It reaches the peer behind the owed withdrawal
+/// and ahead of the deferred answer's `BoRR`.
+#[test]
+fn refresh_absorbing_on_the_last_slot_offers_the_marker_it_freed() {
+    let mut manager = manager(8);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 30, 1));
+    let mut rx = up_session(&mut manager, peer, 0, ipv4_sendable(), 4);
+    received(
+        &mut manager,
+        vec![route(0, 0), route(1, 0)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    send_all(&mut source);
+    send_all(&mut rx);
+    let filler = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    received(
+        &mut manager,
+        vec![],
+        vec![(route_prefix(0), 0)],
+        vec![],
+        vec![],
+    );
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 1);
+    drop(charge);
+    manager.owe_eor(peer, V4);
+    let sender = manager.outbound_peers[&peer].clone();
+    for _ in 0..3 {
+        sender.try_send(OutboundRouteUpdate::default()).unwrap();
+    }
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+    assert!(manager.owing(peer).is_none(), "absorbed on the last slot");
+    assert!(
+        manager.pending_refresh[&peer].contains(&V4),
+        "answer deferred"
+    );
+    assert!(!manager.dirty_peers.contains(&peer), "no resync");
+    assert!(
+        manager.eor_pending(peer).contains(&V4),
+        "refused, still owed"
+    );
+    let absorbed = send_all(&mut rx);
+    assert!(absorbed.iter().all(|update| update.end_of_rib.is_empty()));
+    assert!(
+        absorbed.iter().any(|update| update
+            .unicast_withdrawals()
+            .any(|(prefix, _)| *prefix == route_prefix(0))),
+        "the owed withdrawal went out first"
+    );
+
+    manager.resync_dirty_peers_bounded();
+    let sent = send_all(&mut rx);
+    let marker = sent
+        .iter()
+        .position(|update| update.end_of_rib.contains(&V4))
+        .expect("the marker retry sends the End-of-RIB");
+    let answer = sent
+        .iter()
+        .position(|update| !update.refresh_markers.is_empty())
+        .expect("the deferred answer follows");
+    assert!(marker < answer, "the initial End-of-RIB precedes the BoRR");
+    assert!(manager.eor_pending(peer).is_empty());
+    assert_eq!(manager.eor.unsettled_tick_finds, 0, "an ordinary retry");
 }
 
 /// The keep-set: a marked key is kept while the peer holds it, a source
@@ -1982,7 +2169,7 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                 drop(charge);
                 let _waiter = connect_families(&mut manager, WAITER, vec![family], true);
                 assert!(manager.selection_deferred(family));
-                manager.pending_eor.entry(peer).or_default().insert(family);
+                manager.owe_eor(peer, family);
                 let rtbh = if afi == Afi::Ipv6 {
                     Prefix::V6(Ipv6Prefix::new(
                         "2001:db8:100::".parse().unwrap(),
@@ -2049,7 +2236,7 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                 assert!(!manager.owing_runnable());
                 assert!(!manager.owing_tick_due());
                 assert!(!wire.unicast.contains_key(&(ordinary_key, 0)));
-                assert!(manager.pending_eor[&peer].contains(&family));
+                assert!(manager.eor_pending(peer).contains(&family));
                 manager.expire_selection_deferral();
                 let mut released = Vec::new();
                 for _ in 0..4 {
@@ -2434,11 +2621,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             true,
         );
         assert!(manager.selection_deferred(flowspec));
-        manager
-            .pending_eor
-            .entry(peer)
-            .or_default()
-            .insert(flowspec);
+        manager.owe_eor(peer, flowspec);
         let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
         rule.peer = crate::PeerId::LOCAL;
         if afi == Afi::Ipv6 {
@@ -2517,8 +2700,8 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             assert!(manager.owes_whole(peer, OwedFamily::IPV4_UNICAST));
             assert!(send_all(&mut rx).is_empty());
             drop(charge);
-            manager.pending_eor.entry(peer).or_default().insert(V4);
-            manager.flush_pending_eor(peer);
+            manager.owe_eor(peer, V4);
+            manager.settle_eor_now(peer);
             let sibling = send_all(&mut rx);
             assert_eq!(
                 sibling
@@ -2582,7 +2765,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
         );
         assert!(!manager.owing_runnable());
         assert!(!manager.owing_tick_due());
-        assert!(manager.pending_eor[&peer].contains(&flowspec));
+        assert!(manager.eor_pending(peer).contains(&flowspec));
         manager.expire_selection_deferral();
         let mut released_eor = Vec::new();
         for _ in 0..4 {
@@ -2687,13 +2870,11 @@ fn a_failed_absorption_keeps_the_end_of_rib() {
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
     drop(charge);
-    manager
-        .pending_eor
-        .entry(peer)
-        .or_default()
-        .extend(families);
+    for family in families {
+        manager.owe_eor(peer, family);
+    }
     let encoder = manager.peer_export_encoders.remove(&peer).unwrap();
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     assert!(
         send_all(&mut rx)
             .iter()
@@ -2701,16 +2882,15 @@ fn a_failed_absorption_keeps_the_end_of_rib() {
         "no family End-of-RIB overtakes the failed absorption"
     );
     assert!(
-        manager
-            .pending_eor
-            .get(&peer)
-            .is_some_and(|pending| families.iter().all(|family| pending.contains(family)))
+        families
+            .iter()
+            .all(|family| manager.eor_pending(peer).contains(family))
     );
     assert!(
         manager.dirty_peers.contains(&peer),
         "the peer resyncs instead"
     );
-    manager.flush_pending_eor(peer);
+    manager.settle_eor_now(peer);
     assert!(
         send_all(&mut rx).is_empty(),
         "a retry still waits for the resync"

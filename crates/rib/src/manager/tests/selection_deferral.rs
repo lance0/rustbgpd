@@ -1281,11 +1281,7 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
     while manager.process_next_route_chunk() {}
     assert!(!outbound_rx.try_recv().unwrap().announce.is_empty());
 
-    manager
-        .pending_eor
-        .entry(target)
-        .or_default()
-        .insert(READY_FAMILY);
+    manager.owe_eor(target, READY_FAMILY);
     manager.mark_outbound_dirty(target);
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
 
@@ -1296,8 +1292,8 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
     );
     assert_eq!(resync.end_of_rib, vec![READY_FAMILY]);
     assert_eq!(
-        manager.pending_eor.get(&target),
-        Some(&HashSet::from([FAMILY])),
+        manager.eor_pending(target),
+        HashSet::from([FAMILY]),
         "successful mixed-family resync must retain only the convergence-held EoR"
     );
 
@@ -1367,10 +1363,7 @@ fn withheld_family_eor_waits_for_selection_release() {
         "the held withheld family's EoR must not go out yet"
     );
     assert!(outbound_rx.try_recv().is_err());
-    assert_eq!(
-        manager.pending_eor.get(&target),
-        Some(&HashSet::from([FAMILY]))
-    );
+    assert_eq!(manager.eor_pending(target), HashSet::from([FAMILY]));
 
     let route = make_route_with_lp(
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
@@ -1523,10 +1516,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         observer_rx.try_recv().is_err(),
         "dirty observer emitted deferred BoRR/routes/EoRR before convergence resync/EoR"
     );
-    assert_eq!(
-        manager.pending_eor.get(&observer),
-        Some(&HashSet::from([FAMILY]))
-    );
+    assert_eq!(manager.eor_pending(observer), HashSet::from([FAMILY]));
     assert_eq!(
         manager.pending_refresh.get(&observer),
         Some(&HashSet::from([FAMILY]))
@@ -1638,10 +1628,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
         .selection_deferral_end_route_refresh(survivor, 11, FAMILY)
         .unwrap();
     manager.apply_selection_deferral_transitions([release], "test survivor EoRR completion");
-    assert_eq!(
-        manager.pending_eor.get(&observer),
-        Some(&HashSet::from([FAMILY]))
-    );
+    assert_eq!(manager.eor_pending(observer), HashSet::from([FAMILY]));
     assert_eq!(
         manager.pending_refresh.get(&observer),
         Some(&HashSet::from([FAMILY]))
@@ -1661,14 +1648,11 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
     assert!(
         manager.dirty_peers.contains(&observer),
         "pending_eor={:?} pending_refresh={:?} channel_capacity={}",
-        manager.pending_eor.get(&observer),
+        manager.eor_pending(observer),
         manager.pending_refresh.get(&observer),
         fill_tx.capacity()
     );
-    assert_eq!(
-        manager.pending_eor.get(&observer),
-        Some(&HashSet::from([FAMILY]))
-    );
+    assert_eq!(manager.eor_pending(observer), HashSet::from([FAMILY]));
     assert_eq!(
         manager.pending_refresh.get(&observer),
         Some(&HashSet::from([FAMILY]))
@@ -1879,7 +1863,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
 
     // Re-register the observer after staging. Its initial table is allowed,
     // but its EoR must stay pending. Force one full-channel failure so the
-    // dirty-resync path calls `flush_pending_eor` while convergence is held.
+    // dirty-resync path settles the owed markers while convergence is held.
     let (observer_retry_tx, mut observer_retry_rx) = mpsc::channel(2);
     let observer_fill_tx = observer_retry_tx.clone();
     tx.send(peer_up(observer, 32, observer_retry_tx))
@@ -2300,11 +2284,7 @@ fn collision_failback_overflow_receipt(
     // the full frozen Loc-RIB union as the fail-safe identity source.
     manager = manager.with_selection_deferral(config(Duration::from_mins(1), &[source]));
     super::arm_selection_waiter(&mut manager, source, &[FAMILY]);
-    manager
-        .pending_eor
-        .entry(observer)
-        .or_default()
-        .insert(FAMILY);
+    manager.owe_eor(observer, FAMILY);
     manager.set_deferred_selection_limits_for_test(identity_cap, logical_byte_cap);
     manager.record_deferred_unicast(&HashSet::from([prefix_a, prefix_b]));
     assert_counter_value(

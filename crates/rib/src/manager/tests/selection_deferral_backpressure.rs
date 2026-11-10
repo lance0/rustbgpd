@@ -172,7 +172,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
         assert_eq!(manager.grouped_member_of(peer_v4(OBSERVER)), Some(gid));
         assert!(manager.retain_initial_group_admitted(late));
         assert!(manager.pending_group_admitted.contains_record(late));
-        assert!(manager.pending_eor[&late].contains(&FAMILY));
+        assert!(manager.eor_pending(late).contains(&FAMILY));
 
         if timing == ReplayTiming::BeforeSelectionRelease {
             replay_complete(&mut manager);
@@ -192,7 +192,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
                 !manager.dirty_peers.contains(&late),
                 "grace still holds only the marker"
             );
-            assert!(manager.pending_eor[&late].contains(&FAMILY));
+            assert!(manager.eor_pending(late).contains(&FAMILY));
             assert!(!manager.retain_initial_group_admitted(late));
             assert!(!manager.pending_group_admitted.contains_record(late));
             replay_complete(&mut manager);
@@ -201,7 +201,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
             manager.dirty_peers.contains(&late),
             "{timing:?}: the data filled the sole slot before EoR"
         );
-        assert!(manager.pending_eor[&late].contains(&FAMILY));
+        assert!(manager.eor_pending(late).contains(&FAMILY));
         assert!(
             manager.pending_group_admitted.contains_record(late),
             "failed EoR must recapture actual admitted data"
@@ -251,13 +251,13 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
             assert!(crate::manager::helpers::routes_equal(&route, admitted));
         }
         assert!(!manager.dirty_peers.contains(&late));
-        assert!(!manager.pending_eor.contains_key(&late));
+        assert!(manager.eor_pending(late).is_empty());
         assert!(!manager.retain_initial_group_admitted(late));
         assert!(!manager.pending_group_admitted.contains_record(late));
         assert!(!manager.pending_extra_withdraws.contains_key(&late));
         assert!(manager.group_ribs[&gid].tombstones.is_empty());
         assert!(late_rx.try_recv().is_err());
-        manager.flush_pending_eor(late);
+        manager.settle_eor_now(late);
         manager.distribute_changes(&HashSet::new(), &HashSet::new());
         assert!(
             late_rx.try_recv().is_err(),
@@ -276,7 +276,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
             session_id: LATE_SESSION,
         });
         assert!(!manager.outbound_peers.contains_key(&late));
-        assert!(!manager.pending_eor.contains_key(&late));
+        assert!(manager.eor_pending(late).is_empty());
         assert!(!manager.pending_group_admitted.contains_record(late));
         assert!(manager.next_selection_deferral_deadline().is_none());
     }

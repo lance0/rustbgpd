@@ -75,7 +75,7 @@ fn non_gr_orf_refresh_completes_initial_eor_owed_through_selection_hold() {
     drain_route_chunks(&mut manager);
     assert!(manager.selection_convergence_held(FAMILY));
     assert!(target_rx.try_recv().is_err());
-    assert!(manager.pending_eor_held(target, FAMILY));
+    assert!(manager.eor_withheld(target, FAMILY));
 
     manager.handle_update(RibUpdate::EndOfRib {
         peer: source,
@@ -85,7 +85,7 @@ fn non_gr_orf_refresh_completes_initial_eor_owed_through_selection_hold() {
     });
     assert!(!manager.selection_convergence_held(FAMILY));
     assert!(manager.peer_orf_pending[&target].contains(&FAMILY));
-    assert!(manager.pending_eor[&target].contains(&FAMILY));
+    assert!(manager.eor_pending(target).contains(&FAMILY));
     assert!(
         target_rx.try_recv().is_err(),
         "ORF still holds the initial table"
@@ -120,12 +120,12 @@ fn non_gr_orf_refresh_completes_initial_eor_owed_through_selection_hold() {
     }
     assert_eq!(announced, vec![(prefix, source)]);
     assert_eq!(eors, 1, "the non-GR peer still needs its initial EoR");
-    assert!(!manager.pending_eor.contains_key(&target));
-    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(manager.eor_pending(target).is_empty());
+    assert!(manager.eor_behind_orf_table(target).is_empty());
     assert!(!manager.peer_orf_pending.contains_key(&target));
     assert!(!manager.retain_initial_group_admitted(target));
     assert!(!manager.pending_group_admitted.contains_record(target));
-    manager.flush_pending_eor(target);
+    manager.settle_eor_now(target);
     assert!(
         target_rx.try_recv().is_err(),
         "initial completion is consumed once"

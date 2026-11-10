@@ -1678,11 +1678,7 @@ fn shared_evpn_fixture_absent_destination_preserves_refused_old_and_ordered_eor(
     let old = output.try_recv().unwrap().evpn_announce[0].clone();
     let sender = manager.outbound_peers[&peer].clone();
     while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
-    manager
-        .pending_eor
-        .entry(peer)
-        .or_default()
-        .insert((Afi::L2Vpn, Safi::Evpn));
+    manager.owe_eor(peer, (Afi::L2Vpn, Safi::Evpn));
     manager
         .replace_peer_export_policy_synchronously(peer, Some(strip_rts()))
         .unwrap();

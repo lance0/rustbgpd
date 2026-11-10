@@ -833,6 +833,79 @@ fn deferred_unicast_received_replay_work_is_linear() {
     );
 }
 
+/// A gate release sends what it held to a group of `size` members:
+/// `ROUTES * size` new IPv4 routes and the withdrawal of `size` routes the
+/// members held before the gate armed. One member is dirty at the release;
+/// the rest are clean. The release pass runs while the gate is still
+/// armed, with its selection staged. With `ipv6_deferred` a second family
+/// stays deferred through that pass.
+fn gate_release_fanout(size: usize, ipv6_deferred: bool) -> Work {
+    const V4: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let families: &[(Afi, Safi)] = if ipv6_deferred { &[V4, V6] } else { &[V4] };
+    let (_tx, manager) = manager();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter.into(),
+            families: families.to_vec(),
+        }],
+    });
+    let mut receivers = members(&mut manager, size, false, None);
+    manager.handle_update(routes_from(external(), 0, 2, size));
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        drain(&mut receivers),
+        (size * size, 0),
+        "setup, size {size}"
+    );
+    arm_selection_waiter(&mut manager, waiter, families);
+    let mut held = routes_from(external(), 0, 1, ROUTES * size);
+    if let RibUpdate::RoutesReceived { withdrawn, .. } = &mut held {
+        withdrawn.extend((0..size).map(|index| (Prefix::V4(prefix(2, index)), 0)));
+    }
+    manager.handle_update(held);
+    drain_route_chunks(&mut manager);
+    manager.mark_outbound_dirty(member(0));
+    assert_eq!(drain(&mut receivers), (0, 0), "held, size {size}");
+
+    let work = checkpoints_in(|| {
+        // The waiter's End-of-RIB, as the session reports it.
+        let release = manager
+            .selection_deferral_end_of_rib(waiter, 77, V4)
+            .expect("the last waiter releases the family");
+        manager.apply_selection_deferral_transitions([release], "test");
+    });
+
+    assert!(!manager.selection_convergence_held(V4));
+    assert_eq!(manager.selection_deferred(V6), ipv6_deferred);
+    assert_eq!(
+        drain(&mut receivers),
+        (size * ROUTES * size, size * size),
+        "size {size}: every member gets the held routes and withdrawals once"
+    );
+    eprintln!("gate release fanout size {size}, IPv6 deferred {ipv6_deferred}: {work:?}");
+    work
+}
+
+/// No row of a release pass is deferred once its family is staged, so no
+/// member's commit checks the pass's announcements or withdrawals against
+/// a gate: for clean members that is a members x routes walk. The checks
+/// are still made while another family is deferred, where a row can belong
+/// to it.
+#[test]
+fn gate_release_checks_no_row_against_its_own_staged_gate() {
+    use crate::manager::distribution::GATE_ROW_SCAN;
+    let only = gate_release_fanout(LARGE, false);
+    assert_eq!(only.get(GATE_ROW_SCAN), None, "{only:?}");
+    let second = gate_release_fanout(LARGE, true);
+    assert!(
+        second.get(GATE_ROW_SCAN).copied().unwrap_or(0) >= LARGE * (ROUTES * LARGE + LARGE),
+        "every member's rows are checked while IPv6 is deferred: {second:?}"
+    );
+}
+
 /// Grow retained source RIBs alongside distinct local injections, keeping
 /// one outbound receiver. A local lookup must not scan every retained RIB
 /// for every injected prefix.

@@ -214,11 +214,11 @@ fn observe(
 
 fn assert_completed(manager: &mut RibManager, receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) {
     let target = peer_v4(TARGET_ADDR);
-    assert!(!manager.pending_eor.contains_key(&target));
-    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(manager.eor_pending(target).is_empty());
+    assert!(manager.eor_behind_orf_table(target).is_empty());
     assert!(!manager.peer_orf_pending.contains_key(&target));
     assert!(!manager.dirty_peers.contains(&target));
-    manager.flush_pending_eor(target);
+    manager.settle_eor_now(target);
     assert!(
         receiver.try_recv().map(delivered).is_err(),
         "initial markers are consumed once"
@@ -237,17 +237,12 @@ fn selection_release_does_not_flush_an_orf_held_initial_eor() {
 
     release_v4(&mut manager);
     observe(&mut target_rx, false, &mut seen, &mut eors);
-    assert!(
-        manager
-            .pending_eor
-            .get(&target)
-            .is_some_and(|held| held.contains(&V4))
-    );
+    assert!(manager.eor_pending(target).contains(&V4));
     refresh(&mut manager, V6);
     assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
     assert_eq!(eors, HashMap::from([(V6, 1)]));
     assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
-    assert!(manager.pending_eor[&target].contains(&V4));
+    assert!(manager.eor_pending(target).contains(&V4));
     assert!(manager.peer_orf_pending[&target].contains(&V4));
 
     refresh(&mut manager, V4);
@@ -275,7 +270,7 @@ fn dirty_ipv6_retry_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
     // genuine full channel through release, then free space for its retry.
     release_v4(&mut manager);
     assert!(manager.dirty_peers.contains(&target));
-    assert!(manager.pending_eor[&target].contains(&V4));
+    assert!(manager.eor_pending(target).contains(&V4));
     assert!(manager.peer_orf_pending[&target].contains(&V4));
     let mut seen = BTreeSet::new();
     let mut eors = HashMap::new();
@@ -292,7 +287,7 @@ fn dirty_ipv6_retry_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
         "the missed IPv6 row recovered"
     );
     assert_eq!(eors, HashMap::from([(V6, 1)]));
-    assert!(manager.pending_eor[&target].contains(&V4));
+    assert!(manager.eor_pending(target).contains(&V4));
     assert!(manager.peer_orf_pending[&target].contains(&V4));
 
     refresh(&mut manager, V4);
@@ -322,9 +317,9 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
     let mut target_rx = connect(&mut manager, target, TARGET_SESSION, false, &[V4], 1);
     assert_eq!(manager.outbound_peers[&target].capacity(), 0);
     assert!(manager.dirty_peers.contains(&target));
-    assert!(manager.pending_eor[&target].contains(&V4));
-    assert!(manager.pending_eor[&target].contains(&V6));
-    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(manager.eor_pending(target).contains(&V4));
+    assert!(manager.eor_pending(target).contains(&V6));
+    assert!(manager.eor_behind_orf_table(target).is_empty());
 
     let initial = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(
@@ -350,10 +345,10 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
         "backpressure must preserve the fresh peer's honest-empty completion"
     );
     assert!(manager.peer_orf_pending[&target].contains(&V4));
-    assert!(!manager.pending_eor.contains_key(&target));
-    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(manager.eor_pending(target).is_empty());
+    assert!(manager.eor_behind_orf_table(target).is_empty());
     assert!(!manager.dirty_peers.contains(&target));
-    manager.flush_pending_eor(target);
+    manager.settle_eor_now(target);
     assert!(
         target_rx.try_recv().map(delivered).is_err(),
         "initial completion is sent once"
@@ -366,7 +361,7 @@ fn dirty_ipv6_recovery_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
     let target = peer_v4(TARGET_ADDR);
     assert_eq!(manager.outbound_peers[&target].capacity(), 0);
     assert!(!manager.dirty_peers.contains(&target));
-    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.eor_behind_orf_table(target).contains(&V4));
 
     // The real initial IPv6 table and its EoR occupy both writer slots.
     receive(&mut manager, &[ordinary_v6(0x101)]);
@@ -393,8 +388,8 @@ fn dirty_ipv6_recovery_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
         "the missed IPv6 row recovered"
     );
     assert_eq!(eors, HashMap::from([(V6, 1)]));
-    assert!(manager.pending_eor[&target].contains(&V4));
-    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.eor_pending(target).contains(&V4));
+    assert!(manager.eor_behind_orf_table(target).contains(&V4));
     assert!(manager.peer_orf_pending[&target].contains(&V4));
 
     refresh(&mut manager, V4);
@@ -440,8 +435,8 @@ fn non_restarting_dirty_peer_keeps_orf_initial_eor_held_during_selection_release
         "the missed IPv6 row recovered"
     );
     assert_eq!(eors, HashMap::from([(V6, 1)]));
-    assert!(manager.pending_eor[&target].contains(&V4));
-    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.eor_pending(target).contains(&V4));
+    assert!(manager.eor_behind_orf_table(target).contains(&V4));
     assert!(manager.peer_orf_pending[&target].contains(&V4));
 
     refresh(&mut manager, V4);
@@ -521,7 +516,7 @@ fn setup_withheld_v6() -> (
     let target_rx = connect_withheld_v6(&mut manager, false, 2);
     assert!(!manager.gr_peers.contains_key(&target));
     assert_eq!(manager.outbound_peers[&target].capacity(), 0);
-    assert!(manager.pending_eor[&target].contains(&V6));
+    assert!(manager.eor_pending(target).contains(&V6));
     (manager, source_rx, target_rx)
 }
 
@@ -581,7 +576,7 @@ fn withheld_family_unlock_keeps_orf_initial_eor_held_during_selection_release() 
         seen.extend(update.announce.iter().map(|route| route.prefix));
     }
     assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
-    assert!(manager.pending_eor[&target].contains(&V6));
+    assert!(manager.eor_pending(target).contains(&V6));
     assert!(manager.peer_orf_pending[&target].contains(&V6));
 
     refresh(&mut manager, V6);
@@ -636,10 +631,10 @@ fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release()
     assert_eq!(seen, BTreeSet::from([ordinary_v4(), missed]));
     assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
     assert!(manager.peer_orf_pending[&target].contains(&V6));
-    assert!(!manager.pending_eor.contains_key(&target));
-    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(manager.eor_pending(target).is_empty());
+    assert!(manager.eor_behind_orf_table(target).is_empty());
     assert!(!manager.dirty_peers.contains(&target));
-    manager.flush_pending_eor(target);
+    manager.settle_eor_now(target);
     assert!(target_rx.try_recv().map(delivered).is_err());
 }
 
@@ -667,7 +662,7 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
         let mut target_rx = connect_withheld_v6(&mut manager, true, 64);
         assert!(!manager.gr_peers.contains_key(&target));
         assert!(manager.eor_grace_held(target, V6));
-        assert!(manager.pending_eor[&target].contains(&V6));
+        assert!(manager.eor_pending(target).contains(&V6));
         let mut seen = BTreeSet::new();
         let mut eors = HashMap::new();
         assert_eq!(observe(&mut target_rx, true, &mut seen, &mut eors), 1);
@@ -700,7 +695,7 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
         observe(&mut target_rx, true, &mut seen, &mut eors);
         assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
         assert_eq!(eors, HashMap::from([(V4, 1)]));
-        assert!(manager.pending_eor[&target].contains(&V6));
+        assert!(manager.eor_pending(target).contains(&V6));
         assert!(manager.peer_orf_pending[&target].contains(&V6));
 
         // A complete refresh for the runnable family cannot discharge IPv6.
@@ -710,8 +705,8 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
         observe(&mut target_rx, true, &mut refreshed, &mut refresh_eors);
         assert_eq!(refreshed, BTreeSet::from([ordinary_v4()]));
         assert_eq!(refresh_eors, HashMap::from([(V4, 1)]));
-        assert!(manager.pending_eor[&target].contains(&V6));
-        assert!(manager.gr_deferred_eor[&target].contains(&V6));
+        assert!(manager.eor_pending(target).contains(&V6));
+        assert!(manager.eor_behind_orf_table(target).contains(&V6));
         assert!(manager.peer_orf_pending[&target].contains(&V6));
 
         refresh(&mut manager, V6);
@@ -760,8 +755,8 @@ fn still_withheld_orf_family_completes_on_clean_selection_release() {
         "a withheld family's empty EoR must not wait for the peer's refresh"
     );
     assert!(manager.peer_orf_pending[&target].contains(&V6));
-    assert!(!manager.pending_eor.contains_key(&target));
-    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(manager.eor_pending(target).is_empty());
+    assert!(manager.eor_behind_orf_table(target).is_empty());
     assert!(!manager.dirty_peers.contains(&target));
 }
 
@@ -806,9 +801,9 @@ fn withheld_orf_family_unlock_completion_ignores_writer_capacity() {
         let target = peer_v4(TARGET_ADDR);
         let mut target_rx = connect_withheld_v6(&mut manager, false, capacity);
         assert!(!manager.gr_peers.contains_key(&target));
-        assert!(!manager.eor_held(target, V6));
+        assert!(!manager.eor_withheld(target, V6));
         assert_eq!(
-            manager.pending_eor.contains_key(&target),
+            !manager.eor_pending(target).is_empty(),
             capacity == 1,
             "capacity {capacity}: only the one-slot writer defers the PeerUp markers"
         );
@@ -835,8 +830,8 @@ fn withheld_orf_family_unlock_completion_ignores_writer_capacity() {
             "capacity {capacity}: one honest-empty IPv6 EoR, not held for the refresh"
         );
         assert!(manager.peer_orf_pending[&target].contains(&V6));
-        assert!(!manager.pending_eor.contains_key(&target));
-        assert!(!manager.gr_deferred_eor.contains_key(&target));
+        assert!(manager.eor_pending(target).is_empty());
+        assert!(manager.eor_behind_orf_table(target).is_empty());
 
         // The peer's own refresh brings the table with its ordinary response
         // marker; no initial marker is left over for it.
@@ -852,8 +847,8 @@ fn withheld_orf_family_unlock_completion_ignores_writer_capacity() {
         assert_eq!(refreshed, [ordinary_v6(0x100)], "capacity {capacity}");
         assert_eq!(refresh_eors, [V6], "capacity {capacity}");
         assert!(!manager.peer_orf_pending.contains_key(&target));
-        assert!(!manager.pending_eor.contains_key(&target));
-        assert!(!manager.gr_deferred_eor.contains_key(&target));
+        assert!(manager.eor_pending(target).is_empty());
+        assert!(manager.eor_behind_orf_table(target).is_empty());
     }
 }
 
@@ -890,7 +885,7 @@ fn deferred_orf_update_keeps_the_initial_gate_through_selection_release() {
     observe(&mut target_rx, false, &mut seen, &mut eors);
     assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
     assert_eq!(eors, HashMap::from([(V6, 1)]));
-    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.eor_behind_orf_table(target).contains(&V4));
 
     // RFC 5291 §6: DEFER installs the entries but is not the refresh that
     // opens the family.
@@ -910,7 +905,7 @@ fn deferred_orf_update_keeps_the_initial_gate_through_selection_release() {
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     observe(&mut target_rx, false, &mut seen, &mut eors);
     assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
-    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.eor_behind_orf_table(target).contains(&V4));
     assert!(manager.peer_orf_pending[&target].contains(&V4));
 
     push_v4_orf(&mut manager, WhenToRefresh::Immediate);
@@ -941,10 +936,7 @@ fn unflagged_cap_does_not_defer_another_gated_family() {
         vec![V6],
         "IPv6's honest-empty End-of-RIB is immediate"
     );
-    assert_eq!(
-        manager.gr_deferred_eor.get(&target),
-        Some(&HashSet::from([V4]))
-    );
+    assert_eq!(manager.eor_behind_orf_table(target), HashSet::from([V4]));
 }
 
 /// A replay grace window longer than the ORF cap: the cap releases the
@@ -985,7 +977,7 @@ async fn refresh_after_the_cap_inside_a_longer_grace_keeps_table_first() {
     tokio::time::advance(Duration::from_secs(60)).await;
     manager.expire_eor_holds(cap);
     assert!(manager.orf_eor_cap_passed.contains(&target));
-    assert!(manager.pending_eor[&target].contains(&V6));
+    assert!(manager.eor_pending(target).contains(&V6));
     observe(&mut target_rx, true, &mut seen, &mut eors);
     assert_eq!(eors, HashMap::new(), "grace still holds every marker");
     tokio::time::advance(Duration::from_secs(30)).await;
