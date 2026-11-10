@@ -544,6 +544,9 @@ pub struct AdjRibIn {
     flowspec_routes: StaleTracked<FlowSpecRouteKey, FlowSpecRoute>,
     /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
     flowspec_llgr_stale_local_tags: ShardedMap<FlowSpecRouteKey, ()>,
+    /// Set once a `FlowSpec` route with a non-zero Add-Path ID is stored.
+    /// While clear, every stored `FlowSpec` key has path ID 0.
+    flowspec_add_path_seen: bool,
     /// EVPN routes keyed by RFC 7432 route identity.
     evpn_routes: StaleTracked<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes keyed by opaque RFC 9552 route identity.
@@ -641,6 +644,7 @@ impl AdjRibIn {
             rpki_counts_v6: RpkiValidationCounts::default(),
             flowspec_routes: StaleTracked::with_capacity(flowspec_capacity),
             flowspec_llgr_stale_local_tags: ShardedMap::default(),
+            flowspec_add_path_seen: false,
             evpn_routes: StaleTracked::default(),
             bgpls_routes: StaleTracked::default(),
             vpn_routes: StaleTracked::default(),
@@ -863,6 +867,7 @@ impl AdjRibIn {
         self.rpki_counts_v4 = RpkiValidationCounts::default();
         self.rpki_counts_v6 = RpkiValidationCounts::default();
         self.flowspec_routes.clear();
+        self.flowspec_add_path_seen = false;
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
@@ -1602,6 +1607,7 @@ impl AdjRibIn {
         if !self.flowspec_llgr_stale_local_tags.is_empty() {
             self.flowspec_llgr_stale_local_tags.remove(&route.key());
         }
+        self.flowspec_add_path_seen |= route.path_id != 0;
         self.flowspec_routes.insert(route.key(), route);
     }
 
@@ -1620,6 +1626,14 @@ impl AdjRibIn {
 
     pub(crate) fn get_flowspec(&self, key: &FlowSpecRouteKey) -> Option<&FlowSpecRoute> {
         self.flowspec_routes.get(key)
+    }
+
+    /// Whether a `FlowSpec` route with a non-zero Add-Path ID has been stored
+    /// since the table was last cleared. No session negotiates Add-Path for
+    /// `FlowSpec` and injection uses path ID 0, so this is normally false and
+    /// a rule's only possible row is the one keyed with path ID 0.
+    pub(crate) fn flowspec_add_path_seen(&self) -> bool {
+        self.flowspec_add_path_seen
     }
 
     // --- EVPN methods (RFC 7432) ---
@@ -3383,6 +3397,7 @@ impl AdjRibIn {
     /// Clear all `FlowSpec` routes.
     pub fn clear_flowspec(&mut self) {
         self.flowspec_routes.clear();
+        self.flowspec_add_path_seen = false;
         self.flowspec_llgr_stale_local_tags.clear();
     }
 
