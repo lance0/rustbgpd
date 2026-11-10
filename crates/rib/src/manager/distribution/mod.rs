@@ -180,8 +180,9 @@ impl<P> UnicastDistributionResult<P> {
 /// one staging group while placing a strict bound on both retained encoded
 /// lengths and compatibility checks for adversarially heterogeneous peers.
 const MAX_SHARED_UNICAST_PROBE_COHORTS: usize = 8;
-/// The checkpoint stage of one row checked against a deferred family's
-/// gate. It classifies as the unnamed stage does.
+/// The checkpoint stage test builds give one row checked against a
+/// deferred family's gate, so a work contract can count those rows.
+#[cfg(test)]
 pub(in crate::manager) const GATE_ROW_SCAN: &str = "gate_row_scan";
 
 #[cfg(test)]
@@ -3458,9 +3459,7 @@ impl RibManager {
     ) -> Result<(), OutboundCommitFailure> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
-        // One per row checked against a deferred family's gate.
-        let gate_row =
-            || super::replacement_readiness_checkpoint_at(&readiness, GATE_ROW_SCAN, false);
+        let gate_row = || super::gate_row_checkpoint(&readiness);
         #[cfg(test)]
         let retirement_observer = self.replacement_readiness_test_hook.clone();
         checkpoint();
@@ -8108,7 +8107,7 @@ impl RibManager {
             .announce
             .iter()
             .map(|route| {
-                self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
+                super::gate_row_checkpoint(&self.replacement_readiness);
                 !self.selection_deferred(prefix_family(&route.prefix))
                     || (route.peer == LOCAL_PEER
                         && self
@@ -8147,7 +8146,7 @@ impl RibManager {
             batch.shared_group_encode = None;
         }
         let mut retain_withdrawal = |(prefix, path_id): &(Prefix, u32)| {
-            self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
+            super::gate_row_checkpoint(&self.replacement_readiness);
             let frozen = self.frozen_unicast_withdraw(peer, prefix, *path_id);
             partial |= frozen;
             !frozen
@@ -8169,7 +8168,7 @@ impl RibManager {
             batch.withdraw.retain(retain_withdrawal);
         }
         if batch.vpn_announce.iter().any(|route| {
-            self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
+            super::gate_row_checkpoint(&self.replacement_readiness);
             self.selection_deferred(route.afi_safi())
         }) {
             let allowed: Vec<_> = batch
@@ -8186,7 +8185,7 @@ impl RibManager {
             partial = true;
         }
         batch.vpn_withdraw.retain(|key| {
-            self.replacement_checkpoint_at(GATE_ROW_SCAN, false);
+            super::gate_row_checkpoint(&self.replacement_readiness);
             let held = self.selection_deferred(key.afi_safi());
             partial |= held;
             !held

@@ -1650,6 +1650,21 @@ fn replacement_readiness_checkpoint_at(
     }
 }
 
+/// The readiness checkpoint of one row checked against a deferred family's
+/// gate. Test builds name its stage so a work contract can count the rows;
+/// every other build takes the plain checkpoint.
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+#[inline]
+fn gate_row_checkpoint(readiness: &Option<Arc<ReplacementReadinessContext>>) {
+    #[cfg(test)]
+    replacement_readiness_checkpoint_at(readiness, distribution::GATE_ROW_SCAN, false);
+    #[cfg(not(test))]
+    replacement_readiness_checkpoint(readiness, false);
+}
+
 /// Classify only the current helper callback, never a remembered stage or ordinal.
 #[expect(clippy::ref_option, reason = "cleanup borrows its existing owner")]
 fn replacement_readiness_cleanup_checkpoint(
