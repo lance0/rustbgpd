@@ -1540,10 +1540,12 @@ pub(crate) mod tests {
         assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
     }
 
-    /// The server thread runs the sampler. The thread's runtime starts with
-    /// paused time, so the sampler's second query arrives without a real
-    /// wait; receiving it proves the first sample (answered stalled) was
-    /// already published.
+    /// The server thread runs the sampler. The runtime is real-time, and the
+    /// sampler's first sample is immediate, so no interval is waited out. The
+    /// proof of publication is the gauge reading 1, which only a stalled
+    /// answer received before the 5 s sample deadline can produce; a timeout
+    /// leaves it at 0. The loop only yields between reads; the outer timeout
+    /// is a failure bound, not a wait the test relies on.
     #[tokio::test]
     async fn metrics_thread_runs_the_rib_stall_sampler() {
         let (probe, mut rib_rx) = readiness_lane_probe();
@@ -1551,18 +1553,7 @@ pub(crate) mod tests {
         let listener = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let (server, _exited) = MetricsServerThread::spawn_with_runtime(
-            || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .start_paused(true)
-                    .build()
-            },
-            listener,
-            metrics.clone(),
-            probe,
-            None,
-        );
+        let (server, _exited) = MetricsServerThread::spawn(listener, metrics.clone(), probe, None);
         let guard = Duration::from_secs(30);
         let first = tokio::time::timeout(guard, rib_rx.recv())
             .await
@@ -1570,16 +1561,16 @@ pub(crate) mod tests {
         let Some(rustbgpd_rib::RibReadinessQuery::LocRibCount { reply, .. }) = first else {
             panic!("expected a RIB readiness query");
         };
-        reply
-            .send(Err(
-                rustbgpd_rib::RibReadinessError::PolicyTransitionStalled,
-            ))
-            .unwrap();
-        let second = tokio::time::timeout(guard, rib_rx.recv())
-            .await
-            .expect("the sampler must keep sampling");
-        assert!(second.is_some());
-        assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
+        let _ = reply.send(Err(
+            rustbgpd_rib::RibReadinessError::PolicyTransitionStalled,
+        ));
+        tokio::time::timeout(guard, async {
+            while rib_stalled_line(&metrics).await != "bgp_rib_stalled 1" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stalled answer must reach the gauge");
         drop(server);
     }
 
