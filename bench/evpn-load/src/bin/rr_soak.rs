@@ -416,6 +416,10 @@ struct View {
     capture: Option<qualification::WireCapture>,
     qualification_communities: Option<Vec<u16>>,
     eors: u64,
+    /// The primary-lane probe's bit, and how many of its announcements and
+    /// withdrawals this receiver has applied.
+    watched: Option<usize>,
+    watched_events: u64,
 }
 
 impl View {
@@ -430,6 +434,8 @@ impl View {
             capture: None,
             qualification_communities: None,
             eors: 0,
+            watched: None,
+            watched_events: 0,
         }
     }
 
@@ -447,6 +453,9 @@ impl View {
             return;
         }
         let bit = origin as usize * shape.block() + offset;
+        if self.watched == Some(bit) {
+            self.watched_events += 1;
+        }
         // `classify` matched the route key. An announcement must also carry
         // every non-key field the origin sent (ESI, labels, gateway): a
         // same-key route with other content replaces the originated route,

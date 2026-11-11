@@ -93,16 +93,18 @@ def regroup_evidence(leg, events, controls):
         signal["wall_us"] = base + 50
         at = signal["at"]
         events.extend([{"event": "scrape", "name": f"regroup-{generation}-start", "at": at,
-                        "requested_us": base + 30, "wall_us": base + 40},
+                        "requested_at": at, "requested_us": base + 30, "wall_us": base + 40},
+                       {"event": "command", "command": f"probe-stop {generation}", "at": at + .05},
+                       {"event": "complete", "command": f"probe-stop {generation}", "at": at + .08},
                        {"event": "scrape", "name": f"regroup-{generation}-end", "at": at + .1,
-                        "requested_us": base + 110, "wall_us": base + 120}])
+                        "requested_at": at + .09, "requested_us": base + 110, "wall_us": base + 120}])
         (leg / f"metrics-regroup-{generation}-start.txt").write_text(
             actor_text(5, {"0.2": 1, "+Inf": 1}) + transition_text(0))
         (leg / f"metrics-regroup-{generation}-end.txt").write_text(
             actor_text(8_300_000, {"0.2": 1, "+Inf": 2}) + transition_text(1))
         controls.append({"command": f"probe-stop {generation}", "result": {"samples": [
-            {"sent_us": base + 10, "seen_us": base + 20, "withdrawn": True},
-            {"sent_us": base + 60, "seen_us": base + 105, "withdrawn": True}]}})
+            {"sent_us": base + 10, "seen_us": base + 20, "withdrawn": True, "every_receiver": None},
+            {"sent_us": base + 60, "seen_us": base + 105, "withdrawn": True, "every_receiver": True}]}})
         log.extend([batch_event(base + 70), batch_event(base + 130, 1)])
     with (leg / "daemon.log").open("a") as stream:
         stream.write("".join(line + "\n" for line in log))
@@ -232,16 +234,19 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual([batch["wall_us"] for batch in row["regroup-a-window"]["batches"]], [270])
 
     def test_probe_that_never_arrives_or_misses_the_regroup_is_invalid_not_a_pass(self):
-        def sample(sent, seen, withdrawn=True):
-            return {"sent_us": sent, "seen_us": seen, "withdrawn": withdrawn}
-        good = [sample(10, 20), sample(60, 9_000_060), sample(9_000_100, 9_000_110)]
+        def sample(sent, seen, withdrawn=True, every=None):
+            return {"sent_us": sent, "seen_us": seen, "withdrawn": withdrawn, "every_receiver": every}
+        good = [sample(10, 20), sample(60, 9_000_060), sample(9_000_100, 9_000_110, every=True)]
         self.assertEqual(R.probe_window({"samples": good}, 50, 9_000_000),
                          {"status": "PASS", "reason": None, "samples": 3, "max_latency_us": 9_000_000})
         for name, samples, reason in (
                 ("never-arrives", [sample(10, 20), sample(60, None)], "never reached"),
                 ("left-behind", [sample(10, 20), sample(60, 9_000_060, False)], "not withdrawn"),
-                ("started-late", [sample(60, 9_000_060)], "does not span"),
-                ("stopped-early", [sample(10, 20), sample(30, 40)], "does not span"),
+                ("started-late", [sample(60, 9_000_060, every=True)], "does not span"),
+                ("stopped-early", [sample(10, 20), sample(30, 40, every=True)], "does not span"),
+                ("final-missed-a-receiver", [sample(10, 20), sample(60, 9_000_060, every=False)],
+                 "every receiver"),
+                ("final-unchecked", [sample(10, 20), sample(60, 9_000_060)], "every receiver"),
                 ("empty", [], "no probe sample")):
             with self.subTest(name):
                 result = R.probe_window({"samples": samples}, 50, 9_000_000)
@@ -249,7 +254,8 @@ class RecoveryTests(unittest.TestCase):
                 self.assertIsNone(result["max_latency_us"])
                 self.assertIn(reason, result["reason"])
         for malformed in (None, {}, {"samples": [sample(20, 10)]}, {"samples": [sample(10, 20), sample(10, 30)]},
-                          {"samples": [{"sent_us": 1, "seen_us": 2}]}):
+                          {"samples": [{"sent_us": 1, "seen_us": 2}]},
+                          {"samples": [dict(sample(1, 2), every_receiver="yes")]}):
             with self.subTest(malformed=malformed), self.assertRaises(Exception) as caught:
                 R.probe_window(malformed, 50, 100)
             self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
@@ -262,6 +268,14 @@ class RecoveryTests(unittest.TestCase):
                 R.transition_counts(text)
         self.assertEqual(R.batch_phases("plain text\n" + batch_event(100), 50, 150)[0]["wall_us"], 100)
         self.assertEqual(R.batch_phases(batch_event(100), 101, 150), [])
+        # A parent daemon logs no deferred_members; a paced one does.
+        self.assertIsNone(R.batch_phases(batch_event(100), 50, 150)[0]["deferred_members"])
+        paced = json.loads(batch_event(100))
+        paced["fields"]["deferred_members"] = 148
+        self.assertEqual(R.batch_phases(json.dumps(paced), 50, 150)[0]["deferred_members"], 148)
+        paced["fields"]["deferred_members"] = "148"
+        with self.assertRaises(ValueError):
+            R.batch_phases(json.dumps(paced), 50, 150)
         broken = json.loads(batch_event(100))
         for field, value in (("timestamp", "yesterday"), ("timestamp", "2026-11-11T00:00:00")):
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
@@ -616,10 +630,24 @@ class RecoveryTests(unittest.TestCase):
                   {"event": "command", "command": "resume", "at": 10},
                   {"event": "complete", "command": "resume", "at": 11},
                   {"event": "complete", "command": "settle", "at": 15}]
-        self.assertEqual(R.timings(events), {"regroup-a-seconds": 2, "regroup-b-seconds": 3,
-                                            "recovery-seconds": 4})
+        # Probe cleanup and the closing scrape inside a regroup are excluded.
+        for generation, start in (("a", 2), ("b", 5)):
+            events += [{"event": "command", "command": f"probe-stop {generation}", "at": start},
+                       {"event": "complete", "command": f"probe-stop {generation}", "at": start + .25},
+                       {"event": "scrape", "name": f"regroup-{generation}-end", "requested_at": start + .3,
+                        "at": start + .5}]
+        values = R.timings(events)
+        self.assertEqual(set(values), {"regroup-a-seconds", "regroup-b-seconds", "recovery-seconds"})
+        for key, expected in {"regroup-a-seconds": 1.55, "regroup-b-seconds": 2.55, "recovery-seconds": 4}.items():
+            self.assertAlmostEqual(values[key], expected, msg=key)
         with self.assertRaisesRegex(ValueError, "missing/duplicate"):
+            R.timings(events[:6] + events[7:])
+        with self.assertRaisesRegex(ValueError, "missing/duplicate regroup cleanup"):
             R.timings(events[:-1])
+        broken = copy.deepcopy(events)
+        del broken[-1]["requested_at"]
+        with self.assertRaisesRegex(ValueError, "request time"):
+            R.timings(broken)
 
     def test_socket_writes_and_wrapped_final_state_cannot_replace_actor_barrier(self):
         def row(peer):

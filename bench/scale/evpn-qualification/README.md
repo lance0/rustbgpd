@@ -175,13 +175,20 @@ hold that regroup's `actor_poll` maximum and `route_chunk` bucket increases,
 the increase of `bgp_rib_policy_transition_total` by outcome, and every
 `authoritative_batch_phase` log event between the signal and the closing scrape
 (input, shared and fallback members, fallback regroup, distribution and total
-microseconds). A primary-lane probe runs through the same window: client 0,
+microseconds, and `deferred_members` where the daemon logs it; a daemon that
+does not records it as null). A primary-lane probe runs through the same window: client 0,
 whose policy never changes, announces one Type 5 route from the unused half of
 its pool; the driver records when client 1, also unmoved, holds it, withdraws
 it, waits until no receiver holds it, and repeats until one cycle after the
-witness. The window's `probe.max_latency_us` is the longest announce-to-receipt
-time. A probe that never arrives, a route left behind, or a train that does not
-span the signal and the witness records the probe `INVALID`, never a pass. The
+witness. Before that final cycle it waits until no probe event lands for
+200 ms, then waits until every receiver holds the route and none does, so no
+receiver can install it after the acknowledgement. The window's
+`probe.max_latency_us` is the longest announce-to-receipt time. A probe that
+never arrives, a route left behind, a final cycle that missed a receiver, or a
+train that does not span the signal and the witness records the probe
+`INVALID`, never a pass. Stopping the probe has its own bound, and it and the
+closing scrape are excluded from the regroup's wire-convergence time and
+deadline. The
 probe key is excluded from the paired per-key digest because its events depend
 on when each probe ran; the boundary still requires it withdrawn. These fields
 are recorded in both modes and the final consumer derives them again from the
