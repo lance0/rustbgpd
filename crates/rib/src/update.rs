@@ -678,10 +678,10 @@ impl ExactExportKey {
 
     /// Family NLRI identity without a session-local outbound Add-Path rank.
     ///
-    /// Invariant: `RibManager::live_exact_export_nlri`
-    /// (crates/rib/src/manager/mod.rs) builds its unicast live set keyed at
-    /// `path_id` 0 to match this normalization. Changing the Add-Path keying
-    /// here requires changing that builder too.
+    /// Invariant: `RibManager::exact_export_nlri_is_live`
+    /// (crates/rib/src/manager/mod.rs) decides liveness per NLRI, ignoring
+    /// the path id, to match this normalization. Changing the Add-Path
+    /// keying here requires changing that probe too.
     #[must_use]
     pub fn nlri_identity(&self) -> Self {
         match self {

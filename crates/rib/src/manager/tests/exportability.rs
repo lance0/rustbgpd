@@ -3467,3 +3467,281 @@ fn deferred_frozen_labeled_rejection_keeps_the_explain_exact() {
         );
     }
 }
+
+const OVERLAY_SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 20);
+
+fn overlay_prefix(index: u32) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::from(0x0A00_0000 + (index << 8)), 24)
+}
+
+fn overlay_key(index: u32) -> ExactExportKey {
+    ExactExportKey::Unicast(Prefix::V4(overlay_prefix(index)), 0)
+}
+
+fn overlay_source_update(
+    manager: &mut RibManager,
+    announced: &[u32],
+    withdrawn: &[u32],
+    local_pref: u32,
+) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(OVERLAY_SOURCE),
+        announced: announced
+            .iter()
+            .map(|&index| make_route_with_lp(overlay_prefix(index), OVERLAY_SOURCE, local_pref))
+            .collect(),
+        withdrawn: withdrawn
+            .iter()
+            .map(|&index| (Prefix::V4(overlay_prefix(index)), 0))
+            .collect(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+/// One source feeding `routes` IPv4 prefixes through ordinary ingest to a
+/// target whose encoder rejects the first `rejected` of them.
+fn rejection_overlay_fixture(
+    routes: u32,
+    rejected: u32,
+) -> (
+    RibManager,
+    PeerId,
+    Arc<MockExactExportEncoder>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let mut manager = test_manager();
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 20));
+    register_test_peer(&mut manager, peer_v4(OVERLAY_SOURCE), 0);
+    let encoder = MockExactExportEncoder::accepting(41);
+    encoder.set_profile(41, (0..rejected).map(overlay_key));
+    let rx = sync_peer_up(
+        &mut manager,
+        target,
+        DEFERRED_UNICAST,
+        Some(encoder.clone()),
+        false,
+    );
+    overlay_source_update(&mut manager, &(0..routes).collect::<Vec<_>>(), &[], 100);
+    assert_eq!(
+        manager.peer_unexportable[&target],
+        (0..rejected).map(overlay_key).collect::<HashSet<_>>()
+    );
+    (manager, target, encoder, rx)
+}
+
+fn overlay_end_of_rib(manager: &mut RibManager, peer: PeerId, session_id: u64) {
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer,
+        session_id,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+}
+
+/// With a rejection present, the End-of-RIB of an unrelated peer and an
+/// unrelated peer going down decide the rejection's liveness from the
+/// rejected identities. The reads they spend must not grow with the table.
+#[test]
+fn lifecycle_rejection_prune_reads_follow_the_overlay_not_the_table() {
+    const TABLES: u64 = 5;
+    let reads = |routes: u32| {
+        let (mut manager, target, _encoder, _rx) = rejection_overlay_fixture(routes, 1);
+        let others: Vec<_> = (30..33)
+            .map(|host| peer_v4(Ipv4Addr::new(192, 0, 2, host)))
+            .collect();
+        let _receivers: Vec<_> = others
+            .iter()
+            .map(|&peer| {
+                let encoder = MockExactExportEncoder::accepting(42);
+                sync_peer_up(&mut manager, peer, DEFERRED_UNICAST, Some(encoder), false)
+            })
+            .collect();
+        let mut per_event = Vec::new();
+        let mut measure = |manager: &mut RibManager, event: &dyn Fn(&mut RibManager)| {
+            let before = manager.test_exact_export_liveness_reads;
+            event(manager);
+            per_event.push(manager.test_exact_export_liveness_reads - before);
+        };
+        for &peer in &others {
+            measure(&mut manager, &|manager| {
+                overlay_end_of_rib(manager, peer, 7);
+            });
+        }
+        measure(&mut manager, &|manager| {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: others[0],
+                session_id: 7,
+            });
+        });
+        assert_eq!(
+            manager.peer_unexportable[&target],
+            HashSet::from([overlay_key(0)]),
+            "the live route keeps its rejection"
+        );
+        per_event
+    };
+    let small = reads(8);
+    assert_eq!(small.len(), 4);
+    assert!(
+        small.iter().all(|reads| (1..=1 + TABLES).contains(reads)),
+        "each event reads at most the rejected identity and one row per table: {small:?}"
+    );
+    assert_eq!(
+        small,
+        reads(512),
+        "the reads per event must not follow the table size"
+    );
+}
+
+/// Every lifecycle sweep still removes a rejection whose route is gone and
+/// keeps one whose route is live.
+#[test]
+fn lifecycle_sweeps_prune_dead_rejections_and_keep_live_ones() {
+    type Event = fn(&mut RibManager, PeerId);
+    let events: [(&str, Event); 6] = [
+        ("end-of-rib", |manager, peer| {
+            overlay_end_of_rib(manager, peer, 7);
+        }),
+        ("peer down", |manager, peer| {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer,
+                session_id: 7,
+            });
+        }),
+        ("gr expiry", RibManager::sweep_gr_stale),
+        ("llgr expiry", |manager, _| {
+            manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
+        }),
+        ("llgr family expiry", |manager, peer| {
+            manager.sweep_llgr_stale(peer, &[]);
+        }),
+        ("refresh window expiry", |manager, _| {
+            manager.expire_refresh_windows(tokio::time::Instant::now());
+        }),
+    ];
+    let mut wrong = Vec::new();
+    for (case, event) in events {
+        let (mut manager, target, _encoder, _rx) = rejection_overlay_fixture(4, 1);
+        let bystander = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+        let encoder = MockExactExportEncoder::accepting(42);
+        let _bystander_rx = sync_peer_up(
+            &mut manager,
+            bystander,
+            DEFERRED_UNICAST,
+            Some(encoder),
+            false,
+        );
+        manager
+            .peer_unexportable
+            .get_mut(&target)
+            .unwrap()
+            .insert(overlay_key(900));
+        event(&mut manager, bystander);
+        if manager.peer_unexportable.get(&target) != Some(&HashSet::from([overlay_key(0)])) {
+            wrong.push(case);
+        }
+    }
+    assert!(wrong.is_empty(), "sweeps with a wrong overlay: {wrong:?}");
+}
+
+/// The graceful-restart stale sweep at End-of-RIB removes the rejection of a
+/// route the restarted source did not send again, keeps the rejection of one
+/// it did, and never sends the rejecting target either route.
+#[test]
+fn gr_end_of_rib_sweep_retires_only_the_unrefreshed_rejection() {
+    let (mut manager, target, _encoder, mut rx) = rejection_overlay_fixture(4, 2);
+    let source = peer_v4(OVERLAY_SOURCE);
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![DEFERRED_UNICAST],
+        peer_llgr_capable: false,
+        peer_llgr_families: Vec::new(),
+        llgr_stale_time: 0,
+    });
+    manager.handle_update(registering_peer_up(source, 0));
+    assert_eq!(manager.peer_unexportable[&target].len(), 2);
+    overlay_source_update(&mut manager, &[1, 2, 3], &[], 100);
+
+    overlay_end_of_rib(&mut manager, source, 0);
+    drain_route_chunks(&mut manager);
+
+    assert!(
+        manager
+            .loc_rib
+            .get(&Prefix::V4(overlay_prefix(0)))
+            .is_none()
+    );
+    assert_eq!(
+        manager.peer_unexportable[&target],
+        HashSet::from([overlay_key(1)])
+    );
+    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let rejected = [overlay_key(0), overlay_key(1)];
+    for update in &sent {
+        for route in update.announce.iter() {
+            assert!(!rejected.contains(&ExactExportKey::Unicast(route.prefix, 0)));
+        }
+        for (prefix, _) in update.unicast_withdrawals() {
+            assert!(!rejected.contains(&ExactExportKey::Unicast(*prefix, 0)));
+        }
+    }
+}
+
+/// A rejection added while one exists is kept by the next sweep, and a
+/// rejection the target's encoder stops raising clears without one.
+#[test]
+fn lifecycle_sweep_keeps_an_added_rejection_and_a_cleared_one_stays_cleared() {
+    let (mut manager, target, encoder, mut rx) = rejection_overlay_fixture(4, 1);
+    let bystander = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+    let accepting = MockExactExportEncoder::accepting(42);
+    let _bystander_rx = sync_peer_up(
+        &mut manager,
+        bystander,
+        DEFERRED_UNICAST,
+        Some(accepting),
+        false,
+    );
+
+    encoder.set_profile(43, [overlay_key(0), overlay_key(9)]);
+    overlay_source_update(&mut manager, &[9], &[], 100);
+    let both = HashSet::from([overlay_key(0), overlay_key(9)]);
+    assert_eq!(manager.peer_unexportable[&target], both);
+    let reads = manager.test_exact_export_liveness_reads;
+    overlay_end_of_rib(&mut manager, bystander, 7);
+    assert_eq!(manager.peer_unexportable[&target], both);
+    assert!(manager.test_exact_export_liveness_reads - reads >= 2);
+
+    overlay_source_update(&mut manager, &[], &[9], 100);
+    assert_eq!(
+        manager.peer_unexportable[&target],
+        HashSet::from([overlay_key(0)]),
+        "a withdrawn route's rejection retires with it"
+    );
+    encoder.set_profile(44, []);
+    overlay_source_update(&mut manager, &[0], &[], 200);
+    assert!(!manager.peer_unexportable.contains_key(&target));
+    let reads = manager.test_exact_export_liveness_reads;
+    overlay_end_of_rib(&mut manager, bystander, 7);
+    assert!(!manager.peer_unexportable.contains_key(&target));
+    assert_eq!(manager.test_exact_export_liveness_reads, reads);
+    let announced: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .flat_map(|update| {
+            update
+                .announce
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(announced.contains(&Prefix::V4(overlay_prefix(0))));
+    assert!(!announced.contains(&Prefix::V4(overlay_prefix(9))));
+}
