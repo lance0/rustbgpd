@@ -79,6 +79,9 @@ struct PortSessionChecks {
     inline_credited: std::time::Duration,
     /// The port's `observations` when this round's first query started.
     observed: Option<u64>,
+    /// A retirement this round issued ended the session, or found it gone.
+    /// That is terminal: no later notification about the session undoes it.
+    session_ended: bool,
     state: Option<StateQueryOutcome>,
     retirement: Option<Result<bool, PeerCommandError>>,
     retention_before: Option<Option<rustbgpd_rib::PeerRetention>>,
@@ -1277,6 +1280,14 @@ impl PeerManager {
         let mut inline = std::time::Duration::ZERO;
         loop {
             while let Some((name, mut checks)) = ready.pop_front() {
+                checks.session_ended |= matches!(
+                    checks.retirement,
+                    Some(
+                        Ok(true)
+                            | Err(PeerCommandError::SessionExited
+                                | PeerCommandError::ReplyDropped)
+                    )
+                );
                 // A notification about this port's session was handled (by
                 // another port's preparation or settlement drain) after the
                 // answers were asked for: it is newer than they are.
@@ -1284,9 +1295,16 @@ impl PeerManager {
                     .observed
                     .is_some_and(|observed| observed != self.port_mut(&name).observations)
                 {
-                    debug!(interface = %name, "unnumbered: session state changed during the round; dropping its cached answers and retrying");
-                    self.arm_unnumbered_retry();
-                    continue;
+                    if checks.session_ended {
+                        // Reads can be outdated; the end of the session is
+                        // not. Dropping it would leave an exited handle
+                        // bound, so the round goes on to remove the peer.
+                        self.port_mut(&name).established = false;
+                    } else {
+                        debug!(interface = %name, "unnumbered: session state changed during the round; dropping its cached answers and retrying");
+                        self.arm_unnumbered_retry();
+                        continue;
+                    }
                 }
                 let from = tokio::time::Instant::now();
                 let reconciled = self.reconcile_port(&name, &mut checks).await;

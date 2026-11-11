@@ -584,6 +584,110 @@ async fn a_state_answer_older_than_a_handled_idle_notice_is_dropped() {
     assert!(h.mgr.peers.contains_key(&swp1_key(2)));
 }
 
+/// A conditional retirement that succeeded is a fact about a session the
+/// round itself ended, not a read a later notice can outdate. `swp1`'s
+/// retirement is outstanding when `swp2`'s delete settlement drains that
+/// session's `BackToIdle`; the retirement then succeeds and the session
+/// exits. The round still removes the peer. Otherwise the exited handle
+/// stays bound, and a binding returning to the original endpoint would keep
+/// it through the same-endpoint shortcut with no session behind it.
+#[tokio::test(start_paused = true)]
+async fn a_successful_retirement_survives_a_notice_handled_meanwhile() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    let (commands, mut receiver) = mpsc::channel(8);
+    let (asked_tx, asked) = oneshot::channel();
+    let (retire, retiring) = oneshot::channel();
+    let session = tokio::spawn(async move {
+        let mut hold = Some((asked_tx, retiring));
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply, ticket } => {
+                    let (asked, retiring) = hold.take().expect("one retirement");
+                    asked.send(()).unwrap();
+                    retiring.await.unwrap();
+                    assert!(ticket.claim(), "the round is still waiting for it");
+                    reply.send(Ok(true)).unwrap();
+                    break;
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    let retired_id = own_session(
+        &mut h,
+        &swp1_key(2),
+        PeerHandle::from_parts(commands, session),
+    )
+    .await;
+    let unstoppable: IpAddr = "10.0.0.53".parse().unwrap();
+    insert_test_managed_peer(
+        &mut h.mgr,
+        unstoppable,
+        super::super::command_fan_out::wedged_session(),
+        false,
+    );
+    let breached = h.mgr.peers[&key(unstoppable)].session_id();
+    // The breach keeps swp2's settlement drain busy for a command window.
+    let (stopping, stop_entered, release_stop) = gated_round_shutdown(Some((
+        h.mgr.session_notify_tx.clone(),
+        round_breach(breached, unstoppable),
+    )));
+    own_session(&mut h, &swp2, stopping).await;
+    h.mgr
+        .handle_discovery_event(DiscoveryEvent::BindingChanged {
+            interface: "swp1".into(),
+            previous: Some(endpoint(2, 7)),
+            current: Some(endpoint(3, 7)),
+        });
+    let notices = h.mgr.session_notify_tx.clone();
+    let round = tokio::spawn(async move {
+        h.reconcile().await;
+        h
+    });
+    asked.await.unwrap();
+    stop_entered.await.unwrap();
+    // Queued after swp2's preparation drained: its settlement handles it.
+    notices
+        .send(SessionNotification::BackToIdle {
+            session_id: retired_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: IpAddr::V6(ll(2)),
+        })
+        .unwrap();
+    release_stop.send(()).unwrap();
+    poll_round_tasks().await;
+    // The retirement succeeds while the manager is inside that settlement.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    retire.send(()).unwrap();
+    let mut h = round.await.unwrap();
+    assert_ne!(h.mgr.peers[&key(unstoppable)].session_id(), breached);
+    assert_eq!(h.mgr.session_notify_rx.ready_count(), 0);
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(2)),
+        "the session the round shut down is removed, not left bound"
+    );
+    // The original endpoint's binding returns.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let bound = &h.mgr.peers[&swp1_key(2)];
+    assert_ne!(bound.session_id(), retired_id);
+    assert!(
+        !bound.handle().is_finished(),
+        "the returning binding runs a fresh session"
+    );
+}
+
 /// A state answer belongs to the session that gave it. `swp1`'s session
 /// reports Established, but is replaced (an unstoppable primary after a
 /// max-prefix breach, handled while `swp2`'s deletion settles) before the
