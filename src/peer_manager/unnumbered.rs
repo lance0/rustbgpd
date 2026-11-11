@@ -77,6 +77,8 @@ struct PortSessionChecks {
     deadline_at: Option<tokio::time::Instant>,
     /// The round's inline time this window has already been extended by.
     inline_credited: std::time::Duration,
+    /// The port's `observations` when this round's first query started.
+    observed: Option<u64>,
     state: Option<StateQueryOutcome>,
     retirement: Option<Result<bool, PeerCommandError>>,
     retention_before: Option<Option<rustbgpd_rib::PeerRetention>>,
@@ -328,6 +330,10 @@ struct Port {
     bound: Option<PeerKey>,
     /// The bound peer's session is Established.
     established: bool,
+    /// Counts the session notifications that set `established`. A round's
+    /// cached session answers are older than any notification handled after
+    /// its first query started, and are dropped when this has moved.
+    observations: u64,
     /// The address last refused, so the refusal is logged once.
     refused: Option<Ipv6Addr>,
     /// Why the current binding is refused (`<reason>: <detail>`), reported
@@ -616,9 +622,11 @@ impl PeerManager {
         };
         if new == SessionState::Established {
             port.established = true;
+            port.observations += 1;
             report_established(&unnumbered.discovery, name, peer);
         } else if old == SessionState::Established {
             port.established = false;
+            port.observations += 1;
             unnumbered.discovery.session_failed(name);
             unnumbered.reconcile_due = true;
         }
@@ -639,6 +647,7 @@ impl PeerManager {
             return;
         };
         port.established = false;
+        port.observations += 1;
         unnumbered.discovery.session_failed(name);
         unnumbered.reconcile_due = true;
     }
@@ -1268,6 +1277,17 @@ impl PeerManager {
         let mut inline = std::time::Duration::ZERO;
         loop {
             while let Some((name, mut checks)) = ready.pop_front() {
+                // A notification about this port's session was handled (by
+                // another port's preparation or settlement drain) after the
+                // answers were asked for: it is newer than they are.
+                if checks
+                    .observed
+                    .is_some_and(|observed| observed != self.port_mut(&name).observations)
+                {
+                    debug!(interface = %name, "unnumbered: session state changed during the round; dropping its cached answers and retrying");
+                    self.arm_unnumbered_retry();
+                    continue;
+                }
                 let from = tokio::time::Instant::now();
                 let reconciled = self.reconcile_port(&name, &mut checks).await;
                 inline += from.elapsed();
@@ -1312,6 +1332,8 @@ impl PeerManager {
                         continue;
                     }
                     let deadline_at = checks.open_window(inline);
+                    let observations = self.port_mut(&name).observations;
+                    checks.observed.get_or_insert(observations);
                     let managed = self.peers.get(&key);
                     let id = managed.map(super::ManagedPeer::session_id);
                     let commands = managed.map(|managed| managed.handle().commands_sender());

@@ -515,6 +515,75 @@ async fn a_slow_delete_settlement_does_not_spend_another_ports_next_phase() {
     );
 }
 
+/// `swp1`'s session answers its state query Established. Before the round
+/// reads the answer, `swp2`'s retirement preparation drains that session's
+/// `BackToIdle` (and waits out an unstoppable primary, so the answer is
+/// already there). The notice is the newer fact: the cached answer is
+/// dropped and the port retried, instead of marking the port Established
+/// after its Idle notice was consumed, which would keep an obsolete binding.
+#[tokio::test(start_paused = true)]
+async fn a_state_answer_older_than_a_handled_idle_notice_is_dropped() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    let answering = Arc::new(FakePeerCounters::default());
+    let session = fake_peer_handle(
+        IpAddr::V6(ll(2)),
+        SessionState::Established,
+        None,
+        answering.clone(),
+    );
+    let session_id = own_session(&mut h, &swp1_key(2), session).await;
+    let stopping = fake_peer_handle(
+        IpAddr::V6(ll(2)),
+        SessionState::Active,
+        None,
+        Arc::default(),
+    );
+    own_session(&mut h, &swp2, stopping).await;
+    let unstoppable: IpAddr = "10.0.0.52".parse().unwrap();
+    insert_test_managed_peer(
+        &mut h.mgr,
+        unstoppable,
+        super::super::command_fan_out::wedged_session(),
+        false,
+    );
+    let breached = h.mgr.peers[&key(unstoppable)].session_id();
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    h.mgr
+        .handle_discovery_event(DiscoveryEvent::BindingChanged {
+            interface: "swp1".into(),
+            previous: Some(endpoint(2, 7)),
+            current: Some(endpoint(3, 7)),
+        });
+    h.drain();
+    for notice in [
+        round_breach(breached, unstoppable),
+        SessionNotification::BackToIdle {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: IpAddr::V6(ll(2)),
+        },
+    ] {
+        h.mgr.session_notify_tx.send(notice).unwrap();
+    }
+    h.reconcile().await;
+    assert_eq!(
+        answering.query_state.load(Ordering::SeqCst),
+        1,
+        "swp1's state was asked before swp2's preparation drained the notice"
+    );
+    assert_eq!(h.mgr.session_notify_rx.ready_count(), 0);
+    let recorded = h.drain();
+    assert!(
+        !recorded.contains(&Command::SessionEstablished("swp1".into(), ll(2))),
+        "an answer older than the handled Idle notice must not mark the port Established: {recorded:?}"
+    );
+    assert!(h.mgr.unnumbered_retry_at().is_some());
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
 /// A state answer belongs to the session that gave it. `swp1`'s session
 /// reports Established, but is replaced (an unstoppable primary after a
 /// max-prefix breach, handled while `swp2`'s deletion settles) before the
