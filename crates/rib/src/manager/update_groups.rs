@@ -4781,6 +4781,25 @@ impl GroupRibOut {
             })
     }
 
+    /// One walk of the table for every member that has no RT-Constrain
+    /// filter and no exact-export rejection: each row the group's sessions
+    /// may carry, with its source. Such a member's projection is these rows
+    /// less the ones it sourced. Checkpoints every visited row.
+    pub(in crate::manager) fn evpn_unfiltered_projection<'a>(
+        &'a self,
+        cluster_id: Option<std::net::Ipv4Addr>,
+        mut checkpoint: impl FnMut() + 'a,
+    ) -> impl Iterator<Item = (rustbgpd_wire::EvpnRouteKey, PeerId)> + 'a {
+        self.table.iter_evpn().filter_map(move |route| {
+            checkpoint();
+            let key = route.key();
+            self.evpn_inputs
+                .get(&key)?
+                .reflectable(route, self, cluster_id)
+                .then_some((key, route.peer))
+        })
+    }
+
     /// Borrow the admitted clean-member projection; RTC reads received input.
     #[cfg(test)]
     pub(in crate::manager) fn evpn_member_projection<'a>(

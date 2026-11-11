@@ -329,8 +329,11 @@ fn refused_owned_pass(members: u8, rows: u16) -> (usize, usize) {
 fn refused_owned_captures_serve_readiness_at_every_stride_for_any_size() {
     for (members, rows) in [(2, 64), (8, 64), (2, 512), (8, 512)] {
         let (batches, visited) = refused_owned_pass(members, rows);
+        // The members share one walk: completeness and the projection each
+        // visit every row once, and every member appends at the ledger's
+        // stride of 64.
         assert!(
-            visited >= usize::from(members) * usize::from(rows),
+            visited >= usize::from(rows) * 2 + usize::from(members) * usize::from(rows) / 64,
             "{members} members x {rows} rows: the captures walked {visited} checkpoints"
         );
         assert!(
@@ -505,4 +508,240 @@ fn skipped_dirty_members_of_an_owned_pass_each_pass_a_live_checkpoint() {
             boundaries.load(Ordering::SeqCst)
         );
     }
+}
+
+/// Six members of one owning group over 400 rows, in every state the
+/// pre-stage capture meets: `peers[1]` and `peers[2]` each sourced a tenth of
+/// the rows, `peers[3]` has an exact-export rejection overlay, `peers[4]`
+/// already holds a proof (of the first 120 rows). `rtc` puts RT-Constrain
+/// on the group's sendable set, which gives every member a filter (for
+/// `peers[5]` one that admits every Route Target) and ends the group's
+/// EVPN ownership, so no member can share a walk and none captures. With
+/// `non_client` the group stops being a client group, so rows from the
+/// non-client source are not reflected.
+fn capture_states(rtc: bool, non_client: bool) -> OwnedPass {
+    let mut pass = OwnedPass::new(6, 0, false);
+    let gid = pass.gid;
+    let mut keys = Vec::new();
+    for index in 0..400_u16 {
+        if index == 120 {
+            assert!(pass.manager.capture_shared_evpn_admitted(pass.peers[4]));
+        }
+        let [high, low] = index.to_be_bytes();
+        let mut route = received(100);
+        route.route = make_evpn_imet(Ipv4Addr::new(198, 51, high, low), 1).route;
+        match index % 10 {
+            0 => route.peer = pass.peers[1],
+            1 => route.peer = pass.peers[2],
+            _ => {}
+        }
+        assert_eq!(stage(&mut pass.manager, gid, &route).deltas.len(), 1);
+        keys.push(route.key());
+    }
+    pass.manager.peer_unexportable.insert(
+        pass.peers[3],
+        keys.iter()
+            .skip(5)
+            .step_by(10)
+            .map(|key| ExactExportKey::Evpn(*key))
+            .collect(),
+    );
+    if rtc {
+        pass.manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .sendable
+            .push((Afi::Ipv4, Safi::RtConstrain));
+        pass.manager.peer_rt_membership.insert(
+            pass.peers[5],
+            RtcMembership {
+                has_default: true,
+                entries: Vec::new(),
+            },
+        );
+    }
+    if non_client {
+        pass.manager.group_ribs.get_mut(&gid).unwrap().is_rr_client = false;
+    }
+    pass
+}
+
+/// Everything a capture leaves in the ledger, apart from the daemon peak.
+fn captured_state(pass: &OwnedPass) -> impl PartialEq + std::fmt::Debug {
+    let ledger = &pass.manager.evpn_recovery;
+    let members: Vec<_> = pass
+        .peers
+        .iter()
+        .map(|&peer| {
+            let handle = pass.manager.evpn_recovery_handle(peer).unwrap();
+            (
+                // `Some` only for a Ready proof, which the clean-member
+                // replay and every later admission read.
+                ledger.proof_keys(handle).unwrap(),
+                ledger.is_dormant(handle),
+                ledger.dense_for_test(handle),
+                ledger.peer_usage(peer),
+                pass.manager.dirty_peers.contains(&peer),
+                pass.manager.evpn_recovery_reset_pending(peer),
+            )
+        })
+        .collect();
+    (
+        members,
+        ledger.holders_for_test(),
+        ledger.slot_usage(),
+        ledger.daemon_usage().retained,
+    )
+}
+
+/// The shared walk is an optimisation of work, never of state: from the same
+/// start it must leave exactly what one capture per member leaves. A member
+/// with an RT-Constrain filter or a rejection overlay, and one that already
+/// holds a proof, must take its own capture (or none) inside the same pass.
+#[test]
+fn shared_capture_walk_leaves_what_one_capture_per_member_leaves() {
+    for (rtc, non_client) in [(false, false), (false, true), (true, false)] {
+        let mut batch = capture_states(rtc, non_client);
+        let mut alone = capture_states(rtc, non_client);
+        let order = batch.peers.clone();
+        assert_eq!(order, alone.peers);
+        assert_eq!(captured_state(&batch), captured_state(&alone));
+        let peak = batch.manager.evpn_recovery.daemon_usage().peak;
+        assert_eq!(peak, alone.manager.evpn_recovery.daemon_usage().peak);
+        let earlier = batch
+            .manager
+            .evpn_recovery
+            .proof_keys(batch.manager.evpn_recovery_handle(order[4]).unwrap())
+            .unwrap()
+            .unwrap();
+
+        let gid = batch.gid;
+        let capture_work =
+            |work: super::work_scaling::Work| work.get("capture_evpn").copied().unwrap_or_default();
+        let batch_work = capture_work(super::work_scaling::checkpoints_in(|| {
+            batch.manager.capture_evpn_before_stage(gid, &order);
+        }));
+        let alone_work = capture_work(super::work_scaling::checkpoints_in(|| {
+            for &peer in &order {
+                alone.manager.capture_shared_evpn_admitted(peer);
+            }
+        }));
+        batch.manager.evpn_recovery.assert_consistent();
+        assert_eq!(
+            captured_state(&batch),
+            captured_state(&alone),
+            "rtc {rtc}, non-client group {non_client}"
+        );
+
+        let ledger = &batch.manager.evpn_recovery;
+        let proofs: Vec<_> = order
+            .iter()
+            .map(|&peer| {
+                ledger
+                    .proof_keys(batch.manager.evpn_recovery_handle(peer).unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            proofs[4].as_ref(),
+            Some(&earlier),
+            "an existing proof is kept"
+        );
+        let expected = match (rtc, non_client) {
+            // peers[0]: every row; a sourcing member: all but its own 40;
+            // the overlay member: all but its 40 rejected rows.
+            (false, false) => [400, 360, 360, 360, 120, 400].map(Some),
+            // Only the rows the two client members sourced are reflected.
+            (false, true) => [80, 40, 40, 80, 120, 80].map(Some),
+            // RT-Constrain ends the group's ownership: no capture begins.
+            (true, _) => [None, None, None, None, Some(120), None],
+        };
+        assert_eq!(
+            proofs
+                .iter()
+                .map(|proof| proof.as_ref().map(Vec::len))
+                .collect::<Vec<_>>(),
+            expected,
+            "rtc {rtc}, non-client group {non_client}"
+        );
+
+        let (batch_peak, alone_peak) = (
+            ledger.daemon_usage().peak,
+            alone.manager.evpn_recovery.daemon_usage().peak,
+        );
+        if rtc {
+            assert_eq!((batch_work, batch_peak), (alone_work, alone_peak));
+        } else {
+            // Four members shared one walk; the overlay member walked alone.
+            assert!(
+                batch_work < alone_work,
+                "{batch_work} capture checkpoints against {alone_work}"
+            );
+            // The daemon peak alone may differ, by at most the slot list
+            // charged while the walk ran (12 bytes per table row).
+            assert!(
+                batch_peak >= alone_peak && batch_peak <= alone_peak.max(peak) + 400 * 12,
+                "peak {batch_peak} against {alone_peak}"
+            );
+        }
+    }
+}
+
+/// N members beginning capture in one pass used to hash and probe every key
+/// N times. The shared walk interns each key once, so the ledger's index
+/// work must not grow with the member count.
+#[test]
+fn shared_capture_walk_index_probes_do_not_grow_with_members() {
+    let probes = |members: u8| {
+        let mut pass = OwnedPass::new(members, 128, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        let before = pass.manager.evpn_recovery.probes_for_test();
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        for peer in &pass.peers {
+            let handle = pass.manager.evpn_recovery_handle(*peer).unwrap();
+            assert_eq!(
+                pass.manager
+                    .evpn_recovery
+                    .proof(handle)
+                    .unwrap()
+                    .unwrap()
+                    .len(),
+                128
+            );
+        }
+        pass.manager.evpn_recovery.probes_for_test() - before
+    };
+    let (few, many) = (probes(2), probes(16));
+    assert!(few >= 128, "every key was interned: {few} probes");
+    assert!(
+        many < few * 2,
+        "{many} index probes for 16 members against {few} for 2: per-member interning is 8x"
+    );
+}
+
+/// The shared slot list is refunded before the pass returns: afterwards the
+/// daemon's retained charge is exactly the records and the slot space, and
+/// releasing every proof returns the ledger to its charge before the pass.
+/// The ledger's own test pins that the list was charged while it lived.
+#[test]
+fn shared_capture_walk_charge_returns_to_baseline() {
+    let mut pass = OwnedPass::new(8, 256, true);
+    let keys = pass.changed();
+    let gid = pass.gid;
+    let before = pass.manager.evpn_recovery.daemon_usage();
+    pass.manager.stage_group_evpn_keys(gid, &keys);
+    // Recomputes the daemon charge from the records and the slot space.
+    pass.manager.evpn_recovery.assert_consistent();
+    for peer in &pass.peers {
+        let handle = pass.manager.evpn_recovery_handle(*peer).unwrap();
+        assert!(pass.manager.evpn_recovery.finish_recovery(handle).unwrap());
+    }
+    pass.manager.evpn_recovery.assert_consistent();
+    assert_eq!(
+        pass.manager.evpn_recovery.daemon_usage().retained,
+        before.retained
+    );
+    assert!(pass.manager.evpn_recovery.holders_for_test().is_empty());
 }

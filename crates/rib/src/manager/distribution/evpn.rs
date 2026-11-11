@@ -1373,15 +1373,17 @@ impl RibManager {
         // sendable_evpn key bit, mixed-PCB exclusion, and the EVPN exclusion
         // in GroupKey::is_unicast_only for clean transitions, plus qualified
         // non-RTC admission, ownership transfer, views and counts.
-        let members: Vec<_> = group.members.iter().copied().collect();
-        for member in members {
-            if self.dirty_peers.contains(&member)
-                || self.force_outbound_peers.contains(&member)
-                || self.outbound_channel_full(member)
-            {
-                self.capture_shared_evpn_admitted(member);
-            }
-        }
+        let begins: Vec<_> = group
+            .members
+            .iter()
+            .copied()
+            .filter(|member| {
+                self.dirty_peers.contains(member)
+                    || self.force_outbound_peers.contains(member)
+                    || self.outbound_channel_full(*member)
+            })
+            .collect();
+        self.capture_evpn_before_stage(gid, &begins);
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::super::replacement_readiness_checkpoint_at(&readiness, "staging_evpn", false);

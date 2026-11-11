@@ -1247,7 +1247,8 @@ application cost one lookup per key. Ledger loops over keys and slots, release,
 renumbering and index rebuilds offer the readiness checkpoint at a fixed
 stride. The manager passes its checkpoint through capture, sealing,
 admission, finish and retirement, and snapshots take one too. No checkpoint
-runs inside a comparison.
+runs inside a comparison. Members that begin capture in the same owned pass
+share one walk and one interning of the keys (2026-11-11 amendment).
 
 **Accounting.** The daemon cap is unchanged and still provisional. The daemon
 charge is exact for the ledger's own allocations: its header, record array,
@@ -1367,3 +1368,94 @@ proof or marker debt still runs the proof match. These are component results
 with EVPN ownership enabled in tests. The replay-cost and recovery-memory
 qualifications have not been run on this change, and production EVPN ownership
 remains disabled.
+
+## Amendment (2026-11-11): members of one owned pass share the capture walk
+
+The 2026-11-02 cost paragraph prices one member: its capture walks the group
+table once and pays one keyed hash and one index lookup per key. An owned pass
+begins a capture for every member that is dirty, forced or has a full writer
+and holds no proof yet, before it stages the table. Each of those captures
+walked the whole table, so N members beginning in one pass cost N walks and N
+hashes of every key inside one actor turn. One diagnostic mass-dirty run at
+150 members, not a qualification, saw an actor turn of more than a second in
+which 69 members captured. The readiness lane was served throughout; every
+other actor input waited.
+
+**Shared walk.** For a member with no RT-Constrain filter and no exact-export
+rejection, section E's eligibility has one term that depends on the member:
+it does not receive the rows it sourced. The pass therefore walks the table
+once for all such members. The walk checks the projection is complete, keeps
+the rows the group's sessions may carry, interns each key once and records
+its slot beside its source peer. Each member then takes every recorded slot
+except those it sourced, through the same per-entry step as its own capture
+(room in its entry buffer, the per-slot credit, the holder count, the entry),
+and is sealed before the next member appends. The walk still runs before the
+batch's projection change, from the prior clean view.
+
+**Fallback rule.** A member shares the walk only when all of these hold: its
+capture would begin in this pass (its record is absent or dormant); it has no
+RT-Constrain filter; and its exact-export rejection overlay is empty. Every
+other member takes its own capture, unchanged, in the same pass. When fewer
+than two members qualify, or fewer than two are left after registration, the
+completeness check and the unreleased-private-row check, each takes its own
+capture. A group that negotiated RT-Constrain does not own EVPN, so the
+filter condition is a guard that matches the single capture's own filter; no
+owned group reaches it today. A capture taken at any other seam (a late
+refusal after staging, a refresh, a membership change) is one member's and is
+unchanged.
+
+**Result.** The shared walk leaves what one capture per member leaves: the
+same proof keys, Ready state, refusal and reset handling, holder counts,
+per-peer charge and peak, and retained daemon charge. Three
+things differ, none of them in a proof:
+
+- Slot IDs follow interning order: table order here, member by member before.
+  Two member orders already numbered slots differently. A member's bitset
+  spans up to its highest slot, so above one 1024-slot step its charge can
+  differ by at most the bytes that cover the rows it sourced.
+- The daemon peak includes the slot list described below.
+- If every sharing member exhausts its own credit, the slot space has grown
+  for the whole table, and the rows nobody took are free again until the
+  space next settles. Separate captures would have stopped growing it at the
+  first refusal.
+
+**Slot list.** The recorded slots live in one list inside the ledger call:
+twelve bytes per table row, reserved once at the table's length, so it never
+resizes. Section E charges reserved capacity, and this is charged to the
+daemon, not to any peer, before it is allocated, and refunded before the call
+returns. The list holds each slot it names, so a key no member has taken yet
+cannot be reused under it; those holds are released before the call returns.
+Slot IDs still never leave the ledger and no state outlives the call. If the
+daemon cap or the allocator refuses the list, or the slot space cannot grow
+during the walk, the walk releases what it interned, captures nothing, and
+every member takes its own capture, which meets the same limit on its own
+terms. A member that exhausts its own credit part-way is marked exhausted as
+in its own capture, and the others complete.
+
+**Readiness.** The shared walk takes the ingest readiness owner when none
+holds the lane, as one member's walk does. It offers a checkpoint for every
+table row visited by the completeness check and by the walk, and at the
+ledger's stride of 64 while interning, while each member appends and while
+the list's holds are released; allocations stay bracketed. The work between
+two checkpoints is at most 64 appended entries. The member-boundary service
+of the owned pass is unchanged.
+
+**Evidence status.** Unit tests pin: from one starting state, the shared pass
+and one capture per member leave identical proof keys, Ready state, per-peer
+charge and peak, holder counts, slot usage and retained daemon charge, for a
+group that includes members that sourced rows, a member with a rejection
+overlay, a member that already holds a proof, rows the group may not reflect,
+and a group whose sendable set gains RT-Constrain, where neither captures;
+the daemon peak differs by no more than
+the slot list; the ledger's index probes do not grow from 2 to 16 members
+beginning in one pass, and do when sharing is disabled; the slot list is
+charged while it lives and the daemon charge returns to its baseline; a
+daemon cap with room for every separate capture but not for the list refuses
+the walk and each member then captures alone to the same result; an allocator
+refusal of the list, or of slot-space growth part-way, leaves no hold and no
+capture behind; a peer cap every member exceeds exhausts each at the same key
+as its own capture; and the bitset-span difference stays within its bound.
+The readiness regressions for refused owned passes hold with the walk's new
+checkpoint count. These are component results with EVPN ownership enabled in
+tests. The turn-length, cost and recovery-memory qualifications have not been
+run on this change, and production EVPN ownership remains disabled.

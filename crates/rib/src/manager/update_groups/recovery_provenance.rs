@@ -36,6 +36,8 @@ type Keys = SmallVec<[EvpnRouteKey; 0]>;
 type Records = SmallVec<[Record; 0]>;
 type Words = SmallVec<[u64; 0]>;
 type Slots = SmallVec<[u32; 0]>;
+/// A shared capture's rows: each slot and the one peer that must not hold it.
+type SharedRows = SmallVec<[(u32, PeerId); 0]>;
 
 /// Index buckets per slot of capacity; linear probing stays at most half full.
 const INDEX_BUCKETS_PER_SLOT: usize = 2;
@@ -323,6 +325,16 @@ impl SlotSpace {
         };
         self.insert_at(home, slot);
         slot
+    }
+
+    /// The slot [`EvpnRecoveryProvenance::find_or_reserve`] found for `key`,
+    /// or a new one inserted from the bucket it kept.
+    fn slot_for(&mut self, found: (Option<u32>, Option<usize>), key: EvpnRouteKey) -> u32 {
+        let (existing, home) = found;
+        existing.unwrap_or_else(|| {
+            let home = home.unwrap_or_else(|| self.bucket(&key));
+            self.insert_new(home, key)
+        })
     }
 
     fn hold(&mut self, slot: u32) {
@@ -1657,11 +1669,22 @@ impl EvpnRecoveryProvenance {
         key: EvpnRouteKey,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
-        // A new key reuses this hash to insert unless growth rebuilt the
-        // table in between.
-        let mut home = self.space.bucket_or_empty(&key);
-        let existing = home.and_then(|home| self.space.find_from(home, &key));
         let peer = self.records[index].handle.owner.peer;
+        let found = self.find_or_reserve(peer, &key, checkpoint)?;
+        self.admit_slot(index, checkpoint, |space| space.slot_for(found, key))
+    }
+
+    /// One keyed hash and lookup of `key`, and room for it when it is new.
+    /// Returns its slot, or else its bucket for the insert; growth rebuilds
+    /// the table and leaves neither.
+    fn find_or_reserve(
+        &mut self,
+        peer: PeerId,
+        key: &EvpnRouteKey,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(Option<u32>, Option<usize>), Exhaustion> {
+        let mut home = self.space.bucket_or_empty(key);
+        let existing = home.and_then(|home| self.space.find_from(home, key));
         if existing.is_none() {
             let buckets = self.space.index.len();
             self.ensure_space(peer, 1, checkpoint)?;
@@ -1669,6 +1692,19 @@ impl EvpnRecoveryProvenance {
                 home = None;
             }
         }
+        Ok((existing, home))
+    }
+
+    /// Room and credit for one more entry of a capturing record, then the
+    /// entry itself. `slot` runs only once neither can refuse, so a new key
+    /// is never inserted without its holder.
+    fn admit_slot(
+        &mut self,
+        index: usize,
+        checkpoint: &mut impl FnMut(bool),
+        slot: impl FnOnce(&mut SlotSpace) -> u32,
+    ) -> Result<(), Exhaustion> {
+        let peer = self.records[index].handle.owner.peer;
         let Held::Sparse(entries) = &self.records[index].held else {
             return Err(Self::admission_invariant());
         };
@@ -1680,10 +1716,7 @@ impl EvpnRecoveryProvenance {
             grown?;
         }
         self.credit_slots(peer, 1)?;
-        let slot = existing.unwrap_or_else(|| {
-            let home = home.unwrap_or_else(|| self.space.bucket(&key));
-            self.space.insert_new(home, key)
-        });
+        let slot = slot(&mut self.space);
         self.space.hold(slot);
         let record = &mut self.records[index];
         let Held::Sparse(entries) = &mut record.held else {
@@ -1692,6 +1725,118 @@ impl EvpnRecoveryProvenance {
         entries.push(sparse_entry(slot));
         record.masked += 1;
         Ok(())
+    }
+
+    /// Capture one walk of a table for every record in `handles`, each of
+    /// which is capturing, and seal them. `rows` yields each key once with
+    /// the one peer that must not hold it; every other record takes it. The
+    /// walk interns each key once, so the keyed hashes and index probes do
+    /// not grow with the number of records, and each record then costs one
+    /// appended entry per row, as in its own capture.
+    ///
+    /// The slot list lives only inside this call. It is charged to the
+    /// daemon at `capacity` rows before it is allocated and refunded before
+    /// returning, and it holds every slot it names, so a key no record has
+    /// taken yet cannot be reused under it. An error means the list itself
+    /// was refused, or the slot space could not grow: every record is still
+    /// capturing with nothing captured, and the caller captures each alone.
+    /// A record that exhausts its own credit is marked exhausted, exactly
+    /// as in its own capture, and the others still complete.
+    pub(in crate::manager) fn capture_shared_with_checkpoint(
+        &mut self,
+        handles: &[ProvenanceHandle],
+        rows: impl Iterator<Item = (EvpnRouteKey, PeerId)>,
+        capacity: usize,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Exhaustion> {
+        self.debug_check();
+        let Some(payer) = handles.first().map(|handle| handle.owner.peer) else {
+            return Ok(());
+        };
+        let bytes = capacity
+            .checked_mul(size_of::<(u32, PeerId)>())
+            .ok_or_else(Self::overflow)?;
+        let daemon = self
+            .daemon_used
+            .checked_add(bytes)
+            .ok_or_else(Self::overflow)?;
+        self.check(payer, self.peer_usage(payer).retained, daemon)?;
+        let mut shared = SharedRows::new();
+        checkpoint(true);
+        let allocated = self.allocation_permitted() && shared.try_grow(capacity).is_ok();
+        checkpoint(true);
+        if !allocated {
+            return Err(self.allocation_failure(payer));
+        }
+        self.daemon_used = daemon;
+        self.daemon_peak = self.daemon_peak.max(daemon);
+        let mut interned = Ok(());
+        for (n, (key, excluded)) in rows.enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            stride_work();
+            let found = if shared.len() == capacity {
+                // More rows than the caller reserved for: fail closed.
+                Err(Self::admission_invariant())
+            } else {
+                self.find_or_reserve(payer, &key, checkpoint)
+            };
+            match found {
+                Ok(found) => {
+                    let slot = self.space.slot_for(found, key);
+                    self.space.hold(slot);
+                    shared.push((slot, excluded));
+                }
+                Err(error) => {
+                    interned = Err(error);
+                    break;
+                }
+            }
+        }
+        if interned.is_ok() {
+            for &handle in handles {
+                let index = match self.checked_handle_index(handle) {
+                    Ok(Some(index)) if matches!(self.records[index].state, State::Capturing) => {
+                        index
+                    }
+                    _ => continue,
+                };
+                let mut captured = Ok(());
+                for (n, &(slot, excluded)) in shared.iter().enumerate() {
+                    if n % CHECKPOINT_STRIDE == 0 {
+                        checkpoint(false);
+                    }
+                    stride_work();
+                    if excluded != handle.owner.peer {
+                        captured = self.admit_slot(index, checkpoint, |_| slot);
+                        if captured.is_err() {
+                            break;
+                        }
+                    }
+                }
+                // Seal before the next record appends, so only one unsealed
+                // entry buffer is charged at a time.
+                match captured.and_then(|()| self.seal_held(index, checkpoint)) {
+                    Ok(()) => self.records[index].state = State::Ready,
+                    Err(error) => {
+                        self.mark_exhausted(handle, error);
+                    }
+                }
+            }
+        }
+        for (n, &(slot, _)) in shared.iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            stride_work();
+            self.space.release(slot);
+        }
+        checkpoint(true);
+        drop(shared);
+        checkpoint(true);
+        self.daemon_used -= bytes;
+        interned
     }
 
     /// Seal a capture: merge repeated keys and keep the smaller of sorted
@@ -1847,6 +1992,24 @@ impl EvpnRecoveryProvenance {
                 keys
             })
         })
+    }
+
+    /// Index probe and shift steps so far, for work-bound regressions.
+    #[cfg(test)]
+    pub(in crate::manager) fn probes_for_test(&self) -> u64 {
+        self.space.probes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Every live key with its holder count.
+    #[cfg(test)]
+    pub(in crate::manager) fn holders_for_test(
+        &self,
+    ) -> std::collections::BTreeMap<EvpnRouteKey, u32> {
+        let space = &self.space;
+        (0..space.keys.len())
+            .filter(|&slot| space.holders[slot] != 0)
+            .map(|slot| (space.keys[slot], space.holders[slot]))
+            .collect()
     }
 
     /// Whether a record keeps its slots as a bitset rather than sorted entries.
@@ -2612,6 +2775,281 @@ mod tests {
 
     fn assert_running_charges(ledger: &EvpnRecoveryProvenance) {
         ledger.assert_consistent();
+    }
+
+    /// `count` rows, every fifth sourced by one of `owners` in turn.
+    fn shared_rows(count: u32, owners: &[PeerSession]) -> Vec<(EvpnRouteKey, PeerId)> {
+        (0..count)
+            .map(|n| {
+                let source = if n % 5 == 0 {
+                    owners[n as usize / 5 % owners.len()].peer
+                } else {
+                    owner(250, 1).peer
+                };
+                (key(n), source)
+            })
+            .collect()
+    }
+
+    /// Four dormant records, the last already holding other keys' slots
+    /// through a snapshot, each begun; captured through the shared walk or
+    /// one at a time.
+    fn captured(
+        limits: (usize, usize),
+        rows: &[(EvpnRouteKey, PeerId)],
+        owners: &[PeerSession],
+        shared: bool,
+    ) -> (EvpnRecoveryProvenance, Vec<ProvenanceHandle>) {
+        let (ledger, handles, walk) = try_captured(limits, rows, owners, shared);
+        walk.unwrap();
+        (ledger, handles)
+    }
+
+    fn try_captured(
+        limits: (usize, usize),
+        rows: &[(EvpnRouteKey, PeerId)],
+        owners: &[PeerSession],
+        shared: bool,
+    ) -> (
+        EvpnRecoveryProvenance,
+        Vec<ProvenanceHandle>,
+        Result<(), Exhaustion>,
+    ) {
+        let mut ledger = EvpnRecoveryProvenance::with_test_limits(limits.0, limits.1);
+        let handles: Vec<_> = owners
+            .iter()
+            .map(|owner| ledger.register(*owner).unwrap())
+            .collect();
+        let earlier: Vec<_> = (0..40).map(|n| key(n * 3)).collect();
+        capture(&mut ledger, *handles.last().unwrap(), &earlier);
+        assert!(ledger.snapshot(*handles.last().unwrap()).unwrap().is_some());
+        for &handle in &handles {
+            assert!(ledger.finish_recovery(handle).unwrap());
+            assert!(ledger.begin_capture(handle).unwrap());
+        }
+        let walk = if shared {
+            ledger.capture_shared_with_checkpoint(
+                &handles,
+                rows.iter().copied(),
+                rows.len(),
+                &mut |_| {},
+            )
+        } else {
+            capture_alone(&mut ledger, &handles, rows);
+            Ok(())
+        };
+        ledger.assert_consistent();
+        (ledger, handles, walk)
+    }
+
+    fn capture_alone(
+        ledger: &mut EvpnRecoveryProvenance,
+        handles: &[ProvenanceHandle],
+        rows: &[(EvpnRouteKey, PeerId)],
+    ) {
+        for &handle in handles {
+            let refused = rows
+                .iter()
+                .filter(|(_, source)| *source != handle.owner.peer)
+                .any(|(key, _)| ledger.capture_key(handle, *key).is_err());
+            if !refused {
+                let _ = ledger.seal_capture(handle);
+            }
+        }
+    }
+
+    /// The shared walk must leave what each record's own capture leaves:
+    /// keys, Ready or exhausted state, peer charge and peak, holder counts,
+    /// slot space and the daemon's retained charge. Below one bitset step
+    /// (1024 slots) no charge depends on slot numbering, so all of it is
+    /// exact; a peer cap every record exceeds exhausts each at the same key.
+    #[test]
+    fn shared_capture_matches_each_record_capturing_alone() {
+        let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();
+        let rows = shared_rows(900, &owners);
+        for peer_limit in [PEER_LIMIT_BYTES, 40_000] {
+            let limits = (peer_limit, DAEMON_LIMIT_BYTES);
+            let (batch, batch_handles) = captured(limits, &rows, &owners, true);
+            let (alone, alone_handles) = captured(limits, &rows, &owners, false);
+            for (&left, &right) in batch_handles.iter().zip(&alone_handles) {
+                assert_eq!(
+                    batch.proof_keys(left).map_err(|error| error.cause),
+                    alone.proof_keys(right).map_err(|error| error.cause)
+                );
+                assert_eq!(
+                    batch.proof_keys(left).is_ok(),
+                    peer_limit == PEER_LIMIT_BYTES,
+                    "the tight cap exhausts every record"
+                );
+                assert_eq!(
+                    batch.retained_keys_for_test(left),
+                    alone.retained_keys_for_test(right)
+                );
+                assert_eq!(batch.dense_for_test(left), alone.dense_for_test(right));
+                assert_eq!(
+                    batch.peer_usage(left.owner.peer),
+                    alone.peer_usage(right.owner.peer),
+                    "peer charge and peak"
+                );
+            }
+            assert_eq!(batch.holders_for_test(), alone.holders_for_test());
+            assert_eq!(batch.slot_usage().live, alone.slot_usage().live);
+            if peer_limit == PEER_LIMIT_BYTES {
+                assert_eq!(batch.slot_usage(), alone.slot_usage());
+                assert_eq!(batch.daemon_usage().retained, alone.daemon_usage().retained);
+            } else {
+                // The walk interned the whole table before any record
+                // exhausted; the rows nobody took are free again, and the
+                // slot space keeps its room for them until it settles.
+                assert!(batch.slot_usage().capacity >= alone.slot_usage().capacity);
+                assert_eq!(
+                    batch.daemon_usage().retained - batch.space.bytes(),
+                    alone.daemon_usage().retained - alone.space.bytes()
+                );
+            }
+        }
+    }
+
+    /// The shared slot list is charged to the daemon at its reserved
+    /// capacity for the length of the call, and to no peer. A refusal of
+    /// the list, by the daemon cap or by the allocator, leaves every record
+    /// capturing with nothing captured and no charge behind.
+    #[test]
+    fn shared_capture_charges_its_slot_list_and_returns_to_baseline() {
+        let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();
+        let rows = shared_rows(900, &owners);
+        let list = rows.len() * size_of::<(u32, PeerId)>();
+        let limits = (PEER_LIMIT_BYTES, DAEMON_LIMIT_BYTES);
+        let (batch, _) = captured(limits, &rows, &owners, true);
+        let (alone, alone_handles) = captured(limits, &rows, &owners, false);
+        let (batch, separate) = (batch.daemon_usage(), alone.daemon_usage());
+        assert_eq!(batch.retained, separate.retained, "the list is refunded");
+        assert!(
+            batch.peak >= separate.peak + list / 2 && batch.peak <= separate.peak + list,
+            "the list was charged while it lived: {batch:?} against {separate:?} plus {list}"
+        );
+
+        // A daemon cap with room for every separate capture but not for
+        // the list beside them refuses the walk, wherever it gets to.
+        let tight = (PEER_LIMIT_BYTES, separate.peak + list / 2 - 1);
+        let (mut ledger, handles, walk) = try_captured(tight, &rows, &owners, true);
+        assert_eq!(walk.unwrap_err().cause, ExhaustionCause::DaemonLimit);
+        assert_eq!(ledger.holders_for_test().len(), 40, "the earlier snapshot");
+        for &handle in &handles {
+            assert_eq!(ledger.exhaustion(handle), None);
+            assert_eq!(ledger.retained_keys_for_test(handle), Some(Vec::new()));
+        }
+        // Each record then captures alone, as if the walk had not run.
+        capture_alone(&mut ledger, &handles, &rows);
+        ledger.assert_consistent();
+        assert_eq!(ledger.holders_for_test(), alone.holders_for_test());
+        for (&left, &right) in handles.iter().zip(&alone_handles) {
+            assert_eq!(ledger.proof_keys(left), alone.proof_keys(right));
+            assert_eq!(
+                ledger.peer_usage(left.owner.peer),
+                alone.peer_usage(right.owner.peer)
+            );
+        }
+
+        // The allocator refuses the list itself.
+        let begun = || {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let handles: Vec<_> = owners
+                .iter()
+                .map(|owner| {
+                    let handle = ledger.register(*owner).unwrap();
+                    assert!(ledger.finish_recovery(handle).unwrap());
+                    assert!(ledger.begin_capture(handle).unwrap());
+                    handle
+                })
+                .collect();
+            (ledger, handles)
+        };
+        let (mut ledger, handles) = begun();
+        let before = (ledger.daemon_usage(), ledger.slot_usage());
+        ledger.fail_next_allocation_for_test();
+        assert_eq!(
+            ledger
+                .capture_shared_with_checkpoint(
+                    &handles,
+                    rows.iter().copied(),
+                    rows.len(),
+                    &mut |_| {},
+                )
+                .unwrap_err()
+                .cause,
+            ExhaustionCause::AllocationFailure
+        );
+        assert_eq!((ledger.daemon_usage(), ledger.slot_usage()), before);
+        assert!(ledger.holders_for_test().is_empty());
+        for &handle in &handles {
+            assert_eq!(ledger.exhaustion(handle), None);
+        }
+        ledger.assert_consistent();
+
+        // The slot space fills part-way through the walk: the rows interned
+        // so far are released and nothing was captured.
+        let (mut ledger, handles) = begun();
+        let before = ledger.daemon_usage().retained;
+        // The list, then the first slot-space growth; the second is refused.
+        ledger.fail_allocation_after_for_test(Some(2));
+        assert_eq!(
+            ledger
+                .capture_shared_with_checkpoint(
+                    &handles,
+                    rows.iter().copied(),
+                    rows.len(),
+                    &mut |_| {},
+                )
+                .unwrap_err()
+                .cause,
+            ExhaustionCause::AllocationFailure
+        );
+        ledger.fail_allocation_after_for_test(None);
+        assert!(ledger.holders_for_test().is_empty());
+        assert_eq!(
+            ledger.daemon_usage().retained,
+            before + ledger.space.bytes(),
+            "only the grown slot space remains charged"
+        );
+        for &handle in &handles {
+            assert_eq!(ledger.exhaustion(handle), None);
+            assert_eq!(ledger.retained_keys_for_test(handle), Some(Vec::new()));
+        }
+        ledger.assert_consistent();
+    }
+
+    /// Slot numbering follows interning order, which the shared walk takes
+    /// in table order and separate captures take member by member, as two
+    /// member orders already differ. Above one bitset step a record's span
+    /// can therefore differ, by at most the rows it sourced; its keys, its
+    /// per-slot charge and every holder count cannot.
+    #[test]
+    fn shared_capture_numbering_moves_only_a_bitset_span() {
+        let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();
+        let rows = shared_rows(5000, &owners);
+        let limits = (PEER_LIMIT_BYTES, DAEMON_LIMIT_BYTES);
+        let (batch, batch_handles) = captured(limits, &rows, &owners, true);
+        let (alone, alone_handles) = captured(limits, &rows, &owners, false);
+        assert_eq!(batch.holders_for_test(), alone.holders_for_test());
+        assert_eq!(batch.slot_usage(), alone.slot_usage());
+        for (&left, &right) in batch_handles.iter().zip(&alone_handles) {
+            assert_eq!(
+                batch.proof_keys(left).unwrap(),
+                alone.proof_keys(right).unwrap()
+            );
+            let sourced = rows
+                .iter()
+                .filter(|(_, source)| *source == left.owner.peer)
+                .count();
+            let span = (sourced / 8).next_multiple_of(WORD_STEP * size_of::<u64>());
+            let (batch, alone) = (
+                batch.peer_usage(left.owner.peer),
+                alone.peer_usage(right.owner.peer),
+            );
+            assert!(batch.retained.abs_diff(alone.retained) <= span);
+            assert!(batch.peak.abs_diff(alone.peak) <= span);
+        }
     }
 
     #[test]
