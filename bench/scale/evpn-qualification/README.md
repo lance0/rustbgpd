@@ -144,6 +144,19 @@ output can retain owed work with no dirty flag, so the old failed receipts remai
 failed under their original rule; this change does not establish mass-dirty
 coverage. `dirty` and `dirty_high_water` remain diagnostic fields.
 
+A measured cell also records the longest actor turn of those churn rounds. The
+controller scrapes `/metrics` once after the pause acknowledgement and once
+after the last round, and nothing else scrapes the daemon in between. Every
+render resets `bgp_rib_actor_slice_max_microseconds`, so the second scrape's
+`stage="actor_poll"` value is the longest whole actor poll since the first; the
+first scrape's value covers earlier phases and is discarded. The cell result's
+`mass_dirty_actor` holds that maximum, the phase's increase in each
+`bgp_rib_actor_work_duration_seconds{work_unit="route_chunk"}` bucket, and the
+count of route chunks above 0.2 s. Both raw scrapes are retained and the final
+consumer derives the receipt from them again. An actor poll includes executor
+handoffs, so the maximum is wall-clock turn length, not worker occupancy. The
+functional exercise takes both scrapes and reports no value.
+
 The observer captures timestamps before building each receipt and emits at most
 once per anchored 50,000 µs slot, skipping missed slots without catch-up or
 interpolation. Both online and final checks require the witness row and its

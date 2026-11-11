@@ -450,8 +450,8 @@ def latest_observation(text):
     return rows[-1]
 
 
-def fetch(port, path):
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=1) as response:
+def fetch(port, path, timeout=1):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as response:
         return response.status, response.read().decode()
 
 

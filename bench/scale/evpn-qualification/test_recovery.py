@@ -53,7 +53,72 @@ def write_readiness(leg, times, **fields):
                                                  for at in times))
 
 
+def actor_text(maximum, buckets):
+    """A scrape as the daemon renders it: unrelated stages and work units beside the two read series."""
+    lines = ['# TYPE bgp_rib_actor_slice_max_microseconds gauge',
+             'bgp_rib_actor_slice_max_microseconds{stage="selection"} 7000000',
+             f'bgp_rib_actor_slice_max_microseconds{{stage="actor_poll"}} {maximum}',
+             'bgp_rib_actor_work_duration_seconds_bucket{work_unit="distribute_flush",le="0.2"} 999',
+             'bgp_rib_actor_work_duration_seconds_bucket{work_unit="distribute_flush",le="+Inf"} 999']
+    lines += [f'bgp_rib_actor_work_duration_seconds_bucket{{work_unit="route_chunk",le="{edge}"}} {count}'
+              for edge, count in buckets.items()]
+    lines += [f'bgp_rib_actor_work_duration_seconds_count{{work_unit="route_chunk"}} {max(buckets.values())}']
+    return "\n".join(lines) + "\n"
+
+
 class RecoveryTests(unittest.TestCase):
+    def test_mass_dirty_actor_reads_the_closing_window_and_the_phase_bucket_delta(self):
+        start = actor_text(900_000, {"0.2": 5, "0.5": 6, "+Inf": 6})
+        end = actor_text(1_300_000, {"0.2": 40, "0.5": 43, "+Inf": 44})
+        # The opening scrape's maximum belongs to earlier phases; other
+        # stages and work units never leak into the receipt.
+        self.assertEqual(R.mass_dirty_actor(start, end), {
+            "actor_poll_max_microseconds": 1_300_000,
+            "route_chunk_buckets": {"0.2": 35, "0.5": 37, "+Inf": 38},
+            "route_chunk_over_200ms": 3})
+
+    def test_mass_dirty_actor_rejects_missing_duplicate_and_inconsistent_series(self):
+        good = actor_text(10, {"0.2": 1, "+Inf": 2})
+        maximum = 'bgp_rib_actor_slice_max_microseconds{stage="actor_poll"} 10\n'
+        broken = {
+            # A scrape of a build without the gauge, with every other stage present.
+            "no maximum": good.replace(maximum, ""),
+            "duplicate maximum": good + maximum,
+            "fractional maximum": good.replace(maximum, maximum.replace(" 10", " 10.5")),
+            "no 0.2 edge": actor_text(10, {"0.5": 1, "+Inf": 2}),
+            "no +Inf": actor_text(10, {"0.2": 1, "0.5": 2}),
+            "not cumulative": actor_text(10, {"0.2": 3, "+Inf": 2}),
+            "duplicate bucket": good + 'bgp_rib_actor_work_duration_seconds_bucket{work_unit="route_chunk",le="0.2"} 1\n',
+        }
+        for name, text in broken.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                R.mass_dirty_actor(good, text)
+        with self.assertRaises(ValueError):  # a restarted daemon's counters
+            R.mass_dirty_actor(actor_text(10, {"0.2": 5, "+Inf": 5}), good)
+        with self.assertRaises(ValueError):
+            R.mass_dirty_actor(actor_text(10, {"0.2": 1, "0.5": 1, "+Inf": 2}), good)
+
+    def test_analyze_rechecks_the_mass_dirty_actor_receipt_against_both_raw_scrapes(self):
+        for defect in ("copied-value", "missing-field", "missing-start", "corrupt-end"):
+            with self.subTest(defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = self.analysis_fixture(root)
+                leg = root / "recovery-00-candidate"
+                row = json.loads((leg / "result.json").read_text())
+                if defect == "copied-value":
+                    row["mass_dirty_actor"] = {"actor_poll_max_microseconds": 1}
+                elif defect == "missing-field":
+                    del row["mass_dirty_actor"]
+                elif defect == "missing-start":
+                    (leg / "metrics-mass-dirty-start.txt").unlink()
+                else:
+                    (leg / "metrics-mass-dirty-end.txt").write_text(metrics_text())
+                Q.write_json(leg / "result.json", row)
+                with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
+                    R.analyze(root)
+                self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+
     def test_build_pins_same_source_cli_without_using_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -487,6 +552,9 @@ class RecoveryTests(unittest.TestCase):
             # One 20 Hz probe series covering the first through last workload event.
             write_readiness(leg, [1 + n * .05 for n in range(round((56 - 1) / .05) + 1)])
             (leg / "metrics.txt").write_text(metrics_text())
+            (leg / "metrics-mass-dirty-start.txt").write_text(actor_text(900_000, {"0.2": 5, "0.5": 6, "+Inf": 6}))
+            (leg / "metrics-mass-dirty-end.txt").write_text(actor_text(1_300_000, {"0.2": 40, "0.5": 43, "+Inf": 44}))
+            row["mass_dirty_actor"] = None
             row.update({key: None for key in R.timings(events)})
             row["cgroup"] = {"memory.current": 1000, "memory.peak": 2000, "memory.max": Q.DAEMON_BYTES,
                              "memory.swap.max": 0, "memory.swap.current": 0, "memory.swap.peak": 0}

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import selectors
 import queue
+import re
 import shutil
 import signal
 import statistics
@@ -27,6 +28,9 @@ SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers mo
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
 SAMPLE_PERIOD_US = 1_000_000 // Q.RECOVERY_BARS["sample_hz"]
+ACTOR_SERIES = re.compile(r'(?P<name>bgp_rib_actor_slice_max_microseconds|bgp_rib_actor_work_duration_seconds_bucket)'
+                          r'\{(?P<labels>[^}]*)\} (?P<value>\S+)')
+LABEL = re.compile(r'(\w+)="([^"]*)"')
 
 
 class MissingWitness(Q.AcceptanceFailure):
@@ -77,6 +81,45 @@ class Readiness:
             self.stop_event.set()
         self.thread.join(timeout=5)
         Q.require(not self.thread.is_alive(), "readiness sampler did not stop")
+
+
+def actor_series(text):
+    """The actor-poll maximum of the render window one scrape closed, and the
+    cumulative route-chunk buckets. Every render resets the maximum, so the
+    value belongs to the interval since the previous scrape of this daemon."""
+    maximum, buckets = None, {}
+    for line in text.splitlines():
+        match = ACTOR_SERIES.fullmatch(line)
+        if not match:
+            continue
+        name, labels, value = match["name"], dict(LABEL.findall(match["labels"])), float(match["value"])
+        Q.require(value >= 0 and value.is_integer(), f"invalid actor series value: {line}")
+        if name == "bgp_rib_actor_slice_max_microseconds" and labels == {"stage": "actor_poll"}:
+            Q.require(maximum is None, "duplicate actor_poll maximum")
+            maximum = int(value)
+        elif name == "bgp_rib_actor_work_duration_seconds_bucket" and labels.get("work_unit") == "route_chunk":
+            Q.require(set(labels) == {"work_unit", "le"} and labels["le"] not in buckets,
+                      "malformed or duplicate route_chunk bucket")
+            buckets[labels["le"]] = int(value)
+    Q.require(maximum is not None, "actor_poll maximum series missing")
+    Q.require({"0.2", "+Inf"} <= set(buckets), "route_chunk 0.2 s or +Inf bucket missing")
+    ordered = sorted(buckets, key=float)
+    Q.require(all(buckets[low] <= buckets[high] for low, high in zip(ordered, ordered[1:])),
+              "route_chunk buckets are not cumulative")
+    return maximum, buckets
+
+
+def mass_dirty_actor(start, end):
+    """Actor turns of the mass-dirty churn phase, from the scrape that opened
+    its render window and the one that closed it. The opening scrape's maximum
+    covers earlier phases and is discarded; its buckets are the baseline."""
+    _, before = actor_series(start)
+    maximum, after = actor_series(end)
+    Q.require(set(before) == set(after), "route_chunk bucket layout changed between scrapes")
+    buckets = {edge: after[edge] - before[edge] for edge in sorted(after, key=float)}
+    Q.require(all(count >= 0 for count in buckets.values()), "route_chunk counter moved backwards")
+    return {"actor_poll_max_microseconds": maximum, "route_chunk_buckets": buckets,
+            "route_chunk_over_200ms": buckets["+Inf"] - buckets["0.2"]}
 
 
 def roster(row, arm, clients):
@@ -615,6 +658,10 @@ def run_cell(output, manifest, arm, index, correctness):
             controller.witness(settled)
             controller.command("pause")
             paused = controller.last_command_complete["wall_us"]
+            # Each render resets the actor-slice maxima, and nothing else
+            # scrapes this daemon: this scrape opens the phase's window and
+            # the one after the last round closes it.
+            (leg / "metrics-mass-dirty-start.txt").write_text(Q.fetch(19186, "/metrics", 10)[1])
             recovery = None
             for _ in range(bars["max_churn_rounds"]):
                 start = len(controller.observations)
@@ -629,6 +676,10 @@ def run_cell(output, manifest, arm, index, correctness):
                         raise MissingWitness("recovery snapshot window not inside the paused interval")
                 except MissingWitness:
                     continue
+            (leg / "metrics-mass-dirty-end.txt").write_text(Q.fetch(19186, "/metrics", 10)[1])
+            actor = mass_dirty_actor((leg / "metrics-mass-dirty-start.txt").read_text(),
+                                     (leg / "metrics-mass-dirty-end.txt").read_text())
+            record["mass_dirty_actor"] = None if correctness else actor
             Q.accept(recovery is not None, "simultaneous all-peer recovery snapshot missing")
             record["mass_recovery_previous"], record["mass_recovery"] = recovery
             controller.source_barrier()
@@ -735,6 +786,10 @@ def analyze_results(output):
                   "recovery cell shape differs from fixed campaign")
         Q.require(row["executed_resets"] == Q.metrics((leg / "metrics.txt").read_text())["executed_resets"],
                   "reset receipt differs from raw metrics")
+        actor = mass_dirty_actor((leg / "metrics-mass-dirty-start.txt").read_text(),
+                                 (leg / "metrics-mass-dirty-end.txt").read_text())
+        Q.require("mass_dirty_actor" in row and row["mass_dirty_actor"] == (None if correctness else actor),
+                  "mass-dirty actor receipt differs from raw metrics")
         cgroup = json.loads((leg / "cgroup.json").read_text())
         Q.require(row["cgroup"] == cgroup, "cgroup receipt differs from raw observation")
         Q.check_cgroup(cgroup)
@@ -808,6 +863,7 @@ def analyze_results(output):
                "cells": len(rows), "medians": median_timings,
                "recovery_witness": Q.RECOVERY_BARS["recovery_witness"],
                "recovery": [{"cell": path.parent.name, "arm": row["arm"],
+                             "mass_dirty_actor": row["mass_dirty_actor"],
                              "pending": row["mass_recovery"]["recovery_pending"],
                              "dirty": [peer[0] for peer in row["mass_recovery"]["peers"] if peer[2]],
                              "owing": [peer[0] for peer in row["mass_recovery"]["peers"] if peer[10]]}
