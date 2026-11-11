@@ -1428,50 +1428,159 @@ pub(crate) mod tests {
         );
     }
 
-    /// A stalled answer reaches `bgp_rib_stalled` with no HTTP request made,
-    /// and a ready answer clears it. The fake RIB hands each answer over a
-    /// channel, so the order is fixed by the handshake, not by time.
-    #[tokio::test]
-    async fn rib_stall_sample_publishes_gauge_without_readyz_traffic() {
-        use rustbgpd_rib::RibReadinessQuery;
-        let (peer_tx, _peer_rx) = mpsc::channel(1);
-        let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let (ready_tx, mut ready_rx) = mpsc::channel(1);
-        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_rib_readiness(ready_tx);
-        let metrics = BgpMetrics::new();
-        let gauge = |metrics: &BgpMetrics| {
-            let metrics = metrics.clone();
-            async move {
-                render_text(&metrics)
-                    .await
-                    .unwrap()
-                    .lines()
-                    .find(|line| line.starts_with("bgp_rib_stalled "))
-                    .unwrap()
-                    .to_string()
+    async fn rib_stalled_line(metrics: &BgpMetrics) -> String {
+        render_text(metrics)
+            .await
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("bgp_rib_stalled "))
+            .unwrap()
+            .to_string()
+    }
+
+    /// How the fake RIB answers one sample.
+    enum RibAnswer {
+        Reply(Result<usize, rustbgpd_rib::RibReadinessError>),
+        Silent,
+    }
+
+    /// Run one sample against a fake RIB readiness lane; the answer is
+    /// handed over inside the sample, so order comes from the handshake.
+    async fn sample_once(
+        probe: &CoreReadinessProbe,
+        metrics: &BgpMetrics,
+        rib_rx: &mut mpsc::Receiver<rustbgpd_rib::RibReadinessQuery>,
+        answer: RibAnswer,
+    ) {
+        let answer_query = async {
+            let Some(rustbgpd_rib::RibReadinessQuery::LocRibCount { reply, .. }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected a RIB readiness query");
+            };
+            match answer {
+                RibAnswer::Reply(answer) => {
+                    let _ = reply.send(answer);
+                }
+                RibAnswer::Silent => drop(reply),
             }
         };
-        assert_eq!(gauge(&metrics).await, "bgp_rib_stalled 0");
+        tokio::join!(sample_rib_stall(probe, metrics), answer_query);
+    }
 
-        for (answer, expected) in [
-            (
-                Err(rustbgpd_rib::RibReadinessError::PolicyTransitionStalled),
-                "bgp_rib_stalled 1",
-            ),
-            (Ok(0), "bgp_rib_stalled 0"),
+    fn readiness_lane_probe() -> (
+        CoreReadinessProbe,
+        mpsc::Receiver<rustbgpd_rib::RibReadinessQuery>,
+    ) {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (ready_tx, ready_rx) = mpsc::channel(1);
+        (
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_rib_readiness(ready_tx),
+            ready_rx,
+        )
+    }
+
+    /// A stalled answer reaches `bgp_rib_stalled` with no HTTP request made,
+    /// and a ready answer clears it.
+    #[tokio::test]
+    async fn rib_stall_sample_publishes_gauge_without_readyz_traffic() {
+        use rustbgpd_rib::RibReadinessError::{
+            PeerTeardownStalled, PolicyTransitionStalled, SelectionReleaseStalled,
+        };
+        let (probe, mut rib_rx) = readiness_lane_probe();
+        let metrics = BgpMetrics::new();
+        assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 0");
+        for stalled in [
+            PolicyTransitionStalled,
+            SelectionReleaseStalled,
+            PeerTeardownStalled,
         ] {
-            let sample = sample_rib_stall(&probe, &metrics);
-            let answer_query = async {
-                let Some(RibReadinessQuery::LocRibCount { reply, .. }) = ready_rx.recv().await
-                else {
-                    panic!("expected a RIB readiness query");
-                };
-                let _ = reply.send(answer);
-            };
-            tokio::join!(sample, answer_query);
-            assert_eq!(gauge(&metrics).await, expected);
+            sample_once(
+                &probe,
+                &metrics,
+                &mut rib_rx,
+                RibAnswer::Reply(Err(stalled)),
+            )
+            .await;
+            assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
+            sample_once(&probe, &metrics, &mut rib_rx, RibAnswer::Reply(Ok(0))).await;
+            assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 0");
         }
         assert_eq!(readiness_failure_rows(&metrics).await, Vec::<String>::new());
+    }
+
+    /// A sample that gets no answer keeps whatever the gauge held.
+    #[tokio::test]
+    async fn rib_stall_sample_without_an_answer_leaves_the_gauge() {
+        for (before, expected) in [(true, "bgp_rib_stalled 1"), (false, "bgp_rib_stalled 0")] {
+            let (probe, mut rib_rx) = readiness_lane_probe();
+            let metrics = BgpMetrics::new();
+            metrics.set_rib_stalled(before);
+            sample_once(&probe, &metrics, &mut rib_rx, RibAnswer::Silent).await;
+            assert_eq!(rib_stalled_line(&metrics).await, expected);
+        }
+    }
+
+    /// The sample asks the RIB even when the daemon gate is not ready.
+    #[tokio::test]
+    async fn rib_stall_sample_ignores_the_daemon_gate() {
+        let (probe, mut rib_rx) = readiness_lane_probe();
+        let gate = rustbgpd_api::health_probe::DaemonGate::new();
+        gate.mark_not_ready("test fault");
+        let probe = probe.with_gate(gate);
+        let metrics = BgpMetrics::new();
+        sample_once(
+            &probe,
+            &metrics,
+            &mut rib_rx,
+            RibAnswer::Reply(Err(rustbgpd_rib::RibReadinessError::PeerTeardownStalled)),
+        )
+        .await;
+        assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
+    }
+
+    /// The server thread runs the sampler. The thread's runtime starts with
+    /// paused time, so the sampler's second query arrives without a real
+    /// wait; receiving it proves the first sample (answered stalled) was
+    /// already published.
+    #[tokio::test]
+    async fn metrics_thread_runs_the_rib_stall_sampler() {
+        let (probe, mut rib_rx) = readiness_lane_probe();
+        let metrics = BgpMetrics::new();
+        let listener = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let (server, _exited) = MetricsServerThread::spawn_with_runtime(
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .start_paused(true)
+                    .build()
+            },
+            listener,
+            metrics.clone(),
+            probe,
+            None,
+        );
+        let guard = Duration::from_secs(30);
+        let first = tokio::time::timeout(guard, rib_rx.recv())
+            .await
+            .expect("the thread must sample the RIB");
+        let Some(rustbgpd_rib::RibReadinessQuery::LocRibCount { reply, .. }) = first else {
+            panic!("expected a RIB readiness query");
+        };
+        reply
+            .send(Err(
+                rustbgpd_rib::RibReadinessError::PolicyTransitionStalled,
+            ))
+            .unwrap();
+        let second = tokio::time::timeout(guard, rib_rx.recv())
+            .await
+            .expect("the sampler must keep sampling");
+        assert!(second.is_some());
+        assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
+        drop(server);
     }
 
     #[tokio::test]

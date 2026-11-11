@@ -1986,7 +1986,7 @@ impl BgpMetrics {
 
         let rib_stalled = IntGauge::new(
             "bgp_rib_stalled",
-            "1 while the RIB actor's latest periodic sample got a stalled readiness answer (one unit of work running 30 seconds or more), 0 after a ready answer. Sampled by the daemon on a fixed cadence, independent of /readyz requests; unchanged when a sample gets no answer.",
+            "1 while the RIB actor's latest periodic sample got a stalled readiness answer (one unit of work running 30 seconds or more), 0 after a ready answer. Set by the daemon's periodic sampler (every 5 seconds, independent of /readyz requests) and unchanged when a sample gets no answer; stays 0 where no sampler runs.",
         )
         .expect("valid metric definition");
 

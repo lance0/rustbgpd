@@ -577,7 +577,7 @@ Notes on the sandbox:
   however long it runs. Alert on it instead: the daemon samples the RIB every
   5 seconds and exports `bgp_rib_stalled` (1 while the latest sample was a
   stalled answer). The shipped `BgpReadinessRibStalled` rule fires when it
-  stays 1 for about ten minutes. It needs only a `/metrics` scrape, no
+  reads 1 on every evaluation for ten minutes. It needs only a `/metrics` scrape, no
   `/readyz` probe. Restart by hand only if the work is not finishing.
 
   PID 1 independently sends SIGABRT five minutes after the last ping, and

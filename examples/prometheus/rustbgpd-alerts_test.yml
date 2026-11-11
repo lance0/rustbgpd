@@ -2628,18 +2628,17 @@ tests:
                 evpn.es.bond3.core_isolation.
 
   # ── BgpReadinessRibStalled ─────────────────────────────────────
-  # Sustained: stalled from 5m onward. min_over_time[5m] reaches 1 at 9m
-  # (the 5m window is all stalled), and the 5m `for` fires at 14m. No
-  # /readyz traffic is involved: the series is the daemon's own sample.
+  # No /readyz traffic is involved: the series is the daemon's own sample.
+  # Sustained: stalled from 5m onward, so the 10m `for` fires at 15m.
   - interval: 1m
     input_series:
       - series: 'bgp_rib_stalled{instance="rs1:9179"}'
         values: "0x4 1x25"
     alert_rule_test:
-      - eval_time: 13m
+      - eval_time: 14m
         alertname: BgpReadinessRibStalled
         exp_alerts: []
-      - eval_time: 15m
+      - eval_time: 16m
         alertname: BgpReadinessRibStalled
         exp_alerts:
           - exp_labels:
@@ -2648,8 +2647,8 @@ tests:
             exp_annotations:
               summary: "RIB on rs1:9179 stalled for 10 minutes"
               description: >-
-                The RIB on rs1:9179 has answered "stalled" to every
-                sample for the last 10 minutes: one unit of work (export-policy
+                bgp_rib_stalled on rs1:9179 has read 1 on every
+                evaluation for the last 10 minutes: one unit of work (export-policy
                 transition, selection-deferral release or peer teardown) has been
                 running that long. The actor is answering, so the systemd watchdog
                 does not restart it, but inbound route updates wait behind that
@@ -2657,8 +2656,35 @@ tests:
                 bgp_rib_readiness_query_wait_seconds for the seam; restart only if
                 the work is not finishing.
 
-  # Intermittent: stalled for four minutes, clear for one, repeating. No 5m
-  # window is all stalled, so the rule never fires.
+  # Stalled from the first sample: must not fire before ten minutes of it.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rib_stalled{instance="rs4:9179"}'
+        values: "1x25"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BgpReadinessRibStalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: BgpReadinessRibStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: rs4:9179
+            exp_annotations:
+              summary: "RIB on rs4:9179 stalled for 10 minutes"
+              description: >-
+                bgp_rib_stalled on rs4:9179 has read 1 on every
+                evaluation for the last 10 minutes: one unit of work (export-policy
+                transition, selection-deferral release or peer teardown) has been
+                running that long. The actor is answering, so the systemd watchdog
+                does not restart it, but inbound route updates wait behind that
+                work. Check the daemon WARN log and
+                bgp_rib_readiness_query_wait_seconds for the seam; restart only if
+                the work is not finishing.
+
+  # Intermittent: stalled for four minutes, clear for one, repeating. No
+  # evaluation run reaches ten minutes, so the rule never fires.
   - interval: 1m
     input_series:
       - series: 'bgp_rib_stalled{instance="rs2:9179"}'
@@ -2671,14 +2697,13 @@ tests:
         alertname: BgpReadinessRibStalled
         exp_alerts: []
 
-  # Recovered: stalled from 5m to 19m (fires by 15m), then clears. The alert
-  # is gone once a window holds a clear sample.
+  # Recovered: stalled from 5m through 19m (fires by 16m), clear from 20m.
   - interval: 1m
     input_series:
       - series: 'bgp_rib_stalled{instance="rs3:9179"}'
         values: "0x4 1x15 0x20"
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 16m
         alertname: BgpReadinessRibStalled
         exp_alerts:
           - exp_labels:
@@ -2687,8 +2712,8 @@ tests:
             exp_annotations:
               summary: "RIB on rs3:9179 stalled for 10 minutes"
               description: >-
-                The RIB on rs3:9179 has answered "stalled" to every
-                sample for the last 10 minutes: one unit of work (export-policy
+                bgp_rib_stalled on rs3:9179 has read 1 on every
+                evaluation for the last 10 minutes: one unit of work (export-policy
                 transition, selection-deferral release or peer teardown) has been
                 running that long. The actor is answering, so the systemd watchdog
                 does not restart it, but inbound route updates wait behind that

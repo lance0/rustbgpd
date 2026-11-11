@@ -265,7 +265,15 @@ impl CoreReadinessProbe {
                 | CoreReadinessError::RibSelectionReleaseStalled
                 | CoreReadinessError::RibPeerTeardownStalled,
             ) => Ok(true),
-            Err(error) => Err(error),
+            Err(
+                error @ (CoreReadinessError::PeerManagerUnavailable
+                | CoreReadinessError::PeerManagerTimedOut
+                | CoreReadinessError::PeerManagerDroppedReply
+                | CoreReadinessError::RibUnavailable
+                | CoreReadinessError::RibTimedOut
+                | CoreReadinessError::RibDroppedReply
+                | CoreReadinessError::DaemonUnavailable(_)),
+            ) => Err(error),
         }
     }
 
@@ -653,6 +661,29 @@ mod tests {
             });
             assert!(ready.is_err(), "{stalled:?} must still fail readiness");
         }
+    }
+
+    #[tokio::test]
+    async fn rib_stalled_reports_each_stalled_variant_and_ready() {
+        for (answer, expected) in [
+            (Ok(0), false),
+            (Err(RibReadinessError::PolicyTransitionStalled), true),
+            (Err(RibReadinessError::SelectionReleaseStalled), true),
+            (Err(RibReadinessError::PeerTeardownStalled), true),
+        ] {
+            let (probe, _readiness_rx, mut rib_readiness_rx) = liveness_probe();
+            let (stalled, ()) = tokio::join!(
+                probe.rib_stalled(LIVENESS_DEADLINE),
+                answer_rib(&mut rib_readiness_rx, answer)
+            );
+            assert_eq!(stalled, Ok(expected), "{answer:?}");
+        }
+        let (probe, _readiness_rx, rib_readiness_rx) = liveness_probe();
+        drop(rib_readiness_rx);
+        assert_eq!(
+            probe.rib_stalled(LIVENESS_DEADLINE).await,
+            Err(CoreReadinessError::RibUnavailable)
+        );
     }
 
     /// Readiness returns the RIB's stalled error without waiting for the peer
