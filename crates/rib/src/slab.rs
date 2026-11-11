@@ -491,12 +491,17 @@ mod tests {
     /// the niche.
     #[test]
     fn option_is_niche_free_for_route_types() {
-        use crate::route::{Route, VpnRibRoute};
+        use crate::route::{LabeledRibRoute, Route, VpnRibRoute};
         use std::mem::size_of;
         assert_eq!(size_of::<Option<Route>>(), size_of::<Route>());
         assert_eq!(size_of::<Route>(), 104);
-        // Adj-RIB-In VPN slots.
+        // Adj-RIB-In VPN and labeled-unicast slots.
         assert_eq!(size_of::<Option<VpnRibRoute>>(), size_of::<VpnRibRoute>());
         assert_eq!(size_of::<VpnRibRoute>(), 144);
+        assert_eq!(
+            size_of::<Option<LabeledRibRoute>>(),
+            size_of::<LabeledRibRoute>()
+        );
+        assert_eq!(size_of::<LabeledRibRoute>(), 136);
     }
 }

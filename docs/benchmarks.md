@@ -1168,7 +1168,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1576 bytes |
+| `AdjRibIn` | 1600 bytes |
 | `LocRib` | 1120 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1236,6 +1236,7 @@ hashed route map into a slab behind `u32` handles, like unicast. The slab
 header replaces the route map, and the VPN key index now carries each path's
 handle, so a best-path rescan of one RD and prefix reads route bodies by
 handle instead of probing the route map once per stored path.
+Labeled-unicast routes moved the same way, taking it to 1600 bytes.
 
 `Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

@@ -701,12 +701,10 @@ pub struct AdjRibIn {
     /// identity and then Add-Path path ID (the SAFI 128 analog of `routes`
     /// and `prefix_index`). The single-path case is inline in the index.
     vpn_routes: PathSlab<rustbgpd_wire::VpnRouteKey, VpnRibRoute>,
-    /// Labeled-unicast routes keyed by RFC 8277 prefix + path-id identity.
-    /// Deliberately separate from the unicast `routes` map (ADR-0077 §2).
-    labeled_routes: StaleTracked<LabeledRibRouteKey, LabeledRibRoute>,
-    /// Secondary index: labeled prefix → Add-Path path IDs stored for it
-    /// (the SAFI 4 analog of the `vpn_routes` index).
-    labeled_key_index: ShardedMap<Prefix, PathIndex<()>>,
+    /// Labeled-unicast routes in a slab, indexed by RFC 8277 prefix and then
+    /// Add-Path path ID (the SAFI 4 analog of `vpn_routes`). Deliberately
+    /// separate from the unicast `routes` slab (ADR-0077 §2).
+    labeled_routes: PathSlab<Prefix, LabeledRibRoute>,
     /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
     rtc_routes: StaleTracked<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
@@ -738,12 +736,7 @@ impl AdjRibIn {
         crate::adj_rib_out::release_sharded_map(&mut self.evpn_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
         self.vpn_routes.retire_with(checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
-        crate::adj_rib_out::release_sharded_map_values(
-            &mut self.labeled_key_index,
-            checkpoint,
-            |(_, paths), checkpoint| paths.retire_with(checkpoint),
-        );
+        self.labeled_routes.retire_with(checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.llgr_stale_local_tags, checkpoint);
         crate::adj_rib_out::release_sharded_map(
@@ -788,8 +781,7 @@ impl AdjRibIn {
             evpn_routes: StaleTracked::default(),
             bgpls_routes: StaleTracked::default(),
             vpn_routes: PathSlab::default(),
-            labeled_routes: StaleTracked::default(),
-            labeled_key_index: ShardedMap::default(),
+            labeled_routes: PathSlab::default(),
             rtc_routes: StaleTracked::default(),
             evpn_llgr_stale_local_tags: ShardedMap::default(),
             bgpls_llgr_stale_local_tags: ShardedMap::default(),
@@ -841,9 +833,7 @@ impl AdjRibIn {
         self.evpn_routes.values().for_each(|r| add(r.retention()));
         self.bgpls_routes.values().for_each(|r| add(r.retention()));
         self.vpn_routes.iter().for_each(|r| add(r.retention()));
-        self.labeled_routes
-            .values()
-            .for_each(|r| add(r.retention()));
+        self.labeled_routes.iter().for_each(|r| add(r.retention()));
         self.rtc_routes.values().for_each(|r| add(r.retention()));
         let mut counts: Vec<_> = counts.iter().collect();
         counts.sort_by_key(|((afi, safi), _)| (*afi as u16, *safi as u8));
@@ -1011,7 +1001,6 @@ impl AdjRibIn {
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
         self.labeled_routes.clear();
-        self.labeled_key_index.clear();
         self.rtc_routes.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
@@ -2777,9 +2766,7 @@ impl AdjRibIn {
         if !self.labeled_llgr_stale_local_tags.is_empty() {
             self.labeled_llgr_stale_local_tags.remove(&key);
         }
-        let ids = self.labeled_key_index.get_or_default(key.prefix);
-        ids.insert(key.path_id, ());
-        self.labeled_routes.insert(key, route).is_some()
+        self.labeled_routes.insert(key.prefix, key.path_id, route)
     }
 
     /// Withdraw a labeled-unicast route. Returns `true` if it existed.
@@ -2787,10 +2774,10 @@ impl AdjRibIn {
         self.remove_labeled_entry(key)
     }
 
-    /// Shared labeled removal: drops the route, its locally-injected LLGR
-    /// tag, and its `labeled_key_index` entry. Every labeled removal path
+    /// Shared labeled removal: drops the route, its slab slot and index
+    /// entry, and its locally-injected LLGR tag. Every labeled removal path
     /// (withdraw and the GR/LLGR stale sweeps) must route through here so
-    /// the secondary index never dangles.
+    /// the index never dangles.
     fn remove_labeled_entry(&mut self, key: &LabeledRibRouteKey) -> bool {
         self.remove_labeled_entry_with_checkpoint(key, &mut || {})
     }
@@ -2805,16 +2792,9 @@ impl AdjRibIn {
         if !self.labeled_llgr_stale_local_tags.is_empty() {
             self.labeled_llgr_stale_local_tags.remove(key);
         }
-        let removed = self.labeled_routes.remove(key).is_some();
-        if removed && let Some(ids) = self.labeled_key_index.get_mut(&key.prefix) {
-            checkpoint();
-            ids.remove(key.path_id);
-            checkpoint();
-            if ids.is_empty() {
-                self.labeled_key_index.remove(&key.prefix);
-            }
-        }
-        removed
+        self.labeled_routes
+            .remove_with_checkpoint(&key.prefix, key.path_id, checkpoint)
+            .is_some()
     }
 
     /// Iterate the labeled routes stored for one prefix identity across all
@@ -2823,24 +2803,17 @@ impl AdjRibIn {
         &'a self,
         prefix: &'a Prefix,
     ) -> impl Iterator<Item = &'a LabeledRibRoute> + 'a {
-        self.labeled_key_index
-            .get(prefix)
-            .into_iter()
-            .flat_map(move |ids| {
-                ids.iter().filter_map(move |(path_id, ())| {
-                    self.labeled_routes.get(&LabeledRibRouteKey {
-                        prefix: *prefix,
-                        path_id,
-                    })
-                })
-            })
+        self.labeled_routes.iter_key(prefix)
     }
 
     /// Withdraw all labeled-unicast routes from this Adj-RIB-In.
     pub fn withdraw_all_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
-        let keys: Vec<_> = self.labeled_routes.keys().copied().collect();
+        let keys: Vec<_> = self
+            .labeled_routes
+            .iter()
+            .map(LabeledRibRoute::key)
+            .collect();
         self.labeled_routes.clear();
-        self.labeled_key_index.clear();
         self.labeled_llgr_stale_local_tags.clear();
         keys
     }
@@ -2848,12 +2821,12 @@ impl AdjRibIn {
     /// Look up a labeled route by prefix + path-id key.
     #[must_use]
     pub fn get_labeled(&self, key: &LabeledRibRouteKey) -> Option<&LabeledRibRoute> {
-        self.labeled_routes.get(key)
+        self.labeled_routes.get(&key.prefix, key.path_id)
     }
 
     /// Iterate over all labeled routes in this Adj-RIB-In.
     pub fn iter_labeled(&self) -> impl Iterator<Item = &LabeledRibRoute> {
-        self.labeled_routes.values()
+        self.labeled_routes.iter()
     }
 
     /// Return the number of labeled routes stored.
@@ -2885,8 +2858,8 @@ impl AdjRibIn {
         self.mark_stale_labeled_with_checkpoint(family, &mut || {})
     }
 
-    /// [`Self::mark_stale_labeled`] checkpointing every visited route, removal and
-    /// marked route.
+    /// [`Self::mark_stale_labeled`] checkpointing every slot visited
+    /// (vacancies included) and each removal.
     pub(crate) fn mark_stale_labeled_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
@@ -2900,10 +2873,11 @@ impl AdjRibIn {
         checkpoint();
         already_stale.extend(
             self.labeled_routes
-                .iter()
+                .iter_slots()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
-                .map(|(k, _)| *k),
+                .flatten()
+                .filter(|r| r.is_stale && r.afi_safi() == family)
+                .map(LabeledRibRoute::key),
         );
         for key in &already_stale {
             checkpoint();
@@ -2912,7 +2886,7 @@ impl AdjRibIn {
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.labeled_routes
-            .for_each_mut_with_checkpoint(checkpoint, |_, route| {
+            .for_each_mut_with_checkpoint(checkpoint, |route| {
                 if route.afi_safi() == family && !route.is_llgr_stale {
                     route.is_stale = true;
                 }
@@ -2929,8 +2903,8 @@ impl AdjRibIn {
     }
 
     /// Clear the GR and LLGR stale flags, or with `llgr_only` just the
-    /// LLGR flag, checkpointing every visited route, each local community
-    /// cleanup and scratch retirement.
+    /// LLGR flag, checkpointing every slot visited (vacancies included),
+    /// each local community cleanup and scratch retirement.
     pub(crate) fn clear_stale_labeled_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
@@ -2940,17 +2914,21 @@ impl AdjRibIn {
         if family.1 != Safi::LabeledUnicast {
             return;
         }
-        let mut clear_local_llgr = Vec::with_capacity(self.labeled_llgr_stale_local_tags.len());
+        let tags = &self.labeled_llgr_stale_local_tags;
+        let mut clear_local_llgr = Vec::with_capacity(tags.len());
         checkpoint();
         self.labeled_routes
-            .for_each_mut_with_checkpoint(checkpoint, |key, route| {
+            .for_each_mut_with_checkpoint(checkpoint, |route| {
                 if route.afi_safi() == family {
                     if !llgr_only {
                         route.is_stale = false;
                     }
                     route.is_llgr_stale = false;
-                    if self.labeled_llgr_stale_local_tags.contains_key(key) {
-                        clear_local_llgr.push(*key);
+                    if !tags.is_empty() {
+                        let key = route.key();
+                        if tags.contains_key(&key) {
+                            clear_local_llgr.push(key);
+                        }
                     }
                 }
             });
@@ -2966,8 +2944,8 @@ impl AdjRibIn {
         let stale: Vec<LabeledRibRouteKey> = self
             .labeled_routes
             .iter()
-            .filter(|(_, r)| r.is_stale)
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_stale)
+            .map(LabeledRibRoute::key)
             .collect();
         for key in &stale {
             self.remove_labeled_entry(key);
@@ -2999,12 +2977,13 @@ impl AdjRibIn {
         checkpoint();
         stale.extend(
             self.labeled_routes
-                .iter()
+                .iter_slots()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| {
+                .flatten()
+                .filter(|r| {
                     (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.afi_safi() == family
                 })
-                .map(|(k, _)| *k),
+                .map(LabeledRibRoute::key),
         );
         for key in &stale {
             checkpoint();
@@ -3046,8 +3025,11 @@ impl AdjRibIn {
         let capacity = self.gr_stale_family_len(family);
         let mut no_llgr_keys: Vec<LabeledRibRouteKey> = Vec::new();
         checkpoint();
-        for (_, route) in self.labeled_routes.iter() {
+        for route in self.labeled_routes.iter_slots() {
             checkpoint();
+            let Some(route) = route else {
+                continue;
+            };
             if route.is_stale
                 && route.afi_safi() == family
                 && route.communities().contains(&COMMUNITY_NO_LLGR)
@@ -3068,11 +3050,18 @@ impl AdjRibIn {
             self.remove_labeled_entry_with_checkpoint(key, checkpoint);
             checkpoint();
         }
-        self.labeled_routes.for_each_mut(|_, route| {
+        // Walk slots, not routes, so vacancies of a sparse slab yield too.
+        let PathSlab { routes, counts, .. } = &mut self.labeled_routes;
+        for route in routes.iter_slots_mut() {
             checkpoint();
+            let Some(route) = route else {
+                continue;
+            };
             if route.is_stale && route.afi_safi() == family {
+                let before = route.retention();
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                counts.shift(before, route.retention());
                 checkpoint();
                 if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.labeled_llgr_stale_local_tags.insert(route.key(), ());
@@ -3082,7 +3071,7 @@ impl AdjRibIn {
                 checkpoint();
                 affected.push(route.key());
             }
-        });
+        }
         retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
@@ -3094,8 +3083,8 @@ impl AdjRibIn {
         let stale: Vec<LabeledRibRouteKey> = self
             .labeled_routes
             .iter()
-            .filter(|(_, r)| r.is_llgr_stale)
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_llgr_stale)
+            .map(LabeledRibRoute::key)
             .collect();
         for key in &stale {
             self.remove_labeled_entry(key);
@@ -3801,9 +3790,10 @@ impl AdjRibIn {
     ) {
         for key in keys {
             checkpoint();
-            self.labeled_routes.update(key, |route| {
-                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
-            });
+            self.labeled_routes
+                .update(&key.prefix, key.path_id, |route| {
+                    AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
+                });
             self.labeled_llgr_stale_local_tags.remove(key);
         }
     }
@@ -4133,12 +4123,13 @@ mod tests {
                         .get(id)
                         .is_some()
                 );
-                assert_eq!(
-                    rib.labeled_key_index
+                assert!(
+                    rib.labeled_routes
+                        .index
                         .get(&labeled.nlri.key())
                         .unwrap()
-                        .get(id),
-                    Some(())
+                        .get(id)
+                        .is_some()
                 );
             }
             let lookup = path_comparisons();
@@ -4150,7 +4141,8 @@ mod tests {
                     None
                 );
                 assert_eq!(
-                    rib.labeled_key_index
+                    rib.labeled_routes
+                        .index
                         .get(&labeled.nlri.key())
                         .unwrap()
                         .get(n),
@@ -4169,7 +4161,7 @@ mod tests {
             assert!(remove <= budget, "remove N={n}: {remove} > {budget}");
             assert!(rib.prefix_index.get(&unicast.prefix).is_none());
             assert!(rib.vpn_routes.index.is_empty());
-            assert!(rib.labeled_key_index.is_empty());
+            assert!(rib.labeled_routes.index.is_empty());
             eprintln!(
                 "PATH_INDEX N={n} budget={budget} insert={insert} replace={replace} lookup={lookup} absent={absent} remove={remove}"
             );
@@ -4239,7 +4231,7 @@ mod tests {
             );
             assert!(rib.prefix_index.iter_from(None).next().is_none());
             assert!(rib.vpn_routes.index.is_empty());
-            assert!(rib.labeled_key_index.is_empty());
+            assert!(rib.labeled_routes.index.is_empty());
             for id in 0..16 {
                 let (unicast, vpn, labeled) = crowded_path_routes(id);
                 rib.insert(unicast);
@@ -4249,7 +4241,7 @@ mod tests {
             rib.clear();
             assert!(rib.prefix_index.iter_from(None).next().is_none());
             assert!(rib.vpn_routes.index.is_empty());
-            assert!(rib.labeled_key_index.is_empty());
+            assert!(rib.labeled_routes.index.is_empty());
         }
     }
 
@@ -4478,9 +4470,9 @@ mod tests {
             // Allocation edges, both scans, two removal edges, mutation
             // and interning edges for two promoted rows, plus owned-key drops.
             let promotion_edges = if index == 1 { 2 } else { 3 };
-            // The unicast and VPN slabs' second scan also visits the slot
-            // vacated by the removed NO_LLGR row.
-            let vacated = usize::from(matches!(index, 0 | 4));
+            // The unicast, VPN and labeled slabs' second scan also visits
+            // the slot vacated by the removed NO_LLGR row.
+            let vacated = usize::from(matches!(index, 0 | 4 | 5));
             // Unicast, VPN and labeled removals checkpoint before and after
             // the logarithmic Add-Path index operation.
             let indexed = 2 * usize::from(matches!(index, 0 | 4 | 5));
@@ -6588,7 +6580,7 @@ mod tests {
                 let addr = (0x0a00_0000 + (i << 8)).to_be_bytes();
                 rib.insert_labeled(make_labeled_route(labeled_nlri(addr, 24, 100), 1));
             },
-            |rib| rib.labeled_key_index.capacity(),
+            |rib| rib.labeled_routes.index.capacity(),
         );
     }
 
@@ -6792,13 +6784,13 @@ mod tests {
 
         // Wrong SAFI: no-op
         assert_eq!(rib.mark_stale_labeled((Afi::Ipv4, Safi::Unicast)).len(), 0);
-        assert!(!rib.labeled_routes[&v4_key].is_stale);
+        assert!(!rib.get_labeled(&v4_key).unwrap().is_stale);
 
         // IPv4 labeled: only the v4-tuple route becomes stale
         assert_eq!(rib.mark_stale_labeled(LU_V4).len(), 0);
-        assert!(rib.labeled_routes[&v4_key].is_stale);
+        assert!(rib.get_labeled(&v4_key).unwrap().is_stale);
         assert!(
-            !rib.labeled_routes[&v6_key].is_stale,
+            !rib.get_labeled(&v6_key).unwrap().is_stale,
             "v6 tuple must be untouched"
         );
     }
@@ -6821,7 +6813,7 @@ mod tests {
         let deleted = rib.mark_stale_labeled(LU_V4);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.labeled_len(), 1);
-        let retained = rib.labeled_routes.get(&llgr_key).unwrap();
+        let retained = rib.get_labeled(&llgr_key).unwrap();
         assert!(retained.is_llgr_stale && !retained.is_stale);
         assert!(
             retained
@@ -6838,13 +6830,13 @@ mod tests {
 
         rib.mark_stale_labeled(LU_V4);
         rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
-        let promoted = &rib.labeled_routes[&key];
+        let promoted = rib.get_labeled(&key).unwrap();
         assert!(promoted.is_llgr_stale);
         assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
         assert!(rib.labeled_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_stale_labeled(LU_V4);
-        let route = &rib.labeled_routes[&key];
+        let route = rib.get_labeled(&key).unwrap();
         assert!(!route.is_stale);
         assert!(!route.is_llgr_stale);
         assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
@@ -6859,7 +6851,7 @@ mod tests {
 
         rib.mark_stale_labeled(LU_V4);
         rib.clear_stale_labeled(LU_V4);
-        let route = &rib.labeled_routes[&key];
+        let route = rib.get_labeled(&key).unwrap();
         assert!(!route.is_stale);
         assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
     }
@@ -6907,12 +6899,13 @@ mod tests {
             .promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
 
         // NO_LLGR route removed entirely (RFC 9494 §4.3)
-        assert!(!rib.labeled_routes.contains_key(&no_llgr_key));
+        assert!(rib.get_labeled(&no_llgr_key).is_none());
         // Other v4 route promoted, community injected, local tag recorded
-        assert!(rib.labeled_routes[&keep_key].is_llgr_stale);
-        assert!(!rib.labeled_routes[&keep_key].is_stale);
+        assert!(rib.get_labeled(&keep_key).unwrap().is_llgr_stale);
+        assert!(!rib.get_labeled(&keep_key).unwrap().is_stale);
         assert!(
-            rib.labeled_routes[&keep_key]
+            rib.get_labeled(&keep_key)
+                .unwrap()
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
@@ -6920,8 +6913,8 @@ mod tests {
         assert!(affected.contains(&keep_key));
         assert!(affected.contains(&no_llgr_key));
         // v6 tuple untouched: still GR-stale, not promoted
-        assert!(rib.labeled_routes[&v6_key].is_stale);
-        assert!(!rib.labeled_routes[&v6_key].is_llgr_stale);
+        assert!(rib.get_labeled(&v6_key).unwrap().is_stale);
+        assert!(!rib.get_labeled(&v6_key).unwrap().is_llgr_stale);
         assert!(!affected.contains(&v6_key));
 
         // LLGR expiry sweep removes only the promoted route; the family
@@ -6977,7 +6970,8 @@ mod tests {
         // EoR: the peer-originated LLGR_STALE must survive.
         rib.clear_llgr_stale_labeled(LU_V4);
         assert!(
-            rib.labeled_routes[&key]
+            rib.get_labeled(&key)
+                .unwrap()
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
@@ -7872,35 +7866,45 @@ mod tests {
         withdraw_all: withdraw_all_labeled,
     );
 
-    /// The VPN analog of `withdraw_reinsert_churn_reuses_slab_slots`, with
-    /// several Add-Path IDs per key.
+    /// The VPN and labeled analog of
+    /// `withdraw_reinsert_churn_reuses_slab_slots`, with several Add-Path IDs
+    /// per key.
     #[test]
-    fn vpn_withdraw_reinsert_churn_reuses_slab_slots() {
+    fn vpn_and_labeled_withdraw_reinsert_churn_reuses_slab_slots() {
         let mut rib = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        let routes: Vec<VpnRibRoute> = (0..100u8)
+        let routes: Vec<(VpnRibRoute, LabeledRibRoute)> = (0..100u8)
             .flat_map(|i| {
                 (0..4).map(move |path_id| {
-                    let mut route = make_vpn_route(vpn_nlri([10, 1, i, 0], 24, 100), 1);
-                    route.path_id = path_id;
-                    route
+                    let mut vpn = make_vpn_route(vpn_nlri([10, 1, i, 0], 24, 100), 1);
+                    let mut labeled = make_labeled_route(labeled_nlri([10, 1, i, 0], 24, 100), 1);
+                    vpn.path_id = path_id;
+                    labeled.path_id = path_id;
+                    (vpn, labeled)
                 })
             })
             .collect();
         for cycle in 0..5 {
-            for route in &routes {
-                assert!(!rib.insert_vpn(route.clone()), "cycle {cycle}");
+            for (vpn, labeled) in &routes {
+                assert!(!rib.insert_vpn(vpn.clone()), "cycle {cycle}");
+                assert!(!rib.insert_labeled(labeled.clone()), "cycle {cycle}");
             }
             assert_eq!(rib.vpn_len(), routes.len(), "cycle {cycle}");
+            assert_eq!(rib.labeled_len(), routes.len(), "cycle {cycle}");
             assert_eq!(
-                rib.vpn_routes.routes.slot_count(),
-                routes.len(),
-                "cycle {cycle}: churn must reuse freed slots, not grow the slab"
+                [
+                    rib.vpn_routes.routes.slot_count(),
+                    rib.labeled_routes.routes.slot_count()
+                ],
+                [routes.len(); 2],
+                "cycle {cycle}: churn must reuse freed slots, not grow the slabs"
             );
-            for route in &routes {
-                assert!(rib.withdraw_vpn(&route.key()), "cycle {cycle}");
+            for (vpn, labeled) in &routes {
+                assert!(rib.withdraw_vpn(&vpn.key()), "cycle {cycle}");
+                assert!(rib.withdraw_labeled(&labeled.key()), "cycle {cycle}");
             }
-            assert_eq!(rib.vpn_len(), 0, "cycle {cycle}");
+            assert_eq!(rib.vpn_len() + rib.labeled_len(), 0, "cycle {cycle}");
             assert!(rib.vpn_routes.index.is_empty(), "cycle {cycle}");
+            assert!(rib.labeled_routes.index.is_empty(), "cycle {cycle}");
         }
     }
 
@@ -7922,27 +7926,45 @@ mod tests {
         );
     }
 
-    /// Detached retirement brackets every VPN slot, vacancies included, and
-    /// every crowded index entry.
+    /// A full labeled table grows its slab one segment at a time.
     #[test]
-    fn vpn_slab_retirement_checkpoints_every_slot() {
+    fn labeled_slab_grows_at_most_one_segment_per_insert() {
+        crate::fast_hash::assert_growth_bounded_by(
+            "Adj-RIB-In labeled slab",
+            &mut AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
+            |rib, i| {
+                let addr = (0x0a00_0000 + i).to_be_bytes();
+                rib.insert_labeled(make_labeled_route(labeled_nlri(addr, 32, 100), 1));
+            },
+            |rib| rib.labeled_routes.routes.capacity(),
+            3 * crate::slab::SEGMENT,
+            crate::slab::SEGMENT,
+        );
+    }
+
+    /// Detached retirement brackets every VPN and labeled slot, vacancies
+    /// included, and every crowded index entry.
+    #[test]
+    fn vpn_and_labeled_slab_retirement_checkpoints_every_slot() {
         let mut rib = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         for path_id in 0..64 {
-            let (_, mut vpn, _) = crowded_path_routes(path_id);
-            vpn.path_id = path_id;
+            let (_, vpn, labeled) = crowded_path_routes(path_id);
             rib.insert_vpn(vpn);
+            rib.insert_labeled(labeled);
         }
         for path_id in (0..64).step_by(2) {
-            let (_, vpn, _) = crowded_path_routes(path_id);
+            let (_, vpn, labeled) = crowded_path_routes(path_id);
             assert!(rib.withdraw_vpn(&vpn.key()));
+            assert!(rib.withdraw_labeled(&labeled.key()));
         }
         assert_eq!(rib.vpn_routes.routes.slot_count(), 64);
+        assert_eq!(rib.labeled_routes.routes.slot_count(), 64);
         let mut empty = 0;
         AdjRibIn::new(rib.peer()).retire_with(&mut || empty += 1);
         let mut visits = 0;
         rib.retire_with(&mut || visits += 1);
         assert!(
-            visits >= empty + 2 * 64 + 32,
+            visits >= empty + 2 * (2 * 64 + 32),
             "every slot and crowded index entry must checkpoint: {visits}"
         );
     }
@@ -7986,7 +8008,7 @@ mod tests {
                     + rib.vpn_len()
                     + rib.labeled_len()
                     + rib.rtc_len();
-                let indexes = rib.vpn_routes.index.len() + rib.labeled_key_index.len();
+                let indexes = rib.vpn_routes.index.len() + rib.labeled_routes.index.len();
                 let owned_tags = if std::mem::needs_drop::<FlowSpecRouteKey>() {
                     rib.flowspec_llgr_stale_local_tags.len()
                 } else {
