@@ -1168,7 +1168,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1552 bytes |
+| `AdjRibIn` | 1576 bytes |
 | `LocRib` | 1120 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1230,6 +1230,12 @@ so a full table grows one segment at a time instead of copying every route.
 It grew again from 1544 to 1552 bytes with a flag that records whether the
 peer ever stored a FlowSpec route under a non-zero Add-Path ID, so FlowSpec
 selection can read one row per rule instead of the peer's whole table.
+
+`AdjRibIn` grew from 1552 to 1576 bytes when VPN route bodies moved from a
+hashed route map into a slab behind `u32` handles, like unicast. The slab
+header replaces the route map, and the VPN key index now carries each path's
+handle, so a best-path rescan of one RD and prefix reads route bodies by
+handle instead of probing the route map once per stored path.
 
 `Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

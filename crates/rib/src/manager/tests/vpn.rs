@@ -1886,7 +1886,9 @@ async fn vpn_distribution_serves_readiness_at_each_peer_boundary() {
 
 /// A withdrawal can leave a tombstone that returns no insertion headroom, so
 /// re-announcing withdrawn keys on a full table can force a rehash inside the
-/// UPDATE. A large VPN table is sharded, so that rehash is one shard's.
+/// UPDATE. A large VPN key index is sharded, so that rehash is one shard's;
+/// the route bodies live in a slab whose freed slots the re-announcements
+/// reuse.
 #[test]
 fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
     let (_tx, rx) = mpsc::channel(8);
@@ -1908,11 +1910,8 @@ fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
             withdrawn: vec![],
         });
     }
-    let before = manager.ribs[&peer].vpn_shard_capacities();
-    assert!(
-        before.iter().all(|shards| shards.len() == 16),
-        "large table is sharded"
-    );
+    let (before, slab_before) = manager.ribs[&peer].vpn_storage_capacities();
+    assert_eq!(before.len(), 16, "large key index is sharded");
 
     let churn: Vec<u32> = (0..total).step_by(8).collect();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
@@ -1921,10 +1920,14 @@ fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
         announced: churn.iter().map(|&n| route(n, 200)).collect(),
         withdrawn: churn.iter().map(|&n| route(n, 100).key()).collect(),
     });
-    let after = manager.ribs[&peer].vpn_shard_capacities();
-    for (before, after) in before.iter().flatten().zip(after.iter().flatten()) {
+    let (after, slab_after) = manager.ribs[&peer].vpn_storage_capacities();
+    for (before, after) in before.iter().zip(&after) {
         assert!(after <= &(before * 2), "a shard grew more than once");
     }
+    assert_eq!(
+        slab_after, slab_before,
+        "re-announcements reuse freed slots"
+    );
     assert_eq!(
         manager.ribs[&peer].vpn_len(),
         usize::try_from(total).unwrap()

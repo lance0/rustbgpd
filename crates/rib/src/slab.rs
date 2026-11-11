@@ -22,7 +22,7 @@
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
 /// Slots per segment: 64Ki routes, about 6.5 MiB of 104-byte route bodies.
-const SEGMENT: usize = 1 << 16;
+pub(crate) const SEGMENT: usize = 1 << 16;
 
 /// Dense storage for route bodies addressed by `u32` handles.
 ///
@@ -491,9 +491,12 @@ mod tests {
     /// the niche.
     #[test]
     fn option_is_niche_free_for_route_types() {
-        use crate::route::Route;
+        use crate::route::{Route, VpnRibRoute};
         use std::mem::size_of;
         assert_eq!(size_of::<Option<Route>>(), size_of::<Route>());
         assert_eq!(size_of::<Route>(), 104);
+        // Adj-RIB-In VPN slots.
+        assert_eq!(size_of::<Option<VpnRibRoute>>(), size_of::<VpnRibRoute>());
+        assert_eq!(size_of::<VpnRibRoute>(), 144);
     }
 }
