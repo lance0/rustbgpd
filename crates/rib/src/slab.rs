@@ -21,7 +21,9 @@
 
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
-/// Slots per segment: 64Ki routes, about 6.5 MiB of 104-byte route bodies.
+/// Slots per segment: 64Ki routes. One segment holds 6.5 MiB of 104-byte
+/// unicast bodies, 9 MiB of 144-byte VPN bodies or 8.5 MiB of 136-byte
+/// labeled-unicast bodies.
 pub(crate) const SEGMENT: usize = 1 << 16;
 
 /// Dense storage for route bodies addressed by `u32` handles.
