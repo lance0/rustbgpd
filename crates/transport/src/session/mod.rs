@@ -960,12 +960,13 @@ fn tcp_ao_key_metadata(
 /// Outbound channel buffer size.
 const OUTBOUND_BUFFER: usize = 4096;
 
-/// Per-prefix IPv4/IPv6-unicast Add-Path receive cap when
-/// `add_path.receive_max` is unset or zero, and the floor of the safety
+/// Per-key Add-Path receive cap for every family in [`PATH_CAP_FAMILIES`]
+/// when `add_path.receive_max` is unset or zero, and the floor of the safety
 /// ceiling `max(receive_max, this)` that even `"warning"` cannot lift. The
-/// Adj-RIB-In keeps each prefix's path IDs in a scanned list, so an uncapped
-/// peer can make every insert and withdrawal for one prefix linear in its
-/// path count.
+/// Adj-RIB-In finds one path of a key in logarithmic time, but best-path
+/// selection after the key's selected path is replaced or withdrawn reads
+/// every stored path of the key, so an uncapped peer can make those UPDATEs
+/// linear in the key's path count.
 const DEFAULT_ADD_PATH_RECEIVE_MAX: u16 = 1024;
 
 /// Every family Add-Path receive is advertised for, each with its own
