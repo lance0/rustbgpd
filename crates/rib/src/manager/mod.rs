@@ -5951,6 +5951,61 @@ impl RibManager {
         // leave the manager for the pass.
         let mut overlay = std::mem::take(&mut self.peer_unexportable);
         let mut live = HashMap::new();
+        // FlowSpec, BGP-LS and RT-Constrain have no per-NLRI index. Look each
+        // distinct identity up by key at path id 0 first; the ones that miss
+        // are dead or stored under another path id, and one walk of the
+        // family's rows settles all of them together.
+        let mut unresolved = [false; 3];
+        for key in overlay.values().flatten() {
+            let family = match key {
+                ExactExportKey::FlowSpec(_) => 0,
+                ExactExportKey::BgpLs(_) => 1,
+                ExactExportKey::Rtc(_) => 2,
+                _ => continue,
+            };
+            checkpoint();
+            if let std::collections::hash_map::Entry::Vacant(unprobed) =
+                live.entry(key.nlri_identity())
+            {
+                #[cfg(test)]
+                reads.set(reads.get() + 1);
+                let found = self.unindexed_identity_at_path_zero(unprobed.key(), &mut || {
+                    #[cfg(test)]
+                    reads.set(reads.get() + 1);
+                    checkpoint();
+                });
+                unresolved[family] |= !found;
+                unprobed.insert(found);
+            }
+        }
+        let walk = unresolved;
+        let mut settle = |identity: ExactExportKey| {
+            #[cfg(test)]
+            reads.set(reads.get() + 1);
+            checkpoint();
+            if let Some(found) = live.get_mut(&identity) {
+                *found = true;
+            }
+        };
+        if walk.contains(&true) {
+            for rib in self.ribs.values() {
+                if walk[0] {
+                    for route in rib.iter_flowspec() {
+                        settle(ExactExportKey::FlowSpec(route.selection_key()));
+                    }
+                }
+                if walk[1] {
+                    for route in rib.iter_bgpls() {
+                        settle(ExactExportKey::BgpLs(route.key()).nlri_identity());
+                    }
+                }
+                if walk[2] {
+                    for route in rib.iter_rtc() {
+                        settle(ExactExportKey::Rtc(route.key()).nlri_identity());
+                    }
+                }
+            }
+        }
         overlay.retain(|_, rejected| {
             checkpoint();
             rejected.retain(|key| {
@@ -6003,22 +6058,14 @@ impl RibManager {
             // session negotiates Add-Path for them, so a live identity is
             // found at path id 0 by key; only a miss walks the family's rows
             // for a row stored under another path id.
-            ExactExportKey::FlowSpec(key) => {
-                let exact = crate::route::FlowSpecRouteKey {
-                    afi: key.afi,
-                    rd: key.rd,
-                    rule: key.rule.clone(),
-                    path_id: 0,
-                };
-                self.ribs.values().any(|rib| {
-                    checkpoint();
-                    rib.get_flowspec(&exact).is_some()
-                }) || self.ribs.values().any(|rib| {
-                    checkpoint();
-                    rib.iter_flowspec()
-                        .inspect(|_| checkpoint())
-                        .any(|route| route.selection_key() == *key)
-                })
+            ExactExportKey::FlowSpec(flowspec) => {
+                self.unindexed_identity_at_path_zero(key, checkpoint)
+                    || self.ribs.values().any(|rib| {
+                        checkpoint();
+                        rib.iter_flowspec()
+                            .inspect(|_| checkpoint())
+                            .any(|route| route.selection_key() == *flowspec)
+                    })
             }
             // A Loc-RIB row frozen by selection deferral still stages the
             // route to members; its exact rejection must outlive the source.
@@ -6030,21 +6077,16 @@ impl RibManager {
                         .inspect(|_| checkpoint())
                         .any(|rib| rib.get_evpn(key).is_some())
             }
-            ExactExportKey::BgpLs(key) => {
-                let exact = crate::route::BgpLsRouteKey {
-                    path_id: 0,
-                    ..key.clone()
-                };
-                self.ribs.values().any(|rib| {
-                    checkpoint();
-                    rib.get_bgpls(&exact).is_some()
-                }) || self.ribs.values().any(|rib| {
-                    checkpoint();
-                    rib.iter_bgpls().inspect(|_| checkpoint()).any(|route| {
-                        ExactExportKey::BgpLs(route.key()).nlri_identity()
-                            == ExactExportKey::BgpLs(exact.clone())
+            ExactExportKey::BgpLs(_) => {
+                self.unindexed_identity_at_path_zero(key, checkpoint) || {
+                    let identity = key.nlri_identity();
+                    self.ribs.values().any(|rib| {
+                        checkpoint();
+                        rib.iter_bgpls().inspect(|_| checkpoint()).any(|route| {
+                            ExactExportKey::BgpLs(route.key()).nlri_identity() == identity
+                        })
                     })
-                })
+                }
             }
             ExactExportKey::Vpn(key) => {
                 self.loc_rib.get_vpn(&key.nlri_key).is_some()
@@ -6062,6 +6104,50 @@ impl RibManager {
                         .inspect(|_| checkpoint())
                         .any(|rib| rib.iter_labeled_for_prefix(&key.prefix).next().is_some())
             }
+            ExactExportKey::Rtc(_) => {
+                self.unindexed_identity_at_path_zero(key, checkpoint) || {
+                    let identity = key.nlri_identity();
+                    self.ribs.values().any(|rib| {
+                        checkpoint();
+                        rib.iter_rtc().inspect(|_| checkpoint()).any(|route| {
+                            ExactExportKey::Rtc(route.key()).nlri_identity() == identity
+                        })
+                    })
+                }
+            }
+        }
+    }
+
+    /// Whether any Adj-RIB-In stores this `FlowSpec`, BGP-LS or RT-Constrain
+    /// identity at path id 0, by key. Other families answer `false`.
+    fn unindexed_identity_at_path_zero(
+        &self,
+        key: &ExactExportKey,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
+        match key {
+            ExactExportKey::FlowSpec(key) => {
+                let exact = crate::route::FlowSpecRouteKey {
+                    afi: key.afi,
+                    rd: key.rd,
+                    rule: key.rule.clone(),
+                    path_id: 0,
+                };
+                self.ribs.values().any(|rib| {
+                    checkpoint();
+                    rib.get_flowspec(&exact).is_some()
+                })
+            }
+            ExactExportKey::BgpLs(key) => {
+                let exact = crate::route::BgpLsRouteKey {
+                    path_id: 0,
+                    ..key.clone()
+                };
+                self.ribs.values().any(|rib| {
+                    checkpoint();
+                    rib.get_bgpls(&exact).is_some()
+                })
+            }
             ExactExportKey::Rtc(key) => {
                 let exact = crate::route::RtcRibRouteKey {
                     path_id: 0,
@@ -6070,14 +6156,9 @@ impl RibManager {
                 self.ribs.values().any(|rib| {
                     checkpoint();
                     rib.get_rtc(&exact).is_some()
-                }) || self.ribs.values().any(|rib| {
-                    checkpoint();
-                    rib.iter_rtc().inspect(|_| checkpoint()).any(|route| {
-                        ExactExportKey::Rtc(route.key()).nlri_identity()
-                            == ExactExportKey::Rtc(exact.clone())
-                    })
                 })
             }
+            _ => false,
         }
     }
 

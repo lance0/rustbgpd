@@ -304,10 +304,59 @@ fn prune_finds_unindexed_family_rows_under_another_path_id() {
 
     manager.prune_exact_export_rejections();
     assert_eq!(manager.peer_unexportable[&target], rejected);
+    // Targeted retirement of a still-live identity takes the same fallback.
+    manager.retire_exact_export_rejections(rejected.clone());
+    assert_eq!(manager.peer_unexportable[&target], rejected);
 
     let rib = manager.ribs.get_mut(&source).unwrap();
     rib.withdraw_flowspec(&flowspec_key);
     rib.withdraw_rtc(&rtc_key);
     manager.prune_exact_export_rejections();
     assert!(!manager.peer_unexportable.contains_key(&target));
+}
+
+/// Many dead `FlowSpec`, BGP-LS and RT-Constrain rejections over populated
+/// families are settled by one walk of each family's rows, not one walk per
+/// dead identity.
+#[test]
+fn prune_settles_dead_unindexed_family_rejections_in_one_walk_per_family() {
+    const ROWS: u8 = 100;
+    const DEAD: u8 = 50;
+    let source_addr = Ipv4Addr::new(198, 51, 100, 10);
+    let source = peer_v4(source_addr);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+    let mut rib = AdjRibIn::new(source);
+    let mut rejected = HashSet::new();
+    for row in 0..ROWS + DEAD {
+        let mut flowspec = make_flowspec_route(source_addr);
+        flowspec.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+            rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 10, row, 0), 24)),
+        )];
+        let bgpls = make_bgpls_route(source_addr, row, 100);
+        let rtc = make_rtc_rib_route(source_addr, u16::from(row), 100);
+        if row < ROWS {
+            rib.insert_flowspec(flowspec);
+            rib.insert_bgpls(bgpls);
+            rib.insert_rtc(rtc);
+        } else {
+            rejected.extend([
+                ExactExportKey::FlowSpec(flowspec.selection_key()),
+                ExactExportKey::BgpLs(bgpls.key()),
+                ExactExportKey::Rtc(rtc.key()),
+            ]);
+        }
+    }
+    let mut manager = test_manager();
+    manager.ribs.insert(source, rib);
+    manager.peer_unexportable.insert(target, rejected);
+
+    manager.prune_exact_export_rejections();
+
+    assert!(!manager.peer_unexportable.contains_key(&target));
+    let (rows, dead) = (u64::from(ROWS), u64::from(DEAD));
+    assert_eq!(
+        manager.test_exact_export_liveness_reads,
+        3 * (2 * dead + rows),
+        "per family: a probe and a keyed lookup per dead identity, then each row once"
+    );
 }
