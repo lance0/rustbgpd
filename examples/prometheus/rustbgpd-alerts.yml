@@ -664,21 +664,28 @@ groups:
 
       - alert: BgpSystemdWatchdogPingsSkipped
         # Each increment is a liveness sample in which PeerManager or the RIB
-        # gave no answer, or a ping the notify socket refused. Under the
-        # shipped WatchdogSec=5min, PID 1 aborts the daemon after five
-        # minutes without a ping. The counter also moves while the peer
-        # manager drains sessions during a stop.
-        expr: increase(bgp_systemd_watchdog_pings_skipped_total[2m]) > 0
+        # gave no answer, or a ping the notify socket refused. A silent actor
+        # adds one every 6 s (the 5 s sample deadline plus the 1 s retry), so
+        # 20 in two minutes; a closed channel adds one per second. The
+        # threshold of 15 means skipping covered most of the window, and the
+        # `for` means it is still going on: one transient skip, or a minute
+        # of skips that then stops, never fires. Continuous skipping fires
+        # after about two and a half minutes, ahead of the abort PID 1
+        # delivers five minutes after the last ping under the shipped
+        # WatchdogSec=5min. The counter also moves while the peer manager
+        # drains sessions during a stop.
+        expr: increase(bgp_systemd_watchdog_pings_skipped_total[2m]) >= 15
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "systemd watchdog pings skipped on {{ $labels.instance }}"
           description: >-
-            rustbgpd on {{ $labels.instance }} has withheld systemd watchdog
-            pings for over a minute: a core actor is not answering liveness
-            samples, or the notify socket refuses the ping. If this is not a
-            stop in progress, systemd aborts and restarts the daemon once
+            rustbgpd on {{ $labels.instance }} has skipped most systemd
+            watchdog pings for the last two minutes and is still skipping
+            them: a core actor is not answering liveness samples, or the
+            notify socket refuses the ping. If this is not a stop in
+            progress, systemd aborts and restarts the daemon once
             WatchdogSec passes without a ping. The daemon WARN log names the
             silent actor.
 

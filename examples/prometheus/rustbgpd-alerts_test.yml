@@ -2659,18 +2659,40 @@ tests:
                 if the work is not finishing.
 
   # ── BgpSystemdWatchdogPingsSkipped ─────────────────────────────
-  # Skips start at 5m; the 1m `for` fires at 6m. A flat counter stays quiet.
-  - interval: 1m
+  # One transient skipped ping at 5m, then pings resume: the counter steps
+  # once and stays flat. The rule must stay quiet at every point where the
+  # step is still inside a lookback window.
+  - interval: 15s
     input_series:
       - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs1:9179"}'
-        values: "0x4 1+1x10"
-      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs2:9179"}'
-        values: "3x15"
+        values: "0x19 1x40"
     alert_rule_test:
-      - eval_time: 5m
+      - eval_time: 6m
         alertname: BgpSystemdWatchdogPingsSkipped
         exp_alerts: []
-      - eval_time: 6m
+      - eval_time: 6m30s
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+
+  # A silent actor adds one skip every 6 s (5 s sample deadline plus the 1 s
+  # retry), 5 per 30 s here, from 5m on rs1. The 2m increase reaches 15 at
+  # 6m30s and the 1m `for` fires by 8m, about three minutes into a silence
+  # that systemd aborts after five. rs2 skips for one minute and recovers:
+  # it never reaches 15 and stays quiet.
+  - interval: 30s
+    input_series:
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs1:9179"}'
+        values: "0x10 5+5x20"
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs2:9179"}'
+        values: "0x10 5 10x20"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 8m
         alertname: BgpSystemdWatchdogPingsSkipped
         exp_alerts:
           - exp_labels:
@@ -2679,9 +2701,10 @@ tests:
             exp_annotations:
               summary: "systemd watchdog pings skipped on rs1:9179"
               description: >-
-                rustbgpd on rs1:9179 has withheld systemd watchdog
-                pings for over a minute: a core actor is not answering liveness
-                samples, or the notify socket refuses the ping. If this is not a
-                stop in progress, systemd aborts and restarts the daemon once
+                rustbgpd on rs1:9179 has skipped most systemd
+                watchdog pings for the last two minutes and is still skipping
+                them: a core actor is not answering liveness samples, or the
+                notify socket refuses the ping. If this is not a stop in
+                progress, systemd aborts and restarts the daemon once
                 WatchdogSec passes without a ping. The daemon WARN log names the
                 silent actor.

@@ -18,7 +18,8 @@
   alert rule covers that case. The new counter
   `bgp_systemd_watchdog_pings_skipped_total` counts each sample that withheld
   the ping and each ping the notify socket refused, and the new
-  `BgpSystemdWatchdogPingsSkipped` rule alerts on it. Both shipped native units now set
+  `BgpSystemdWatchdogPingsSkipped` rule alerts when skipping is sustained.
+  Both shipped native units now set
   `TimeoutAbortSec=2min`, so a watchdog abort waits at most two minutes for
   the core dump instead of the 32-minute stop timeout; reinstall the unit to
   pick it up. The [Kubernetes liveness recipe](../docs/how-to/deployment.md#kubernetes-probes)
