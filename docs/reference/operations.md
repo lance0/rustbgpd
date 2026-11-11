@@ -1799,6 +1799,15 @@ shipped `BgpReadinessRibStalled` rule warns after ten minutes), and
 operator who judges that the work is not finishing restarts the daemon by
 hand.
 
+The alert depends on a recurring `/readyz` probe. The counter moves only on
+HTTP `/readyz` requests, not on `/metrics` scrapes or `rbgp health`, so an
+install that only scrapes `/metrics` never fires it and nothing bounds a
+stalled RIB. Request `/readyz` at least once a minute, for example with a
+Prometheus blackbox-exporter HTTP check or a systemd timer that runs `curl`
+against it; see [deployment.md](../how-to/deployment.md#systemd). The rule
+also cannot tell one long stall from separate ones less than five minutes
+apart: it fires for stalled answers recurring or sustained over ten minutes.
+
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.
 EVPN, FIB, and peer-count health are surfaced through their own

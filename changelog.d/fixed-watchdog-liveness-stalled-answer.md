@@ -15,7 +15,8 @@
   (285 to 305 seconds) after an actor stops answering; it was 2.5 to
   5 minutes, documented as five. A RIB that keeps answering "stalled" is
   never aborted, however long its work runs; the new `BgpReadinessRibStalled`
-  alert rule covers that case. The new counter
+  alert rule covers that case, and needs a recurring HTTP `/readyz` probe to
+  see it. The new counter
   `bgp_systemd_watchdog_pings_skipped_total` counts each sample that withheld
   the ping and each ping the notify socket refused, and the new
   `BgpSystemdWatchdogPingsSkipped` rule alerts when skipping is sustained.

@@ -579,6 +579,15 @@ Notes on the sandbox:
   minutes (the shipped `BgpReadinessRibStalled` rule), and restart by hand
   only if the work is not finishing.
 
+  That counter moves only when something requests `/readyz` over HTTP.
+  Scraping `/metrics` does not, and neither does `rbgp health`. A native
+  systemd install with no HTTP prober therefore never fires the alert, and
+  nothing bounds a stalled RIB. Add a recurring probe, at least once a
+  minute: a Prometheus blackbox-exporter HTTP check of `/readyz`, or a
+  systemd timer or cron job that runs
+  `curl -fsS -o /dev/null http://127.0.0.1:9179/readyz` (use your
+  `prometheus_addr`).
+
   PID 1 independently sends SIGABRT five minutes after the last ping, and
   `Restart=on-failure` covers that expiry. Measured from the moment an actor
   stops answering, that is about five minutes: 290 to 300 seconds when
