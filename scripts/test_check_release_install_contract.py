@@ -240,6 +240,24 @@ MUTATIONS = (
         "TimeoutStartSec=9min",
         "systemd unit",
     ),
+    (
+        contract.SYSTEMD_UNIT,
+        "TimeoutAbortSec=2min",
+        "TimeoutAbortSec=32min",
+        "systemd unit",
+    ),
+    (
+        contract.SYSTEMD_TEMPLATE,
+        "TimeoutAbortSec=2min",
+        "TimeoutAbortSec=32min",
+        "systemd unit",
+    ),
+    (
+        WORKFLOW,
+        "TimeoutAbortSec=2min",
+        "TimeoutAbortSec=32min",
+        "real native package assertions",
+    ),
     (WORKFLOW, "Type=notify", "Type=simple", "real native package assertions"),
     (
         WORKFLOW,

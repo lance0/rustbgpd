@@ -547,14 +547,66 @@ Notes on the sandbox:
   bind failure prevents peer registration, BGP ingress, telemetry, dial-out,
   and readiness publication before entering shortened coordinated teardown.
   `STOPPING=1` marks the start of coordinated
-  shutdown. With `WatchdogSec=5min` the daemon sends `WATCHDOG=1` every
-  2.5 minutes while the PeerManager and RIB actors answer the same bounded
-  core-actor probe `/readyz` uses. A missed probe skips the ping and retries
-  every second; PID 1 independently expires the service after five minutes
-  without a ping, and `Restart=on-failure` covers that expiry. The probe's
-  200 ms timeout bounds one liveness sample; it is not a separate service
-  deadline. `TimeoutStartSec=10min` bounds initial roster installation before
+  shutdown. `TimeoutStartSec=10min` bounds initial roster installation before
   `READY=1`.
+- `WatchdogSec=5min` restarts a daemon whose core actors have stopped
+  answering. Every 10 seconds the daemon asks the PeerManager and the RIB
+  actor for an answer, waits up to 5 seconds, and sends `WATCHDOG=1` when
+  both answered. This is a liveness sample, not `/readyz`:
+
+  - A RIB that answers "stalled" from inside a long policy transition,
+    selection-deferral release or peer teardown is working, not dead.
+    `/readyz` returns `503` for it; the watchdog keeps pinging.
+  - Only silence withholds the ping: an actor that does not answer within
+    5 seconds, a closed channel or a dropped reply. A ping that the notify
+    socket refuses counts the same way. The daemon logs a WARN, increments
+    `bgp_systemd_watchdog_pings_skipped_total` and samples again one second
+    later, so a silent actor is asked every 6 seconds (5 seconds of waiting,
+    then the 1-second retry).
+  - The sampler runs on its own thread. It does not depend on the telemetry
+    listener being configured, and a busy daemon worker cannot delay it.
+  - The sample ignores the shutdown gate, so pings continue through
+    coordinated shutdown for as long as the actors answer. Once the peer
+    manager starts draining sessions it stops answering, so the counter
+    moves until the process exits. That cannot abort a stop: systemd stops
+    enforcing the watchdog when it receives `STOPPING=1`, and
+    `TimeoutStopSec` bounds the stop from then on.
+
+  The watchdog does not bound how long the RIB may keep answering
+  "stalled". A unit of work that keeps making progress is never aborted,
+  however long it runs. Alert on it instead:
+  `bgp_readiness_probe_failures_total{reason="rib_stalled"}` rising for many
+  minutes (the shipped `BgpReadinessRibStalled` rule), and restart by hand
+  only if the work is not finishing.
+
+  That counter moves only when something requests `/readyz` over HTTP.
+  Scraping `/metrics` does not, and neither does `rbgp health`. A native
+  systemd install with no HTTP prober therefore never fires the alert, and
+  nothing bounds a stalled RIB. Add a recurring probe, at least once a
+  minute: a Prometheus blackbox-exporter HTTP check of `/readyz`, or a
+  systemd timer or cron job that runs
+  `curl -fsS -o /dev/null http://127.0.0.1:9179/readyz` (use your
+  `prometheus_addr`).
+
+  PID 1 independently sends SIGABRT five minutes after the last ping, and
+  `Restart=on-failure` covers that expiry. Measured from the moment an actor
+  stops answering, that is about five minutes: 290 to 300 seconds when
+  answers were prompt, and 285 to 305 seconds at the edges. A sample that
+  took almost 5 seconds to answer makes the last ping up to 15 seconds old,
+  and an actor that stops while the other's answer to the same sample is
+  still on its way lets one more ping out up to 5 seconds later. A stopped
+  process (SIGSTOP, a debugger) is aborted 285 to 300 seconds after it
+  stops. With another `WatchdogSec` the sample period is a quarter of it
+  and the sample deadline an eighth, capped at 10 and 5 seconds, so the
+  abort comes between five eighths and nine eighths of the timeout after an
+  actor stops.
+- `TimeoutAbortSec=2min` bounds the wait after that SIGABRT. The daemon does
+  not handle the signal, so the kernel writes a core dump and the restart
+  waits for it; every session is already down. Two minutes is enough for a
+  multi-gigabyte core, and systemd truncates a larger one with SIGKILL.
+  Without the setting systemd would wait `TimeoutStopSec`, 32 minutes. Raise
+  it if complete cores of a very large table matter more than restart time.
+  It needs systemd 243 or newer; older versions ignore it with a warning.
 
   Without `NOTIFY_SOCKET` — a foreground run or Docker — every notification
   is a silent no-op. A native unit opting out must disable all inherited notify
@@ -1031,7 +1083,7 @@ containers:
       - name: telemetry
         containerPort: 9179
     startupProbe:
-      httpGet: {path: /readyz, port: telemetry}
+      httpGet: {path: /livez, port: telemetry}
       periodSeconds: 10
       timeoutSeconds: 1
       failureThreshold: 60   # 10 minutes, the unit's TimeoutStartSec
@@ -1041,10 +1093,10 @@ containers:
       timeoutSeconds: 1
       failureThreshold: 3
     livenessProbe:
-      httpGet: {path: /readyz, port: telemetry}
+      httpGet: {path: /livez, port: telemetry}
       periodSeconds: 10
       timeoutSeconds: 1
-      failureThreshold: 30   # about 5 minutes, the unit's WatchdogSec
+      failureThreshold: 3
       terminationGracePeriodSeconds: 90   # liveness kills only; Kubernetes 1.25+
 terminationGracePeriodSeconds: 1920   # ordinary stops; same as docker --stop-timeout
 ```
@@ -1066,35 +1118,42 @@ session state through its own signals instead, such as the
 `BgpSessionNotEstablished` rule in
 [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml).
 
-**Liveness** has two reasonable choices:
+**Liveness** uses `/livez`. It returns `200 ok` whenever the HTTP listener
+accepts a connection and checks no actors. The listener has its own thread,
+so `/livez` keeps answering while the daemon's runtime workers are saturated.
+It restarts a process that is gone or cannot serve HTTP at all. It does not
+restart a daemon whose RIB or PeerManager has deadlocked while the listener
+still answers; Kubernetes has no equivalent of the systemd watchdog's
+actor check (see [systemd](#systemd)). Alert on that case instead: a
+`/readyz` that stays `503`, or
+`bgp_readiness_probe_failures_total{reason=~"(peer_manager|rib)_(timeout|unavailable)"}`
+still rising after several minutes, means the actors are not answering.
 
-- **`/readyz` with a watchdog-length tolerance** (the snippet above). The
-  shipped systemd unit sets `WatchdogSec=5min`; the daemon sends `WATCHDOG=1`
-  every 2.5 minutes while the same core-actor probe passes, and PID 1
-  restarts it after five minutes without one (see [systemd](#systemd)). A
-  10 s period with `failureThreshold: 30` detects about five minutes of
-  continuous `/readyz` failure, a comparable tolerance, and then stops a
-  daemon whose PeerManager or RIB has stopped answering. The restart comes
-  after the stop: see the grace period below.
-- **`/livez`**. It returns `200 ok` whenever the HTTP listener accepts a
-  connection and checks no actors. The listener has its own thread, so
-  `/livez` keeps answering while the daemon's runtime workers are saturated. It will not restart a deadlocked RIB or
-  PeerManager. Choose it only when another mechanism handles a wedged daemon.
+Do not point liveness at `/readyz`, with any `failureThreshold`. `/readyz`
+fails for conditions that are not a dead daemon:
 
-Do not point liveness at `/readyz` with the default `failureThreshold: 3`.
-A `/readyz` sample fails whenever either core actor misses the 200 ms
-deadline, and the RIB reports an export-policy transition, selection-deferral
-release or peer teardown as stalled once it has run for 30 seconds. Under
-heavy load those conditions can clear on their own. The Kubernetes
-documentation warns that [liveness probes that fail under load](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/#liveness-probe)
+- The RIB reports an export-policy transition, selection-deferral release or
+  peer teardown as stalled once it has run for 30 seconds, and keeps
+  reporting it until the work finishes. The actor is answering and making
+  progress the whole time. On a large table that work can outlast any
+  threshold chosen in advance; a restart then drops every session and the
+  daemon repeats the same work after it comes back.
+- Either core actor can miss the 200 ms deadline under heavy load and
+  recover on its own.
+
+The Kubernetes documentation warns that
+[liveness probes that fail under load](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/#liveness-probe)
 cause restarts that add to the load and can cascade. A restart of a BGP
-speaker also resets every session it holds, so a 30 s tolerance would turn a
-recoverable stall into a peer-visible outage.
+speaker resets every session it holds, so a liveness probe must fail only
+when a restart is the fix.
 
 **Startup.** The listener is bound early, but nothing answers HTTP, not even
 `/livez`, until startup wiring has finished and the configured peer roster is
 installed, the same boundary as systemd `READY=1`. Until then, probes connect
-and time out. A startup probe holds liveness off for the 10 minutes the
+and time out. The startup probe uses `/livez` for that reason: its first
+`200` already means startup finished, and unlike `/readyz` it cannot be held
+red by a long RIB unit of work during initial table loading. It holds
+liveness off for the 10 minutes the
 systemd unit allows (`TimeoutStartSec=10min`). BGP ingress opens at that
 boundary, so routes from peers, including full tables, load while the probes
 already answer; the startup probe does not need to cover table loading.
@@ -1107,8 +1166,8 @@ a five-second grace to finish. During coordinated shutdown `/readyz` returns
 
 A failed liveness probe only starts that same termination. Without a
 probe-level override, Kubernetes applies the pod-level grace period to a
-liveness kill too, so the time to restart a wedged daemon is the five-minute
-detection plus up to 32 minutes of shutdown. A wedged daemon usually cannot
+liveness kill too, so the time to restart a daemon that stopped serving HTTP
+is the detection time plus up to 32 minutes of shutdown. A wedged daemon usually cannot
 shut down cleanly: coordinated shutdown waits without a deadline for the
 PeerManager to drain its peers, and only a second termination signal skips
 that wait. Kubernetes sends one SIGTERM, then SIGKILL when the grace period
@@ -1128,7 +1187,7 @@ seconds covers them with headroom if the actors recover.
 The 90 seconds is an intentional cap, not an estimate of a clean stop. A
 daemon that is still wedged when it expires is killed, and the PeerManager
 drain, which has no deadline, is deliberately not waited for. Graceful drain
-is moot by then: the actors did not answer for five minutes. The systemd path is no gentler: the shipped
+is moot by then: the process could not answer a plain HTTP request. The systemd path is no gentler: the shipped
 unit keeps systemd's default watchdog signal, SIGABRT, which the daemon does
 not handle, so a watchdog expiry ends the process without coordinated
 shutdown. In either case a runtime-config mutation that was cut short is

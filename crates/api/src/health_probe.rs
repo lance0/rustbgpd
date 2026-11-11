@@ -19,9 +19,9 @@ pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
 /// Two one-way transitions, both set from `main.rs` and observed by the
 /// readiness surface:
 ///
-/// - **not-ready**: a fatal availability fault (coordinated shutdown
-///   started). `/readyz` reports 503 with the first recorded reason until
-///   the process restarts.
+/// - **not-ready**: a fatal availability fault (a runtime-config settlement
+///   recovery fence, or coordinated shutdown started). `/readyz` reports 503
+///   with the first recorded reason until the process restarts.
 /// - **shutting-down**: coordinated shutdown has begun; admission paths
 ///   (inbound BGP connections, persisted config mutations) reject new
 ///   work instead of racing the teardown.
@@ -151,8 +151,8 @@ impl CoreReadinessProbe {
         self
     }
 
-    /// Attach the process-wide [`DaemonGate`]: a recorded fault (bind
-    /// failure, shutdown) makes the probe fail before touching the
+    /// Attach the process-wide [`DaemonGate`]: a recorded fault (settlement
+    /// recovery fence, shutdown) makes the probe fail before touching the
     /// core actors.
     #[must_use]
     pub fn with_gate(mut self, gate: DaemonGate) -> Self {
@@ -167,15 +167,16 @@ impl CoreReadinessProbe {
     /// When both fail, the peer-manager error is reported.
     ///
     /// A daemon with zero configured peers or zero routes can still be ready.
-    /// During an actor-owned export-policy transition, the dedicated RIB lane
-    /// remains responsive but reports a stalled owner once its age reaches 30
-    /// seconds.
+    /// During an actor-owned export-policy transition, selection-deferral
+    /// release or source-peer teardown, the dedicated RIB lane remains
+    /// responsive but reports a stalled owner once its age reaches 30 seconds.
     ///
     /// # Errors
     ///
     /// Returns [`CoreReadinessError`] when either core actor is unavailable,
     /// drops its reply channel, or does not respond before the readiness
-    /// deadline, or when the RIB reports a stalled export-policy transition.
+    /// deadline, or when the RIB reports a stalled export-policy transition,
+    /// selection-deferral release or source-peer teardown.
     pub async fn check(&self) -> Result<(), CoreReadinessError> {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
@@ -201,7 +202,8 @@ impl CoreReadinessProbe {
     ///
     /// Returns [`CoreReadinessError`] when either core actor is unavailable,
     /// drops its reply channel, or does not respond before the readiness
-    /// deadline, or when the RIB reports a stalled export-policy transition.
+    /// deadline, or when the RIB reports a stalled export-policy transition,
+    /// selection-deferral release or source-peer teardown.
     pub async fn snapshot(&self) -> Result<CoreHealthSnapshot, CoreReadinessError> {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
@@ -216,6 +218,34 @@ impl CoreReadinessProbe {
             active_peers,
             total_routes,
         })
+    }
+
+    /// Sample whether both core actors still answer, for the service-manager
+    /// watchdog. This is a liveness question, not readiness:
+    ///
+    /// - a prompt stalled answer from the RIB proves its actor is running, so
+    ///   it counts as live (see [`core_actor_answered`]);
+    /// - both actors are always asked, so a stalled RIB answer cannot hide a
+    ///   silent peer manager;
+    /// - the [`DaemonGate`] is never consulted, so the watchdog keeps
+    ///   following the actors through coordinated shutdown;
+    /// - `deadline` is the caller's, on a seconds scale, not the 200 ms
+    ///   readiness deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first no-answer failure (peer manager first): a closed
+    /// lane, a dropped reply, or no answer before `deadline`.
+    pub async fn check_liveness(&self, deadline: Duration) -> Result<(), CoreReadinessError> {
+        let deadline = Instant::now() + deadline;
+        let (peer_manager, rib) =
+            tokio::join!(self.ping_peer_manager(deadline), self.query_rib(deadline));
+        for half in [peer_manager, rib.map(drop)] {
+            if !core_actor_answered(&half) {
+                return half;
+            }
+        }
+        Ok(())
     }
 
     async fn count_active_peers(&self, deadline: Instant) -> Result<usize, CoreReadinessError> {
@@ -318,6 +348,36 @@ where
         .map_err(|_| timeout_error)?
 }
 
+/// The watchdog's liveness predicate over one core-actor probe result: `false`
+/// only when the actor gave no answer. Every variant is classified here, so a
+/// new one cannot compile without a liveness decision.
+#[must_use]
+pub const fn core_actor_answered<T>(result: &Result<T, CoreReadinessError>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(error) => match error {
+            // No answer: the lane is closed, the reply was dropped, or the
+            // actor stayed silent past the deadline.
+            CoreReadinessError::PeerManagerUnavailable
+            | CoreReadinessError::PeerManagerTimedOut
+            | CoreReadinessError::PeerManagerDroppedReply
+            | CoreReadinessError::RibUnavailable
+            | CoreReadinessError::RibTimedOut
+            | CoreReadinessError::RibDroppedReply => false,
+            // The RIB actor answered from inside a long unit of work. Not
+            // ready, but running; aborting it would drop every session to
+            // repeat the same work after restart.
+            CoreReadinessError::RibPolicyTransitionStalled
+            | CoreReadinessError::RibSelectionReleaseStalled
+            | CoreReadinessError::RibPeerTeardownStalled
+            // The availability gate answered without asking the actors, so it
+            // says nothing about them. Liveness never consults the gate; this
+            // keeps a gated caller from aborting a settlement shutdown.
+            | CoreReadinessError::DaemonUnavailable(_) => true,
+        },
+    }
+}
+
 /// Core readiness failure reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreReadinessError {
@@ -339,8 +399,9 @@ pub enum CoreReadinessError {
     RibSelectionReleaseStalled,
     /// The RIB actor's source-peer teardown exceeded 30 seconds.
     RibPeerTeardownStalled,
-    /// The daemon recorded a fatal availability fault ([`DaemonGate`]):
-    /// BGP listener bind failure or coordinated shutdown in progress.
+    /// The daemon recorded a fatal availability fault ([`DaemonGate`]): a
+    /// runtime-config settlement recovery fence or coordinated shutdown in
+    /// progress.
     DaemonUnavailable(&'static str),
 }
 
@@ -476,6 +537,181 @@ mod tests {
             CoreReadinessError::RibSelectionReleaseStalled.to_string(),
             "RIB selection-deferral release stalled"
         );
+        assert_eq!(
+            CoreReadinessError::RibPeerTeardownStalled.to_string(),
+            "RIB peer teardown stalled"
+        );
+        assert_eq!(
+            CoreReadinessError::DaemonUnavailable("daemon is shutting down").to_string(),
+            "daemon is shutting down"
+        );
+    }
+
+    const LIVENESS_DEADLINE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn liveness_predicate_fails_only_when_an_actor_gave_no_answer() {
+        use CoreReadinessError as E;
+        assert!(core_actor_answered(&Ok(())));
+        for answered in [
+            E::RibPolicyTransitionStalled,
+            E::RibSelectionReleaseStalled,
+            E::RibPeerTeardownStalled,
+            E::DaemonUnavailable("daemon is shutting down"),
+        ] {
+            assert!(
+                core_actor_answered::<()>(&Err(answered)),
+                "{answered:?} is an answer and must keep the watchdog ping"
+            );
+        }
+        for silent in [
+            E::PeerManagerUnavailable,
+            E::PeerManagerTimedOut,
+            E::PeerManagerDroppedReply,
+            E::RibUnavailable,
+            E::RibTimedOut,
+            E::RibDroppedReply,
+        ] {
+            assert!(
+                !core_actor_answered::<()>(&Err(silent)),
+                "{silent:?} is no answer and must withhold the watchdog ping"
+            );
+        }
+    }
+
+    fn liveness_probe() -> (
+        CoreReadinessProbe,
+        mpsc::Receiver<PeerManagerReadinessQuery>,
+        mpsc::Receiver<RibReadinessQuery>,
+    ) {
+        let (peer_tx, _) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(1);
+        let (rib_query_tx, _) = mpsc::channel(1);
+        let (rib_readiness_tx, rib_readiness_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_query_tx)
+            .with_peer_manager_readiness(readiness_tx)
+            .with_rib_readiness(rib_readiness_tx);
+        (probe, readiness_rx, rib_readiness_rx)
+    }
+
+    async fn answer_ping(readiness_rx: &mut mpsc::Receiver<PeerManagerReadinessQuery>) {
+        let PeerManagerReadinessQuery::Ping { reply } = readiness_rx.recv().await.unwrap() else {
+            panic!("liveness must ping the peer manager");
+        };
+        reply.send(()).unwrap();
+    }
+
+    async fn answer_rib(
+        rib_readiness_rx: &mut mpsc::Receiver<RibReadinessQuery>,
+        answer: Result<usize, RibReadinessError>,
+    ) {
+        let RibReadinessQuery::LocRibCount { reply, .. } = rib_readiness_rx.recv().await.unwrap();
+        reply.send(answer).unwrap();
+    }
+
+    /// The defect this pins: a RIB readiness owner older than 30 seconds
+    /// answers every probe at once with a stalled error. Readiness fails;
+    /// liveness must not.
+    #[tokio::test]
+    async fn liveness_holds_for_every_stalled_rib_answer_while_readiness_fails() {
+        for stalled in [
+            RibReadinessError::PolicyTransitionStalled,
+            RibReadinessError::SelectionReleaseStalled,
+            RibReadinessError::PeerTeardownStalled,
+        ] {
+            let (probe, mut readiness_rx, mut rib_readiness_rx) = liveness_probe();
+            let (live, ()) = tokio::join!(probe.check_liveness(LIVENESS_DEADLINE), async {
+                answer_ping(&mut readiness_rx).await;
+                answer_rib(&mut rib_readiness_rx, Err(stalled)).await;
+            });
+            assert_eq!(live, Ok(()), "{stalled:?} proves the RIB actor is running");
+
+            let (ready, ()) = tokio::join!(probe.check(), async {
+                answer_ping(&mut readiness_rx).await;
+                answer_rib(&mut rib_readiness_rx, Err(stalled)).await;
+            });
+            assert!(ready.is_err(), "{stalled:?} must still fail readiness");
+        }
+    }
+
+    /// Readiness returns the RIB's stalled error without waiting for the peer
+    /// manager. Liveness must wait for both, or a stalled RIB answer would
+    /// keep a silent peer manager pinged forever.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_rib_answer_does_not_hide_a_silent_peer_manager() {
+        let (probe, _readiness_rx, mut rib_readiness_rx) = liveness_probe();
+        let started = Instant::now();
+        let (live, ()) = tokio::join!(
+            probe.check_liveness(LIVENESS_DEADLINE),
+            answer_rib(
+                &mut rib_readiness_rx,
+                Err(RibReadinessError::PolicyTransitionStalled)
+            )
+        );
+        assert_eq!(live, Err(CoreReadinessError::PeerManagerTimedOut));
+        assert_eq!(started.elapsed(), LIVENESS_DEADLINE);
+    }
+
+    /// An answer slower than the 200 ms readiness deadline is still an
+    /// answer; silence for the whole liveness deadline is not.
+    #[tokio::test(start_paused = true)]
+    async fn liveness_uses_its_own_deadline_not_the_readiness_deadline() {
+        let (probe, mut readiness_rx, mut rib_readiness_rx) = liveness_probe();
+        let (live, ()) = tokio::join!(probe.check_liveness(LIVENESS_DEADLINE), async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            answer_ping(&mut readiness_rx).await;
+            answer_rib(&mut rib_readiness_rx, Ok(0)).await;
+        });
+        assert_eq!(live, Ok(()));
+
+        let (live, ()) = tokio::join!(
+            probe.check_liveness(LIVENESS_DEADLINE),
+            answer_ping(&mut readiness_rx)
+        );
+        assert_eq!(live, Err(CoreReadinessError::RibTimedOut));
+    }
+
+    #[tokio::test]
+    async fn liveness_fails_on_closed_lanes_and_dropped_replies() {
+        let (probe, readiness_rx, mut rib_readiness_rx) = liveness_probe();
+        drop(readiness_rx);
+        let (live, ()) = tokio::join!(
+            probe.check_liveness(LIVENESS_DEADLINE),
+            answer_rib(&mut rib_readiness_rx, Ok(0))
+        );
+        assert_eq!(live, Err(CoreReadinessError::PeerManagerUnavailable));
+
+        let (probe, mut readiness_rx, rib_readiness_rx) = liveness_probe();
+        drop(rib_readiness_rx);
+        let (live, ()) = tokio::join!(
+            probe.check_liveness(LIVENESS_DEADLINE),
+            answer_ping(&mut readiness_rx)
+        );
+        assert_eq!(live, Err(CoreReadinessError::RibUnavailable));
+
+        let (probe, mut readiness_rx, mut rib_readiness_rx) = liveness_probe();
+        let (live, ()) = tokio::join!(probe.check_liveness(LIVENESS_DEADLINE), async {
+            answer_ping(&mut readiness_rx).await;
+            let RibReadinessQuery::LocRibCount { reply, .. } =
+                rib_readiness_rx.recv().await.unwrap();
+            drop(reply);
+        });
+        assert_eq!(live, Err(CoreReadinessError::RibDroppedReply));
+    }
+
+    /// Shutdown trips the gate; the watchdog must keep following the actors
+    /// until they go away, however the caller built its probe.
+    #[tokio::test]
+    async fn liveness_ignores_the_availability_gate() {
+        let (probe, mut readiness_rx, mut rib_readiness_rx) = liveness_probe();
+        let gate = DaemonGate::new();
+        let probe = probe.with_gate(gate.clone());
+        gate.begin_shutdown();
+        let (live, ()) = tokio::join!(probe.check_liveness(LIVENESS_DEADLINE), async {
+            answer_ping(&mut readiness_rx).await;
+            answer_rib(&mut rib_readiness_rx, Ok(0)).await;
+        });
+        assert_eq!(live, Ok(()));
     }
 
     #[test]

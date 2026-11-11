@@ -55,9 +55,14 @@ systemd unit the daemon also sends `READY=1` only after every configured gRPC
 listener is bound and that boundary is reached. A gRPC bind failure prevents
 configured-peer registration, BGP ingress, telemetry, dial-out, and readiness
 publication, then enters shortened coordinated teardown. The daemon sends
-`STOPPING=1` when coordinated shutdown begins and `WATCHDOG=1` from the same
-core-actor probe. PID 1 independently enforces the unit's five-minute watchdog
-deadline; see [deployment.md](../how-to/deployment.md#systemd).
+`STOPPING=1` when coordinated shutdown begins and `WATCHDOG=1` after each
+liveness sample of the same two actors, taken every 10 seconds with a
+5-second deadline. A RIB that answers "stalled" fails `/readyz` but is still
+pinged; only an actor that gives no answer withholds the ping, and each such
+sample increments `bgp_systemd_watchdog_pings_skipped_total`. PID 1
+independently enforces the unit's five-minute watchdog deadline, which aborts
+the daemon about five minutes (285 to 305 seconds) after an actor stops
+answering; see [deployment.md](../how-to/deployment.md#systemd).
 
 ### Runtime-config settlement fail-stop
 
@@ -1772,6 +1777,37 @@ PeerManager and the RIB, which run on the daemon runtime: if they cannot be
 scheduled, it returns `503` once the 200 ms deadline passes. The listener costs
 one OS thread, plus a short-lived blocking thread while a scrape renders.
 
+`/readyz` does not bound route-processing latency. While the RIB actor runs
+one long unit of work (an export-policy transition, a selection-deferral
+release or a source-peer teardown), it answers the readiness lane between
+bounded steps: `/readyz` keeps answering `200` for the first 30 seconds of
+that work while inbound route updates wait behind it. A green `/readyz`
+therefore means the actors answer, not that an UPDATE received now is
+processed promptly. After 30 seconds the answer becomes
+`503 not ready: RIB ... stalled` until the work finishes; that is a report of
+slow progress, not of a dead actor, and it is not a reason to restart the
+daemon.
+
+Nothing restarts a daemon in that state automatically. The systemd watchdog
+pings for as long as the RIB answers, so a unit of work that keeps passing its
+checkpoints can answer "stalled" indefinitely and is never aborted. This is
+deliberate: a restart would drop every session and repeat the same work.
+Bound it with alerting instead. `bgp_readiness_probe_failures_total` with
+`reason="rib_stalled"` rises on every probe while the condition lasts (the
+shipped `BgpReadinessRibStalled` rule warns after ten minutes), and
+`bgp_rib_readiness_query_wait_seconds{seam}` names the kind of work. An
+operator who judges that the work is not finishing restarts the daemon by
+hand.
+
+The alert depends on a recurring `/readyz` probe. The counter moves only on
+HTTP `/readyz` requests, not on `/metrics` scrapes or `rbgp health`, so an
+install that only scrapes `/metrics` never fires it and nothing bounds a
+stalled RIB. Request `/readyz` at least once a minute, for example with a
+Prometheus blackbox-exporter HTTP check or a systemd timer that runs `curl`
+against it; see [deployment.md](../how-to/deployment.md#systemd). The rule
+also cannot tell one long stall from separate ones less than five minutes
+apart: it fires for stalled answers recurring or sustained over ten minutes.
+
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.
 EVPN, FIB, and peer-count health are surfaced through their own
@@ -1828,8 +1864,8 @@ succeeded only after it), `peer_manager_unavailable` (PeerManager channel
 closed or reply dropped), `peer_manager_timeout`, `rib_unavailable` (RIB
 channel closed or reply dropped), `rib_timeout`, `rib_stalled` (an export-policy
 transition, selection-deferral release or source-peer teardown exceeded its
-30-second bound) and `daemon_unavailable` (listener bind failure or coordinated
-shutdown). The `503` body and the WARN log keep the exact error. Probes that
+30-second bound) and `daemon_unavailable` (a runtime-config settlement recovery
+fence or coordinated shutdown). The `503` body and the WARN log keep the exact error. Probes that
 succeed are not counted, including slow ones that only log a delayed-phase
 warning.
 
@@ -2078,6 +2114,7 @@ name it.
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |
 | `bgp_rib_actor_work_duration_seconds{work_unit}` | Wall-clock duration of RIB actor work components. The closed `work_unit` set is `route_chunk` (construction and processing of one bounded route chunk, excluding its drained-batch tail), `distribute_flush` (one outbound pass across the peer set per distribution window: a route batch plus any unicast-only route messages that were already queued when it drained, up to 256 messages, 4,096 routes, 1,024 changed prefixes or 5 ms, so one observation can cover many UPDATE messages and the series count is windows, not messages; includes readiness servicing at peer boundaries), `exact_export_retire` (retiring exact-export rejections when that window settles), `attribute_gc` (deadline-triggered attribute-intern collection outside ingest chunks), and `flowspec_validation` (a receive-side feasibility slice, including completed selection/distribution). Validation slices cap candidate visits; dependency discovery, peer inventory, and distribution add work outside that visit count. Count-triggered collection remains included in its route chunk. Compare the `le="0.2"` bucket against the series count to count components above 200 ms. These are component timings for correlation with readiness waits, not uninterrupted stalls, a bound on probe latency, or coverage of all actor work |
+| `bgp_systemd_watchdog_pings_skipped_total` | Liveness samples that withheld the systemd `WATCHDOG=1` ping because PeerManager or the RIB gave no answer within the sample deadline (5 s under the shipped unit): a timeout, a closed channel or a dropped reply. A ping that the notify socket refused is counted too. A RIB "stalled" answer is not counted and keeps the ping. Zero without a systemd watchdog. Under the shipped `WatchdogSec=5min`, a count that keeps rising means PID 1 aborts the daemon about five minutes after the last delivered ping; a silent actor adds one every 6 seconds and logs a WARN naming it. The counter also moves during a stop, once the peer manager starts draining sessions; systemd no longer enforces the watchdog by then. The shipped `BgpSystemdWatchdogPingsSkipped` rule fires once skipping has continued for about two and a half minutes (at least 15 skips in two minutes, sustained for another minute); a single transient skip does not fire it |
 | `bgp_rib_actor_turn_duration_seconds{kind}` | Wall-clock duration of one RIB actor turn: the synchronous handling of one inbound RIB message from any lane (primary updates, general queries, operator summaries), labelled by message kind. The closed `kind` set is `routes`, `end_of_rib`, `peer_up`, `peer_down`, `peer_lifecycle`, `peer_state`, `outbound_policy`, `outbound_replay`, `route_refresh`, `injection`, `validation`, `dampening`, `query`. `peer_lifecycle` is neighbor deletion, release, rebind and graceful-restart entry; `peer_state` is per-session context such as policy, ADD-PATH, ORF and slow-peer state; `outbound_policy` is export-policy replacement and re-evaluation, outbound prefix limits and conditional advertisement; `outbound_replay` is a forced outbound replay or refresh; `injection` is API route, FlowSpec and EVPN injection and lease expiry; `validation` is RPKI and ASPA table updates; `query` covers every read, explain and subscription. A turn never yields, so it lies within one actor poll; readiness queries answered at checkpoints inside it are included in its time. Operator summaries answered from a synchronous replacement's frozen projection never reach the message dispatcher: their time counts toward whichever turn or work unit holds the replacement, and they are not observed as `query`. VPN, BGP-LS, labeled and RTC messages are processed and distributed inside their `routes` turn. Unicast, FlowSpec and EVPN messages are only admitted there; their chunk processing and distribution windows run later and appear as `route_chunk` and `distribute_flush` in `bgp_rib_actor_work_duration_seconds`. A clean policy transition's later polls appear in `bgp_rib_policy_transition_actor_poll_duration_seconds`. Attribute GC and FlowSpec validation slices are their own work units (`attribute_gc`, `flowspec_validation`). Other timer expiries (GR and LLGR stale sweeps, refresh windows, End-of-RIB holds, selection deferral, conditional advertisement), dirty-resync ticks, destination pre-staging and deferred initial table dumps are not message turns, and no histogram covers the whole unit; they show in `bgp_rib_actor_slice_seconds`. Use this histogram to find which message kind holds the actor. A turn of 200 ms or longer (the `/readyz` deadline, an exact bucket edge) also logs `slow RIB actor turn` at WARN with `kind`, `elapsed_ms`, and `peer`, `routes` (the batch size, or the departing peer's unicast routes) or `members` (cohort size) where they apply. The log is limited to one line per 10 seconds and its `suppressed` field counts the slow turns not logged; the histogram counts all of them. All series are exported at 0 from startup |
 | `bgp_rib_readiness_query_wait_seconds{seam}` | Wall-clock delay from admission to the dedicated RIB readiness lane until actor service. The closed `seam` set is `actor_loop` (ordinary drains, including in-pass ingest servicing), `policy_transition_fence` (synchronous replacement checkpoints), `selection_release` (synchronous selection-deferral release checkpoints), and `peer_teardown` (source-key collection and removal recomputation/distribution, including an injection lease expiry batch). Records service even after a caller times out, but queries canceled before admission or never served contribute no sample. Excludes channel admission wait, the prior peer-manager probe, and reply delivery; it is not full `/readyz` latency or a probe-timeout rate |
 | `bgp_rib_actor_slice_seconds{stage}` | Wall-clock durations of RIB actor work. `stage="actor_poll"` is one whole poll of the actor task, including executor handoffs during which other tasks run; it is not uninterrupted worker occupancy. A long poll is not a query-service outage: readiness checkpoints answer queries synchronously inside a poll and the loop drains queries before yielding. The other closed stages split each poll at every 64th readiness checkpoint and at the poll end, and label each slice by the most recent checkpoint at or before its end, so work after the last checkpoint keeps that checkpoint's stage: `selection`, `retirement`, `update_group`, `flowspec`, `refresh`, and `other` (unnamed checkpoints). Checkpoints fire per item in long loops and the clock is read only at a split, so a gap between two checkpoints is never divided. A slice above 200 ms is wall-clock work labelled by its stage, not necessarily a single unchecked gap: it can span up to 64 checkpoints, at which pending queries were answered. Slices of a poll with no checkpoint appear only in `actor_poll`. Buckets run from 1 ms to 2 s, dense around 25, 50, 100, 200, and 500 ms |

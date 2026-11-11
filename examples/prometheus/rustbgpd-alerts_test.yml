@@ -2626,3 +2626,173 @@ tests:
                 stacked on this binding and is excluded from the uplink signal.
                 See the daemon log and rbgp doctor
                 evpn.es.bond3.core_isolation.
+
+  # ── BgpReadinessRibStalled ─────────────────────────────────────
+  # rib_stalled failures start at 5m and continue; the 10m `for` fires at
+  # 15m. Timeouts on the same instance never fire this alert.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_readiness_probe_failures_total{reason="rib_stalled", instance="rs1:9179"}'
+        values: "0x4 1+1x25"
+      - series: 'bgp_readiness_probe_failures_total{reason="rib_timeout", instance="rs1:9179"}'
+        values: "0+1x29"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BgpReadinessRibStalled
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BgpReadinessRibStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: rib_stalled
+              instance: rs1:9179
+            exp_annotations:
+              summary: "Stalled RIB readiness answers on rs1:9179 for 10 minutes"
+              description: >-
+                /readyz on rs1:9179 has returned stalled RIB
+                answers repeatedly or continuously over the last 10 minutes. Either
+                one unit of work (export-policy transition, selection-deferral
+                release or peer teardown) is still running, or separate units each
+                ran past 30 seconds within five minutes of one another. The actor is
+                answering, so the systemd watchdog does not restart it, but inbound
+                route updates wait behind that work. Check the daemon WARN log and
+                bgp_rib_readiness_query_wait_seconds for the seam; restart only if
+                the work is not finishing. This alert needs something to request
+                /readyz at least once a minute: without a recurring probe the
+                counter never moves.
+
+  # Separate brief stalls four minutes apart (5m, 9m, 13m, 17m): every 5m
+  # window holds one, so this fires at 15m exactly like one long stall. The
+  # annotation says "repeatedly or continuously" for that reason.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_readiness_probe_failures_total{reason="rib_stalled", instance="rs2:9179"}'
+        values: "0x4 1x3 2x3 3x3 4x10"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BgpReadinessRibStalled
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BgpReadinessRibStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: rib_stalled
+              instance: rs2:9179
+            exp_annotations:
+              summary: "Stalled RIB readiness answers on rs2:9179 for 10 minutes"
+              description: >-
+                /readyz on rs2:9179 has returned stalled RIB
+                answers repeatedly or continuously over the last 10 minutes. Either
+                one unit of work (export-policy transition, selection-deferral
+                release or peer teardown) is still running, or separate units each
+                ran past 30 seconds within five minutes of one another. The actor is
+                answering, so the systemd watchdog does not restart it, but inbound
+                route updates wait behind that work. Check the daemon WARN log and
+                bgp_rib_readiness_query_wait_seconds for the seam; restart only if
+                the work is not finishing. This alert needs something to request
+                /readyz at least once a minute: without a recurring probe the
+                counter never moves.
+
+  # ── BgpSystemdWatchdogPingsSkipped ─────────────────────────────
+  # One transient skipped ping at 5m, then pings resume: the counter steps
+  # once and stays flat. The rule must stay quiet at every point where the
+  # step is still inside a lookback window.
+  - interval: 15s
+    input_series:
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs1:9179"}'
+        values: "0x19 1x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 6m30s
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+
+  # A silent actor adds one skip every 6 s (5 s sample deadline plus the 1 s
+  # retry), 5 per 30 s here, from 5m on rs1. The 2m increase reaches 15 at
+  # 6m30s and the 1m `for` fires by 8m, about three minutes into a silence
+  # that systemd aborts after five. rs2 skips for one minute and recovers:
+  # it never reaches 15 and stays quiet.
+  - interval: 30s
+    input_series:
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs1:9179"}'
+        values: "0x10 5+5x20"
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs2:9179"}'
+        values: "0x10 5 10x20"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: rs1:9179
+            exp_annotations:
+              summary: "systemd watchdog pings skipped on rs1:9179"
+              description: >-
+                rustbgpd on rs1:9179 has skipped most systemd
+                watchdog pings for the last two minutes and is still skipping
+                them: a core actor is not answering liveness samples, or the
+                notify socket refuses the ping. If this is not a stop in
+                progress, systemd aborts and restarts the daemon once
+                WatchdogSec passes without a ping. The daemon WARN log names the
+                silent actor.
+
+  # A notify-socket outage: 30 refused pings in 30 s (one per second), then
+  # pings resume. The skips stay inside the 2m window for two minutes, but
+  # nothing is being skipped any more, so the rule must stay quiet.
+  - interval: 15s
+    input_series:
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs1:9179"}'
+        values: "0x19 15 30x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 6m30s
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+
+  # The same two shapes at a 60 s scrape. rs1 skips 10 per minute from 5m
+  # and fires; rs2 has the 30-skip outage inside one scrape and stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs1:9179"}'
+        values: "0x4 10+10x20"
+      - series: 'bgp_systemd_watchdog_pings_skipped_total{instance="rs2:9179"}'
+        values: "0x4 30x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BgpSystemdWatchdogPingsSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: rs1:9179
+            exp_annotations:
+              summary: "systemd watchdog pings skipped on rs1:9179"
+              description: >-
+                rustbgpd on rs1:9179 has skipped most systemd
+                watchdog pings for the last two minutes and is still skipping
+                them: a core actor is not answering liveness samples, or the
+                notify socket refuses the ping. If this is not a stop in
+                progress, systemd aborts and restarts the daemon once
+                WatchdogSec passes without a ping. The daemon WARN log names the
+                silent actor.
+

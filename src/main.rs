@@ -7181,18 +7181,19 @@ async fn run<T>(
 
     // systemd `READY=1` shares the readiness boundary above: every configured
     // gRPC listener is bound, the peer roster is installed, and BGP ingress is
-    // active. The watchdog ping reuses the core-actor probe without the
-    // availability gate, so it
-    // reflects PeerManager/RIB responsiveness and keeps running through
-    // coordinated shutdown until the actors themselves go away.
+    // active. The watchdog ping is a liveness sample of the same two actors,
+    // not readiness: it never consults the availability gate, so it keeps
+    // running through coordinated shutdown until the actors themselves go
+    // away, and a RIB that answers "stalled" from inside a long unit of work
+    // is still pinged. It samples from its own thread, not this runtime: a
+    // reply sent from inside a synchronous RIB unit of work would otherwise
+    // strand the sampler in that worker's LIFO slot until the unit ended.
     let sd_notify = sd_notify::SdNotify::from_env();
     if !initial_peer_boot_failed {
         sd_notify.ready();
-        let watchdog_notify = sd_notify.clone();
-        tokio::spawn(async move {
-            watchdog_notify
-                .run_watchdog(|| async { core_probe.check().await.is_ok() })
-                .await;
+        sd_notify.spawn_watchdog(metrics.clone(), move |deadline| {
+            let probe = core_probe.clone();
+            async move { sd_notify::core_actors_live(&probe, deadline).await }
         });
     }
 
@@ -9767,6 +9768,12 @@ mod tests {
         assert!(metrics_startup < sd_ready);
         assert!(grpc_startup < sd_ready);
         assert!(production.contains("if !initial_peer_boot_failed {\n        sd_notify.ready();"));
+        // The watchdog samples liveness, never the readiness check.
+        // It runs on the watchdog's own thread, never as a task here.
+        assert!(production.contains(
+            "sd_notify.spawn_watchdog(metrics.clone(), move |deadline| {\n            let probe = core_probe.clone();\n            async move { sd_notify::core_actors_live(&probe, deadline).await }"
+        ));
+        assert!(!production.contains("run_watchdog"));
         assert_eq!(production.matches("sd_notify.stopping();").count(), 1);
         assert!(production.contains("daemon_gate.begin_shutdown();\n    sd_notify.stopping();"));
     }

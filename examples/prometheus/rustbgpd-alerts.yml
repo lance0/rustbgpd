@@ -641,6 +641,74 @@ groups:
             warning; bgp_rib_policy_transition_last_duration_milliseconds is
             the previous terminal sample until this transition completes.
 
+      - alert: BgpReadinessRibStalled
+        # The RIB answers "stalled" once one unit of work has run for 30
+        # seconds and keeps answering it until the work ends. The systemd
+        # watchdog deliberately does not restart a daemon in that state, so
+        # this alert is what bounds it. The counter cannot tell one long
+        # stall from separate ones less than five minutes apart; both fire.
+        # It moves only on HTTP /readyz requests: an install that scrapes
+        # /metrics and never requests /readyz never fires this alert.
+        expr: increase(bgp_readiness_probe_failures_total{reason="rib_stalled"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stalled RIB readiness answers on {{ $labels.instance }} for 10 minutes"
+          description: >-
+            /readyz on {{ $labels.instance }} has returned stalled RIB
+            answers repeatedly or continuously over the last 10 minutes. Either
+            one unit of work (export-policy transition, selection-deferral
+            release or peer teardown) is still running, or separate units each
+            ran past 30 seconds within five minutes of one another. The actor is
+            answering, so the systemd watchdog does not restart it, but inbound
+            route updates wait behind that work. Check the daemon WARN log and
+            bgp_rib_readiness_query_wait_seconds for the seam; restart only if
+            the work is not finishing. This alert needs something to request
+            /readyz at least once a minute: without a recurring probe the
+            counter never moves.
+
+      - alert: BgpSystemdWatchdogPingsSkipped
+        # Each increment is a liveness sample in which PeerManager or the RIB
+        # gave no answer, or a ping the notify socket refused. A silent actor
+        # adds one every 6 s (the 5 s sample deadline plus the 1 s retry), so
+        # 20 in two minutes; a closed channel adds one per second. The
+        # threshold of 15 means skipping covered most of the window, and the
+        # `for` means it is still going on: one transient skip, or a minute
+        # of skips that then stops, never fires. Continuous skipping fires
+        # after about two and a half minutes, ahead of the abort PID 1
+        # delivers five minutes after the last ping under the shipped
+        # WatchdogSec=5min. The counter also moves while the peer manager
+        # drains sessions during a stop.
+        #
+        # The two offset terms require a skip in the last minute and in the
+        # minute before it, read from stored samples so they hold at any
+        # scrape interval up to a minute. Without them a short burst (a 30 s
+        # notify-socket outage is 30 skips) kept the increase above 15 for
+        # two minutes after pings had resumed. A burst shorter than a minute
+        # satisfies both terms for less than the `for`. A counter reset makes
+        # a difference negative and a series younger than two minutes has no
+        # offset sample; both read as not firing.
+        expr: >-
+          increase(bgp_systemd_watchdog_pings_skipped_total[2m]) >= 15
+          and (bgp_systemd_watchdog_pings_skipped_total
+          - bgp_systemd_watchdog_pings_skipped_total offset 1m) > 0
+          and (bgp_systemd_watchdog_pings_skipped_total offset 1m
+          - bgp_systemd_watchdog_pings_skipped_total offset 2m) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "systemd watchdog pings skipped on {{ $labels.instance }}"
+          description: >-
+            rustbgpd on {{ $labels.instance }} has skipped most systemd
+            watchdog pings for the last two minutes and is still skipping
+            them: a core actor is not answering liveness samples, or the
+            notify socket refuses the ping. If this is not a stop in
+            progress, systemd aborts and restarts the daemon once
+            WatchdogSec passes without a ping. The daemon WARN log names the
+            silent actor.
+
       - alert: BgpPolicyTransitionActorPollExceededReadinessBudget
         # Histogram subtraction classifies observations above the exact
         # 200ms bucket boundary. `ignoring(le)` is required to match the
