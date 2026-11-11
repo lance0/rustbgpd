@@ -1815,8 +1815,9 @@ impl EvpnRecoveryProvenance {
     /// what it had taken, and it and every later record are still capturing
     /// with nothing captured, for the caller to capture each alone. Only a
     /// record's own peer cap exhausts it, and the others still complete. It
-    /// is then exhausted holding nothing, where its own capture would stop
-    /// part-way holding the rows before the cap.
+    /// is then exhausted holding nothing, whether the cap refused its credit
+    /// or its bitset at sealing, where its own capture would stop holding
+    /// the rows taken before the cap.
     pub(in crate::manager) fn capture_shared_with_checkpoint(
         &mut self,
         handles: &[ProvenanceHandle],
@@ -1898,6 +1899,11 @@ impl EvpnRecoveryProvenance {
                         break;
                     }
                     Err(error) => {
+                        // Its own cap: the credit, or the bitset at sealing
+                        // with every entry already taken. Exhausted either
+                        // way, holding nothing; the list still holds each
+                        // slot, so none is freed under the later records.
+                        self.release_held(index, checkpoint);
                         self.mark_exhausted(handle, error);
                     }
                 }
@@ -3054,6 +3060,42 @@ mod tests {
             batch.peer_usage(owners[0].peer).retained,
             reference.peer_usage(owners[0].peer).retained
         );
+    }
+
+    /// A peer cap can admit a record's whole credit and then refuse its
+    /// bitset at sealing, with every entry already taken. That refusal also
+    /// leaves the record exhausted holding nothing, charged its record
+    /// alone, and the next record still captures.
+    #[test]
+    fn shared_capture_refused_at_sealing_holds_nothing() {
+        let owners = [owner(1, 7), owner(2, 7)];
+        // The first record takes all 520 rows; the second sourced 100.
+        let rows: Vec<_> = (0..520)
+            .map(|n| {
+                let source = if n < 100 {
+                    owners[1].peer
+                } else {
+                    owner(250, 1).peer
+                };
+                (key(n), source)
+            })
+            .collect();
+        // Slots and buffer need 45,696 above the record; the bitset 128 more.
+        let tight = (size_of::<Record>() + 45_700, DAEMON_LIMIT_BYTES);
+        let (ledger, handles, walk) = try_captured(tight, &rows, &owners, true);
+        walk.unwrap();
+        assert_eq!(
+            ledger.exhaustion(handles[0]).map(|error| error.cause),
+            Some(ExhaustionCause::PeerLimit)
+        );
+        assert_eq!(ledger.retained_keys_for_test(handles[0]), Some(Vec::new()));
+        assert_eq!(
+            ledger.peer_usage(owners[0].peer).retained,
+            size_of::<Record>()
+        );
+        assert_eq!(ledger.proof_keys(handles[1]).unwrap().unwrap().len(), 420);
+        // Only the second record and its earlier snapshot hold slots.
+        assert_eq!(ledger.holders_for_test().values().sum::<u32>(), 420 + 40);
     }
 
     /// The one buffer reservation matches the doubling's capacity at every

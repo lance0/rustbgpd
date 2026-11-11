@@ -1436,10 +1436,11 @@ proof:
   that gap refuses the member's own capture at the doubling and admits the
   shared one, which then seals a proof charged what its own capture retains
   under a cap that admits it.
-- A member whose own peer cap refuses the capture is refused its whole
-  credit and is exhausted holding no row. Its own capture stops at the cap
-  holding the rows before it. Both reset the session, and nothing reads an
-  exhausted record's rows.
+- A member whose own peer cap refuses the capture is exhausted holding no
+  row, whether the cap refuses its whole credit or, with every entry taken,
+  its bitset at sealing. Its own capture stops at the cap holding the rows
+  before it. Both reset the session, and nothing reads an exhausted record's
+  rows.
 - The daemon peak includes the slot list described below.
 - If every sharing member exhausts its own credit, the slot space has grown
   for the whole table, and the rows nobody took are free again until the
@@ -1518,7 +1519,9 @@ member's charge returns to its record alone, and every member ends with the
 proof, charge and peak separate captures leave; one allocation refused at each
 point of a three-member pass in turn (the list, slot-space growth, each
 member's buffer growths and bitset) leaves every member Ready with no reset
-pending; a peer cap every member exceeds exhausts each holding no row; the
+pending; a peer cap every member exceeds exhausts each holding no row, and
+so does one that admits a member's credit and refuses its bitset at sealing,
+while the next member still captures; the
 per-peer peak equals the formula above on both sides of the doubling band and
 the retained charge is equal in both; a peer cap inside the band refuses a
 member's own capture and seals the shared one at the same retained charge;
