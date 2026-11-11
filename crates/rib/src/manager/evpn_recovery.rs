@@ -1443,15 +1443,20 @@ impl RibManager {
                 .is_ok()
         };
         for (peer, handle) in walking {
-            if !shared {
-                // One member left, or the shared slot list was refused.
-                self.walk_evpn_capture(peer, false, &[], Some(gid), handle);
-            } else if !self
+            if self
                 .evpn_recovery
                 .proof(handle)
                 .is_ok_and(|proof| proof.is_some())
             {
+                continue;
+            }
+            if shared || self.evpn_recovery.exhaustion(handle).is_some() {
+                // Its own peer cap refused it, as in its own capture.
                 self.refuse_evpn_capture(peer, handle);
+            } else {
+                // One member left, or the ledger stopped sharing before
+                // this member was sealed: it is still capturing, empty.
+                self.walk_evpn_capture(peer, false, &[], Some(gid), handle);
             }
         }
     }

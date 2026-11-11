@@ -745,3 +745,120 @@ fn shared_capture_walk_charge_returns_to_baseline() {
     );
     assert!(pass.manager.evpn_recovery.holders_for_test().is_empty());
 }
+
+/// The cause a member's capture was refused for, or `None` with its proof
+/// length when it holds a Ready proof.
+fn capture_outcome(
+    pass: &OwnedPass,
+    peer: PeerId,
+) -> Result<usize, crate::update::EvpnRecoveryExhaustionCause> {
+    let ledger = &pass.manager.evpn_recovery;
+    let handle = pass.manager.evpn_recovery_handle(peer).unwrap();
+    match ledger.exhaustion(handle) {
+        Some(error) => Err(error.cause),
+        None => Ok(ledger
+            .proof(handle)
+            .unwrap()
+            .expect("neither refused nor Ready")
+            .len()),
+    }
+}
+
+/// A member with an unreleased private EVPN row cannot prove its admitted
+/// set from the group table. The shared walk must refuse that member, as
+/// its own walk does, and still capture for the others.
+#[test]
+fn shared_capture_walk_refuses_only_the_member_with_unreleased_private_rows() {
+    for members in [3_u8, 2] {
+        let mut pass = OwnedPass::new(members, 64, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        let held = pass.peers[1];
+        pass.manager
+            .adj_ribs_out
+            .get_mut(&held)
+            .unwrap()
+            .insert_evpn(make_evpn_imet(Ipv4Addr::new(203, 0, 113, 77), 3));
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        pass.manager.evpn_recovery.assert_consistent();
+        for &peer in &pass.peers {
+            if peer == held {
+                assert_eq!(
+                    capture_outcome(&pass, peer),
+                    Err(crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable)
+                );
+                assert!(pass.manager.dirty_peers.contains(&peer));
+            } else {
+                // With two members, the one left takes its own walk.
+                assert_eq!(capture_outcome(&pass, peer), Ok(64), "{members} members");
+            }
+        }
+    }
+}
+
+/// Desired state is usable only after a complete transfer: a table row with
+/// no received input refuses every sharing member, as it refuses one.
+#[test]
+fn shared_capture_walk_refuses_every_member_of_an_incomplete_projection() {
+    let mut pass = OwnedPass::new(3, 64, true);
+    let keys = pass.changed();
+    let gid = pass.gid;
+    let group = pass.manager.group_ribs.get_mut(&gid).unwrap();
+    let displaced = group.table.iter_evpn().next().unwrap().key();
+    group.table.remove_evpn(&displaced);
+    group
+        .table
+        .insert_evpn(make_evpn_imet(Ipv4Addr::new(203, 0, 113, 77), 3));
+    assert!(!group.evpn_projection_complete());
+    pass.manager.stage_group_evpn_keys(gid, &keys);
+    pass.manager.evpn_recovery.assert_consistent();
+    for &peer in &pass.peers {
+        assert_eq!(
+            capture_outcome(&pass, peer),
+            Err(crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable)
+        );
+    }
+}
+
+/// One allocation refused anywhere in the shared walk (the slot list, the
+/// slot space, a member's entry buffer or its bitset) is not a refusal of
+/// any member's own capture: the pass falls back and every member still
+/// ends with its whole proof, with nothing left charged for the attempt.
+#[test]
+fn one_refused_allocation_in_the_shared_walk_leaves_every_member_ready() {
+    let whole = {
+        let mut pass = OwnedPass::new(3, 64, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        pass.manager.evpn_recovery.daemon_usage().retained
+    };
+    // The list, one slot-space growth, then three buffer growths and a
+    // bitset per member: fourteen allocations, each refused once in turn.
+    for refused in 0..16 {
+        let mut pass = OwnedPass::new(3, 64, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        pass.manager
+            .evpn_recovery
+            .fail_allocation_after_for_test(Some(refused));
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        pass.manager
+            .evpn_recovery
+            .fail_allocation_after_for_test(None);
+        pass.manager.evpn_recovery.assert_consistent();
+        for &peer in &pass.peers {
+            assert_eq!(
+                capture_outcome(&pass, peer),
+                Ok(64),
+                "allocation {refused} refused"
+            );
+            assert!(!pass.manager.evpn_recovery_reset_pending(peer));
+        }
+        assert_eq!(
+            pass.manager.evpn_recovery.daemon_usage().retained,
+            whole,
+            "allocation {refused} refused"
+        );
+    }
+}

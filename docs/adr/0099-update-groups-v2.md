@@ -1425,12 +1425,27 @@ resizes. Section E charges reserved capacity, and this is charged to the
 daemon, not to any peer, before it is allocated, and refunded before the call
 returns. The list holds each slot it names, so a key no member has taken yet
 cannot be reused under it; those holds are released before the call returns.
-Slot IDs still never leave the ledger and no state outlives the call. If the
-daemon cap or the allocator refuses the list, or the slot space cannot grow
-during the walk, the walk releases what it interned, captures nothing, and
-every member takes its own capture, which meets the same limit on its own
-terms. A member that exhausts its own credit part-way is marked exhausted as
-in its own capture, and the others complete.
+Slot IDs still never leave the ledger and no state outlives the call.
+
+The list stays charged while each member appends and is sealed, so the daemon
+total a member's entry buffer or bitset is checked against is larger than the
+one its own capture would meet. A daemon-cap or allocator refusal met while
+the list is charged therefore never exhausts a member. Wherever it lands (the
+list itself, slot-space growth during the walk, or a member's own storage),
+the walk stops sharing: members already sealed keep their proofs, the member
+that met the refusal gives back the entries it had taken and their credit,
+the list's holds and charge are released, and that member and every later one
+take their own capture, which meets the cap without the list. Only a member's
+own peer cap exhausts it part-way, as in its own capture, and the others
+complete.
+
+**Withdrawal order.** A proof iterates in slot order, and callers that need
+key order sort their own output. A replay that emits proof-derived
+withdrawals without sorting them (the private handoff and the resync walk of
+the admitted set) therefore puts them in slot order. The set of withdrawn
+NLRI is identical; their order inside an UPDATE can differ from separate
+captures, as it already could between two member orders. A grouped member's
+commit sorts its withdrawals and is unaffected.
 
 **Readiness.** The shared walk takes the ingest readiness owner when none
 holds the lane, as one member's walk does. It offers a checkpoint for every
@@ -1449,13 +1464,21 @@ and a group whose sendable set gains RT-Constrain, where neither captures;
 the daemon peak differs by no more than
 the slot list; the ledger's index probes do not grow from 2 to 16 members
 beginning in one pass, and do when sharing is disabled; the slot list is
-charged while it lives and the daemon charge returns to its baseline; a
-daemon cap with room for every separate capture but not for the list refuses
-the walk and each member then captures alone to the same result; an allocator
-refusal of the list, or of slot-space growth part-way, leaves no hold and no
-capture behind; a peer cap every member exceeds exhausts each at the same key
-as its own capture; and the bitset-span difference stays within its bound.
-The readiness regressions for refused owned passes hold with the walk's new
-checkpoint count. These are component results with EVPN ownership enabled in
+charged while it lives and the daemon charge returns to its baseline; across
+daemon caps from "the list fits" to "the whole walk fits", with the slot space
+already grown so that each refusal lands on a member's entry buffer or
+bitset, no member is exhausted, sealed members stay Ready, the refused
+member's charge returns to its record alone, and every member ends with the
+proof, charge and peak separate captures leave; one allocation refused at each
+point of a three-member pass in turn (the list, slot-space growth, each
+member's buffer growths and bitset) leaves every member Ready with no reset
+pending; a peer cap every member exceeds exhausts each at the same key as its
+own capture; a sharing member with an unreleased private row is refused
+alone, an incomplete projection refuses every sharing member, and a single
+member left after those checks takes its own walk; interning, each member's
+appends and the release of the list's holds do at most 64 units of work
+between two checkpoints; and the bitset-span difference stays within its
+bound. The readiness regressions for refused owned passes hold with the
+walk's new checkpoint count. These are component results with EVPN ownership enabled in
 tests. The turn-length, cost and recovery-memory qualifications have not been
 run on this change, and production EVPN ownership remains disabled.

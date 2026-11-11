@@ -684,6 +684,11 @@ impl EvpnRecoveryProvenance {
     }
 
     #[cfg(test)]
+    fn set_daemon_limit_for_test(&mut self, daemon: usize) {
+        self.daemon_limit = daemon;
+    }
+
+    #[cfg(test)]
     pub(in crate::manager) fn fail_next_allocation_for_test(&mut self) {
         self.fail_next_allocation = true;
     }
@@ -1737,11 +1742,18 @@ impl EvpnRecoveryProvenance {
     /// The slot list lives only inside this call. It is charged to the
     /// daemon at `capacity` rows before it is allocated and refunded before
     /// returning, and it holds every slot it names, so a key no record has
-    /// taken yet cannot be reused under it. An error means the list itself
-    /// was refused, or the slot space could not grow: every record is still
-    /// capturing with nothing captured, and the caller captures each alone.
-    /// A record that exhausts its own credit is marked exhausted, exactly
-    /// as in its own capture, and the others still complete.
+    /// taken yet cannot be reused under it.
+    ///
+    /// While the list is charged, a daemon-cap or allocator refusal says
+    /// nothing about one record's own capture, which runs without the list.
+    /// So no such refusal exhausts a record. Whether it meets the list
+    /// itself, slot-space growth during the walk, or a record's entry
+    /// buffer or bitset, the call stops sharing and returns the error:
+    /// records already sealed stay Ready, the record that met it gives back
+    /// what it had taken, and it and every later record are still capturing
+    /// with nothing captured, for the caller to capture each alone. Only a
+    /// record's own peer cap exhausts it, exactly as in its own capture,
+    /// and the others still complete.
     pub(in crate::manager) fn capture_shared_with_checkpoint(
         &mut self,
         handles: &[ProvenanceHandle],
@@ -1819,6 +1831,19 @@ impl EvpnRecoveryProvenance {
                 // entry buffer is charged at a time.
                 match captured.and_then(|()| self.seal_held(index, checkpoint)) {
                     Ok(()) => self.records[index].state = State::Ready,
+                    Err(error)
+                        if matches!(
+                            error.cause,
+                            ExhaustionCause::DaemonLimit | ExhaustionCause::AllocationFailure
+                        ) =>
+                    {
+                        // The daemon total this was refused against holds
+                        // the list, so the record's own capture might fit.
+                        // Give back what it took and stop sharing.
+                        self.release_held(index, checkpoint);
+                        interned = Err(error);
+                        break;
+                    }
                     Err(error) => {
                         self.mark_exhausted(handle, error);
                     }
@@ -2558,6 +2583,13 @@ impl EvpnRecoveryProvenance {
     /// Release every slot the record holds, then free its storage before
     /// refunding the credit. The last holder of a slot frees it.
     fn free_keys(&mut self, index: usize, checkpoint: &mut impl FnMut(bool)) {
+        self.release_held(index, checkpoint);
+        self.settle_space(checkpoint);
+    }
+
+    /// Release every slot a record holds or pins and free its storage,
+    /// without settling the slot space, so other slot IDs stay valid.
+    fn release_held(&mut self, index: usize, checkpoint: &mut impl FnMut(bool)) {
         let before = self.records[index].charge();
         let Self { records, space, .. } = self;
         let record = &mut records[index];
@@ -2578,7 +2610,6 @@ impl EvpnRecoveryProvenance {
         record.pins = Slots::new();
         self.daemon_used -= bytes;
         self.recharge(index, before);
-        self.settle_space(checkpoint);
     }
 
     /// Exhaustion cannot become a fresh capture. Releasing walks every held
@@ -2934,10 +2965,13 @@ mod tests {
         let tight = (PEER_LIMIT_BYTES, separate.peak + list / 2 - 1);
         let (mut ledger, handles, walk) = try_captured(tight, &rows, &owners, true);
         assert_eq!(walk.unwrap_err().cause, ExhaustionCause::DaemonLimit);
-        assert_eq!(ledger.holders_for_test().len(), 40, "the earlier snapshot");
         for &handle in &handles {
             assert_eq!(ledger.exhaustion(handle), None);
-            assert_eq!(ledger.retained_keys_for_test(handle), Some(Vec::new()));
+            assert!(
+                ledger.proof(handle).unwrap().is_some()
+                    || ledger.retained_keys_for_test(handle) == Some(Vec::new()),
+                "sealed, or still capturing with nothing captured"
+            );
         }
         // Each record then captures alone, as if the walk had not run.
         capture_alone(&mut ledger, &handles, &rows);
@@ -3017,6 +3051,141 @@ mod tests {
             assert_eq!(ledger.retained_keys_for_test(handle), Some(Vec::new()));
         }
         ledger.assert_consistent();
+    }
+
+    /// The list is charged while each record appends and seals, so a daemon
+    /// cap can refuse a record's entry buffer or bitset that its own capture
+    /// would have been granted. That refusal must not exhaust the record:
+    /// across every cap between "the list fits" and "the whole walk fits",
+    /// the walk stops, the records it had sealed stay Ready, and the rest
+    /// capture alone to exactly what separate captures leave. A fifth
+    /// record already holds every row, so the slot space never grows here
+    /// and each refusal lands on a record's own storage.
+    #[test]
+    fn shared_capture_daemon_refusal_under_the_list_exhausts_no_record() {
+        let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();
+        let rows = shared_rows(900, &owners);
+        let list = rows.len() * size_of::<(u32, PeerId)>();
+        let begun = || {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let every: Vec<_> = rows.iter().map(|(key, _)| *key).collect();
+            let holder = ledger.register(owner(9, 7)).unwrap();
+            capture(&mut ledger, holder, &every);
+            let handles: Vec<_> = owners
+                .iter()
+                .map(|owner| {
+                    let handle = ledger.register(*owner).unwrap();
+                    assert!(ledger.finish_recovery(handle).unwrap());
+                    assert!(ledger.begin_capture(handle).unwrap());
+                    handle
+                })
+                .collect();
+            (ledger, handles)
+        };
+        let (mut alone, alone_handles) = begun();
+        let baseline = alone.daemon_usage().retained;
+        // Separate captures fit under the lowest cap tried.
+        alone.set_daemon_limit_for_test(baseline + list);
+        capture_alone(&mut alone, &alone_handles, &rows);
+        for &handle in &alone_handles {
+            assert_eq!(alone.proof_keys(handle).unwrap().unwrap().len(), 855);
+        }
+
+        let (mut refused, mut after_a_seal, mut whole) = (0, 0, 0);
+        for room in (0..8192).step_by(128) {
+            let (mut ledger, handles) = begun();
+            assert_eq!(ledger.daemon_usage().retained, baseline);
+            ledger.set_daemon_limit_for_test(baseline + list + room);
+            let walk = ledger.capture_shared_with_checkpoint(
+                &handles,
+                rows.iter().copied(),
+                rows.len(),
+                &mut |_| {},
+            );
+            ledger.assert_consistent();
+            if let Err(error) = walk {
+                assert_eq!(error.cause, ExhaustionCause::DaemonLimit, "room {room}");
+                let sealed = handles
+                    .iter()
+                    .filter(|handle| ledger.proof(**handle).unwrap().is_some())
+                    .count();
+                refused += 1;
+                after_a_seal += usize::from(sealed > 0);
+                for &handle in &handles {
+                    assert_eq!(ledger.exhaustion(handle), None, "room {room}");
+                    if ledger.proof(handle).unwrap().is_none() {
+                        assert_eq!(ledger.retained_keys_for_test(handle), Some(Vec::new()));
+                        assert_eq!(
+                            ledger.peer_usage(handle.owner.peer).retained,
+                            size_of::<Record>(),
+                            "room {room}: nothing of the attempt stays charged"
+                        );
+                    }
+                }
+                capture_alone(&mut ledger, &handles, &rows);
+                ledger.assert_consistent();
+            } else {
+                whole += 1;
+            }
+            for (&left, &right) in handles.iter().zip(&alone_handles) {
+                assert_eq!(
+                    ledger.proof_keys(left),
+                    alone.proof_keys(right),
+                    "room {room}"
+                );
+                assert_eq!(
+                    ledger.peer_usage(left.owner.peer),
+                    alone.peer_usage(right.owner.peer),
+                    "room {room}"
+                );
+            }
+            assert_eq!(ledger.holders_for_test(), alone.holders_for_test());
+            assert_eq!(
+                ledger.daemon_usage().retained,
+                alone.daemon_usage().retained,
+                "room {room}"
+            );
+        }
+        assert!(
+            refused > 0 && after_a_seal > 0 && whole > 0,
+            "{refused} refusals, {after_a_seal} after a record was sealed, {whole} whole walks"
+        );
+    }
+
+    /// Interning, each record's appends and the release of the list's
+    /// holds each do at most one stride of work between readiness
+    /// callbacks, however many rows and records the walk covers.
+    #[test]
+    fn shared_capture_bounds_work_between_checkpoints() {
+        let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();
+        let rows = shared_rows(2048, &owners);
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let handles: Vec<_> = owners
+            .iter()
+            .map(|owner| {
+                let handle = ledger.register(*owner).unwrap();
+                assert!(ledger.finish_recovery(handle).unwrap());
+                assert!(ledger.begin_capture(handle).unwrap());
+                handle
+            })
+            .collect();
+        let most = most_work_between_checkpoints(|checkpoint| {
+            ledger
+                .capture_shared_with_checkpoint(
+                    &handles,
+                    rows.iter().copied(),
+                    rows.len(),
+                    &mut |force| checkpoint(force),
+                )
+                .unwrap();
+        });
+        assert!(
+            most > 0 && most <= CHECKPOINT_STRIDE as u64,
+            "{most} units of work between two checkpoints"
+        );
+        for &handle in &handles {
+            assert!(ledger.proof(handle).unwrap().is_some());
+        }
     }
 
     /// Slot numbering follows interning order, which the shared walk takes
