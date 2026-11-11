@@ -6564,6 +6564,8 @@ impl RibManager {
             for mut route in announced {
                 let key = route.key();
                 let family = route.afi_safi();
+                // Selection finds a route's Adj-RIB-In by `route.peer`.
+                debug_assert_eq!(route.peer, peer, "received route names another peer");
                 self.attr_intern.intern(&mut route.attributes);
                 displaced += usize::from(rib.insert_vpn(route));
                 affected.insert(key.clone());
@@ -6631,6 +6633,8 @@ impl RibManager {
             for mut route in announced {
                 let key = route.key();
                 let family = route.afi_safi();
+                // Selection finds a route's Adj-RIB-In by `route.peer`.
+                debug_assert_eq!(route.peer, peer, "received route names another peer");
                 self.attr_intern.intern(&mut route.attributes);
                 displaced += usize::from(rib.insert_labeled(route));
                 affected.insert(key);

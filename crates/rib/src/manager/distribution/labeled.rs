@@ -816,11 +816,15 @@ impl RibManager {
             });
             let changed = if let Some((rib, best)) = untouched_best {
                 let first = touched.partition_point(|(touched_key, _)| touched_key < key);
-                let candidates = touched[first..]
-                    .iter()
-                    .take_while(|(touched_key, _)| touched_key == key)
-                    .filter_map(|&(_, path_id)| rib.get_labeled(&path(path_id)))
-                    .chain(std::iter::once(best))
+                // The stored best goes first: `min_by` keeps the first of
+                // equal candidates, so a tie leaves the selection alone.
+                let candidates = std::iter::once(best)
+                    .chain(
+                        touched[first..]
+                            .iter()
+                            .take_while(|(touched_key, _)| touched_key == key)
+                            .filter_map(|&(_, path_id)| rib.get_labeled(&path(path_id))),
+                    )
                     .inspect(|_| checkpoint());
                 self.loc_rib.recompute_labeled(*key, candidates)
             } else {

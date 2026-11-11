@@ -3,7 +3,8 @@
 //!
 //! The differential test drives random receives (announce, replace and
 //! withdraw with Add-Path IDs, a withdraw and an announce of one path in one
-//! message), GR stale marking, LLGR promotion and session teardown, and
+//! message), Graceful Restart entry, GR and LLGR expiry, End-of-RIB, the
+//! in-place stale seams and session teardown, and
 //! after every step compares the Loc-RIB best of every key with the minimum
 //! over all stored paths. The work test bounds the candidate reads of one
 //! non-best change.
@@ -106,6 +107,15 @@ enum Op {
     PromoteLlgr { peer: u8, vpn: bool },
     /// Production `PeerDown` teardown.
     SessionDown { peer: u8 },
+    /// Production `PeerGracefulRestart` for both families, with or without
+    /// LLGR.
+    GracefulRestart { peer: u8, llgr: bool },
+    /// Production GR timer expiry: purge, or promote under LLGR.
+    SweepGr { peer: u8 },
+    /// Production LLGR timer expiry for both families.
+    SweepLlgr { peer: u8 },
+    /// Production End-of-RIB for one family.
+    EndOfRib { peer: u8, vpn: bool },
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -118,7 +128,36 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::MarkStale { peer, vpn }),
         1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::PromoteLlgr { peer, vpn }),
         1 => (0..PEERS).prop_map(|peer| Op::SessionDown { peer }),
+        2 => (0..PEERS, any::<bool>())
+            .prop_map(|(peer, llgr)| Op::GracefulRestart { peer, llgr }),
+        1 => (0..PEERS).prop_map(|peer| Op::SweepGr { peer }),
+        1 => (0..PEERS).prop_map(|peer| Op::SweepLlgr { peer }),
+        1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::EndOfRib { peer, vpn }),
     ]
+}
+
+/// GR entry for both families; with `llgr`, expiry promotes instead of purging.
+fn graceful_restart(peer: PeerId, llgr: bool) -> RibUpdate {
+    let llgr_family = |(afi, safi)| rustbgpd_wire::LlgrFamily {
+        afi,
+        safi,
+        forwarding_preserved: false,
+        stale_time: 3600,
+    };
+    RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![VPN, LABELED],
+        peer_llgr_capable: llgr,
+        peer_llgr_families: if llgr {
+            [VPN, LABELED].map(llgr_family).to_vec()
+        } else {
+            vec![]
+        },
+        llgr_stale_time: if llgr { 3600 } else { 0 },
+    }
 }
 
 fn apply(manager: &mut RibManager, op: &Op) {
@@ -189,6 +228,22 @@ fn apply(manager: &mut RibManager, op: &Op) {
             peer: peer_v4(source(*peer)),
             session_id: 0,
         }),
+        Op::GracefulRestart { peer, llgr } => {
+            manager.handle_update(graceful_restart(peer_v4(source(*peer)), *llgr));
+        }
+        Op::SweepGr { peer } => manager.sweep_gr_stale(peer_v4(source(*peer))),
+        Op::SweepLlgr { peer } => {
+            manager.sweep_llgr_stale(peer_v4(source(*peer)), &[VPN, LABELED]);
+        }
+        Op::EndOfRib { peer, vpn } => {
+            let (afi, safi) = if *vpn { VPN } else { LABELED };
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: peer_v4(source(*peer)),
+                session_id: 0,
+                afi,
+                safi,
+            });
+        }
     }
 }
 
@@ -386,4 +441,51 @@ fn non_best_change_reads_do_not_grow_with_stored_paths() {
             "selection checkpoints per non-best change: vpn {vpn}, labeled {labeled}"
         );
     }
+}
+
+/// Two live handles on one endpoint share a selection rank, so identical
+/// paths from both compare equal. The stored best stays selected.
+#[test]
+fn an_equal_challenger_does_not_displace_the_stored_best() {
+    let endpoint = crate::peer_id::PeerEndpoint::new("fe80::1".parse().unwrap(), Some("eth0"));
+    let old = PeerId::allocate(endpoint.clone());
+    old.supersede();
+    let new = PeerId::allocate(endpoint);
+    assert_ne!(old, new);
+    assert_eq!(old.cmp_selection(new), std::cmp::Ordering::Equal);
+
+    let mut manager = manager();
+    let from = |peer: PeerId| {
+        let (mut vpn, mut labeled) = (vpn_route(0, 0, 1, 0), labeled_route(0, 0, 1, 0));
+        (vpn.peer, labeled.peer) = (peer, peer);
+        (vpn, labeled)
+    };
+    for (session, peer) in [(1, old), (2, new)] {
+        manager.handle_update(registering_peer_up(peer, session));
+        let (vpn, labeled) = from(peer);
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer,
+            session_id: session,
+            announced: vec![vpn],
+            withdrawn: vec![],
+        });
+        manager.handle_update(RibUpdate::LabeledRoutesReceived {
+            peer,
+            session_id: session,
+            announced: vec![labeled],
+            withdrawn: vec![],
+        });
+    }
+    let (vpn, labeled) = from(new);
+    assert_eq!(manager.ribs[&new].vpn_len(), 1);
+    assert_eq!(manager.ribs[&new].labeled_len(), 1);
+    assert_eq!(manager.loc_rib.get_vpn(&vpn.nlri.key()).unwrap().peer, old);
+    assert_eq!(
+        manager
+            .loc_rib
+            .get_labeled(&labeled.nlri.key())
+            .unwrap()
+            .peer,
+        old
+    );
 }
