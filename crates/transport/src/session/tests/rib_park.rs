@@ -688,7 +688,7 @@ async fn rib_park_stall_cease_retains_with_notification_gr() {
 }
 
 /// Repeated administrative resets while parked: the first closes the
-/// Established session at once; its reconnect, and every later reset, wait
+/// Established session at once; its reconnect, including later resets, waits
 /// for the held messages, so the backlog stays at the held UPDATE plus one
 /// `PeerDown` however many resets arrive.
 /// Mutation-red: running a reset that has no Established session to close
@@ -747,12 +747,10 @@ async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
         "the held UPDATE and one PeerDown, whatever the reset count"
     );
     assert_eq!(session.fsm.state(), SessionState::Idle);
-    assert!(matches!(
-        session.deferred_command,
-        Some(PeerCommand::AdministrativeReset { .. })
-    ));
-    // Every retained command still runs, in order, once the RIB drains: a
-    // Stop queued after the resets wins, and a later query sees it applied.
+    assert!(session.deferred_command.is_none());
+    assert!(session.reconnect_timer.is_some());
+    // The accepted resets own one restart. A later Stop cancels it, and a
+    // query observes that decision before RIB admission becomes available.
     commands
         .send(PeerCommand::Stop { reason: None })
         .await
@@ -765,30 +763,15 @@ async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
     let state = {
         let run = session.run();
         let steps = async {
-            let mut response = std::pin::pin!(response);
-            let mut seen = Vec::new();
+            let state = response.await.unwrap();
+            let mut announced = Vec::new();
             loop {
-                tokio::select! {
-                    update = rib_rx.recv() => seen.push(update.unwrap()),
-                    state = &mut response => {
-                        // The reply can win the select while admitted
-                        // messages still wait in the channel.
-                        while let Ok(update) = rib_rx.try_recv() {
-                            seen.push(update);
-                        }
-                        let first_down = seen
-                            .iter()
-                            .position(|update| matches!(update, RibUpdate::PeerDown { .. }))
-                            .expect("the reset's PeerDown is delivered");
-                        assert!(
-                            seen[..first_down]
-                                .iter()
-                                .any(|update| announced_v4(update) == [Prefix::V4(held())]),
-                            "the held UPDATE precedes the first PeerDown"
-                        );
-                        return state.unwrap();
-                    }
+                let update = rib_rx.recv().await.unwrap();
+                if matches!(update, RibUpdate::PeerDown { .. }) {
+                    assert_eq!(announced, vec![Prefix::V4(held())]);
+                    return state;
                 }
+                announced.extend(announced_v4(&update));
             }
         };
         tokio::select! {
@@ -859,6 +842,393 @@ async fn rib_park_shutdown_sends_cease_then_delivers_in_order() {
         vec![Prefix::V4(held())],
         "the held UPDATE must precede PeerDown"
     );
+}
+
+/// Poll through the ready command arm until the actor is waiting again.
+async fn poll_parked_commands(session: &mut PeerSession) {
+    let mut run = std::pin::pin!(session.run());
+    let result = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(run.as_mut(), cx))
+    })
+    .await;
+    assert!(result.is_pending(), "the owned session must keep running");
+}
+
+async fn parked_mutation_then_close(command: PeerCommand, expected_subcode: u8) {
+    let RibPark {
+        mut session,
+        commands,
+        mut rib_rx,
+        mut server,
+        fillers,
+        ..
+    } = rib_park().await;
+    park_with_buffered(&mut session, &[]).await;
+    let (reply, mut accepted) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::UpdateGracefulShutdown {
+            enabled: true,
+            reply,
+        })
+        .unwrap();
+    poll_parked_commands(&mut session).await;
+    assert!(
+        session.commands.is_empty(),
+        "the mutation has left the command channel before the close arrives"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_eq!(session.rib_backlog.len(), 1);
+    assert_eq!(rib_rx.len(), fillers, "no RIB capacity was released");
+
+    commands.try_send(command).unwrap();
+    {
+        let run = session.run();
+        let close = async {
+            let frame = next_frame_after_handshake(&mut server).await;
+            let Some(Message::Notification(notification)) = frame else {
+                panic!("the close behind a refused mutation must reach the wire: {frame:?}");
+            };
+            assert_eq!(notification.code, NotificationCode::Cease);
+            assert_eq!(notification.subcode, expected_subcode);
+            tokio::time::timeout(Duration::from_secs(5), server.read_to_end(&mut Vec::new()))
+                .await
+                .expect("TCP must close before the RIB is released")
+                .unwrap();
+        };
+        tokio::select! {
+            result = run => panic!("run() ended before the RIB drained: {result:?}"),
+            () = close => {}
+        }
+    }
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.stop_requested);
+    assert!(session.reconnect_timer.is_none());
+    assert!(
+        !session.advertise_graceful_shutdown,
+        "refusal never applies the toggle"
+    );
+    assert!(matches!(
+        accepted.try_recv(),
+        Ok(Err(PeerCommandError::CommandFailed(_)))
+    ));
+    assert_eq!(rib_rx.len(), fillers, "TCP closed with the RIB still full");
+
+    let drain = async {
+        for _ in 0..fillers {
+            assert_eq!(announced_v4(&rib_rx.recv().await.unwrap()), []);
+        }
+        let held_update = rib_rx.recv().await.unwrap();
+        assert_eq!(announced_v4(&held_update), vec![Prefix::V4(held())]);
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::PeerDown { .. }
+        ));
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(session.flush_rib_backlog(), drain);
+    })
+    .await
+    .expect("the held UPDATE must be admitted before the terminal message");
+    assert!(session.rib_backlog.is_empty());
+    assert!(rib_rx.try_recv().is_err());
+}
+
+/// A deferred mutation must not hide a later Stop behind RIB admission.
+#[tokio::test]
+async fn rib_park_refuses_mutation_and_observes_following_stop() {
+    parked_mutation_then_close(
+        PeerCommand::Stop { reason: None },
+        cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+    )
+    .await;
+}
+
+/// BFD's accepted terminal command has the same independence from RIB capacity.
+#[tokio::test]
+async fn rib_park_refuses_mutation_and_observes_following_bfd_down() {
+    parked_mutation_then_close(PeerCommand::BfdDown, cease_subcode::BFD_DOWN).await;
+}
+
+enum ParkedRetirement {
+    UnlessEstablished,
+    UnlessConnected,
+    CollisionUnlessEstablished,
+}
+
+async fn parked_conditional_retirement_is_refused(retirement: ParkedRetirement) {
+    let RibPark {
+        mut session,
+        commands,
+        mut rib_rx,
+        server: _server,
+        fillers,
+        ..
+    } = rib_park().await;
+    park_with_buffered(&mut session, &[]).await;
+    let _ = session
+        .handle_command(PeerCommand::Stop { reason: None })
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(session.rib_backlog.len(), 2);
+    let task = tokio::spawn(async move { session.run().await });
+    let handle = crate::PeerHandle::from_parts(commands, task);
+    // Paused: the deadline cannot elapse while the session still has the
+    // command to answer, however loaded the host is.
+    tokio::time::pause();
+    let deadline = Duration::from_millis(100);
+    let result = match retirement {
+        ParkedRetirement::UnlessEstablished => {
+            handle.shutdown_unless_established_timeout(deadline).await
+        }
+        ParkedRetirement::UnlessConnected => {
+            handle.shutdown_unless_connected_timeout(deadline).await
+        }
+        ParkedRetirement::CollisionUnlessEstablished => {
+            handle
+                .collision_dump_unless_established_timeout(deadline)
+                .await
+        }
+    };
+    assert!(
+        matches!(result, Err(PeerCommandError::CommandFailed(_))),
+        "held RIB work requires an explicit refusal, not retirement or timeout: {result:?}"
+    );
+    let crate::StateQueryOutcome::State(state) = handle.query_state_outcome(deadline).await else {
+        panic!("refusal must leave the live actor available for state queries");
+    };
+    tokio::time::resume();
+    assert_eq!(state.fsm_state, SessionState::Idle);
+    assert_eq!(
+        rib_rx.len(),
+        fillers,
+        "the refused retirement released no RIB slot"
+    );
+    for _ in 0..fillers {
+        rib_rx.recv().await.unwrap();
+    }
+    let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(announced_v4(&update), vec![Prefix::V4(held())]);
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::PeerDown { .. }
+    ));
+    handle
+        .shutdown_timeout(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn rib_park_refuses_conditional_shutdown_without_claiming_retirement() {
+    parked_conditional_retirement_is_refused(ParkedRetirement::UnlessEstablished).await;
+}
+
+#[tokio::test]
+async fn rib_park_refuses_connected_shutdown_without_claiming_retirement() {
+    parked_conditional_retirement_is_refused(ParkedRetirement::UnlessConnected).await;
+}
+
+#[tokio::test]
+async fn rib_park_refuses_conditional_collision_dump_without_claiming_retirement() {
+    parked_conditional_retirement_is_refused(ParkedRetirement::CollisionUnlessEstablished).await;
+}
+
+/// A conditional retirement that keeps the session changes nothing, so a
+/// parked Established session answers it by state instead of refusing.
+#[tokio::test]
+async fn rib_park_answers_a_kept_conditional_retirement_by_state() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        server: _server,
+        ..
+    } = rib_park().await;
+    park_with_buffered(&mut session, &[]).await;
+    for command in [
+        |reply, ticket| PeerCommand::ShutdownUnlessEstablished { reply, ticket },
+        |reply, ticket| PeerCommand::ShutdownUnlessConnected { reply, ticket },
+        |reply, ticket| PeerCommand::CollisionDumpUnlessEstablished { reply, ticket },
+    ] {
+        let (reply, response) = oneshot::channel();
+        assert_eq!(
+            session
+                .handle_command(command(reply, crate::handle::CommandTicket::default()))
+                .await,
+            ControlFlow::Continue(())
+        );
+        assert_eq!(response.await.unwrap(), Ok(false));
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert!(!session.stop_requested);
+        assert_eq!(session.rib_backlog.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn rib_park_withdrawn_conditional_retirement_stays_a_no_op() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        server: _server,
+        ..
+    } = rib_park().await;
+    park_with_buffered(&mut session, &[]).await;
+    for command in [
+        |reply, ticket| PeerCommand::ShutdownUnlessEstablished { reply, ticket },
+        |reply, ticket| PeerCommand::ShutdownUnlessConnected { reply, ticket },
+        |reply, ticket| PeerCommand::CollisionDumpUnlessEstablished { reply, ticket },
+    ] {
+        let ticket = crate::handle::CommandTicket::default();
+        assert!(ticket.claim(), "the caller already withdrew the command");
+        let (reply, response) = oneshot::channel();
+        assert_eq!(
+            session.handle_command(command(reply, ticket)).await,
+            ControlFlow::Continue(())
+        );
+        assert!(
+            response.await.is_err(),
+            "withdrawn commands do not acknowledge"
+        );
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert!(!session.stop_requested);
+        assert_eq!(session.rib_backlog.len(), 1);
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "fixture keeps accepted start, held retirement, timer readiness, cancellation and exactly-once proof together"
+)]
+async fn parked_start_retains_owned_intent(inbound: bool, cancel: Option<PeerCommand>) {
+    let RibPark {
+        mut session,
+        commands,
+        mut rib_rx,
+        server: _server,
+        fillers,
+        ..
+    } = rib_park().await;
+    park_with_buffered(&mut session, &[]).await;
+    let _ = session
+        .handle_command(PeerCommand::Stop { reason: None })
+        .await;
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    let starts = || {
+        counter(
+            &metrics,
+            "bgp_session_state_transitions_total",
+            &[("peer", &peer), ("from", "idle"), ("to", "connect")],
+        )
+    };
+    let starts_before = starts();
+    session.notification_idle_failures = 9;
+    let start = if inbound {
+        PeerCommand::StartInbound {
+            notification_idle_failures: 3,
+        }
+    } else {
+        PeerCommand::Start
+    };
+    commands.try_send(start).unwrap();
+    poll_parked_commands(&mut session).await;
+    assert!(session.commands.is_empty());
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Idle,
+        "RIB retirement still precedes reconnect"
+    );
+    assert!(
+        !session.stop_requested,
+        "an accepted start retains ownership"
+    );
+    assert!(
+        session.reconnect_timer.is_some(),
+        "the existing retry owns the start"
+    );
+    assert_eq!(
+        session.notification_idle_failures,
+        if inbound { 3 } else { 0 }
+    );
+    assert_eq!(session.rib_backlog.len(), 2);
+    // Wait for the accepted start's own timer. A single actor poll need not
+    // drive Tokio's timer wheel, even for a zero-duration sleep.
+    session.reconnect_timer.as_mut().unwrap().as_mut().await;
+    poll_parked_commands(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(
+        starts(),
+        starts_before,
+        "held retirement gates a ready start"
+    );
+
+    let canceled = cancel.is_some();
+    if let Some(command) = cancel {
+        commands.try_send(command).unwrap();
+        poll_parked_commands(&mut session).await;
+        assert!(session.commands.is_empty());
+        assert!(session.stop_requested);
+        assert!(
+            session.reconnect_timer.is_none(),
+            "the later close cancels the start"
+        );
+        assert_eq!(session.rib_backlog.len(), 2, "no duplicate terminal debt");
+    }
+    for _ in 0..fillers {
+        rib_rx.try_recv().unwrap();
+    }
+    session.flush_rib_backlog().await;
+    assert_eq!(
+        announced_v4(&rib_rx.try_recv().unwrap()),
+        vec![Prefix::V4(held())]
+    );
+    assert!(matches!(
+        rib_rx.try_recv().unwrap(),
+        RibUpdate::PeerDown { .. }
+    ));
+    assert!(rib_rx.try_recv().is_err());
+    poll_parked_commands(&mut session).await;
+    if canceled {
+        assert_eq!(session.fsm.state(), SessionState::Idle);
+        assert!(session.stop_requested);
+        assert!(session.reconnect_timer.is_none());
+        assert!(session.connect_task.is_none());
+        assert_eq!(starts(), starts_before, "the canceled start never runs");
+    } else {
+        assert_ne!(
+            session.fsm.state(),
+            SessionState::Idle,
+            "the accepted start resumes after admission"
+        );
+        assert!(!session.stop_requested);
+        assert!(session.reconnect_timer.is_none());
+        assert_eq!(starts(), starts_before + 1.0, "the start runs exactly once");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rib_park_retains_accepted_start_until_rib_retirement_is_admitted() {
+    for inbound in [false, true] {
+        parked_start_retains_owned_intent(inbound, None).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rib_park_later_stop_cancels_the_accepted_start() {
+    for inbound in [false, true] {
+        parked_start_retains_owned_intent(inbound, Some(PeerCommand::Stop { reason: None })).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rib_park_later_bfd_down_cancels_the_accepted_start() {
+    for inbound in [false, true] {
+        parked_start_retains_owned_intent(inbound, Some(PeerCommand::BfdDown)).await;
+    }
 }
 
 /// While parked the session processes no further buffered PDU and reads
@@ -1149,17 +1519,15 @@ async fn rib_park_expires_writer_admission() {
     assert_held_then_peer_down(&mut session, &mut rib_rx, fillers).await;
 }
 
-/// A command outside the close allowlist that arrives while parked waits:
-/// it runs only once the held messages are admitted, after them.
-/// Mutation-red: treating every command as a close runs it at once, while
-/// the held UPDATE is still waiting.
+/// Route Refresh keeps its real capability check and writer admission while
+/// parked; neither an error nor an accepted refresh releases the held input.
 #[tokio::test]
-async fn rib_park_defers_a_non_terminal_command() {
+async fn rib_park_answers_route_refresh_without_releasing_held_input() {
     let RibPark {
         mut session,
         commands,
         mut rib_rx,
-        server: _server,
+        mut server,
         fillers,
         ..
     } = parked(&[]).await;
@@ -1172,32 +1540,43 @@ async fn rib_park_defers_a_non_terminal_command() {
         })
         .await
         .unwrap();
-    let mut run = std::pin::pin!(session.run());
-    // The command is ready and nothing else is: one poll takes it.
-    let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
-    assert!(polled.is_pending());
-    assert!(
-        response.try_recv().is_err(),
-        "the command must wait while RIB-bound messages are held"
+    poll_parked_commands(&mut session).await;
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Err(PeerCommandError::RouteRefreshUnsupported),
+        "a parked session still reports its actual negotiated capability"
     );
-    let steps = async {
-        for _ in 0..fillers {
-            assert_eq!(announced_v4(&rib_rx.recv().await.unwrap()), []);
-        }
-        tokio::time::timeout(Duration::from_secs(5), &mut response)
-            .await
-            .expect("the command runs once the backlog drains")
-            .unwrap()
+    assert_eq!(session.rib_backlog.len(), 1);
+    assert_eq!(rib_rx.len(), fillers);
+
+    Arc::make_mut(session.negotiated.as_mut().unwrap()).peer_route_refresh = true;
+    let (reply, mut response) = oneshot::channel();
+    commands
+        .send(PeerCommand::SendRouteRefresh {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            reply,
+        })
+        .await
+        .unwrap();
+    poll_parked_commands(&mut session).await;
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    let Some(Message::RouteRefresh(refresh)) = next_frame_after_handshake(&mut server).await else {
+        panic!("the accepted refresh must reach the wire before RIB admission");
     };
-    tokio::select! {
-        result = &mut run => panic!("run() ended: {result:?}"),
-        _ = steps => {}
+    assert_eq!(refresh.afi(), Some(Afi::Ipv4));
+    assert_eq!(refresh.safi(), Some(Safi::Unicast));
+    assert_eq!(session.rib_backlog.len(), 1);
+    assert_eq!(rib_rx.len(), fillers);
+    for _ in 0..fillers {
+        assert_eq!(announced_v4(&rib_rx.try_recv().unwrap()), []);
     }
-    // It ran only after the held UPDATE was admitted.
+    session.flush_rib_backlog().await;
     assert_eq!(
         announced_v4(&rib_rx.try_recv().unwrap()),
         vec![Prefix::V4(held())]
     );
+    assert!(rib_rx.try_recv().is_err());
 }
 
 /// The backpressure counter counts park episodes: a batch delivered at once

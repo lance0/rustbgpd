@@ -24,6 +24,100 @@ async fn replay_live_rib_admission_serves_bounded_reads() {
     exercise_live_replay_admission(ReplayAdmissionWait::Rib).await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (mut session, mut rib_rx, mut old_bmp_rx) =
+        make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    read_single_bgp_message(&mut server).await;
+    read_single_bgp_message(&mut server).await;
+    while rib_rx.try_recv().is_ok() {}
+    while old_bmp_rx.try_recv().is_ok() {}
+    session.install_import_policy(Some(rustbgpd_policy::PolicyChain::new(vec![])));
+    let (commands, receiver) = mpsc::channel(8);
+    session.commands = receiver;
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(1);
+    session.bmp_tx = Some(bmp_tx.clone());
+    bmp_tx
+        .try_send(BmpEvent::RouteMonitoring {
+            peer_info: session.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(b"held admission"),
+        })
+        .unwrap();
+    let (reply, mut replay_response) = oneshot::channel();
+    session.handle_read_during_wait(PeerCommand::ReplayOutbound { reply });
+    assert!(matches!(
+        session.deferred_command,
+        Some(PeerCommand::ReplayOutbound { .. })
+    ));
+    let (reply, mut mutation) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::UpdateImportPolicy {
+            policy: None,
+            reply,
+        })
+        .unwrap();
+    let snapshot;
+    {
+        let actor = session.run();
+        tokio::pin!(actor);
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        // The owned replay wait consumed the mutation but has not run it.
+        assert_eq!(commands.capacity(), commands.max_capacity());
+        assert!(matches!(
+            mutation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            replay_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(bmp_tx.capacity(), 0);
+
+        let (reply, response) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+            .unwrap();
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(commands.capacity(), commands.max_capacity() - 1);
+        drop(replay_response);
+        snapshot = tokio::select! {
+            result = response => result.unwrap(),
+            stopped = &mut actor => panic!("actor stopped before nested FIFO snapshot: {stopped:?}"),
+        };
+    }
+    let writer = session.writer_join.take().unwrap();
+    writer.abort();
+    let _ = writer.await;
+    assert!(snapshot.is_none(), "snapshot must follow policy removal");
+    mutation
+        .try_recv()
+        .expect("retained mutation acknowledged before its snapshot")
+        .unwrap();
+    assert!(session.pending_replay.is_none());
+    assert!(session.deferred_command.is_none());
+    assert!(matches!(
+        bmp_rx.try_recv().unwrap(),
+        BmpEvent::RouteMonitoring { .. }
+    ));
+    assert!(bmp_rx.try_recv().is_err());
+    assert!(rib_rx.try_recv().is_err());
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "real admission proof spans BMP queue ordering, enrollment, RIB pressure, the aggregate deadline and cleanup"

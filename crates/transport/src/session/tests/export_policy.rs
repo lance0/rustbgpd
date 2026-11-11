@@ -165,62 +165,76 @@ async fn accepted_export_policy_is_queued_before_ack_even_if_reply_dropped() {
     }
 }
 
+/// Another session queued on the full RIB mailbox must not fail this
+/// session's export update. The handler returns at once, so the run loop keeps
+/// reading commands, and the acknowledgement follows RIB admission.
 #[tokio::test]
-async fn accepted_export_policy_waits_for_capacity_and_rejects_closed_rib() {
+async fn export_policy_holds_for_a_contended_mailbox_and_acks_on_admission() {
     let (mut session, _rx) =
         make_test_session_with_metrics_and_identity(BgpMetrics::new(), SessionIdentity::primary(7));
-    let old = export_chain(PolicyAction::Deny);
-    session.export_policy = Some(old.clone());
+    session.export_policy = Some(export_chain(PolicyAction::Deny));
+    let filler = |session_id| RibUpdate::PeerDown {
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))),
+        session_id,
+    };
     let (tx, mut rx) = mpsc::channel(1);
-    tx.send(RibUpdate::PeerDown {
-        peer: PeerId::from_addr(session.peer_ip),
-        session_id: 99,
-    })
-    .await
-    .unwrap();
+    tx.try_send(filler(99)).unwrap();
+    // Handshake: a second sender is queued on the mailbox before the command.
+    let mut other = std::pin::pin!(tx.clone().reserve_owned());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(other.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
     session.rib_tx = tx;
     let (reply, mut accepted) = oneshot::channel();
-    {
+    let completion = {
         let command = session.handle_command(PeerCommand::UpdateExportPolicy {
             policy: None,
             reply,
         });
         tokio::pin!(command);
-        tokio::select! {
-            biased;
-            _ = &mut command => panic!("full RIB channel must delay acceptance"),
-            () = tokio::task::yield_now() => {},
-        }
-        assert!(matches!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(command.as_mut(), cx))
+        })
+        .await
+    };
+    assert!(
+        matches!(
+            completion,
+            std::task::Poll::Ready(ControlFlow::Continue(()))
+        ),
+        "the handler must not wait on the mailbox"
+    );
+    assert!(
+        matches!(
             accepted.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
-        ));
-    }
-    assert_eq!(session.export_policy, Some(old.clone()));
-    assert!(accepted.await.is_err(), "canceled wait did not acknowledge");
-    drop(rx.recv().await);
-    let (reply, accepted) = oneshot::channel();
-    let _ = session
-        .handle_command(PeerCommand::UpdateExportPolicy {
-            policy: None,
-            reply,
-        })
-        .await;
-    assert_eq!(accepted.await.unwrap(), Ok(()));
-    drop(rx);
-    // The next update must fail without changing the accepted permit-all state.
-    let (reply, accepted) = oneshot::channel();
-    let _ = session
-        .handle_command(PeerCommand::UpdateExportPolicy {
-            policy: Some(Box::new(old)),
-            reply,
-        })
-        .await;
+        ),
+        "a contended mailbox neither refuses nor acknowledges early"
+    );
+    assert_eq!(session.rib_backlog.len(), 1);
+
     assert!(matches!(
-        accepted.await.unwrap(),
-        Err(PeerCommandError::CommandFailed(_))
+        rx.recv().await.unwrap(),
+        RibUpdate::PeerDown { session_id: 99, .. }
     ));
+    other.await.unwrap().send(filler(98));
+    assert!(matches!(
+        rx.recv().await.unwrap(),
+        RibUpdate::PeerDown { session_id: 98, .. }
+    ));
+    session.flush_rib_backlog().await;
+    assert_eq!(accepted.await.unwrap(), Ok(()));
     assert_eq!(session.export_policy, None);
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        RibUpdate::SetPeerSessionExportPolicy {
+            export_policy: None,
+            session_id: 7,
+            ..
+        }
+    ));
 }
 
 /// An export policy that sets an IPv6 next hop rewrites the RIB route's

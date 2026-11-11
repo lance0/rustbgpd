@@ -52,7 +52,7 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
     )
     .with_operator_queries(operator_rx)
     .with_readiness_queries(readiness_rx);
-    let (session_rib, held_rib) = mpsc::channel(1);
+    let (session_rib, mut held_rib) = mpsc::channel(1);
     let (held, _response) = oneshot::channel();
     session_rib
         .try_send(RibUpdate::QueryLocRibCount { reply: held })
@@ -83,12 +83,10 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
         false,
     );
     let session_commands = handle.commands_sender();
-    let (reply, mut export_ack) = oneshot::channel();
+    // A real purge owns its final RIB flush before the task exits. The
+    // published import counters remain available throughout that wait.
     session_commands
-        .send(PeerCommand::UpdateExportPolicy {
-            policy: None,
-            reply,
-        })
+        .send(PeerCommand::PurgeReset)
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -97,7 +95,17 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
         }
     })
     .await
-    .expect("actual session parks in export RIB admission");
+    .expect("the real session owns a PeerDown waiting for final RIB admission");
+    assert!(!handle.is_finished(), "the final flush still owns the task");
+    assert_eq!(
+        held_rib.len(),
+        1,
+        "the original filler still holds admission"
+    );
+    assert!(
+        !session_commands.is_closed(),
+        "the held task has not exited"
+    );
     insert_test_managed_peer(&mut manager, address, handle, false);
     let import_roster = manager.import_roster();
     let (hold_manager, hold_requested) = oneshot::channel();
@@ -146,10 +154,7 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
     assert_eq!(result.chains[0].terms[0].policy, "held-import");
     assert_eq!(result.chains[0].terms[0].hits, 7);
     assert_eq!(result.chains[0].last_error.len(), 0);
-    assert!(matches!(
-        export_ack.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
+    assert_eq!(held_rib.len(), 1, "the final RIB flush remains held");
     assert!(
         matches!(
             PeerHandle::query_state_outcome_with(
@@ -178,11 +183,22 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
     );
     actor.abort();
     let _ = actor.await;
-    // PeerHandle drop does not stop the held session: release its RIB owner,
-    // then explicitly wait for the command receiver to close.
-    drop(held_rib);
-    session_commands.send(PeerCommand::Shutdown).await.unwrap();
-    session_commands.closed().await;
+    // The real session finishes its owned purge only after the filler and
+    // PeerDown are admitted in order; no second command is needed to stop it.
+    assert!(matches!(
+        held_rib.try_recv().unwrap(),
+        RibUpdate::QueryLocRibCount { .. }
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), held_rib.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RibUpdate::PeerDown { .. }
+    ));
+    tokio::time::timeout(Duration::from_secs(1), session_commands.closed())
+        .await
+        .expect("the purge completes after its held session end is admitted");
 }
 
 fn chainless_policy_query_handle() -> PeerHandle {

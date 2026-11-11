@@ -502,7 +502,7 @@ async fn retention_left_after_the_check() -> (
                         stale_routes: 3,
                         next_deadline: Some(deadline),
                     };
-                    let _ = reply.send(true);
+                    let _ = reply.send(Ok(true));
                     break;
                 }
                 _ => {}
@@ -615,7 +615,7 @@ async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
                         stale_routes: 3,
                         next_deadline: Some(deadline),
                     };
-                    let _ = reply.send(true);
+                    let _ = reply.send(Ok(true));
                     break;
                 }
                 _ => {}
@@ -734,7 +734,7 @@ async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
                 ),
                 _ => continue,
             };
-            let _ = reply.send(!spared);
+            let _ = reply.send(Ok(!spared));
             if !spared {
                 session_shut_down.fetch_add(1, Ordering::SeqCst);
                 break;
@@ -789,7 +789,7 @@ async fn a_handshake_that_fails_after_the_state_read_releases_the_address() {
                             | SessionState::OpenConfirm
                             | SessionState::Established
                     );
-                    let _ = reply.send(quiet);
+                    let _ = reply.send(Ok(quiet));
                     if quiet {
                         break;
                     }
@@ -3018,7 +3018,7 @@ fn establishes_after_its_state_query(
                 }
                 PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     let shut_down = state != SessionState::Established;
-                    let _ = reply.send(shut_down);
+                    let _ = reply.send(Ok(shut_down));
                     if shut_down {
                         shutdowns.fetch_add(1, Ordering::SeqCst);
                         break;
@@ -3139,7 +3139,7 @@ fn retirement_answered_after_release(
                     if let Some(release) = release.take() {
                         let _ = release.await;
                     }
-                    let _ = reply.send(true);
+                    let _ = reply.send(Ok(true));
                     break;
                 }
                 _ => {}

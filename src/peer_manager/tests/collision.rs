@@ -202,7 +202,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                     break;
                 }
                 PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
-                    let _ = reply.send(true);
+                    let _ = reply.send(Ok(true));
                     dumps.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
@@ -2151,6 +2151,79 @@ async fn inbound_candidate_held_while_primary_active_is_promoted() {
         SessionState::Established,
         "the promoted inbound session consumes the buffered KEEPALIVE"
     );
+}
+
+/// A winning candidate is still promoted when the RIB mailbox is full with
+/// another sender queued on it: its export-policy sync waits for admission
+/// inside the manager's bound instead of being refused, which closed the
+/// candidate with Cease/7.
+#[tokio::test]
+async fn winning_candidate_is_promoted_while_another_sender_waits_on_the_rib_mailbox() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, primary.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let notification = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+
+    let filler = || RibUpdate::QueryLocRibCount {
+        reply: oneshot::channel().0,
+    };
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx.try_send(filler()).is_ok() {}
+    // Handshake: another sender is queued on the full mailbox.
+    let mut other = Box::pin(rib_tx.clone().reserve_owned());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(other.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    // Controlled time: the mailbox is released only once every task is
+    // waiting, so the candidate has met it full, and before any manager
+    // deadline can run out.
+    tokio::time::pause();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        rib_rx.recv().await;
+        other.await.unwrap().send(filler());
+        while rib_rx.recv().await.is_some() {}
+    });
+
+    mgr.handle_session_notification(notification).await;
+    tokio::time::resume();
+
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(
+        managed.pending_inbound.is_none() && managed.session_id() != 1,
+        "the candidate must be promoted, not closed for a contended mailbox"
+    );
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("promotion must release the held KEEPALIVE");
+    assert!(matches!(msg, Message::Keepalive));
+    release.abort();
 }
 
 /// A true simultaneous open that the local identifier wins: the candidate has

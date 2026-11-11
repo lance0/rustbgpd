@@ -490,6 +490,152 @@ async fn mid_session_store_completes_after_every_unicast_family_refreshes() {
     f.assert_wire_silent().await;
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "fixture keeps the real handshake, held input, required refresh and ordered revalidation together"
+)]
+async fn parked_validation_keeps_refresh_delivery(complete: bool) {
+    let mut peer = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    if complete {
+        peer.families.push((Afi::Ipv4, Safi::FlowSpec));
+    }
+    let mut capabilities = peer
+        .families
+        .iter()
+        .map(|&(afi, safi)| Capability::MultiProtocol { afi, safi })
+        .collect::<Vec<_>>();
+    capabilities.extend([
+        Capability::RouteRefresh,
+        Capability::FourOctetAs { asn: 65002 },
+    ]);
+    let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+    config.local_revalidation = complete;
+    let (validation, validation_rx) = watch::channel(vrps(vec![vrp(VALID, 65002)]));
+    let (commands, command_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut session = PeerSession::new(
+        config,
+        BgpMetrics::new(),
+        command_rx,
+        rib_tx,
+        Some(deny_invalid(true)),
+        None,
+        None,
+        None,
+        Some(validation_rx),
+        false,
+    );
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities,
+        }))
+        .await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    read_single_bgp_message(&mut server).await;
+    read_single_bgp_message(&mut server).await;
+    while rib_rx.try_recv().is_ok() {}
+    while session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .is_ok()
+    {}
+    let fillers = rib_rx.len();
+    session
+        .process_update(announce_from(VALID, vec![65002]))
+        .await;
+    assert_eq!(session.rib_backlog.len(), 1, "the input UPDATE is held");
+    assert_eq!(session.validation_retention.is_some(), complete);
+    validation.send_replace(vrps(vec![vrp(VALID, 65099)]));
+    {
+        let run = session.run();
+        let requests = async {
+            let (reply, response) = oneshot::channel();
+            commands
+                .send(PeerCommand::RevalidateImport {
+                    delta: ValidationDelta::Rpki(None),
+                    reply,
+                })
+                .await
+                .unwrap();
+            let answer = response.await.expect("the live session must answer");
+            let family = if complete {
+                assert_eq!(
+                    answer,
+                    ImportRevalidation::Local {
+                        refresh_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+                    }
+                );
+                (Afi::Ipv4, Safi::FlowSpec)
+            } else {
+                assert_eq!(answer, ImportRevalidation::Incomplete);
+                (Afi::Ipv4, Safi::Unicast)
+            };
+            let (reply, response) = oneshot::channel();
+            commands
+                .send(PeerCommand::SendRouteRefresh {
+                    afi: family.0,
+                    safi: family.1,
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.await.unwrap(), Ok(()));
+            let Message::RouteRefresh(refresh) = read_single_bgp_message(&mut server).await else {
+                panic!("validation's required Route Refresh must reach the wire while parked");
+            };
+            assert_eq!(
+                (refresh.afi(), refresh.safi()),
+                (Some(family.0), Some(family.1))
+            );
+        };
+        tokio::select! {
+            result = run => panic!("run() ended before the RIB drained: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(5), requests) => {
+                result.expect("parked validation and refresh must both answer");
+            }
+        }
+    }
+    assert_eq!(rib_rx.len(), fillers, "no RIB slot was released");
+    assert_eq!(session.rib_backlog.len(), 1, "refresh adds no RIB work");
+    assert_eq!(session.revalidation_pending(), complete);
+    for _ in 0..fillers {
+        rib_rx.try_recv().unwrap();
+    }
+    session.flush_rib_backlog().await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("the original input UPDATE is delivered first");
+    };
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix(VALID)));
+    assert!(rib_rx.try_recv().is_err());
+    if complete {
+        session.advance_revalidation().await;
+        assert!(!session.revalidation_pending());
+        let RibUpdate::RoutesReceived { withdrawn, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("the queued local revalidation must follow the original UPDATE");
+        };
+        assert_eq!(withdrawn, vec![(Prefix::V4(prefix(VALID)), 0)]);
+    }
+}
+
+#[tokio::test]
+async fn rib_park_incomplete_validation_preserves_required_refresh() {
+    parked_validation_keeps_refresh_delivery(false).await;
+}
+
+#[tokio::test]
+async fn rib_park_local_validation_preserves_flowspec_refresh() {
+    parked_validation_keeps_refresh_delivery(true).await;
+}
+
 /// The retention probe asks whether another validation outcome would admit a
 /// denied route. Those hypothetical evaluations must not reach the policy
 /// statistics: the counters match a session without local re-evaluation.
