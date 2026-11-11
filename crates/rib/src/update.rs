@@ -3795,17 +3795,22 @@ pub enum RibUpdate {
     /// Contract: replacements naming peers no longer registered for
     /// outbound updates are skipped (a reconnect installs the desired
     /// policy — the same posture as the serial per-peer loop this
-    /// replaces). Everything else commits in the one synchronous call:
-    /// there is no partial-state failure mode after the first mutation.
-    /// Per-member wire delivery is best-effort — a member whose emission
-    /// cannot be prepared (closed channel, encoder churn, exact-export
-    /// rejection) is marked dirty and healed by the ordinary resync from
-    /// the already-committed state.
+    /// replaces). Residual members carrying EVPN outbound state (private
+    /// EVPN rows or an EVPN-owning source or destination group) are not
+    /// applied: their installed chain is left as it was and the reply
+    /// names them in caller order, for the caller to apply one per
+    /// [`RibUpdate::ReplacePeerExportPolicy`] so that other RIB work runs
+    /// between their whole-table resyncs. Everything else commits in the
+    /// one synchronous call: there is no partial-state failure mode after
+    /// the first mutation. Per-member wire delivery is best-effort — a
+    /// member whose emission cannot be prepared (closed channel, encoder
+    /// churn, exact-export rejection) is marked dirty and healed by the
+    /// ordinary resync from the already-committed state.
     ReplacePeerExportPoliciesAuthoritatively {
         /// Replacements in caller transaction order.
         replacements: Vec<PeerExportPolicyReplacement>,
-        /// Response channel for success/failure.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
+        /// Response channel: the deferred peers in caller order, or failure.
+        reply: oneshot::Sender<Result<Vec<PeerId>, RibCommandError>>,
     },
     /// Restore prior export policies as one exact rollback-only actor call.
     ///

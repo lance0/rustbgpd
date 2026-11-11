@@ -831,7 +831,7 @@ async fn import_tolerant_cohort_handoff_fires_deferred_refresh_once() {
                 .all(|counter| counter.refreshes.load(Ordering::SeqCst) == 0),
             "no Route Refresh may fire before the authoritative handoff completes"
         );
-        reply.send(Ok(())).unwrap();
+        reply.send(Ok(Vec::new())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
     result.expect("handoff cohort snapshot must commit");
@@ -1314,7 +1314,7 @@ async fn export_only_snapshot_handoff_batches_the_authoritative_apply() {
         .await
         .expect("readiness must remain live while the batched RIB reply is held")
         .unwrap();
-        reply.send(Ok(())).unwrap();
+        reply.send(Ok(Vec::new())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
 
@@ -1424,7 +1424,7 @@ async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_r
         .expect("readiness must remain live while the batched RIB reply is held")
         .unwrap();
 
-        reply.send(Ok(())).unwrap();
+        reply.send(Ok(Vec::new())).unwrap();
         tokio::task::yield_now().await;
         assert!(matches!(
             rib_rx.try_recv(),
@@ -1671,7 +1671,7 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
         tokio::task::yield_now().await;
 
         assert!(
-            late_forward_reply.send(Ok(())).is_err(),
+            late_forward_reply.send(Ok(Vec::new())).is_err(),
             "the timed-out forward receiver must be gone before the RIB actor advances to rollback"
         );
         let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -2900,4 +2900,273 @@ async fn deferred_refresh_dispatch_serves_readiness_while_a_probe_is_held() {
     let (result, ()) = tokio::join!(apply, drive);
     result.expect("both members answer Established, so the cohort commits");
     assert_eq!(*refreshes.lock().unwrap(), peers.to_vec());
+}
+
+/// Three Established peers moving to one export chain, with a RIB stub the
+/// caller drives through the cohort handoff to the authoritative batch.
+fn paced_handoff_fixture(
+    octet: u8,
+) -> (
+    PeerManager,
+    mpsc::Receiver<RibUpdate>,
+    [IpAddr; 3],
+    Arc<AtomicUsize>,
+) {
+    let peers = [1, 2, 3].map(|last| IpAddr::V4(Ipv4Addr::new(10, octet, 0, last)));
+    let installs = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    (manager, rib_rx, peers, installs)
+}
+
+fn paced_targets(
+    peers: &[IpAddr],
+    next: &PolicyChain,
+) -> Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy> {
+    peers
+        .iter()
+        .map(|&address| rustbgpd_api::peer_types::ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(next.clone()),
+        })
+        .collect()
+}
+
+/// Answer the cohort with a handoff and the authoritative batch with the
+/// given deferred members (by index); returns the batch's peer identities.
+async fn defer_from_batch(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    deferred: &[usize],
+) -> Vec<PeerId> {
+    skip_destination_prestage(rib_rx).await;
+    let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap() else {
+        panic!("expected cohort RIB command");
+    };
+    reply
+        .send(Ok(
+            rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+        ))
+        .unwrap();
+    let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements,
+        reply,
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected batched authoritative RIB command");
+    };
+    let ids: Vec<_> = replacements
+        .iter()
+        .map(|replacement| replacement.peer)
+        .collect();
+    reply
+        .send(Ok(deferred.iter().map(|&index| ids[index]).collect()))
+        .unwrap();
+    ids
+}
+
+async fn expect_step(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    expected: PeerId,
+    next: &PolicyChain,
+) -> oneshot::Sender<Result<(), rustbgpd_rib::RibCommandError>> {
+    let RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy,
+        reply,
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected one per-peer RIB command for a deferred member");
+    };
+    assert_eq!(peer, expected, "the walk follows the batch's caller order");
+    assert_eq!(export_policy.as_ref(), Some(next));
+    reply
+}
+
+async fn answer_restore(rib_rx: &mut mpsc::Receiver<RibUpdate>, peers: &[IpAddr]) {
+    let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+        replacements,
+        reply,
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected exact rollback RIB batch");
+    };
+    assert_eq!(
+        replacements
+            .iter()
+            .map(|replacement| replacement.peer.addr())
+            .collect::<Vec<_>>(),
+        peers,
+        "every captured prior is restored, applied or not"
+    );
+    assert!(
+        replacements
+            .iter()
+            .all(|replacement| replacement.export_policy.is_none())
+    );
+    reply
+        .send(Ok(replacements
+            .iter()
+            .rev()
+            .map(
+                |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                    peer: replacement.peer,
+                },
+            )
+            .collect()))
+        .unwrap();
+}
+
+/// The batch applied one member inline (a unicast cohort) and handed two
+/// EVPN members back: each gets one per-peer command, in caller order; one
+/// that left the RIB (`NotFound`) is skipped, and the reload commits.
+#[tokio::test]
+async fn paced_handoff_applies_each_deferred_member_once_and_skips_a_departed_one() {
+    let (mut manager, mut rib_rx, peers, installs) = paced_handoff_fixture(44);
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
+    let drive_rib = async {
+        let ids = defer_from_batch(&mut rib_rx, &[1, 2]).await;
+        expect_step(&mut rib_rx, ids[1], &next)
+            .await
+            .send(Err(rustbgpd_rib::RibCommandError::not_found("peer left")))
+            .unwrap();
+        expect_step(&mut rib_rx, ids[2], &next)
+            .await
+            .send(Ok(()))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+    result.expect("a paced handoff whose departed member is skipped commits");
+    assert!(
+        matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "no restore and no repeated command after the walk"
+    );
+    assert_eq!(installs.load(Ordering::SeqCst), peers.len());
+    for peer in peers {
+        assert_eq!(
+            manager.peers.get(&key(peer)).unwrap().export_policy,
+            Some(next.clone())
+        );
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// A RIB error mid-walk fails the reload only after every captured prior is
+/// restored: the inline member, the one already walked and the one not yet.
+#[tokio::test]
+async fn paced_handoff_mid_walk_failure_restores_every_prior() {
+    let (mut manager, mut rib_rx, peers, installs) = paced_handoff_fixture(45);
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
+    let drive_rib = async {
+        let ids = defer_from_batch(&mut rib_rx, &[0, 1, 2]).await;
+        expect_step(&mut rib_rx, ids[0], &next)
+            .await
+            .send(Ok(()))
+            .unwrap();
+        expect_step(&mut rib_rx, ids[1], &next)
+            .await
+            .send(Err(rustbgpd_rib::RibCommandError::internal(
+                "synthetic step failure",
+            )))
+            .unwrap();
+        answer_restore(&mut rib_rx, &peers).await;
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("synthetic step failure")
+                && error.contains("already-applied peers restored")),
+        "{result:?}"
+    );
+    assert_eq!(installs.load(Ordering::SeqCst), peers.len() * 2);
+    for peer in peers {
+        let state = manager.peers.get(&key(peer)).unwrap();
+        assert!(state.export_policy.is_none());
+        assert!(!state.pending_export_apply);
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// The batch and every walk step share one forward budget. A batch that
+/// takes 70 s leaves 50 s for the walk: a step answering 70 s later is past
+/// the budget, so the reload restores instead of issuing the next step. A
+/// fresh deadline per step would accept it.
+#[tokio::test(start_paused = true)]
+async fn paced_handoff_walk_shares_the_batch_budget() {
+    let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(46);
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
+    let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(
+                rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+            ))
+            .unwrap();
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected batched authoritative RIB command");
+        };
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        let ids: Vec<_> = replacements
+            .iter()
+            .map(|replacement| replacement.peer)
+            .collect();
+        reply.send(Ok(ids.clone())).unwrap();
+        let late = expect_step(&mut rib_rx, ids[0], &next).await;
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        assert!(
+            late.send(Ok(())).is_err(),
+            "the step's wait ended at the shared deadline, 50 s after it was sent"
+        );
+        answer_restore(&mut rib_rx, &peers).await;
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("shared policy-walk budget")
+                && error.contains("already-applied peers restored")),
+        "{result:?}"
+    );
+    for peer in peers {
+        assert!(
+            manager
+                .peers
+                .get(&key(peer))
+                .unwrap()
+                .export_policy
+                .is_none()
+        );
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
 }

@@ -14619,7 +14619,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
                 .with_replacement_readiness_age(Duration::ZERO, |manager| {
                     manager.send_route_refresh_response(fleet.members[0], Afi::Ipv4, Safi::Unicast);
                 });
-            reply.send(Ok(())).unwrap();
+            reply.send(Ok(Vec::new())).unwrap();
         } else {
             // A pre-existing dirty member outside the replacement batch must
             // also finish the forced repair before its command acknowledges.
@@ -14644,7 +14644,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             1,
             "{stage}: nested scope finalized early"
         );
-        assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(()));
+        assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(vec![]));
         assert!(fleet.manager.replacement_readiness.is_none());
         assert!(fleet.manager.pending_regroup_baseline.is_empty());
         assert!(fleet.manager.dirty_peers.is_empty());
@@ -14761,7 +14761,7 @@ fn replacement_readiness_terminal_paths_restore_service_before_ack() {
             let result = fleet
                 .manager
                 .restore_export_policy_replacements_synchronously(replacements)
-                .map(|_| ());
+                .map(|_| Vec::new());
             reply.send(result).unwrap();
         } else {
             fleet
@@ -16827,7 +16827,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
             replacements: batch_replacements(&fleet.members, &next_policy),
             reply,
         });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
 
     // One batch, every member on the shared transition, no fallback —
     // and ZERO distribution passes: the wire delta was derived and
@@ -16973,7 +16973,7 @@ fn batched_authoritative_apply_announces_only_changed_slots() {
             replacements: batch_replacements(&fleet.members, &next_policy),
             reply,
         });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
 
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 4);
@@ -17035,7 +17035,7 @@ fn batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels() {
             replacements,
             reply,
         });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
 
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_batches, 1);
@@ -17699,7 +17699,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                         replacements: batch_replacements(&fleet.members, &next),
                         reply,
                     });
-                assert_eq!(response.try_recv().unwrap(), Ok(()));
+                assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
             }
             assert!(
                 visits.load(Ordering::Relaxed) >= 2,
@@ -17963,7 +17963,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    assert_eq!(response.await.unwrap(), Ok(vec![]));
     let (after_batch, batched) = published_ids(&tx, &roster).await;
     assert_eq!(
         after_batch,

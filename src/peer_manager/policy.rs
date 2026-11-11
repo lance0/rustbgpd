@@ -2021,8 +2021,9 @@ impl PeerManager {
                     self.discard_prepared_export_destination(targets[0]).await;
                 }
                 self.apply_export_policy_replacements_authoritatively(
+                    &peer_keys,
                     &replacements,
-                    context.operator_reads,
+                    context,
                 )
                 .await
             }
@@ -2247,46 +2248,80 @@ impl PeerManager {
     /// old→new wire delta across the cohort, and runs ONE distribution pass
     /// — instead of one full-table resync per member. Peers no longer
     /// registered in the RIB are skipped inside the batch (a reconnect
-    /// installs the desired policy), matching the prior per-peer loop. The
-    /// dedicated readiness lane is admitted throughout the send/reply, plus
-    /// the operator-read lane on the same terms as the clean transition.
+    /// installs the desired policy), matching the prior per-peer loop.
+    ///
+    /// Members carrying EVPN outbound state come back unapplied: each one's
+    /// move resyncs its whole EVPN table, so they are applied here one per
+    /// ordinary per-peer RIB command, and other RIB work runs between them
+    /// instead of waiting behind one turn that grows with members × rows.
+    /// The batch and every step of that walk share the transaction's one
+    /// forward budget, never a fresh deadline per step. Any failure,
+    /// including that budget expiring mid-walk, returns `Err` and the caller
+    /// restores every captured prior; a peer that left the RIB (`NotFound`)
+    /// is skipped, as its reconnect installs the session's accepted chain.
+    /// The dedicated readiness lane is admitted throughout the send/reply,
+    /// plus the operator-read lane on the same terms as the clean transition.
     async fn apply_export_policy_replacements_authoritatively(
         &mut self,
+        peer_keys: &[PeerKey],
         replacements: &[PeerExportPolicyReplacement],
-        operator_reads: OperatorReadAdmission,
+        context: &mut PolicySnapshotContext,
     ) -> Result<(), String> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let deadline = context.forward.deadline();
         let rib_tx = self.rib_tx.clone();
-        if self
-            .await_with_readiness(
-                rib_tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        let batch = async {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            rib_tx
+                .send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
                     replacements: replacements.to_vec(),
                     reply: reply_tx,
-                }),
-                operator_reads,
-            )
-            .await
-            .is_err()
-        {
-            return Err("RIB manager unavailable".to_string());
-        }
-        let result = match tokio::time::timeout(
-            super::RIB_BATCH_REPLY_TIMEOUT,
-            self.await_with_readiness(reply_rx, operator_reads),
-        )
-        .await
-        {
-            Err(_) => Err(format!(
-                "RIB manager did not reply within {:?} while applying the authoritative export-policy batch",
-                super::RIB_BATCH_REPLY_TIMEOUT
-            )),
-            Ok(Err(_)) => Err("RIB manager dropped authoritative batch reply".to_string()),
-            Ok(Ok(Err(error))) => Err(error.to_string()),
-            Ok(Ok(Ok(()))) => Ok(()),
+                })
+                .await
+                .map_err(|_| "RIB manager unavailable".to_string())?;
+            match reply_rx.await {
+                Err(_) => Err("RIB manager dropped authoritative batch reply".to_string()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Ok(Ok(deferred)) => Ok(deferred),
+            }
         };
+        let outcome = self
+            .await_with_readiness(
+                tokio::time::timeout_at(deadline, batch),
+                context.operator_reads,
+            )
+            .await;
         self.drain_readiness_queries().await;
-        result
+        let deferred = outcome.map_err(|_| {
+            format!(
+                "RIB manager did not reply within the {:?} shared policy-walk budget while applying the authoritative export-policy batch",
+                super::RIB_BATCH_REPLY_TIMEOUT
+            )
+        })??;
+        let index_of: std::collections::HashMap<_, _> = replacements
+            .iter()
+            .enumerate()
+            .map(|(index, replacement)| (replacement.peer, index))
+            .collect();
+        for peer in deferred {
+            let index = *index_of
+                .get(&peer)
+                .ok_or_else(|| format!("RIB deferred peer {peer} outside the batch"))?;
+            match self
+                .replace_peer_export_policy_in_rib(
+                    &peer_keys[index],
+                    replacements[index].export_policy.clone(),
+                    Some(&mut context.forward),
+                    context.operator_reads,
+                )
+                .await
+            {
+                Ok(()) | Err(RibCommandError::NotFound(_)) => {}
+                Err(error) => return Err(format!("{}: {error}", peer_keys[index])),
+            }
+            self.drain_operator_queries(context.operator_reads).await;
+        }
+        Ok(())
     }
 
     /// Run one ordinary RIB export-policy replacement while servicing the

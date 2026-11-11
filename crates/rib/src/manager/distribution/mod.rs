@@ -5961,7 +5961,7 @@ impl RibManager {
     pub(super) fn handle_replace_peer_export_policies_authoritatively(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<PeerId>, RibCommandError>>,
     ) {
         // The caller's deadline may have lapsed while this command sat
         // in the actor queue — by then the reload has rolled back its
@@ -5985,7 +5985,7 @@ impl RibManager {
             });
             return;
         }
-        let _ = reply.send(self.apply_export_policy_replacements_synchronously(replacements));
+        let _ = reply.send(self.apply_export_policy_replacements_deferring_evpn(replacements));
     }
 
     pub(super) fn handle_restore_peer_export_policies_authoritatively(
@@ -6097,6 +6097,31 @@ impl RibManager {
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<(), RibCommandError> {
+        self.apply_export_policy_replacements(replacements, false)
+            .map(|_| ())
+    }
+
+    /// The forward authoritative batch: as
+    /// [`Self::apply_export_policy_replacements_synchronously`], except that
+    /// residual members carrying EVPN outbound state (private EVPN rows, or
+    /// an EVPN-owning source or destination group) are left unapplied, with
+    /// their installed chain untouched, and returned in caller order. Each
+    /// such move resyncs the member's whole EVPN table, so the caller applies
+    /// them one per RIB command through the per-peer replacement and other
+    /// work runs between them, instead of one actor turn growing with moved
+    /// members × rows. Rollback batches stay whole.
+    pub(in crate::manager) fn apply_export_policy_replacements_deferring_evpn(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+    ) -> Result<Vec<PeerId>, RibCommandError> {
+        self.apply_export_policy_replacements(replacements, true)
+    }
+
+    fn apply_export_policy_replacements(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+        defer_evpn: bool,
+    ) -> Result<Vec<PeerId>, RibCommandError> {
         self.with_replacement_summary_reads("apply", |manager| {
         let started = std::time::Instant::now();
         let mut r = AuthoritativeTransitionReceipt {
@@ -6112,8 +6137,11 @@ impl RibManager {
         r.groups_before = manager.group_ribs.len();
         let previous_deferral =
             std::mem::replace(&mut manager.update_groups.reclamation_deferred, true);
-        let result =
-            manager.apply_export_policy_replacements_synchronously_inner(replacements, &mut r);
+        let result = manager.apply_export_policy_replacements_synchronously_inner(
+            replacements,
+            defer_evpn,
+            &mut r,
+        );
         manager.update_groups.reclamation_deferred = previous_deferral;
         manager.reclaim_unused_update_group_policies();
         r.total_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -6148,7 +6176,8 @@ impl RibManager {
             membership_commit_us=r.membership_commit_us, filtered_scope_build_us=r.filtered_scope_build_us,
             member_emit_state_us=r.member_emit_state_us, cohort_finalize_us=r.cohort_finalize_us,
             fallback_regroup_us=r.fallback_regroup_us, distribution_us=r.distribution_us,
-            duplicate_fallback_us=r.duplicate_fallback_us, input_peers=r.input_peers,
+            duplicate_fallback_us=r.duplicate_fallback_us, deferred_members=r.deferred_members,
+            input_peers=r.input_peers,
             present_peers=r.present_peers, skipped_peers=r.skipped_peers, duplicate_peers=r.duplicate_peers,
             candidate_cohorts=r.candidate_cohorts, shared_cohorts=r.shared_cohorts,
             shared_members=r.shared_members, fallback_members=r.fallback_members,
@@ -6189,8 +6218,9 @@ impl RibManager {
     fn apply_export_policy_replacements_synchronously_inner(
         &mut self,
         mut replacements: Vec<PeerExportPolicyReplacement>,
+        defer_evpn: bool,
         receipt: &mut AuthoritativeTransitionReceipt,
-    ) -> Result<(), RibCommandError> {
+    ) -> Result<Vec<PeerId>, RibCommandError> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -6246,7 +6276,7 @@ impl RibManager {
                 u64::try_from(duplicate_started.elapsed().as_micros()).unwrap_or(u64::MAX);
             receipt.outcome = "committed";
             receipt.classification = "duplicate-fallback";
-            return Ok(());
+            return Ok(Vec::new());
         }
         receipt.precondition_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         // A still-running destination preparation cannot be trusted
@@ -6283,6 +6313,10 @@ impl RibManager {
         receipt.registered_peer_source_membership_scan_us =
             u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         let phase = std::time::Instant::now();
+        // Chains this batch replaced (the installed instances, so their
+        // term-hit counters survive), kept only so a deferred member can be
+        // returned with its installed chain untouched.
+        let mut displaced: HashMap<PeerId, Option<Option<PolicyChain>>> = HashMap::new();
         // Install the new chains (content-equal INSTANCE guard — see
         // `replace_peer_export_policy_synchronously` for the ADR-0096
         // term-hit rationale), then classify each member's destination.
@@ -6323,8 +6357,12 @@ impl RibManager {
                 }
             }
             if !equal {
-                self.export_chains
-                    .insert(replacement.peer, replacement.export_policy.clone());
+                let prior = self
+                    .export_chains
+                    .replace(replacement.peer, replacement.export_policy.clone());
+                if defer_evpn {
+                    displaced.insert(replacement.peer, prior);
+                }
             }
         }
         receipt.policy_compare_install_us =
@@ -6420,14 +6458,43 @@ impl RibManager {
             }
         }
 
+        let n_residual_members = residual.len();
         // Per-member fallback: the ordinary regroup lifecycle (baseline
         // snapshot + dirty), drained by the one pass below — the exact
-        // body of the single-peer seam, minus its per-call pass.
-        let n_fallback_members = residual.len();
+        // body of the single-peer seam, minus its per-call pass. A member
+        // carrying EVPN outbound state is instead restored to its installed
+        // chain and handed back for its own per-peer command.
+        let destination_of: HashMap<PeerId, Option<usize>> = if defer_evpn {
+            present
+                .iter()
+                .inspect(|_| checkpoint())
+                .zip(&destinations)
+                .map(|(replacement, destination)| (replacement.peer, *destination))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let mut deferred: HashSet<PeerId> = HashSet::new();
         let phase = std::time::Instant::now();
         let mut evpn_feeds = HashMap::new();
         for peer in residual {
             checkpoint();
+            if defer_evpn
+                && self
+                    .carries_evpn_outbound_state(peer, destination_of.get(&peer).copied().flatten())
+            {
+                match displaced.remove(&peer) {
+                    Some(Some(prior)) => {
+                        self.export_chains.insert(peer, prior);
+                    }
+                    Some(None) => {
+                        self.export_chains.remove(&peer);
+                    }
+                    None => {}
+                }
+                deferred.insert(peer);
+                continue;
+            }
             let before = self.grouped_member_of(peer);
             let mut evpn_feed = self.recompute_update_group(peer);
             let key_stable = before.is_some() && before == self.grouped_member_of(peer);
@@ -6440,11 +6507,13 @@ impl RibManager {
         }
         receipt.fallback_regroup_us =
             u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let n_fallback_members = n_residual_members - deferred.len();
         self.create_installed_export_counters(
             present
                 .iter()
                 .inspect(|_| checkpoint())
-                .map(|replacement| replacement.peer),
+                .map(|replacement| replacement.peer)
+                .filter(|peer| !deferred.contains(peer)),
         );
 
         // Group tables and memberships moved above without a staging
@@ -6460,6 +6529,7 @@ impl RibManager {
         receipt.shared_cohorts = n_destination_groups;
         receipt.shared_members = n_shared_members;
         receipt.fallback_members = n_fallback_members;
+        receipt.deferred_members = deferred.len();
         receipt.outcome = "committed";
         receipt.classification = if n_shared_members > 0 && n_fallback_members == 0 {
             "shared"
@@ -6489,10 +6559,31 @@ impl RibManager {
             n_destination_groups,
             n_shared_members,
             n_fallback_members,
+            n_deferred_members = deferred.len(),
             n_skipped_unregistered,
             "authoritative export-policy batch applied"
         );
-        Ok(())
+        // Caller order, so the per-peer walk applies them as the batch would.
+        Ok(present
+            .iter()
+            .inspect(|_| checkpoint())
+            .map(|replacement| replacement.peer)
+            .filter(|peer| deferred.contains(peer))
+            .collect())
+    }
+
+    /// Whether moving `peer` resyncs EVPN outbound state: private EVPN rows,
+    /// or an EVPN-owning current or destination group (capture and
+    /// complete-feed build). Either costs the member's whole EVPN table.
+    fn carries_evpn_outbound_state(&self, peer: PeerId, destination: Option<usize>) -> bool {
+        self.adj_ribs_out
+            .get(&peer)
+            .is_some_and(|private| private.evpn_len() > 0)
+            || self
+                .grouped_member_of(peer)
+                .into_iter()
+                .chain(destination)
+                .any(|gid| self.planned_group_owns_evpn(gid))
     }
 
     /// Commit one qualifying cohort through the shared batched

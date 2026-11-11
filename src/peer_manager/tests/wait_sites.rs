@@ -505,14 +505,17 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         rib: RibHold::Receiver(is_cohort_replace),
         session: answer_all,
-        additional_entry: None,
+        additional_entry: Some(
+            "the batch wait parked at RIB admission: one shared-budget future covers the send \
+             and the reply, so this is the reply row's call site",
+        ),
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
         site: "policy.rs::apply_export_policy_replacements_authoritatively",
-        awaits: "RibUpdate::ReplacePeerExportPoliciesAuthoritatively reply",
+        awaits: "RibUpdate::ReplacePeerExportPoliciesAuthoritatively send and reply (shared forward budget)",
         drive: Drive::ForwardCohort {
             import_delta: false,
             cohort_reply: CohortReply::Authoritative,
@@ -1040,8 +1043,10 @@ fn answer_rib(
                 CohortReply::Rejected => Err("test: cohort rejected".to_string()),
             });
         }
-        RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
-        | RibUpdate::ReplacePeerExportPolicy { reply, .. }
+        RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+            let _ = reply.send(Ok(Vec::new()));
+        }
+        RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
             let _ = reply.send(Ok(()));

@@ -134,6 +134,25 @@ Wire-profile compatibility and each member's ceiling are still checked during
 `ProbeAndPrepare`; `Validate` keeps its exact current owner/generation checks
 before any emission.
 
+**Amended:** 2026-11-11 — the authoritative fallback batch paces members that
+carry EVPN outbound state. Each such move resyncs the member's whole EVPN
+table, so a batch of N of them was one RIB poll growing with N × rows. The
+batch now applies shared cohorts and every other residual member as before,
+but leaves residual members with private EVPN rows, or an EVPN-owning source or
+destination group, unapplied: their installed chain instance is put back and
+the reply names them in caller order. PeerManager applies each through the
+ordinary per-peer replacement, so other RIB work runs between them. The batch
+and every such step share the transaction's forward RIB budget; it is never
+renewed per step. Each step is its own commit point: between steps an `rbgp`
+read or a route chunk sees applied members on the new chain and the rest on the
+old one, as in the serial remainder walk. The reload replies, and its
+configuration is published, only after the last step is committed and
+enqueued. A step that fails, or a budget that expires mid-walk, restores every
+captured prior through the existing rollback batch, which stays one synchronous
+turn. A member that left the RIB answers `NotFound` and is skipped; its
+reconnect registers the session's chain, which cohort setup already
+hot-applied.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

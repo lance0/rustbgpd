@@ -191,6 +191,8 @@ struct PolicyTransitionStats {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AuthoritativeTransitionReceipt {
+    /// Residual members carrying EVPN outbound state, returned unapplied.
+    deferred_members: usize,
     outcome: &'static str,
     classification: &'static str,
     failure_stage: &'static str,

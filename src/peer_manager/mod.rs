@@ -473,10 +473,12 @@ impl DeferredRibUpdates {
 }
 
 /// Hard deadline for the batched authoritative export-policy apply
-/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`). One command
-/// carries the whole fallback cohort, so unlike the inline replies above
-/// it legitimately performs a destination-table build plus a cohort-wide
-/// emission — seconds at route-server scale. Twice the clean
+/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`) together with
+/// the per-peer commands that follow it for members the batch deferred,
+/// and for the other `O(peers)` RIB walks of one policy transaction. One
+/// command carries the whole fallback cohort, so unlike the inline replies
+/// above it legitimately performs a destination-table build plus a
+/// cohort-wide emission — seconds at route-server scale. Twice the clean
 /// transition's 60-second pre-commit ownership budget, and still bounded
 /// so a wedged RIB task cannot park the peer-manager actor forever.
 const RIB_BATCH_REPLY_TIMEOUT: Duration = Duration::from_mins(2);

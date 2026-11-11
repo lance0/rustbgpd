@@ -396,6 +396,62 @@ fn policy_reload_work_is_linear() {
     );
 }
 
+/// An export-policy reload moves `size` EVPN receivers holding
+/// [`EVPN_ROWS`] reflected routes each, the peer manager's way: the
+/// authoritative batch, then one per-peer command for every member it hands
+/// back. Each move resyncs one member's table, so the longest single command
+/// must not grow with the moved members; one turn carrying the whole cohort
+/// grows members × rows.
+fn evpn_cohort_reload(size: usize, owned: bool) -> Work {
+    let mut fleet = super::evpn_policy_pacing::evpn_fleet(size, EVPN_ROWS, owned);
+    let mut deferred = Vec::new();
+    let mut longest = checkpoints_in(|| deferred = fleet.batch())[ALL];
+    for peer in deferred {
+        let step = checkpoints_in(|| fleet.step(peer).unwrap());
+        longest = longest.max(step[ALL]);
+    }
+    fleet.manager.resync_dirty_peers_bounded();
+    // Pin the wire: every member ends with every row under the new policy.
+    for (peer, output) in fleet.members.iter().zip(&mut fleet.outputs) {
+        let mut tagged = HashSet::new();
+        while let Ok(update) = output.try_recv() {
+            for route in update.evpn_announce.iter() {
+                if route.communities().contains(&0xFC00_0001) {
+                    tagged.insert(route.key());
+                }
+            }
+        }
+        assert_eq!(
+            tagged.len(),
+            EVPN_ROWS as usize,
+            "owned={owned} size {size}: {peer}"
+        );
+    }
+    Work::from([("longest command checkpoints", longest)])
+}
+
+/// Reflected EVPN routes per member, fixed across sizes.
+const EVPN_ROWS: u32 = 256;
+
+#[test]
+fn evpn_cohort_reload_longest_command_is_flat_in_moved_members() {
+    for owned in [false, true] {
+        let unit = "longest command checkpoints";
+        let (small, large) = (
+            evpn_cohort_reload(SMALL, owned),
+            evpn_cohort_reload(LARGE, owned),
+        );
+        assert!(small[unit] > 0);
+        assert!(
+            large[unit] < small[unit] * 2,
+            "owned={owned}: the longest single RIB command grew {} -> {} from {SMALL} to {LARGE} \
+             moved members at {EVPN_ROWS} rows; one turn carries more than one member's move",
+            small[unit],
+            large[unit],
+        );
+    }
+}
+
 #[test]
 fn inbound_update_distribution_work_is_linear() {
     assert_linear(
