@@ -9,9 +9,85 @@ member: `cargo build` builds `evpn-tester`, `evpn-monitor`, and `evpn-rr-soak`.
 The four `bench/scale` crates are workspace members excluded from the default
 build; select them with `--workspace` or `-p <package>`.
 
+Keep that split: `evpn-load` provides the shared peer helpers and dev load tools,
+while the four scale crates are opt-in measurement programs. Removing
+`evpn-load` from `default-members` would make plain `cargo build` omit its three
+binaries and plain `cargo test` omit its package tests; callers relying on those
+defaults would need `-p rustbgpd-evpn-load` or `--workspace`. Workspace CI and
+the Docker build already select `--workspace`.
+
 Release binary tarballs and the default runtime container image exclude these
 tools. The `dev` image target used by the interop/soak labs includes
 `evpn-tester` and `evpn-monitor`; it does not copy `evpn-rr-soak`.
+
+## Harness index
+
+Commands below run from the repository root. Follow each linked README or script
+header for arguments and prerequisites. **CI** describes the checks in
+[the CI workflow](../.github/workflows/ci.yml), not a performance qualification.
+An offline test or a reduced smoke does not replace a measured run.
+
+| Harness | Measures and launch | Quick check | CI coverage |
+| --- | --- | --- | --- |
+| [evpn-load](evpn-load/README.md) | EVPN peer generators and Type 2 fanout over real sessions; `python3 bench/evpn-load/fanout.py` | Fanout: `--receivers 2 --routes 40 --churn-seconds 2` in the documented container | Crate built/tested through `--workspace`; no `fanout.py` run or `test_fanout.py` invocation |
+| [netns-calibration](netns-calibration/README.md) | Pinned-kernel VM boundary and raw neighbour-event timing; `bench/netns-calibration/run-vm.sh` | `bash bench/tests/test-netns-calibration-vm.sh`; `raw_bridge_skew.py --plan PROFILE` previews a campaign | Offline parser/runner tests and shell checks; no VM boot |
+| [rrharness](scale/rrharness/README.md) | RIB-manager flood, churn, late join and recovery CPU/memory; `just bench-rrharness MODE ...` or `just bench-compare-rrharness BASE HEAD` | Small `flood 4 100 2 OUTPUT` shape; `recovery-memory` supports `--correctness-only` | Crate built/tested; comparator/control checks; no timed campaign |
+| [rrtransport](scale/rrtransport/README.md) | Real-transport RR correctness and 1,000-peer × 100,000-route receipt; `just bench-rrtransport OUTPUT` | `just bench-rrtransport-smoke`; runner `--real-smoke OUTPUT` | Crate built/tested, both real-TCP smokes and receipt tests; no scale run |
+| [reloadstall](scale/reloadstall/README.md) | Route-server reload stalls, membership, failover and mass-dirty recovery; `target/scale/reloadstall` and the directory's cell runners | Scenario/settlement tests; recovery runner `--correctness-only`; converged-rejoin `DRY_RUN=1` or `SMOKE=1` | Crate built/tested and scenario/settlement checks; recovery qualifications require manual workflow dispatch |
+| [enhanced-route-refresh](scale/enhanced-route-refresh/README.md) | RFC 7313 inventory and memory; `just bench-enhanced-route-refresh` (package `enhanced-route-refresh-receipt`) | Package tests and `test_validate_phase.py`; no reduced live receipt mode | Crate built/tested and phase tests; no full receipt |
+| [matrix](scale/matrix/run-matrix.sh) | Same-host rustbgpd, BIRD and OpenBGPD reload comparison; `just bench-ixp-matrix [cells]` | Shell/provenance tests; no dry-run switch | Shell and provenance checks; no live matrix |
+| [irrreload](scale/irrreload/README.md) | IRR-policy reload matrix, memory attribution and BMP dump/live-buffer boundary; `just bench-irr-reload [cells]`, `run-memory-attribution.sh`, `run-bmp-buffer-receipt.sh` | Reload `SMOKE=1`; reload/BMP `DRY_RUN_PROTOCOL=1` | Renderer/scenario contracts and reload verifier tests; no full campaign or BMP receipt |
+| [headline](scale/headline/run-campaign.sh) | Multi-arm matrix, IRR and RR1000 campaigns; `just bench-headline OUTPUT LABEL=REF ...` | `DRY_RUN=1` prints schedule; `SMOKE=1` reduces shapes | Python tests and shell checks; no live campaign |
+| [route-server-1000](scale/route-server-1000/README.md) | Fixed 1,000-peer route-server receipt; `just bench-route-server-1000` | `bash bench/tests/test-route-server-1000-receipt.sh`; no reduced live mode | Mocked runner/receipt tests and shell checks; no full receipt |
+| [rpki-cell](scale/rpki-cell/run-rpki-cell.sh) | Reloadstall initial convergence with a static StayRTR VRP table; `just bench-rpki-cell OUTPUT BASE HEAD` with `DAEMON_CPUS` and `RTR_CPUS` | `rpki_cell.py check PEERS PREFIXES VRPS`; runner `SMOKE=1` | Fixture/extractor tests and shell checks; no RTR campaign |
+| [rebaseline](scale/rebaseline/README.md) | CPU-phase and live-heap attribution for pinned receipts; `classify_cpu.py`, `classify_dhat.py`, `parse_rrharness.py` | Fixture tests in this directory | Classifier/parser tests and retained-input replay; no new profile collection |
+| [evpn-qualification](scale/evpn-qualification/README.md) | Owned/private daemon memory and recovery comparison; `qualify.py prepare/build`, then `run.sh [--recovery] CAMPAIGN` | Append `--correctness-only` to either runner entry point | Python/wire tests and shell checks; no instrumented-daemon build or live cells |
+| [evpn-terminal-debt](scale/evpn-terminal-debt/README.md) | Admitted refresh marker debt and parent/candidate cost; `terminal.py` or `compare.py prepare/build`, then `run.sh [--compare] CAMPAIGN` | Append `--correctness-only` to either runner entry point | Python tests, source-patch anchors with `QUALIFICATION_SOURCE`, shell checks; no instrumented-daemon build or live cells |
+
+## Shared run rules
+
+- Build the four scale crates with `CARGO_INCREMENTAL=0 cargo build --locked
+  --profile scale -p PACKAGE`; use `rrharness`, `rrtransport`, `reloadstall`, or
+  `enhanced-route-refresh-receipt`. Their binaries go to `target/scale`.
+  Build the daemon, CLI and EVPN load binaries with the profile specified by
+  their runner, usually `--release`; substituting the scale profile changes
+  their code generation.
+- Take the [shared host lock](../tests/soak/host-lock.sh) for measurements and
+  keep the host quiet for the whole run. Drivers with a lock manage it themselves;
+  wrap bare tools that lack one. Check for competing builds before a long Cargo
+  run, and preserve failed or disturbed runs. A pre-cell quiet check alone does
+  not detect a competitor that starts and finishes inside the cell.
+- Fix the cells and bars before measuring. For a new parent-relative timing
+  qualification, build distinct parent/candidate binaries and run A/A, ABBA,
+  then confirmation. Follow a retained receipt's pinned protocol when replaying
+  it; a driver's default repetition count need not implement that schedule.
+- `PASS` means the declared checks passed for that shape; `FAIL` means valid
+  evidence missed a bar; `INVALID` means the instrument, provenance or host
+  conditions cannot support a verdict. Consult the harness for its exact bars
+  and exit codes. Descriptive tools such as `rpki-cell` report medians without
+  a regression threshold; successful extraction alone is not a performance pass.
+- Keep generated campaign directories and raw results outside Git. Preserve
+  existing historical receipts; publish only reviewed evidence through the
+  [receipt convention](../docs/perf/README.md#writing-a-receipt).
+
+## Loose scripts
+
+- **Timing and query comparisons:** `compare-criterion.sh`,
+  `compare-route-paging.sh`, `run-vpn-query-campaign.sh`, and
+  `scale/compare-rrharness.sh`; use the recipes below.
+- **Memory and recovery:** `compare-rib-memory.sh`,
+  `scale/compare-recovery-memory.sh`, and its `recovery_memory.py` classifier.
+  The recovery driver's `--check-controls` compiles against its fixed controls.
+- **Kernel and MRT experiments:** `run-fib-kernel-dump.py` compares global and
+  table-filtered IPv4 netlink dumps in an isolated namespace;
+  `run-mrt-attribute-scratch-campaign.py` runs its frozen MRT scratch A/B.
+- **Receipt verification:** `verify-vpn-query-campaign.py`,
+  `verify-mrt-growth-campaign.py`, and `verify-mrt-attribute-scratch-campaign.py`
+  check existing results; `tests/` contains their guard and fixture tests.
+- **Shared support:** `scale/host-quiet.sh`, `scale/provenance.sh`, and
+  `scale/cgroup-memory.sh` supply admission, source and memory checks.
+  `smoke-benches.sh` runs the Cargo bench bodies without collecting timings
+  (`just gate-contract`).
 
 ## Recipes
 
