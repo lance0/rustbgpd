@@ -839,18 +839,13 @@ impl RibManager {
             &affected_nlri,
         );
 
-        // The source's changed path IDs, grouped by key.
-        let mut touched: Vec<(VpnRouteKey, u32)> = Vec::new();
-        if source.is_some() {
-            touched.reserve_exact(affected.len());
-            touched.extend(
-                affected
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .map(|key| (key.nlri_key, key.path_id)),
-            );
-            touched.sort_unstable();
-        }
+        // The source's changed path IDs, grouped by key. Filled when the
+        // first key needs it; a few IDs stay off the heap.
+        let mut touched: smallvec::SmallVec<[(VpnRouteKey, u32); 4]> = smallvec::SmallVec::new();
+        // The one changed path of a single-route UPDATE, the common case.
+        let only = (affected.len() == 1)
+            .then(|| affected.iter().next())
+            .flatten();
 
         // Changed keys are a subset of the selected inputs: an owner
         // reserves them so inserts never rehash between checkpoints.
@@ -879,13 +874,27 @@ impl RibManager {
             // UPDATE left that best alone.
             let untouched_best = source.and_then(|peer| {
                 let best = self.loc_rib.get_vpn(key)?;
-                if best.peer == peer && affected.contains(&path(best.path_id)) {
+                if best.peer == peer
+                    && only.map_or_else(
+                        || affected.contains(&path(best.path_id)),
+                        |only| only.path_id == best.path_id,
+                    )
+                {
                     return None;
                 }
                 let best = self.ribs.get(&best.peer)?.get_vpn(&path(best.path_id))?;
                 Some((self.ribs.get(&peer)?, best))
             });
             let changed = if let Some((rib, best)) = untouched_best {
+                if touched.is_empty() {
+                    touched.extend(
+                        affected
+                            .iter()
+                            .inspect(|_| checkpoint())
+                            .map(|key| (key.nlri_key, key.path_id)),
+                    );
+                    touched.sort_unstable();
+                }
                 let first = touched.partition_point(|(touched_key, _)| touched_key < key);
                 // The stored best goes first: `min_by` keeps the first of
                 // equal candidates, so a tie leaves the selection alone.
@@ -899,13 +908,16 @@ impl RibManager {
                     .inspect(|_| checkpoint());
                 self.loc_rib.recompute_vpn(*key, candidates)
             } else {
-                let candidates = self
+                // Collected first: selecting straight from the nested
+                // iterator measured slower for a key with one stored path.
+                let candidates: Vec<&VpnRibRoute> = self
                     .ribs
                     .values()
                     .inspect(|_| checkpoint())
                     .flat_map(|rib| rib.iter_vpn_for_nlri(key))
-                    .inspect(|_| checkpoint());
-                self.loc_rib.recompute_vpn(*key, candidates)
+                    .inspect(|_| checkpoint())
+                    .collect();
+                self.loc_rib.recompute_vpn(*key, candidates.into_iter())
             };
             if changed {
                 changed_keys.insert(*key);
