@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1b6e43edd012d27006b2bd01b806d0c21b6cb85d9fecca3bd442ba4f3049c239 # shrinks to a = ([Med(1)], 1, 0, 0, 1, false, true), b = ([], 1, 0, 0, 1, false, true), orr_costs = None
