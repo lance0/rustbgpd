@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use super::super::eor_hold::EorHold;
 use super::super::outbound_owing::OwedFamily;
 use super::*;
 use crate::outbound_credit::CHUNK_ROWS;
@@ -841,6 +842,117 @@ fn begin_close_flushes_owed_withdrawals() {
     wire.apply(&queued);
     assert!(wire.evpn.is_empty());
     drop(charge);
+}
+
+fn close_marker_held_by_withdrawal() -> (
+    RibManager,
+    PeerId,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    crate::outbound_credit::OutboundCharge,
+) {
+    let mut manager = manager(8);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 9, 2));
+    let mut rx = up(&mut manager, peer, ipv4_sendable());
+    send_all(&mut rx);
+    received(&mut manager, vec![route(1, 0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    send_all(&mut rx);
+    manager.outbound_row_credit_override = Some(1);
+    let credit = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&credit, 1);
+    received(
+        &mut manager,
+        vec![],
+        vec![(route_prefix(1), 0)],
+        vec![],
+        vec![],
+    );
+    assert_eq!(owed(&manager, peer, V4), 1);
+    manager.owe_eor(peer, V4);
+    assert!(manager.eor_holds(peer, V4).contains(EorHold::OwedKeys));
+    assert!(held(&mut rx).is_empty());
+    (manager, peer, rx, charge)
+}
+
+/// The close flush releases the last owed key before the actor checks its
+/// marker obligations; the marker must follow the withdrawal in that turn.
+#[test]
+fn begin_close_settles_the_marker_freed_by_owed_withdrawals() {
+    let (mut manager, peer, mut rx, _charge) = close_marker_held_by_withdrawal();
+    manager.handle_update(RibUpdate::BeginClose);
+    manager.assert_eor_settled();
+    let queued = send_all(&mut rx);
+    assert_eq!(queued.len(), 2);
+    assert_eq!(
+        queued[0].unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(route_prefix(1), 0)]
+    );
+    assert_eq!(queued[1].end_of_rib, vec![V4]);
+    assert!(!manager.eor.owes(peer, V4));
+    manager.retry_eor_markers_bounded();
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    assert!(send_all(&mut rx).is_empty());
+}
+
+#[test]
+fn begin_close_retries_a_refused_marker_without_a_missed_release() {
+    let (mut manager, peer, mut rx, _charge) = close_marker_held_by_withdrawal();
+    let sender = manager.outbound_peers[&peer].clone();
+    // Leave exactly the withdrawal's slot; the following marker is refused.
+    let permits: Vec<_> = sender
+        .try_reserve_many(sender.capacity() - 1)
+        .unwrap()
+        .collect();
+    manager.handle_update(RibUpdate::BeginClose);
+    assert_eq!(owed(&manager, peer, V4), 0);
+    assert!(manager.eor_holds(peer, V4).contains(EorHold::Writer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    let queued = send_all(&mut rx);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].unicast_withdrawals().count(), 1);
+    assert_eq!(queued[0].end_of_rib, []);
+    drop(permits);
+    manager.retry_eor_markers_bounded();
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    let retried = send_all(&mut rx);
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].end_of_rib, vec![V4]);
+    assert!(!manager.eor.owes(peer, V4));
+}
+
+#[test]
+fn begin_close_keeps_the_marker_behind_remaining_announcements() {
+    let (mut manager, peer, mut rx, _charge) = close_marker_held_by_withdrawal();
+    received(&mut manager, vec![route(2, 0)], vec![], vec![], vec![]);
+    assert_eq!(owed(&manager, peer, V4), 2);
+    manager.handle_update(RibUpdate::BeginClose);
+    let queued = send_all(&mut rx);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].unicast_withdrawals().count(), 1);
+    assert!(queued[0].announce.is_empty());
+    assert_eq!(queued[0].end_of_rib, []);
+    assert_eq!(owed(&manager, peer, V4), 1);
+    assert!(manager.eor.owes(peer, V4));
+    manager.retry_eor_markers_bounded();
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    assert!(send_all(&mut rx).is_empty());
+}
+
+#[test]
+fn begin_close_keeps_the_marker_behind_another_hold() {
+    let (mut manager, peer, mut rx, _charge) = close_marker_held_by_withdrawal();
+    manager.owe_eor_behind_orf_table(peer, V4);
+    manager.handle_update(RibUpdate::BeginClose);
+    let queued = send_all(&mut rx);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].unicast_withdrawals().count(), 1);
+    assert_eq!(queued[0].end_of_rib, []);
+    assert_eq!(owed(&manager, peer, V4), 0);
+    assert!(manager.eor.owes(peer, V4));
+    manager.retry_eor_markers_bounded();
+    assert_eq!(manager.eor.unsettled_tick_finds, 0);
+    assert!(send_all(&mut rx).is_empty());
 }
 
 /// An End-of-RIB that waits on a family's owed keys is never sent ahead of
