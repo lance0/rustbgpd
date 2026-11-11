@@ -336,16 +336,16 @@ async fn own_session(h: &mut Harness, key: &PeerKey, handle: PeerHandle) -> u64 
     id
 }
 
-/// `swp1` loses its link; preparing its retirement drains a queued breach
+/// One port loses its link; preparing its retirement drains a queued breach
 /// whose primary cannot take its Stop, which costs a whole command window
-/// inside the round. That time is the preparation's: `swp1`'s own session is
-/// still stopped with a Shutdown, and `swp2`'s state query, asked afterwards,
-/// is still sent.
-#[tokio::test(start_paused = true)]
-async fn a_slow_retirement_preparation_does_not_spend_another_ports_window() {
+/// inside the round. That time is the preparation's: the lost port's own
+/// session is still stopped with a Shutdown, and the other port's state query
+/// is still sent, whether it was asked before the preparation or after it.
+async fn slow_preparation_spares_the_other_port(lost: usize) {
+    let ports = [("swp1", 7), ("swp2", 8)];
     let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
     let mut counters = Vec::new();
-    for (name, scope) in [("swp1", 7), ("swp2", 8)] {
+    for (name, scope) in ports {
         h.bind(name, Some(endpoint(2, scope))).await;
         let key = PeerKey::new(IpAddr::V6(ll(2)), Some(name.into()));
         let counted = Arc::new(FakePeerCounters::default());
@@ -365,12 +365,18 @@ async fn a_slow_retirement_preparation_does_not_spend_another_ports_window() {
         .session_notify_tx
         .send(round_breach(breached, unstoppable))
         .unwrap();
-    h.links_changed(snapshot(true, &[("swp1", 7, false), ("swp2", 8, true)]));
+    let kept = 1 - lost;
+    let links: Vec<_> = ports
+        .iter()
+        .enumerate()
+        .map(|(index, &(name, scope))| (name, scope, index != lost))
+        .collect();
+    h.links_changed(snapshot(true, &links));
     h.mgr
         .handle_discovery_event(DiscoveryEvent::BindingChanged {
-            interface: "swp2".into(),
-            previous: Some(endpoint(2, 8)),
-            current: Some(endpoint(3, 8)),
+            interface: ports[kept].0.into(),
+            previous: Some(endpoint(2, ports[kept].1)),
+            current: Some(endpoint(3, ports[kept].1)),
         });
     let started = tokio::time::Instant::now();
     h.reconcile().await;
@@ -380,20 +386,132 @@ async fn a_slow_retirement_preparation_does_not_spend_another_ports_window() {
     );
     assert_ne!(h.mgr.peers[&key(unstoppable)].session_id(), breached);
     assert_eq!(
-        counters[0].shutdown.load(Ordering::SeqCst),
+        counters[lost].shutdown.load(Ordering::SeqCst),
         1,
-        "swp1's session gets its Shutdown after the slow preparation"
+        "the lost port's session gets its Shutdown after the slow preparation"
     );
     assert_eq!(
-        counters[1].query_state.load(Ordering::SeqCst),
+        counters[kept].query_state.load(Ordering::SeqCst),
         1,
-        "swp2's state query is sent, not timed out unsent"
+        "the other port's state query is sent, not timed out unsent"
     );
     assert!(
         h.mgr
             .peers
-            .contains_key(&PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()))),
-        "swp2 went on to its new binding in the same round"
+            .contains_key(&PeerKey::new(IpAddr::V6(ll(3)), Some(ports[kept].0.into()))),
+        "the other port went on to its new binding in the same round"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_retirement_preparation_does_not_spend_another_ports_window() {
+    slow_preparation_spares_the_other_port(0).await;
+}
+
+/// The healthy port sorts first: its query is built before the slow
+/// preparation and must already be on its way when that starts.
+#[tokio::test(start_paused = true)]
+async fn a_slow_preparation_after_a_ports_query_does_not_time_it_out_unsent() {
+    slow_preparation_spares_the_other_port(1).await;
+}
+
+/// `swp2`'s deletion settles slowly: the session it stopped reports a breach
+/// by a primary that cannot take its Stop, and the settlement's drain waits
+/// out a whole command window. `swp1` answers its state query meanwhile and
+/// still has its conditional retirement to ask. That settlement time is not
+/// `swp1`'s: the retirement is sent, and `swp1` moves to its new binding.
+#[tokio::test(start_paused = true)]
+async fn a_slow_delete_settlement_does_not_spend_another_ports_next_phase() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    let (commands, mut receiver) = mpsc::channel(8);
+    let (asked_tx, asked) = oneshot::channel();
+    let (answer, answered) = oneshot::channel();
+    let retirements = Arc::new(AtomicU32::new(0));
+    let retired = retirements.clone();
+    let session = tokio::spawn(async move {
+        let mut hold = Some((asked_tx, answered));
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    if let Some((asked, answered)) = hold.take() {
+                        asked.send(()).unwrap();
+                        answered.await.unwrap();
+                    }
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply, ticket } => {
+                    if ticket.claim() {
+                        retired.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(true));
+                        break;
+                    }
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    own_session(
+        &mut h,
+        &swp1_key(2),
+        PeerHandle::from_parts(commands, session),
+    )
+    .await;
+    let unstoppable: IpAddr = "10.0.0.51".parse().unwrap();
+    insert_test_managed_peer(
+        &mut h.mgr,
+        unstoppable,
+        super::super::command_fan_out::wedged_session(),
+        false,
+    );
+    let breached = h.mgr.peers[&key(unstoppable)].session_id();
+    // Reported as swp2's session exits: after the deletion's preparation has
+    // drained, so the settlement's drain is the one that handles it.
+    let (stopping, stop_entered, release_stop) = gated_round_shutdown(Some((
+        h.mgr.session_notify_tx.clone(),
+        round_breach(breached, unstoppable),
+    )));
+    own_session(&mut h, &swp2, stopping).await;
+    h.mgr
+        .handle_discovery_event(DiscoveryEvent::BindingChanged {
+            interface: "swp1".into(),
+            previous: Some(endpoint(2, 7)),
+            current: Some(endpoint(3, 7)),
+        });
+    let started = tokio::time::Instant::now();
+    let round = tokio::spawn(async move {
+        h.reconcile().await;
+        h
+    });
+    asked.await.unwrap();
+    stop_entered.await.unwrap();
+    release_stop.send(()).unwrap();
+    poll_round_tasks().await;
+    // swp1 answers while the manager is inside swp2's settlement.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    answer.send(()).unwrap();
+    let h = round.await.unwrap();
+    assert!(
+        started.elapsed() >= ROUND_WINDOW,
+        "the settlement waited out the unstoppable primary"
+    );
+    assert_ne!(h.mgr.peers[&key(unstoppable)].session_id(), breached);
+    assert_eq!(
+        retirements.load(Ordering::SeqCst),
+        1,
+        "swp1's conditional retirement is sent after the slow settlement"
+    );
+    assert!(
+        h.mgr.peers.contains_key(&swp1_key(3)),
+        "swp1 went on to its new binding in the same round"
     );
 }
 

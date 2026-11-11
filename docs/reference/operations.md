@@ -69,8 +69,10 @@ instead of one after another:
   collision candidate still gets its Cease when the primary cannot take a
   command. A session that has not stopped when the window ends is aborted: its
   TCP connection closes without a Cease, and its final `PeerDown` reaches the
-  RIB when the mailbox has room. A healthy peer finishes without waiting for a
-  stalled one.
+  RIB when the mailbox has room. The window belongs to the round, not to each
+  session: a second retirement of the same peer queued behind one that used
+  the whole window is aborted the same way, without a Shutdown. A healthy peer
+  finishes without waiting for a stalled one.
 - **Dynamic dampening sources.** A dynamic neighbor whose routes feed
   dampening history is removed only after the RIB acknowledges a barrier
   queued behind that neighbor's session ends. The barrier never waits for
@@ -81,8 +83,10 @@ instead of one after another:
   stops the peer manager.
 - **Interface-only reconciliation.** Each port's session checks (state,
   conditional retirement, retention, stop) share one 500 ms window that
-  starts with that port's first wait; time spent preparing another port's
-  retirement is not charged to it. A session holding messages for a full RIB
+  opens when that port's first command is sent. Time the daemon spends
+  preparing or settling another port's retirement is not charged to it: a
+  command already sent keeps waiting for its answer, and the port's next
+  check still gets what was left of its window. A session holding messages for a full RIB
   mailbox refuses a conditional retirement at once; an unanswered one is
   withdrawn. Either way the binding is kept and the check retried about a
   second later. A full RIB mailbox makes the retention query retry instead of

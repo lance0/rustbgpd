@@ -6,7 +6,9 @@
   from the start of its session waits; each interface-only port has its own.
   Healthy peers finish while stalled ones wait.
   **Operator-visible:** a session that has not stopped when its round's
-  window ends is aborted, closing TCP without a Cease. The barrier that
+  window ends is aborted, closing TCP without a Cease; the window is per
+  round, so a second retirement of the same peer queued behind one that used
+  it is aborted too. The barrier that
   precedes removing a dynamic dampening source no longer waits for RIB mailbox
   room: it queues behind deferred RIB updates and is acknowledged within the
   same 5 s bound as before, after which the peer manager still stops. An

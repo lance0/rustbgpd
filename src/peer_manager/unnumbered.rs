@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
 
-use futures::{FutureExt as _, StreamExt as _};
+use futures::StreamExt as _;
 use rustbgpd_api::peer_types::{PeerKey, PeerLifecycleError};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{PeerCommandError, PeerHandle, StateQueryOutcome};
@@ -73,8 +73,10 @@ const RETENTION_RECHECK: std::time::Duration = std::time::Duration::from_secs(30
 )]
 struct PortSessionChecks {
     /// One window for all of this port's session phases, opened when its
-    /// first wait starts: another port's inline work is never charged to it.
+    /// first wait starts.
     deadline_at: Option<tokio::time::Instant>,
+    /// The round's inline time this window has already been extended by.
+    inline_credited: std::time::Duration,
     state: Option<StateQueryOutcome>,
     retirement: Option<Result<bool, PeerCommandError>>,
     retention_before: Option<Option<rustbgpd_rib::PeerRetention>>,
@@ -110,6 +112,22 @@ enum PortRoundCompletion {
 }
 
 impl PortSessionChecks {
+    /// The deadline for this port's next wait. What the actor has awaited
+    /// inline since the port's previous wait started (`inline`, the round's
+    /// running total) is no session's time: an open window is extended by
+    /// it, so the next phase is not timed out unsent. A session whose wait
+    /// was in flight meanwhile had that time too, so a port's phases can
+    /// take up to the window plus the round's inline time.
+    fn open_window(&mut self, inline: std::time::Duration) -> tokio::time::Instant {
+        if let Some(deadline_at) = &mut self.deadline_at {
+            *deadline_at += inline.saturating_sub(self.inline_credited);
+        }
+        self.inline_credited = inline;
+        *self
+            .deadline_at
+            .get_or_insert_with(|| tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT)
+    }
+
     fn state(&self) -> Result<&StateQueryOutcome, PortSessionRequest> {
         self.state.as_ref().ok_or(PortSessionRequest::State)
     }
@@ -1244,25 +1262,29 @@ impl PeerManager {
         let mut pending = futures::stream::FuturesUnordered::<
             futures::future::BoxFuture<'static, PortRoundCompletion>,
         >::new();
+        let mut completed = std::collections::VecDeque::new();
+        // Time the actor spent awaiting inline in this round: preparing or
+        // settling one port while other ports' windows are open.
+        let mut inline = std::time::Duration::ZERO;
         loop {
             while let Some((name, mut checks)) = ready.pop_front() {
-                if let Err(request) = self.reconcile_port(&name, &mut checks).await {
+                let from = tokio::time::Instant::now();
+                let reconciled = self.reconcile_port(&name, &mut checks).await;
+                inline += from.elapsed();
+                if let Err(request) = reconciled {
                     let Some(key) = self.port_mut(&name).bound.clone() else {
                         continue;
                     };
                     if let PortSessionRequest::Delete { reason } = request {
-                        let preparing = tokio::time::Instant::now();
+                        let from = tokio::time::Instant::now();
                         let prepared = self
                             .prepare_bound_peer_retirement(&name, &key, reason)
                             .await;
-                        // The preparation's own drains are not session time.
-                        let deadline_at = checks.deadline_at.map_or_else(
-                            || tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT,
-                            |deadline_at| deadline_at + preparing.elapsed(),
-                        );
+                        inline += from.elapsed();
+                        let deadline_at = checks.open_window(inline);
                         match prepared {
                             Ok((detached, retirement)) => {
-                                pending.push(
+                                super::notifications::start_round_wait(
                                     async move {
                                         let stopped = match detached {
                                             Some(detached) => Some(Box::new(
@@ -1276,8 +1298,9 @@ impl PeerManager {
                                             stopped,
                                             retirement,
                                         }
-                                    }
-                                    .boxed(),
+                                    },
+                                    &mut pending,
+                                    &mut completed,
                                 );
                             }
                             Err(error) => {
@@ -1288,15 +1311,13 @@ impl PeerManager {
                         }
                         continue;
                     }
-                    let deadline_at = *checks.deadline_at.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT
-                    });
+                    let deadline_at = checks.open_window(inline);
                     let managed = self.peers.get(&key);
                     let id = managed.map(super::ManagedPeer::session_id);
                     let commands = managed.map(|managed| managed.handle().commands_sender());
                     let rib_tx = self.rib_tx.clone();
                     let rib_peer = self.rib_peer_of(&key);
-                    pending.push(
+                    super::notifications::start_round_wait(
                         async move {
                             let checks = checks
                                 .wait(request, commands, deadline_at, rib_tx, rib_peer)
@@ -1307,12 +1328,17 @@ impl PeerManager {
                                 id,
                                 checks: Box::new(checks),
                             }
-                        }
-                        .boxed(),
+                        },
+                        &mut pending,
+                        &mut completed,
                     );
                 }
             }
-            let Some(completion) = self.await_session_sweep(pending.next()).await else {
+            let completion = if let Some(completion) = completed.pop_front() {
+                completion
+            } else if let Some(completion) = self.await_session_sweep(pending.next()).await {
+                completion
+            } else {
                 break;
             };
             match completion {
@@ -1340,6 +1366,7 @@ impl PeerManager {
                     stopped,
                     retirement,
                 } => {
+                    let from = tokio::time::Instant::now();
                     if let Some(stopped) = stopped {
                         self.finish_stopped_peer_delete(*stopped).await;
                     }
@@ -1353,8 +1380,14 @@ impl PeerManager {
                             .await;
                         ready.push_back((name, PortSessionChecks::default()));
                     } else {
+                        // Nothing in a round rebinds a port whose delete is
+                        // in flight; if it happens, the held operator and
+                        // latch state is lost with this retirement.
+                        debug_assert!(false, "port {name} was rebound during its delete");
+                        warn!(interface = %name, peer = %key, "unnumbered: port binding changed while its peer was being removed; held neighbor state dropped, retrying");
                         self.arm_unnumbered_retry();
                     }
+                    inline += from.elapsed();
                 }
             }
         }

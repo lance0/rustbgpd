@@ -45,12 +45,12 @@ enum NotificationCompletion {
     },
 }
 
-type NotificationWait = futures::future::BoxFuture<'static, NotificationCompletion>;
-
-fn start_notification_wait(
-    wait: impl std::future::Future<Output = NotificationCompletion> + Send + 'static,
-    pending: &mut futures::stream::FuturesUnordered<NotificationWait>,
-    ready: &mut VecDeque<NotificationCompletion>,
+/// Start one of a round's owned waits: poll it once now, so its command is
+/// sent and its window is open before the actor does anything else inline.
+pub(super) fn start_round_wait<T>(
+    wait: impl std::future::Future<Output = T> + Send + 'static,
+    pending: &mut futures::stream::FuturesUnordered<futures::future::BoxFuture<'static, T>>,
+    ready: &mut VecDeque<T>,
 ) {
     let mut wait = wait.boxed();
     // Every target gets its first poll before any completion can await.
@@ -504,7 +504,7 @@ impl PeerManager {
         let mut ready = VecDeque::new();
         for queue in by_peer.values_mut() {
             if let Some(retirement) = queue.pop_front() {
-                start_notification_wait(
+                start_round_wait(
                     async move { NotificationCompletion::Sessions(retirement.wait(deadline_at).await) },
                     &mut pending,
                     &mut ready,
@@ -531,7 +531,7 @@ impl PeerManager {
                     by_peer.entry(peer.clone()).or_default().extend(additional);
                     self.finish_notification_replacement(&peer, old_id, *managed, rib_owner);
                     if let Some(retirement) = by_peer.get_mut(&peer).and_then(VecDeque::pop_front) {
-                        start_notification_wait(
+                        start_round_wait(
                             async move {
                                 NotificationCompletion::Sessions(retirement.wait(deadline_at).await)
                             },
@@ -555,7 +555,7 @@ impl PeerManager {
                             let (aborted, old_id, managed) = managed.into_parts();
                             let peer = peer.clone();
                             self.retiring_sessions.insert(old_id, peer.clone());
-                            start_notification_wait(
+                            start_round_wait(
                                 async move {
                                     let rib_owner =
                                         aborted.abort_and_rib_registration_owner(old_id).await;
@@ -588,7 +588,7 @@ impl PeerManager {
                             // Admission and acknowledgement share the bound
                             // of every other primary-lane control round trip.
                             let barrier_deadline = Instant::now() + super::RIB_REPLY_TIMEOUT;
-                            start_notification_wait(
+                            start_round_wait(
                                 async move {
                                     let failed = !matches!(
                                         tokio::time::timeout_at(barrier_deadline, acknowledged)
@@ -631,7 +631,7 @@ impl PeerManager {
                 );
             }
             if let Some(retirement) = by_peer.get_mut(&peer).and_then(VecDeque::pop_front) {
-                start_notification_wait(
+                start_round_wait(
                     async move { NotificationCompletion::Sessions(retirement.wait(deadline_at).await) },
                     &mut pending,
                     &mut ready,
