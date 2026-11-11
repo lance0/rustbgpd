@@ -15,11 +15,19 @@ ExecStart=/usr/local/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config
 ExecReload=/bin/kill -HUP $MAINPID
 # READY=1 arrives once the configured peer roster is installed and BGP
 # ingress is active; STOPPING=1 marks the start of coordinated shutdown.
-# WATCHDOG=1 is sent every 2.5 minutes only while the PeerManager and RIB
-# actors answer the same bounded core-actor probe /readyz uses. PID 1
-# independently enforces the five-minute watchdog deadline;
+# WATCHDOG=1 follows each liveness sample, taken every 10 seconds, in which
+# the PeerManager and RIB actors both answered within 5 seconds. A RIB that
+# answers "stalled" from inside a long unit of work fails /readyz but is
+# still pinged. PID 1 independently enforces the deadline: it aborts the
+# daemon between 4 min 50 s and 5 min after the actors stop answering.
 # Restart=on-failure below covers watchdog expiry.
 WatchdogSec=5min
+# Watchdog expiry sends SIGABRT, which the daemon does not handle, so the
+# kernel writes a core dump before the process exits. Every session is
+# already lost and the restart waits for the dump, so the wait is bounded:
+# two minutes is enough for a multi-gigabyte core, and SIGKILL truncates a
+# larger one. Unset, the wait would fall back to TimeoutStopSec (32 minutes).
+TimeoutAbortSec=2min
 
 User=rustbgpd
 Group=rustbgpd

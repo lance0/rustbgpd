@@ -552,8 +552,8 @@ pub enum ReadinessProbeFailureReason {
     /// The RIB answered, but a policy transition, selection-deferral
     /// release or source-peer teardown has exceeded its stall bound.
     RibStalled,
-    /// The daemon recorded a fatal availability fault (listener bind
-    /// failure or coordinated shutdown).
+    /// The daemon recorded a fatal availability fault (runtime-config
+    /// settlement recovery fence or coordinated shutdown).
     DaemonUnavailable,
 }
 

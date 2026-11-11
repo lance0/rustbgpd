@@ -744,6 +744,7 @@ struct BgpMetricsInner {
     rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
     rib_policy_transition_outcomes: IntCounterVec,
     readiness_probe_failures: IntCounterVec,
+    systemd_watchdog_pings_skipped: IntCounter,
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
     rib_route_refresh_actor_duration_seconds: HistogramVec,
     rib_actor_work_duration_seconds: HistogramVec,
@@ -1976,6 +1977,11 @@ impl BgpMetrics {
         for reason in crate::reason_labels::ReadinessProbeFailureReason::ALL {
             readiness_probe_failures.with_label_values(&[reason.as_str()]);
         }
+        let systemd_watchdog_pings_skipped = IntCounter::new(
+            "bgp_systemd_watchdog_pings_skipped_total",
+            "Liveness samples that withheld the systemd WATCHDOG=1 ping because PeerManager or the RIB gave no answer.",
+        )
+        .expect("valid metric definition");
 
         let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -3539,6 +3545,9 @@ impl BgpMetrics {
             .register(Box::new(readiness_probe_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(systemd_watchdog_pings_skipped.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(
                 rib_outbound_prefix_limit_actor_duration_seconds.clone(),
             ))
@@ -4064,6 +4073,7 @@ impl BgpMetrics {
             rib_policy_transition_actor_poll_duration_seconds,
             rib_policy_transition_outcomes,
             readiness_probe_failures,
+            systemd_watchdog_pings_skipped,
             rib_outbound_prefix_limit_actor_duration_seconds,
             rib_route_refresh_actor_duration_seconds,
             rib_actor_work_duration_seconds,
@@ -6070,6 +6080,11 @@ impl BgpMetrics {
             .readiness_probe_failures
             .with_label_values(&[reason.as_str()])
             .inc();
+    }
+
+    /// Record one liveness sample that withheld the systemd watchdog ping.
+    pub fn record_systemd_watchdog_ping_skipped(&self) {
+        self.0.systemd_watchdog_pings_skipped.inc();
     }
 
     /// Set the sampled row credit in use and live whole-table operations.
@@ -9356,6 +9371,14 @@ mod tests {
                 reason.as_str()
             )));
         }
+    }
+
+    #[test]
+    fn systemd_watchdog_skips_export_at_zero_and_increment() {
+        let m = BgpMetrics::new();
+        assert!(gather_text(&m).contains("\nbgp_systemd_watchdog_pings_skipped_total 0\n"));
+        m.record_systemd_watchdog_ping_skipped();
+        assert!(gather_text(&m).contains("\nbgp_systemd_watchdog_pings_skipped_total 1\n"));
     }
 
     #[test]

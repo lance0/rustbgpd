@@ -50,6 +50,7 @@ SYSTEMD_DIRECTIVES = {
     ("Service", "Type"): "notify",
     ("Service", "NotifyAccess"): "main",
     ("Service", "WatchdogSec"): "5min",
+    ("Service", "TimeoutAbortSec"): "2min",
     ("Service", "TimeoutStartSec"): "10min",
     ("Service", "Restart"): "on-failure",
     ("Service", "RestartSec"): "5",

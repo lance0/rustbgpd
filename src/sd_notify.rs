@@ -2,26 +2,66 @@
 //! protocol) without a libsystemd dependency.
 //!
 //! The daemon sends `READY=1` once the configured peer roster is installed,
-//! `STOPPING=1` when coordinated shutdown begins, and `WATCHDOG=1` at half the
-//! `WATCHDOG_USEC` interval for as long as the `PeerManager` and RIB actors keep
-//! answering the same bounded core-actor probe `/readyz` uses. Without
-//! `NOTIFY_SOCKET` every call is a silent no-op, so the daemon behaves
-//! identically outside systemd.
+//! `STOPPING=1` when coordinated shutdown begins, and `WATCHDOG=1` after each
+//! liveness sample in which the `PeerManager` and RIB actors both answered.
+//! Liveness is not readiness: a RIB that answers "stalled" from inside a long
+//! unit of work fails `/readyz` and is still pinged. Without `NOTIFY_SOCKET`
+//! every call is a silent no-op, so the daemon behaves identically outside
+//! systemd.
 
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustbgpd_api::health_probe::CoreReadinessProbe;
+use rustbgpd_telemetry::BgpMetrics;
 use tracing::{debug, warn};
 
 /// Floor for the watchdog ping interval so a degenerate `WATCHDOG_USEC`
 /// cannot turn the ping loop into a busy loop.
 const MIN_PING_INTERVAL: Duration = Duration::from_millis(100);
-/// Retry cadence after a failed liveness probe, bounded by the ping interval,
-/// so one transient miss delays the next ping by about a second instead of a
-/// full interval.
+/// Retry cadence after a failed liveness sample, bounded by the sample
+/// period, so one transient miss delays the next ping by about a second.
 const PROBE_RETRY: Duration = Duration::from_secs(1);
+/// Longest gap between liveness samples. The last ping before the actors go
+/// silent is at most this old, so the service manager's deadline runs from
+/// within this much of the moment they stopped answering.
+const MAX_SAMPLE_PERIOD: Duration = Duration::from_secs(10);
+/// Longest wait for one liveness sample: seconds, not the 200 ms readiness
+/// deadline, because a slow answer is still an answer.
+const MAX_SAMPLE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Sample period and per-sample deadline for a ping interval (half
+/// `WATCHDOG_USEC`): a quarter and an eighth of the watchdog timeout, capped
+/// at 10 s and 5 s. A live daemon therefore pings at least every 3/8 of the
+/// timeout, and one missed sample (period, deadline, retry, deadline) still
+/// fits inside it.
+fn sample_timing(interval: Duration) -> (Duration, Duration) {
+    let period = (interval / 2).min(MAX_SAMPLE_PERIOD);
+    (period, (period / 2).min(MAX_SAMPLE_DEADLINE))
+}
+
+/// One watchdog liveness sample of the core actors. A sample that got no
+/// answer is logged and counted; the caller withholds the ping.
+pub async fn core_actors_live(
+    probe: &CoreReadinessProbe,
+    metrics: &BgpMetrics,
+    deadline: Duration,
+) -> bool {
+    match probe.check_liveness(deadline).await {
+        Ok(()) => true,
+        Err(error) => {
+            metrics.record_systemd_watchdog_ping_skipped();
+            warn!(
+                ?error,
+                deadline_ms = deadline.as_millis(),
+                "core control-plane liveness sample got no answer; systemd watchdog ping skipped"
+            );
+            false
+        }
+    }
+}
 
 /// Notification endpoint resolved from the service-manager environment.
 #[derive(Clone, Debug)]
@@ -78,26 +118,33 @@ impl SdNotify {
         self.send("STOPPING=1");
     }
 
-    /// Send `WATCHDOG=1` every half `WATCHDOG_USEC` while `live` reports the
-    /// core actors responsive. A failed probe skips the ping and retries after
-    /// one second; a control plane that stays unresponsive therefore lets the
-    /// service manager's watchdog expire. Returns immediately when either the
-    /// socket or the watchdog is not configured.
-    pub async fn run_watchdog<Fut>(&self, live: impl Fn() -> Fut)
+    /// Sample `live` every [`sample_timing`] period, passing it the sample
+    /// deadline, and send `WATCHDOG=1` after every sample that reports the
+    /// core actors responsive. A failed sample skips the ping and retries
+    /// after one second; a control plane that stays unresponsive therefore
+    /// lets the service manager's watchdog expire, one full timeout after a
+    /// ping at most one sample period old. Returns immediately when either
+    /// the socket or the watchdog is not configured.
+    pub async fn run_watchdog<Fut>(&self, live: impl Fn(Duration) -> Fut)
     where
         Fut: Future<Output = bool>,
     {
         let (Some(interval), true) = (self.watchdog_interval, self.is_enabled()) else {
             return;
         };
-        let retry = PROBE_RETRY.min(interval);
-        debug!(?interval, "systemd watchdog pings enabled");
+        let (period, deadline) = sample_timing(interval);
+        let retry = PROBE_RETRY.min(period);
+        debug!(
+            ?interval,
+            ?period,
+            ?deadline,
+            "systemd watchdog pings enabled"
+        );
         loop {
-            if live().await {
+            if live(deadline).await {
                 self.send("WATCHDOG=1");
-                tokio::time::sleep(interval).await;
+                tokio::time::sleep(period).await;
             } else {
-                warn!("core control-plane liveness probe failed; systemd watchdog ping skipped");
                 tokio::time::sleep(retry).await;
             }
         }
@@ -222,14 +269,168 @@ mod tests {
         notify.ready();
         notify.stopping();
         // Must return instead of looping when nothing can receive the ping.
-        notify.run_watchdog(|| async { true }).await;
+        notify.run_watchdog(|_| async { true }).await;
     }
 
     #[tokio::test]
     async fn watchdog_without_interval_returns_immediately() {
         let (_socket, name) = abstract_socket();
         let notify = SdNotify::new(Some(&name), None);
-        notify.run_watchdog(|| async { true }).await;
+        notify.run_watchdog(|_| async { true }).await;
+    }
+
+    fn pings(socket: &UnixDatagram) -> usize {
+        let mut count = 0;
+        let mut buf = [0u8; 64];
+        loop {
+            match socket.recv(&mut buf) {
+                Ok(len) => {
+                    assert_eq!(&buf[..len], b"WATCHDOG=1");
+                    count += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return count,
+                Err(error) => panic!("recv failed: {error}"),
+            }
+        }
+    }
+
+    /// The shipped `WatchdogSec=5min` on a paused clock. The documented
+    /// tolerance depends on this cadence: a ping after every live sample, ten
+    /// seconds apart, so the last ping before silence is under ten seconds
+    /// old and the abort follows 290 to 300 s after the actors stop.
+    #[tokio::test(start_paused = true)]
+    async fn shipped_timeout_pings_every_ten_seconds_and_retries_a_miss_each_second() {
+        let (socket, name) = abstract_socket();
+        socket.set_nonblocking(true).unwrap();
+        let interval = watchdog_interval(Some("300000000"), None, std::process::id());
+        let notify = SdNotify::new(Some(&name), interval);
+        let live = Arc::new(AtomicBool::new(true));
+        let samples = Arc::new(AtomicUsize::new(0));
+        let (probe_live, probe_samples) = (live.clone(), samples.clone());
+        let task = tokio::spawn(async move {
+            notify
+                .run_watchdog(|deadline| {
+                    assert_eq!(deadline, Duration::from_secs(5));
+                    probe_samples.fetch_add(1, Ordering::Relaxed);
+                    let live = probe_live.load(Ordering::Relaxed);
+                    async move { live }
+                })
+                .await;
+        });
+        let wait = |secs_f64: f64| tokio::time::sleep(Duration::from_secs_f64(secs_f64));
+
+        // t = 0.5 s: the first sample pinged at once.
+        wait(0.5).await;
+        assert_eq!(pings(&socket), 1);
+        // t = 9.5 s: nothing between samples. t = 10.5 s: the next ping.
+        wait(9.0).await;
+        assert_eq!(pings(&socket), 0);
+        wait(1.0).await;
+        assert_eq!(pings(&socket), 1);
+        // t = 300.5 s: one ping per ten seconds across a whole timeout.
+        wait(290.0).await;
+        assert_eq!(pings(&socket), 29);
+
+        // Silence: no ping however long it lasts, one retry per second.
+        live.store(false, Ordering::Relaxed);
+        let before = samples.load(Ordering::Relaxed);
+        wait(300.0).await;
+        assert_eq!(pings(&socket), 0, "a silent control plane is never pinged");
+        // The first failed sample is the one already due at t = 310 s.
+        assert_eq!(samples.load(Ordering::Relaxed) - before, 291);
+
+        // Recovery pings on the next one-second retry.
+        live.store(true, Ordering::Relaxed);
+        wait(1.0).await;
+        assert_eq!(pings(&socket), 1);
+        task.abort();
+    }
+
+    #[test]
+    fn sample_timing_scales_with_the_timeout_and_caps_at_ten_and_five_seconds() {
+        let secs = Duration::from_secs;
+        // Interval is half WATCHDOG_USEC: 5 min, 1 min, 8 s.
+        assert_eq!(sample_timing(secs(150)), (secs(10), secs(5)));
+        assert_eq!(sample_timing(secs(30)), (secs(10), secs(5)));
+        assert_eq!(sample_timing(secs(4)), (secs(2), secs(1)));
+        for interval in [MIN_PING_INTERVAL, secs(4), secs(30), secs(150)] {
+            let (period, deadline) = sample_timing(interval);
+            let timeout = interval * 2;
+            assert!(
+                period + deadline + PROBE_RETRY.min(period) + deadline < timeout,
+                "one missed sample must fit inside a {timeout:?} watchdog"
+            );
+        }
+    }
+
+    fn core_probe() -> (
+        CoreReadinessProbe,
+        tokio::sync::mpsc::Receiver<rustbgpd_api::peer_types::PeerManagerCommand>,
+        tokio::sync::mpsc::Receiver<rustbgpd_rib::RibReadinessQuery>,
+    ) {
+        let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
+        let (rib_query_tx, _) = tokio::sync::mpsc::channel(1);
+        let (rib_readiness_tx, rib_readiness_rx) = tokio::sync::mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
+        (probe, peer_rx, rib_readiness_rx)
+    }
+
+    async fn answer(
+        peer_rx: &mut tokio::sync::mpsc::Receiver<rustbgpd_api::peer_types::PeerManagerCommand>,
+        rib_rx: &mut tokio::sync::mpsc::Receiver<rustbgpd_rib::RibReadinessQuery>,
+        rib_answer: Result<usize, rustbgpd_rib::RibReadinessError>,
+    ) {
+        let Some(rustbgpd_api::peer_types::PeerManagerCommand::Ping { reply }) =
+            peer_rx.recv().await
+        else {
+            panic!("liveness must ping the peer manager");
+        };
+        reply.send(()).unwrap();
+        let rustbgpd_rib::RibReadinessQuery::LocRibCount { reply, .. } =
+            rib_rx.recv().await.unwrap();
+        reply.send(rib_answer).unwrap();
+    }
+
+    /// The function the daemon hands to `run_watchdog`: a stalled RIB answer
+    /// keeps the ping and counts nothing; silence withholds it and counts.
+    #[tokio::test(start_paused = true)]
+    async fn core_actors_live_keeps_the_ping_on_stalled_and_counts_only_silence() {
+        use rustbgpd_rib::RibReadinessError as Stalled;
+        let deadline = Duration::from_secs(5);
+        let metrics = BgpMetrics::new();
+        let skipped = || {
+            let families = metrics.registry().gather();
+            let family = families
+                .iter()
+                .find(|family| family.name() == "bgp_systemd_watchdog_pings_skipped_total")
+                .expect("skip counter is registered");
+            family.get_metric()[0].get_counter().get_value()
+        };
+        let (probe, mut peer_rx, mut rib_rx) = core_probe();
+
+        for rib_answer in [
+            Ok(0),
+            Err(Stalled::PolicyTransitionStalled),
+            Err(Stalled::SelectionReleaseStalled),
+            Err(Stalled::PeerTeardownStalled),
+        ] {
+            let (live, ()) = tokio::join!(
+                core_actors_live(&probe, &metrics, deadline),
+                answer(&mut peer_rx, &mut rib_rx, rib_answer)
+            );
+            assert!(live, "{rib_answer:?} is an answer from a running RIB actor");
+        }
+        assert!(skipped().abs() < f64::EPSILON);
+
+        // Nobody answers: the sample runs out its deadline.
+        assert!(!core_actors_live(&probe, &metrics, deadline).await);
+        assert!((skipped() - 1.0).abs() < f64::EPSILON);
+
+        // Actors gone: lanes closed.
+        drop((peer_rx, rib_rx));
+        assert!(!core_actors_live(&probe, &metrics, deadline).await);
+        assert!((skipped() - 2.0).abs() < f64::EPSILON);
     }
 
     // The receiver blocks on a std socket, so the ping task needs its own worker.
@@ -241,7 +442,7 @@ mod tests {
         let probe_live = live.clone();
         let task = tokio::spawn(async move {
             notify
-                .run_watchdog(|| async { probe_live.load(Ordering::Relaxed) })
+                .run_watchdog(|_| async { probe_live.load(Ordering::Relaxed) })
                 .await;
         });
 
