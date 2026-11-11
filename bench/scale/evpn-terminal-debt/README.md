@@ -66,12 +66,18 @@ dispatches (`mono_us`, microseconds).
     for that peer must be `retry_sent`, with debt cleared, one added retry
     attempt and no added refusal. A skipped offer FAILs even if a later attempt
     is fast. An adjacent successful retry also proves capacity if the receiver
-    freed a slot after a zero-capacity offer snapshot.
-    Retry and drain clocks remain diagnostic; either can occur first. The retry
-    may precede resume, but must follow the witnessed refusal.
-    The controller waits for both under the existing 60-second bound. This
-    prospective causal bar replaces the former one-second-plus-drain inequality;
-    earlier receipts retain their original result and rule.
+    freed a slot after a zero-capacity offer snapshot. A zero-capacity offer
+    followed by neither `retry_sent` nor `retry_refused` is INVALID.
+    Either the retry or the drain can occur first. The retry may precede
+    resume, but must follow the witnessed refusal.
+  - Retry latency: the send must also satisfy `tick <= 1 s + drain`, both
+    measured from the resume dispatch. The offer and its send are logged in
+    the same synchronous call, so the causal proof alone would pass a resync
+    tick that reaches the debtor late; a retry before resume has a negative
+    tick and passes.
+    The controller waits for both under the existing 60-second bound. The
+    causal bar is prospective; earlier receipts retain their original result
+    and rule.
   - The private arm runs the same fill and must also show the refresh taking the
     last slot; it carries no debt and has no timing comparison.
   - Every root from the refresh dispatch to settlement, including the fill

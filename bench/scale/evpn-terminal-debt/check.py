@@ -277,6 +277,9 @@ def raw_updates(data):
     return bytes(result)
 
 
+MARKER_RETRY_US = 1_000_000  # DIRTY_RESYNC_INTERVAL, unchanged
+
+
 def refusal_witness(feed, peer, after_us):
     """The first refused refresh-site marker send after the refresh dispatch.
 
@@ -311,6 +314,8 @@ def fallback(feed, refusal, resume_us, limit_us):
     must send those markers before another observation of this peer: the offer
     and send are synchronous in the RIB actor, with no intervening producer.
     A successful retry also proves capacity the receiver freed after its snapshot.
+    The causal check alone cannot see a tick that reaches the debtor late, so
+    the bar also bounds the send at one resync interval plus the drain.
     """
     rows = [row for row in feed if row["peer"] == refusal["peer"]]
     counts = [marker_counts(row) for row in rows]
@@ -324,6 +329,12 @@ def fallback(feed, refusal, resume_us, limit_us):
     # [resume, unfill] contains the drain the bar measures.
     require(sent is None or sent["wall_us"] <= limit_us, "fill withdrawn before the fallback send")
     empty_us = drain_clock(rows, refusal["peer"], resume_us, limit_us)
+    # A full-channel offer is synchronous with its send attempt: one that
+    # records neither outcome left the retry path unobserved.
+    require(all(index + 1 < len(later) and later[index + 1]["event"] in ("retry_sent", "retry_refused")
+                for index, row in enumerate(later)
+                if row["event"] == "retry_offer" and positive(row) and row["capacity"] == 0),
+            "zero-capacity retry offer has neither a send nor a refusal")
     offered = next((index for index, row in enumerate(later) if row["event"] == "retry_offer"
                     and positive(row) and (row["capacity"] > 0 or (index + 1 < len(later)
                         and later[index + 1]["event"] == "retry_sent"))), None)
@@ -341,8 +352,10 @@ def fallback(feed, refusal, resume_us, limit_us):
 
 
 def fallback_within_bar(result):
-    """The first eligible resync offer, not a later retry, discharged the debt."""
-    return result["sent_event"] == "retry_sent" and result["first_offer_sent"]
+    """The first eligible resync offer, not a later retry, discharged the debt,
+    within one resync interval plus the drain after the reader resume."""
+    return (result["sent_event"] == "retry_sent" and result["first_offer_sent"]
+            and result["tick_us"] <= MARKER_RETRY_US + result["drain_us"])
 
 
 def mono(row, what):

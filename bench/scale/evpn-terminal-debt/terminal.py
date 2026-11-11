@@ -564,7 +564,7 @@ def accept_report(report, arm, q):
                  "complete current-feed churn repeated full-inventory producer work")
     if "fallback" in report:
         q.accept(check.fallback_within_bar(report["fallback"]),
-                 "markers did not leave the refusal on the first eligible resync offer")
+                 "markers did not leave the refusal on the first eligible resync offer within 1 s plus the drain")
 
 def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
     leg = output / f"terminal-{index:02}-{shape}-{arm}"

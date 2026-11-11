@@ -290,6 +290,28 @@ class ForcedRefusalChecks(unittest.TestCase):
                 self.assertLess(result["tick_us"], 1_000_000 + result["drain_us"], "the former timing bar would pass")
                 self.assertFalse(check.fallback_within_bar(result))
 
+    def test_a_late_first_retry_fails_the_latency_bound(self):
+        for late, passes in ((30_000_000, False), (1_100_001, False), (1_100_000, True)):
+            with self.subTest(late=late):
+                rows = forced_feed()
+                rows[-2]["wall_us"], rows[-1]["wall_us"] = RESUME + late - 1, RESUME + late
+                result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, RESUME + late)
+                self.assertTrue(result["first_offer_sent"], "the causal check alone would pass")
+                self.assertEqual((result["drain_us"], result["tick_us"]), (100_000, late))
+                self.assertEqual(check.fallback_within_bar(result), passes)
+
+    def test_zero_capacity_offer_without_a_send_or_refusal_is_invalid(self):
+        for mode in ("sample-follows", "feed-ends"):
+            with self.subTest(mode=mode):
+                rows = forced_feed()
+                if mode == "sample-follows":
+                    rows.insert(4, dict(rows[3], event="retry_offer", wall_us=2_050_000))
+                else:
+                    del rows[-1]
+                    rows[-1]["capacity"] = 0
+                with self.assertRaisesRegex(ValueError, "zero-capacity retry offer has neither"):
+                    check.fallback(rows, rows[2], RESUME, UNFILL)
+
     def test_capacity_freed_after_the_retry_offer_snapshot_passes(self):
         rows = forced_feed()
         rows[-2]["capacity"] = rows[-1]["capacity"] = 0
