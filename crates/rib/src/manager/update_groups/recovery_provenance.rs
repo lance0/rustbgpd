@@ -1732,12 +1732,66 @@ impl EvpnRecoveryProvenance {
         Ok(())
     }
 
+    /// Give a capturing record, still empty, every listed slot except those
+    /// that exclude its peer: one count of its rows, one entry buffer, one
+    /// credit for all of them, then a hold and an entry per row. Its own
+    /// capture pays room, credit and several record lookups for each entry.
+    ///
+    /// The buffer is reserved at the capacity that capture's doubling ends
+    /// at, so a sealed record is charged the same. Nothing can refuse after
+    /// the credit, so a refusal leaves the record holding no slot: at most
+    /// an empty buffer, which its storage charge covers.
+    fn admit_shared(
+        &mut self,
+        index: usize,
+        shared: &[(u32, PeerId)],
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Exhaustion> {
+        let peer = self.records[index].handle.owner.peer;
+        let mut count = 0_usize;
+        for (n, (_, excluded)) in shared.iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            stride_work();
+            count += usize::from(*excluded != peer);
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if !matches!(&self.records[index].held, Held::Sparse(entries) if entries.is_empty()) {
+            return Err(Self::admission_invariant());
+        }
+        checkpoint(true);
+        let grown = self.grow_sparse(index, count.next_power_of_two().max(16));
+        checkpoint(true);
+        grown?;
+        self.credit_slots(peer, count)?;
+        let Self { records, space, .. } = self;
+        let record = &mut records[index];
+        let Held::Sparse(entries) = &mut record.held else {
+            unreachable!("a capturing record stays sparse");
+        };
+        for (n, &(slot, excluded)) in shared.iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            stride_work();
+            if excluded != peer {
+                space.hold(slot);
+                entries.push(sparse_entry(slot));
+            }
+        }
+        record.masked += count;
+        Ok(())
+    }
+
     /// Capture one walk of a table for every record in `handles`, each of
     /// which is capturing, and seal them. `rows` yields each key once with
     /// the one peer that must not hold it; every other record takes it. The
     /// walk interns each key once, so the keyed hashes and index probes do
     /// not grow with the number of records, and each record then costs one
-    /// appended entry per row, as in its own capture.
+    /// credit and one appended entry per row ([`Self::admit_shared`]).
     ///
     /// The slot list lives only inside this call. It is charged to the
     /// daemon at `capacity` rows before it is allocated and refunded before
@@ -1752,8 +1806,9 @@ impl EvpnRecoveryProvenance {
     /// records already sealed stay Ready, the record that met it gives back
     /// what it had taken, and it and every later record are still capturing
     /// with nothing captured, for the caller to capture each alone. Only a
-    /// record's own peer cap exhausts it, exactly as in its own capture,
-    /// and the others still complete.
+    /// record's own peer cap exhausts it, and the others still complete. It
+    /// is then exhausted holding nothing, where its own capture would stop
+    /// part-way holding the rows before the cap.
     pub(in crate::manager) fn capture_shared_with_checkpoint(
         &mut self,
         handles: &[ProvenanceHandle],
@@ -1814,22 +1869,12 @@ impl EvpnRecoveryProvenance {
                     }
                     _ => continue,
                 };
-                let mut captured = Ok(());
-                for (n, &(slot, excluded)) in shared.iter().enumerate() {
-                    if n % CHECKPOINT_STRIDE == 0 {
-                        checkpoint(false);
-                    }
-                    stride_work();
-                    if excluded != handle.owner.peer {
-                        captured = self.admit_slot(index, checkpoint, |_| slot);
-                        if captured.is_err() {
-                            break;
-                        }
-                    }
-                }
                 // Seal before the next record appends, so only one unsealed
                 // entry buffer is charged at a time.
-                match captured.and_then(|()| self.seal_held(index, checkpoint)) {
+                match self
+                    .admit_shared(index, &shared, checkpoint)
+                    .and_then(|()| self.seal_held(index, checkpoint))
+                {
                     Ok(()) => self.records[index].state = State::Ready,
                     Err(error)
                         if matches!(
@@ -2893,7 +2938,8 @@ mod tests {
     /// keys, Ready or exhausted state, peer charge and peak, holder counts,
     /// slot space and the daemon's retained charge. Below one bitset step
     /// (1024 slots) no charge depends on slot numbering, so all of it is
-    /// exact; a peer cap every record exceeds exhausts each at the same key.
+    /// exact. A peer cap every record exceeds exhausts each, holding none
+    /// of the rows where its own capture holds those before the cap.
     #[test]
     fn shared_capture_matches_each_record_capturing_alone() {
         let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();
@@ -2907,11 +2953,17 @@ mod tests {
                     batch.proof_keys(left).map_err(|error| error.cause),
                     alone.proof_keys(right).map_err(|error| error.cause)
                 );
-                assert_eq!(
-                    batch.proof_keys(left).is_ok(),
-                    peer_limit == PEER_LIMIT_BYTES,
-                    "the tight cap exhausts every record"
-                );
+                if peer_limit != PEER_LIMIT_BYTES {
+                    // Its own capture stops at the cap holding a prefix; the
+                    // shared one is refused its whole credit and holds none.
+                    assert_eq!(
+                        batch.proof_keys(left).map_err(|error| error.cause),
+                        Err(ExhaustionCause::PeerLimit)
+                    );
+                    assert_eq!(batch.retained_keys_for_test(left), Some(Vec::new()));
+                    assert_ne!(alone.retained_keys_for_test(right), Some(Vec::new()));
+                    continue;
+                }
                 assert_eq!(
                     batch.retained_keys_for_test(left),
                     alone.retained_keys_for_test(right)
@@ -2923,21 +2975,47 @@ mod tests {
                     "peer charge and peak"
                 );
             }
-            assert_eq!(batch.holders_for_test(), alone.holders_for_test());
-            assert_eq!(batch.slot_usage().live, alone.slot_usage().live);
             if peer_limit == PEER_LIMIT_BYTES {
+                assert_eq!(batch.holders_for_test(), alone.holders_for_test());
                 assert_eq!(batch.slot_usage(), alone.slot_usage());
                 assert_eq!(batch.daemon_usage().retained, alone.daemon_usage().retained);
             } else {
-                // The walk interned the whole table before any record
-                // exhausted; the rows nobody took are free again, and the
+                // The walk interned the whole table before any record was
+                // refused; the rows nobody took are free again, and the
                 // slot space keeps its room for them until it settles.
+                assert_eq!(batch.holders_for_test().len(), 40, "the earlier snapshot");
                 assert!(batch.slot_usage().capacity >= alone.slot_usage().capacity);
-                assert_eq!(
-                    batch.daemon_usage().retained - batch.space.bytes(),
-                    alone.daemon_usage().retained - alone.space.bytes()
-                );
             }
+        }
+    }
+
+    /// A record's own capture doubles its entry buffer as it goes, and the
+    /// last doubling charges both buffers beside the slots held so far:
+    /// 46 bytes per entry of the final capacity. The shared walk reserves
+    /// that final capacity once, so its peak is the sealing peak alone: 80
+    /// bytes per slot, the buffer and the bitset. The two differ only when
+    /// a record holds little more than half its buffer; the retained charge
+    /// never does.
+    #[test]
+    fn shared_capture_peer_peak_is_the_sealing_peak() {
+        let owners = [owner(1, 7), owner(2, 7)];
+        let limits = (PEER_LIMIT_BYTES, DAEMON_LIMIT_BYTES);
+        for (count, below) in [(520_u32, 46 * 1024 - (80 * 520 + 4 * 1024 + 128)), (855, 0)] {
+            let rows: Vec<_> = (0..count).map(|n| (key(n), owner(250, 1).peer)).collect();
+            let (batch, _) = captured(limits, &rows, &owners, true);
+            let (alone, _) = captured(limits, &rows, &owners, false);
+            // The first owner; the last also carries a snapshot's charge.
+            let (batch, alone) = (
+                batch.peer_usage(owners[0].peer),
+                alone.peer_usage(owners[0].peer),
+            );
+            assert_eq!(batch.retained, alone.retained, "{count} rows");
+            assert_eq!(alone.peak - batch.peak, below, "{count} rows");
+            assert_eq!(
+                batch.peak,
+                size_of::<Record>() + 80 * count as usize + 4 * 1024 + 128,
+                "{count} rows: record, slots, buffer and bitset"
+            );
         }
     }
 

@@ -1387,10 +1387,10 @@ it does not receive the rows it sourced. The pass therefore walks the table
 once for all such members. The walk checks the projection is complete, keeps
 the rows the group's sessions may carry, interns each key once and records
 its slot beside its source peer. Each member then takes every recorded slot
-except those it sourced, through the same per-entry step as its own capture
-(room in its entry buffer, the per-slot credit, the holder count, the entry),
-and is sealed before the next member appends. The walk still runs before the
-batch's projection change, from the prior clean view.
+except those it sourced: its rows are counted, its entry buffer is reserved
+once, their per-slot credit is taken once, and each row costs a holder count
+and an entry. It is sealed before the next member appends. The walk still
+runs before the batch's projection change, from the prior clean view.
 
 **Fallback rule.** A member shares the walk only when all of these hold: its
 capture would begin in this pass (its record is absent or dormant); it has no
@@ -1406,9 +1406,22 @@ unchanged.
 
 **Result.** The shared walk leaves what one capture per member leaves: the
 same proof keys, Ready state, refusal and reset handling, holder counts,
-per-peer charge and peak, and retained daemon charge. Three
-things differ, none of them in a proof:
+per-peer retained charge, and retained daemon charge. Five things differ,
+none of them in a proof:
 
+- A member's own capture doubles its entry buffer as it goes, and the last
+  doubling charges both buffers beside the slots held so far. With N rows,
+  a final buffer of C entries (the power of two at or above N, at least 16),
+  a record of R bytes and a bitset of D bytes, its peak is R + max(46 C,
+  80 N + 4 C + D). The shared walk reserves the C entries once, so its peak
+  is R + 80 N + 4 C + D. The two are equal unless N is within about 5% above
+  C / 2, where the shared peak is lower by 46 C - (80 N + 4 C + D). The
+  buffer has the same capacity either way, so a sealed record is charged the
+  same.
+- A member whose own peer cap refuses the capture is refused its whole
+  credit and is exhausted holding no row. Its own capture stops at the cap
+  holding the rows before it. Both reset the session, and nothing reads an
+  exhausted record's rows.
 - Slot IDs follow interning order: table order here, member by member before.
   Two member orders already numbered slots differently. A member's bitset
   spans up to its highest slot, so above one 1024-slot step its charge can
@@ -1436,8 +1449,7 @@ the walk stops sharing: members already sealed keep their proofs, the member
 that met the refusal gives back the entries it had taken and their credit,
 the list's holds and charge are released, and that member and every later one
 take their own capture, which meets the cap without the list. Only a member's
-own peer cap exhausts it part-way, as in its own capture, and the others
-complete.
+own peer cap exhausts it, and the others complete.
 
 **Withdrawal order.** A proof iterates in slot order, and callers that need
 key order sort their own output. A replay that emits proof-derived
@@ -1492,8 +1504,9 @@ member's charge returns to its record alone, and every member ends with the
 proof, charge and peak separate captures leave; one allocation refused at each
 point of a three-member pass in turn (the list, slot-space growth, each
 member's buffer growths and bitset) leaves every member Ready with no reset
-pending; a peer cap every member exceeds exhausts each at the same key as its
-own capture; a sharing member with an unreleased private row is refused
+pending; a peer cap every member exceeds exhausts each holding no row; the
+per-peer peak equals the formula above on both sides of the doubling band and
+the retained charge is equal in both; a sharing member with an unreleased private row is refused
 alone, an incomplete projection refuses every sharing member, and a single
 member left after those checks takes its own walk; interning, each member's
 appends and the release of the list's holds do at most 64 units of work
