@@ -146,7 +146,19 @@ coverage. `dirty` and `dirty_high_water` remain diagnostic fields.
 
 A measured cell also records the longest actor turn of those churn rounds. The
 controller scrapes `/metrics` once after the pause acknowledgement and once
-after the last round, and nothing else scrapes the daemon in between. Every
+after the daemon has applied the last round, and nothing else scrapes the
+daemon in between. A churn acknowledgement only says the driver's writers
+drained, so the second scrape waits for two daemon-side signals, neither of
+which renders metrics: every source's input barrier behind the churn rounds
+(the actor handled that source's End-of-RIB with no route batch pending and no
+distribution window open), and then one actor snapshot taken after the latest
+of those barriers, with the receivers still paused. That snapshot is
+`mass_dirty_close` in the cell result, and the final consumer checks it against
+the raw barriers and the resume command. The actor publishes a poll's duration
+when the poll returns. Route chunks each end their poll, so every poll that
+applied churn has returned by then; the poll that handled the last End-of-RIB
+is only known to have gone round the actor loop again, and no existing signal
+shows that it has returned. Every
 render resets `bgp_rib_actor_slice_max_microseconds`, so the second scrape's
 `stage="actor_poll"` value is the longest whole actor poll since the first; the
 first scrape's value covers earlier phases and is discarded. The cell result's

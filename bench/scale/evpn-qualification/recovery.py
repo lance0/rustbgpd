@@ -118,8 +118,37 @@ def mass_dirty_actor(start, end):
     Q.require(set(before) == set(after), "route_chunk bucket layout changed between scrapes")
     buckets = {edge: after[edge] - before[edge] for edge in sorted(after, key=float)}
     Q.require(all(count >= 0 for count in buckets.values()), "route_chunk counter moved backwards")
+    # Each scrape being cumulative does not make their difference so.
+    counts = list(buckets.values())
+    Q.require(all(low <= high for low, high in zip(counts, counts[1:])),
+              "route_chunk bucket increases are not cumulative")
     return {"actor_poll_max_microseconds": maximum, "route_chunk_buckets": buckets,
             "route_chunk_over_200ms": buckets["+Inf"] - buckets["0.2"]}
+
+
+def churn_applied_at(barriers, clients):
+    """When the actor had applied the last churn round: the latest of every
+    source's second input barrier. The first follows the initial load; the
+    second is the End-of-RIB each source sends behind the churn rounds, and
+    the actor emits it after its FIFO handler with no route batch pending
+    and no distribution window open. None until every source has one."""
+    second = {}
+    seen = {Q.COMMON.peer(index): 0 for index in range(clients)}
+    for row in barriers:
+        Q.require(row["peer"] in seen, "input barrier names an unknown source")
+        seen[row["peer"]] += 1
+        if seen[row["peer"]] == 2:
+            second[row["peer"]] = row["wall_us"]
+    Q.require(all(type(at) is int for at in second.values()), "input barrier clock is not an integer")
+    return max(second.values()) if len(second) == clients else None
+
+
+def closes_mass_dirty(row, barriers, clients, resumed_wall_us=float("inf")):
+    """Whether an actor snapshot may close the mass-dirty scrape window: the
+    actor took it after it had applied the last churn round, with the
+    receivers still paused."""
+    applied = churn_applied_at(barriers, clients)
+    return applied is not None and applied < row["wall_us"] < resumed_wall_us
 
 
 def roster(row, arm, clients):
@@ -676,13 +705,19 @@ def run_cell(output, manifest, arm, index, correctness):
                         raise MissingWitness("recovery snapshot window not inside the paused interval")
                 except MissingWitness:
                     continue
+            # A churn acknowledgement only says the driver's writers drained.
+            # The window closes after the actor has applied every source's
+            # End-of-RIB behind the last round and has gone round its loop
+            # again, readers still paused. Neither signal renders /metrics.
+            controller.source_barrier()
+            record["mass_dirty_close"] = controller.witness(
+                lambda row: closes_mass_dirty(row, controller.input_barriers, clients))
             (leg / "metrics-mass-dirty-end.txt").write_text(Q.fetch(19186, "/metrics", 10)[1])
             actor = mass_dirty_actor((leg / "metrics-mass-dirty-start.txt").read_text(),
                                      (leg / "metrics-mass-dirty-end.txt").read_text())
             record["mass_dirty_actor"] = None if correctness else actor
             Q.accept(recovery is not None, "simultaneous all-peer recovery snapshot missing")
             record["mass_recovery_previous"], record["mass_recovery"] = recovery
-            controller.source_barrier()
             controller.command("refresh")
             debt = controller.witness(lambda row: row["protocol_obligations"] > 0 and row["recovery_pending"] > 0)
             start = len(controller.observations)
@@ -824,6 +859,9 @@ def analyze_results(output):
         barriers = [json.loads(line.removeprefix("evpn_input_barrier ")) for line in
                     (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_input_barrier ")]
         Q.require(input_applied(barriers, clients, 3), "missing actor-applied input barriers")
+        Q.require(row.get("mass_dirty_close") in observed
+                  and closes_mass_dirty(row["mass_dirty_close"], barriers, clients, resumed),
+                  "mass-dirty scrape window closed before the actor applied the last churn round")
         applied = [event for event in events if event["event"] == "input-applied"]
         Q.require([event["generation"] for event in applied] == [1, 2, 3]
                   and [event["receipts"] for event in applied] == [clients, clients * 2, clients * 3],
