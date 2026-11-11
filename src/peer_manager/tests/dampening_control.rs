@@ -224,6 +224,15 @@ pub(super) async fn capacity_blocked_admission() -> DampeningAdmission {
     fixture.admission
 }
 
+/// An unblocked admission whose owner a real RIB records wire history for,
+/// which is what makes a dynamic source's retirement wait for the barrier.
+pub(super) async fn wire_history_admission() -> DampeningAdmission {
+    let fixture = Box::pin(CapacityFixture::new()).await;
+    fixture.rib_task.abort();
+    assert!(fixture.admission.owner.records_wire_history());
+    fixture.admission
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,

@@ -142,6 +142,9 @@ enum Drive {
     BfdReload,
     /// A reload or catalog change installs conditional advertisements.
     ConditionalInstall,
+    /// A dynamic wire-history source went idle: its notification round
+    /// awaits the primary-lane RIB barrier before deciding its removal.
+    DampeningRetirement,
     /// Config-transaction planning queries the RIB's update groups.
     UpdateGroupSnapshot,
     /// An unstoppable primary is replaced and its RIB generation fenced.
@@ -152,6 +155,9 @@ enum Drive {
     /// Peer removal defers the RIB's `PeerDeleted` reap marker behind a full
     /// mailbox; a session start at the same label then waits for it.
     PeerRemoval,
+    /// An unbound interface-only neighbor's reconcile round asks the RIB
+    /// whether its GR or LLGR routes are still retained.
+    UnboundRetention,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +167,8 @@ enum Completion {
     ExportRestored,
     Finished,
     PeerEnabled,
+    /// The first peer, a dynamic neighbor, is gone and the manager runs on.
+    DynamicRemoved,
 }
 
 struct WaitSite {
@@ -288,6 +296,10 @@ fn is_conditional_install(update: &RibUpdate) -> bool {
 
 fn is_rib_barrier(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::QueryLocRibCount { .. })
+}
+
+fn is_peer_retention(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::QueryPeerRetention { .. })
 }
 
 fn is_update_group_snapshot(update: &RibUpdate) -> bool {
@@ -845,6 +857,40 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Fenced {
             reason: "capacity disable or owned enable is unacknowledged against the RIB block; \
                      bounded by RIB_REPLY_TIMEOUT",
+        },
+        completion: Completion::Finished,
+    },
+    // The two rows below re-enter `await_session_sweep` from the round pumps
+    // this file's session-sweep inventory lists: what they hold is a RIB
+    // reply the round polls beside its session waits.
+    WaitSite {
+        site: "mod.rs::await_session_sweep",
+        awaits: "RibUpdate::QueryLocRibCount barrier after dynamic source retirement \
+                 (notification round)",
+        drive: Drive::DampeningRetirement,
+        rib: RibHold::Reply(is_rib_barrier),
+        session: answer_all,
+        additional_entry: Some("notifications.rs::finish_notification_round"),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the retiring dynamic peer is out of the peer table until the barrier \
+                     decides whether it returns; the barrier is queued without waiting and \
+                     its acknowledgement is bounded by RIB_REPLY_TIMEOUT (5 s)",
+        },
+        completion: Completion::DynamicRemoved,
+    },
+    WaitSite {
+        site: "mod.rs::await_session_sweep",
+        awaits: "RibUpdate::QueryPeerRetention reply (unbound interface-only reconcile round)",
+        drive: Drive::UnboundRetention,
+        rib: RibHold::Reply(is_peer_retention),
+        session: answer_all,
+        additional_entry: Some("unnumbered.rs::reconcile_unnumbered"),
+        window: Duration::from_millis(250),
+        contract: Contract::Fenced {
+            reason: "the reply is one of the round's owned waits, polled beside other ports' \
+                     session commands, so reads stay queued until the round settles; \
+                     admission is a try_send and the reply shares the port's 500 ms window",
         },
         completion: Completion::Finished,
     },
@@ -1428,7 +1474,9 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::UpdateGroupSnapshot
         | Drive::ReplacePrimary
         | Drive::DampeningDisable
-        | Drive::PeerRemoval => (Vec::new(), false),
+        | Drive::DampeningRetirement
+        | Drive::PeerRemoval
+        | Drive::UnboundRetention => (Vec::new(), false),
     };
     match drive {
         Drive::ForwardCohort { .. }
@@ -1626,7 +1674,26 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             assert_eq!(manager.conditional_advertisements, set);
             Ok(())
         }
+        Drive::DampeningRetirement => {
+            let session_id = manager.peers[&key(peers[0])].session_id();
+            manager
+                .handle_session_notification(SessionNotification::BackToIdle {
+                    session_id,
+                    role: rustbgpd_transport::SessionRole::Primary,
+                    peer_addr: peers[0],
+                })
+                .await;
+            if manager.dampening_control_failed {
+                Err("the retirement barrier went unacknowledged".to_owned())
+            } else {
+                Ok(())
+            }
+        }
         Drive::UpdateGroupSnapshot => manager.query_update_group_snapshot().await.map(drop),
+        Drive::UnboundRetention => {
+            manager.reconcile_unnumbered().await;
+            Ok(())
+        }
         Drive::ReplacePrimary => {
             manager.replace_unstoppable_primary(&key(peers[0])).await;
             Ok(())
@@ -1817,6 +1884,13 @@ async fn run(row: &WaitSite) {
     insert_test_managed_peer_with_asn(&mut manager, first, 65002, handle, false);
     let (handle, _) = spawn_session(second, true, gate.clone(), answer_all, false);
     insert_test_managed_peer_with_asn(&mut manager, second, 65003, handle, false);
+    let _unnumbered = if matches!(row.drive, Drive::UnboundRetention) {
+        let (attached, channels) = super::unnumbered::attach_unbound_port(manager).await;
+        manager = attached;
+        Some(channels)
+    } else {
+        None
+    };
     let _rpol_dir = match row.drive {
         Drive::CompensatingReplay => {
             let dir = tempfile::tempdir().unwrap();
@@ -1918,7 +1992,15 @@ async fn run(row: &WaitSite) {
         | Drive::ConditionalInstall
         | Drive::UpdateGroupSnapshot
         | Drive::ReplacePrimary
-        | Drive::PeerRemoval => {}
+        | Drive::PeerRemoval
+        | Drive::UnboundRetention => {}
+        Drive::DampeningRetirement => {
+            let admission = Box::pin(super::dampening_control::wire_history_admission()).await;
+            let retiring = manager.peers.get_mut(&key(first)).unwrap();
+            retiring.is_dynamic = true;
+            retiring.transport_config.dampening_admission = Some(admission);
+            manager.dynamic_peer_count = 1;
+        }
         Drive::BfdReload => {
             manager = attach_held_bfd_actor(manager, first, gate.clone());
         }
@@ -2085,12 +2167,20 @@ async fn run(row: &WaitSite) {
 async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Result<(), String>) {
     let site = row.site;
     let first = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 1));
-    let first_peer = &manager.peers[&key(first)];
+    if matches!(row.completion, Completion::DynamicRemoved) {
+        assert!(result.is_ok(), "{site}: {result:?}");
+        assert!(
+            !manager.peers.contains_key(&key(first)),
+            "{site}: the acknowledged barrier found no block, so the dynamic peer is removed"
+        );
+    }
+    let first_peer = manager.peers.get(&key(first));
+    let first_peer = || first_peer.expect("the first peer stays in the table");
     match row.completion {
         Completion::ExportApplied => {
             assert!(result.is_ok(), "{site}: {result:?}");
             assert_eq!(
-                first_peer.export_policy,
+                first_peer().export_policy,
                 Some(if matches!(row.drive, Drive::CatalogPolicyRefresh) {
                     named_deny_policy_chain(&[Some("edge-export")])
                 } else {
@@ -2102,14 +2192,14 @@ async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Res
         Completion::ImportApplied => {
             assert!(result.is_ok(), "{site}: {result:?}");
             assert_eq!(
-                first_peer.import_policy,
+                first_peer().import_policy,
                 Some(deny_policy_chain()),
                 "{site}"
             );
         }
         Completion::ExportRestored => {
             let error = result.expect_err(site);
-            assert_eq!(first_peer.export_policy, None, "{site}: {error}");
+            assert_eq!(first_peer().export_policy, None, "{site}: {error}");
             if let Contract::Unreachable { .. } = row.contract {
                 assert!(
                     error.contains(
@@ -2119,11 +2209,13 @@ async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Res
                 );
             }
         }
-        Completion::Finished => assert!(result.is_ok(), "{site}: {result:?}"),
+        Completion::Finished | Completion::DynamicRemoved => {
+            assert!(result.is_ok(), "{site}: {result:?}");
+        }
         Completion::PeerEnabled => {
             assert!(result.is_ok(), "{site}: {result:?}");
             assert!(
-                first_peer.enabled,
+                first_peer().enabled,
                 "{site}: the released Start must re-enable the peer"
             );
         }
@@ -2372,6 +2464,394 @@ fn wait_site_table_covers_every_call_site() {
         "every actor wait-helper call site needs exactly one WAIT_SITES row keyed by \
          file::enclosing_fn (left: call sites in the source, right: table rows); add a row \
          stating whether operator reads are served or fenced at the new site, and why"
+    );
+}
+
+/// Every `await_session_sweep` call site by enclosing function, the number
+/// of calls there, and what the sweep holds. Operator reads are fenced at
+/// all of them (`mod.rs::await_session_sweep` has the behavioural row); a
+/// new sweep must say here what it waits for, so a session wait routed
+/// through the helper is still an inventoried wait.
+const SESSION_SWEEP_SITES: &[(&str, usize, &str)] = &[
+    (
+        "dynamic.rs::reap_dynamic_peers_unbatched",
+        1,
+        "the bounded shutdowns of every reaped dynamic neighbor",
+    ),
+    (
+        "lifecycle.rs::shutdown_handle_bounded",
+        1,
+        "one session's bounded shutdown",
+    ),
+    (
+        "lifecycle.rs::bounce_dynamic_peers_for_ranges",
+        1,
+        "the stop signals of every dynamic neighbor in the changed ranges",
+    ),
+    (
+        "lifecycle.rs::purge_reset_for_delete",
+        1,
+        "the purge resets of every peer a delete batch removes",
+    ),
+    (
+        "lifecycle.rs::retire_purged_candidates",
+        1,
+        "the bounded shutdowns of purged peers' pending candidates",
+    ),
+    (
+        "lifecycle.rs::delete_detached_peers",
+        1,
+        "each deleted peer's pending-then-primary stop chain",
+    ),
+    (
+        "lifecycle.rs::set_graceful_shutdown",
+        1,
+        "the graceful-shutdown toggles of every targeted peer",
+    ),
+    (
+        "notifications.rs::idle_primary_state_for_pending",
+        1,
+        "the Idle primary's state before a pending candidate is promoted, bounded by \
+         PEER_QUERY_TIMEOUT (100 ms)",
+    ),
+    (
+        "notifications.rs::finish_notification_round",
+        1,
+        "one notification round: every retiring peer's Stop and session joins under one 500 ms \
+         window, and a dynamic source's RIB retirement barrier under RIB_REPLY_TIMEOUT",
+    ),
+    (
+        "unnumbered.rs::shut_down_unless_established",
+        1,
+        "one bound session's conditional retirement (reconfigure and inbound rebind)",
+    ),
+    (
+        "unnumbered.rs::reconcile_unnumbered",
+        1,
+        "one reconcile round: every port's state query, conditional retirement, retention \
+         reply and delete stop chain, each port under its own 500 ms window",
+    ),
+    (
+        "unnumbered.rs::learn_inbound_endpoint",
+        1,
+        "the bound session's state before an inbound connection may rebind the port",
+    ),
+];
+
+fn session_sweep_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
+    let mut sites = BTreeMap::new();
+    for (current, line) in lines_by_fn(source) {
+        let calls = line.matches(".await_session_sweep(").count();
+        if calls > 0 {
+            *sites.entry(format!("{file}::{current}")).or_default() += calls;
+        }
+    }
+    sites
+}
+
+#[test]
+fn session_sweep_call_sites_are_listed() {
+    let found: BTreeMap<String, usize> = peer_manager_sources()
+        .iter()
+        .flat_map(|(file, source)| session_sweep_call_sites(file, source))
+        .collect();
+    let listed: BTreeMap<String, usize> = SESSION_SWEEP_SITES
+        .iter()
+        .map(|(site, count, _)| ((*site).to_string(), *count))
+        .collect();
+    assert_eq!(
+        found, listed,
+        "an await_session_sweep call site is not in SESSION_SWEEP_SITES (left: call sites in \
+         the source, right: listed); say what the new sweep waits for and how it is bounded"
+    );
+}
+
+/// A session wait that existed before this inventory and has not been
+/// classified as an owned future or a bounded direct wait. Its count is
+/// pinned, so another bare wait in the same function still fails the guard.
+const PREDATES_SESSION_INVENTORY: &str = "predates the session-wait inventory; not yet classified as an owned future or a bounded \
+     direct wait";
+
+/// Functions with more session-command calls than wait-helper calls, the
+/// number left over, and why each is not an unserved actor wait. While the
+/// actor awaits a session command bare it serves no readiness query, and a
+/// session that is slow to answer costs the whole command deadline.
+const BARE_SESSION_WAIT_FNS: &[(&str, usize, &str)] = &[
+    (
+        "dampening_control.rs::disable_dampening_capacity",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "inbound.rs::spawn_pending_inbound",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    ("inbound.rs::handle_inbound", 1, PREDATES_SESSION_INVENTORY),
+    (
+        "inbound.rs::resolve_by_primary_state",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "inbound.rs::claim_pending_inbound",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "inbound.rs::retire_primary_for_promotion",
+        2,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "inbound.rs::sync_promotion_candidate",
+        4,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "inbound.rs::activate_promoted_max_prefix_metrics",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "inbound.rs::replace_with_inbound",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "lifecycle.rs::send_max_prefix_start_before",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "lifecycle.rs::stop_until",
+        1,
+        "an owned future: the unnumbered reconcile round polls a detached peer's stop chain \
+         under await_session_sweep",
+    ),
+    (
+        "lifecycle.rs::provision_new_peer_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "lifecycle.rs::sync_owned_session_metrics",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "lifecycle.rs::quiesce_retiring_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "lifecycle.rs::shutdown_handle_until_owned",
+        1,
+        "an owned future: every caller polls it under await_session_sweep, alone \
+         (shutdown_handle_bounded), in a fan-out, or inside a round's retirement",
+    ),
+    (
+        "lifecycle.rs::hot_update_peer_in_place",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    ("lifecycle.rs::enable_peer", 1, PREDATES_SESSION_INVENTORY),
+    ("lifecycle.rs::disable_peer", 1, PREDATES_SESSION_INVENTORY),
+    ("lifecycle.rs::reset_peer", 1, PREDATES_SESSION_INVENTORY),
+    (
+        "lifecycle.rs::request_outbound_refresh",
+        1,
+        "not a session: starts the detached outbound refresher",
+    ),
+    ("lifecycle.rs::send", 1, PREDATES_SESSION_INVENTORY),
+    ("mod.rs::dispatch_command", 3, PREDATES_SESSION_INVENTORY),
+    (
+        "notifications.rs::wait",
+        1,
+        "an owned future: the notification round polls each retirement's Stop and joins \
+         under await_session_sweep",
+    ),
+    (
+        "notifications.rs::replace_unstoppable_primary",
+        1,
+        "no command wait: aborts the session task and joins the cancellation, which \
+         completes at the task's next suspension point",
+    ),
+    (
+        "policy.rs::try_apply_export_only_policy_cohort",
+        3,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "policy.rs::apply_runtime_policies_for_peer_key",
+        2,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::apply_to_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::preflight_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::preflight_selection_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::apply_selection_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::observe_selection_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::commit_selection_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::preflight_delete_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "rotation.rs::apply_delete_session",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "snapshot.rs::collect_session_states",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "snapshot.rs::query_warm_checkpoint_capture",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    ("snapshot.rs::get_peer_info", 1, PREDATES_SESSION_INVENTORY),
+    (
+        "snapshot.rs::detach_list_peers",
+        1,
+        PREDATES_SESSION_INVENTORY,
+    ),
+    (
+        "unnumbered.rs::wait",
+        3,
+        "owned futures: one port's state query or conditional retirement, polled by the \
+         reconcile round under await_session_sweep",
+    ),
+    (
+        "unnumbered.rs::shutdown",
+        1,
+        "not a session: stops the discovery actor at daemon shutdown",
+    ),
+    (
+        "unnumbered.rs::with_unnumbered",
+        1,
+        "not a session: starts discovery on an interface",
+    ),
+    (
+        "unnumbered.rs::shut_down_unless_established",
+        1,
+        "the two forms of one conditional retirement, built as one future and awaited \
+         under await_session_sweep",
+    ),
+    (
+        "unnumbered.rs::sync_unnumbered_ports",
+        2,
+        "not a session: starts discovery on an added interface and stops the discovery \
+         actor when the last neighbor is removed",
+    ),
+    (
+        "unnumbered.rs::remove_port",
+        1,
+        "not a session: stops discovery on a removed interface",
+    ),
+];
+
+/// The session handle's async commands, read from the transport crate so a
+/// command added there is covered here without an edit.
+fn session_command_names() -> Vec<String> {
+    let handle = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/transport/src/handle.rs"),
+    )
+    .unwrap();
+    let mut names: Vec<String> = handle
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("pub async fn "))
+        .filter_map(|rest| rest.split(['(', '<']).next())
+        // The notification receiver's `recv`, not a session command.
+        .filter(|name| *name != "recv")
+        .map(str::to_owned)
+        .collect();
+    names.sort();
+    names.dedup();
+    assert!(
+        names.len() > 40 && names.iter().any(|name| name == "shutdown_until"),
+        "the scan must read the session handle's commands: {names:?}"
+    );
+    names
+}
+
+/// Per function, the session-command calls beyond its wait-helper calls: the
+/// textual shape of a session command awaited bare. A call is a handle
+/// method (`.name(` or `::name(`) or a direct `PeerCommand` send. As with
+/// [`bare_rib_wait_fns`] this is a count, not a pairing: a spare wrapped wait
+/// can mask one bare wait added to the same function, and a method of
+/// another type that shares a command's name is counted and listed as such.
+fn bare_session_wait_fns(file: &str, source: &str, commands: &[String]) -> BTreeMap<String, usize> {
+    let mut seen: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for (current, line) in lines_by_fn(source) {
+        let (calls, waits) = seen.entry(current).or_default();
+        *calls += commands
+            .iter()
+            .map(|name| {
+                line.matches(&format!(".{name}(")).count()
+                    + line.matches(&format!("::{name}(")).count()
+            })
+            .sum::<usize>();
+        if line.contains(".send(") && line.contains("PeerCommand::") {
+            *calls += 1;
+        }
+        *waits += line.matches("await_session_sweep").count()
+            + line.matches("await_with_readiness").count();
+    }
+    seen.into_iter()
+        .filter_map(|(current, (calls, waits))| {
+            let bare = calls.saturating_sub(waits);
+            (bare > 0).then(|| (format!("{file}::{current}"), bare))
+        })
+        .collect()
+}
+
+/// A session command awaited outside `await_session_sweep` (or another wait
+/// helper) must be listed in `BARE_SESSION_WAIT_FNS` with its count and the
+/// reason it is not an unserved actor wait. Stale entries fail too.
+#[test]
+fn bare_session_waits_are_listed_with_a_reason() {
+    let commands = session_command_names();
+    let found: BTreeMap<String, usize> = peer_manager_sources()
+        .iter()
+        .flat_map(|(file, source)| bare_session_wait_fns(file, source, &commands))
+        .collect();
+    let listed: BTreeMap<String, usize> = BARE_SESSION_WAIT_FNS
+        .iter()
+        .map(|(site, count, _)| ((*site).to_string(), *count))
+        .collect();
+    assert_eq!(
+        found, listed,
+        "a peer-manager function awaits a session command without serving readiness (left: \
+         found in the source, right: BARE_SESSION_WAIT_FNS); run the wait under \
+         await_session_sweep, or list it with the reason it cannot hold the actor"
     );
 }
 

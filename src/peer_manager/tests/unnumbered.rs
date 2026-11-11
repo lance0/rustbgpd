@@ -225,6 +225,45 @@ impl Harness {
     }
 }
 
+/// For the wait inventory: give `mgr` one interface-only neighbor (`swp1`)
+/// whose binding was just lost, so its next reconcile asks the RIB whether
+/// the neighbor's routes are still retained. The returned channels keep the
+/// link monitor and the recorded discovery open.
+pub(super) async fn attach_unbound_port(
+    mut mgr: PeerManager,
+) -> (
+    PeerManager,
+    (
+        watch::Sender<Arc<LinkSnapshot>>,
+        mpsc::UnboundedReceiver<Command>,
+    ),
+) {
+    mgr.current_config = toml::from_str(
+        "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+         [global.telemetry]\nlog_format = \"json\"\n\
+         [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+         families = [\"ipv6_unicast\"]\n",
+    )
+    .unwrap();
+    let (links, links_rx) = watch::channel(snapshot(true, &[("swp1", 7, true)]));
+    let (discovery, commands) = RaDiscovery::recording();
+    let (_events_tx, events_rx) = crate::ra_discovery::event_channel();
+    let mut mgr = mgr
+        .with_link_failover(links_rx)
+        .with_unnumbered(Unnumbered::new(discovery, events_rx));
+    for current in [Some(endpoint(2, 7)), None] {
+        mgr.handle_discovery_event(DiscoveryEvent::BindingChanged {
+            interface: "swp1".into(),
+            previous: None,
+            current,
+        });
+        if current.is_some() {
+            mgr.reconcile_unnumbered().await;
+        }
+    }
+    (mgr, (links, commands))
+}
+
 fn endpoint(last: u16, ifindex: u32) -> Endpoint {
     Endpoint {
         address: ll(last),
