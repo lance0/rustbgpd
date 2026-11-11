@@ -756,6 +756,123 @@ fn bench_attr_intern_manager_churn(c: &mut Criterion) {
     }
 }
 
+// Typed-family twin: the same N live background sets, with a VPN target
+// replacing or withdrawing through VpnRoutesReceived instead of unicast chunks.
+fn bench_attr_intern_manager_vpn_churn(c: &mut Criterion) {
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = c;
+    #[cfg(feature = "bench-internals")]
+    {
+        use std::time::{Duration, Instant};
+
+        use criterion::SamplingMode;
+        use rustbgpd_rib::{RibManager, route::VpnRibRoute};
+        use rustbgpd_telemetry::BgpMetrics;
+        use rustbgpd_wire::{MplsLabelEntry, RouteDistinguisher, VpnNlri, VpnPrefix};
+        use tokio::sync::mpsc;
+
+        // Criterion's untimed test mode pins deferral; measured parent controls may sweep.
+        let check_deferral = !std::env::args().any(|arg| arg == "--bench")
+            || std::env::args().any(|arg| arg == "--test");
+        let mut group = c.benchmark_group("attr_intern_manager_vpn_churn");
+        group.sample_size(10);
+        group.warm_up_time(Duration::from_secs(1));
+        group.measurement_time(Duration::from_secs(3));
+        group.sampling_mode(SamplingMode::Linear);
+        for count in [1_000, 200_000, 1_000_000] {
+            for withdraw in [false, true] {
+                let (_tx, rx) = mpsc::channel(8);
+                let (_query_tx, query_rx) = mpsc::channel(8);
+                let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                let routes = generate_prefixes(count)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, prefix)| {
+                        let mut attrs = typical_attributes(1);
+                        attrs.push(PathAttribute::Communities(vec![
+                            u32::try_from(index).expect("fixture community fits u32"),
+                        ]));
+                        make_route_with_attributes(prefix, 1, AttrSet::new(attrs))
+                    })
+                    .collect();
+                manager.bench_seed_loc_rib(routes);
+                let make_target = |variant: u32| {
+                    let mut attrs = typical_attributes(1);
+                    attrs.push(PathAttribute::Communities(vec![variant]));
+                    VpnRibRoute {
+                        nlri: VpnNlri {
+                            labels: vec![MplsLabelEntry::try_new(100, 0, true).unwrap()],
+                            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+                            prefix: VpnPrefix::v4(Ipv4Addr::new(198, 51, 100, 0), 24).unwrap(),
+                        },
+                        next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                        link_local_next_hop: None,
+                        next_hop_scope: None,
+                        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+                        attributes: AttrSet::new(attrs),
+                        received_at: Instant::now(),
+                        origin_type: RouteOrigin::Ebgp,
+                        peer_router_id: Ipv4Addr::new(10, 0, 1, 1),
+                        is_stale: false,
+                        is_llgr_stale: false,
+                        path_id: 0,
+                    }
+                };
+                let peer = make_target(0).peer;
+                manager.bench_apply_vpn_routes_received(peer, vec![make_target(0)], vec![]);
+                let inventory = manager.bench_attr_intern_inventory();
+                assert_eq!(&inventory[..3], &[count, count, count]);
+                assert_eq!(manager.bench_attr_intern_displaced(), 0);
+                eprintln!("VPN attr-intern fixture: {inventory:?}");
+                let mut variant = 0;
+                let mut first_batch = true;
+                group.bench_function(
+                    BenchmarkId::new(if withdraw { "withdraw" } else { "replace" }, count),
+                    |b| {
+                        b.iter_custom(|iterations| {
+                            let mut elapsed = Duration::ZERO;
+                            for _ in 0..iterations {
+                                if withdraw {
+                                    let withdrawn = vec![make_target(0).key()];
+                                    let start = Instant::now();
+                                    manager.bench_apply_vpn_routes_received(peer, vec![], withdrawn);
+                                    elapsed += start.elapsed();
+                                    assert_eq!(manager.bench_vpn_attributes(&make_target(0)), [None, None]);
+                                } else {
+                                    variant ^= 1;
+                                    let announced = vec![make_target(variant)];
+                                    let start = Instant::now();
+                                    manager.bench_apply_vpn_routes_received(peer, announced, vec![]);
+                                    elapsed += start.elapsed();
+                                }
+                                if check_deferral && first_batch && count >= 200_000 {
+                                    assert_eq!(
+                                        manager.bench_attr_intern_displaced(),
+                                        1,
+                                        "the first VPN displacement must defer the whole-table sweep",
+                                    );
+                                }
+                                first_batch = false;
+                                if withdraw {
+                                    manager.bench_apply_vpn_routes_received(peer, vec![make_target(0)], vec![]);
+                                }
+                                assert_eq!(manager.bench_attr_intern_inventory(), inventory);
+                                let expected = make_target(variant);
+                                assert_eq!(
+                                    manager.bench_vpn_attributes(&expected),
+                                    [Some(Arc::clone(&expected.attributes)), Some(expected.attributes)],
+                                );
+                            }
+                            elapsed
+                        });
+                    },
+                );
+            }
+        }
+        group.finish();
+    }
+}
+
 /// Manager-level contested-prefix selection: a challenger announces every
 /// prefix a holder already has, equal through every step above the peer
 /// tie-break, and wins on the lower peer address, so each prefix's best path
@@ -1444,6 +1561,7 @@ criterion_group!(
     benches,
     bench_attr_intern_hashing,
     bench_attr_intern_manager_churn,
+    bench_attr_intern_manager_vpn_churn,
     bench_attr_hashing_adj_rib_in_insert,
     bench_attr_hashing_bulk_initial_load,
     bench_attr_hashing_route_churn,
