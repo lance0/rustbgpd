@@ -2264,17 +2264,6 @@ impl RibManager {
     /// member is moved or an envelope emitted.
     pub(super) fn clean_policy_transition_peer_ready(&self, peer: PeerId) -> bool {
         let sendable = self.peer_sendable_families.get(&peer);
-        let only_unicast = sendable.is_some_and(|families| {
-            !families.is_empty() && families.iter().all(|(_, safi)| *safi == Safi::Unicast)
-        });
-        let no_private_family_state = self.adj_ribs_out.get(&peer).is_none_or(|rib| {
-            rib.flowspec_len() == 0
-                && rib.evpn_len() == 0
-                && rib.bgpls_len() == 0
-                && rib.vpn_len() == 0
-                && rib.labeled_len() == 0
-                && rib.rtc_len() == 0
-        });
         let no_selection_gate = sendable.is_some_and(|families| {
             families
                 .iter()
@@ -2290,9 +2279,8 @@ impl RibManager {
             .grouped_member_of(peer)
             .and_then(|gid| self.group_ribs.get(&gid))
             .is_none_or(|group| !group.per_client_best);
-        only_unicast
+        self.shared_policy_transition_member_ready(peer)
             && not_per_client_best_group
-            && no_private_family_state
             && no_selection_gate
             && self.outbound_peers.contains_key(&peer)
             && self.peer_export_encoders.contains_key(&peer)
@@ -6412,6 +6400,16 @@ impl RibManager {
         let mut n_destination_groups = 0_usize;
         for (source, destination, members) in cohorts {
             checkpoint();
+            // The shared delta re-exports unicast only; a mover with any
+            // other sendable family or private-family row takes the
+            // per-member path, which re-exports every family.
+            let (members, mixed): (Vec<PeerId>, Vec<PeerId>) = members
+                .into_iter()
+                .partition(|&peer| self.shared_policy_transition_member_ready(peer));
+            residual.extend(mixed);
+            if members.is_empty() {
+                continue;
+            }
             if self.apply_batched_group_transition(source, destination, &members, receipt) {
                 n_shared_members += members.len();
                 n_destination_groups += 1;

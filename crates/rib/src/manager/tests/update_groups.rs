@@ -18754,3 +18754,417 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
     assert_eq!(recovered.vpn_announce[0].key(), route(2).key());
     assert!(!manager.dirty_peers.contains(&peers[2]));
 }
+
+// --- mixed unicast + private-family members through the batched cohort path ---
+
+struct MixedFamilyFleet {
+    manager: RibManager,
+    members: Vec<PeerId>,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+}
+
+/// Leading members of a [`mixed_family_fleet`] that send the private family.
+const MIXED_MEMBERS: usize = 2;
+
+/// A non-member source announcing one unicast route and one `private` route.
+fn seed_mixed_family_source(manager: &mut RibManager, private: Safi) {
+    let source_addr = Ipv4Addr::new(10, 41, 9, 9);
+    let source = peer_v4(source_addr);
+    register_test_peer(manager, source, 0);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            source_addr,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: if private == Safi::FlowSpec {
+            vec![make_flowspec_route(source_addr)]
+        } else {
+            vec![]
+        },
+        flowspec_withdrawn: vec![],
+        evpn_announced: if private == Safi::Evpn {
+            vec![make_evpn_imet(source_addr, 100)]
+        } else {
+            vec![]
+        },
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    match private {
+        Safi::LabeledUnicast => manager.handle_update(RibUpdate::LabeledRoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: vec![make_labeled_rib_route(source_addr, 7, 100, 100)],
+            withdrawn: vec![],
+        }),
+        Safi::BgpLs => manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: vec![make_bgpls_route(source_addr, 7, 100)],
+            withdrawn: vec![],
+        }),
+        _ => {}
+    }
+}
+
+/// One update group: [`MIXED_MEMBERS`] members sending IPv4 unicast plus
+/// `private`, then `unicast_only` members sending IPv4 unicast alone (the
+/// group key leaves `private` out, so all share one group).
+fn mixed_family_fleet(
+    initial: &PolicyChain,
+    private: (Afi, Safi),
+    unicast_only: u8,
+) -> MixedFamilyFleet {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let members: Vec<PeerId> = (1..=2 + unicast_only)
+        .map(|index| peer_v4(Ipv4Addr::new(10, 41, 0, index)))
+        .collect();
+    let mut receivers = Vec::new();
+    for (index, &peer) in members.iter().enumerate() {
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder: Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 23,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        });
+        let mut sendable_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        if index < MIXED_MEMBERS {
+            sendable_families.push(private);
+        }
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
+            peer,
+            session_id: 0,
+            peer_asn: 65_100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: Some(initial.clone()),
+            sendable_families,
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        receivers.push(outbound_rx);
+    }
+    let group = manager.grouped_member_of(members[0]);
+    assert!(group.is_some(), "setup: members are grouped");
+    for &peer in &members {
+        assert_eq!(manager.grouped_member_of(peer), group, "setup: one group");
+    }
+    seed_mixed_family_source(&mut manager, private.1);
+    drain_route_chunks(&mut manager);
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    MixedFamilyFleet {
+        manager,
+        members,
+        receivers,
+    }
+}
+
+fn mixed_ipv4_evpn_fleet(initial: &PolicyChain) -> MixedFamilyFleet {
+    mixed_family_fleet(initial, (Afi::L2Vpn, Safi::Evpn), 0)
+}
+
+fn private_family_rows(manager: &RibManager, peer: PeerId, safi: Safi) -> usize {
+    let rib = &manager.adj_ribs_out[&peer];
+    match safi {
+        Safi::Evpn => rib.evpn_len(),
+        Safi::LabeledUnicast => rib.labeled_len(),
+        Safi::FlowSpec => rib.flowspec_len(),
+        Safi::BgpLs => rib.bgpls_len(),
+        other => panic!("no fixture for {other:?}"),
+    }
+}
+
+fn private_family_withdrawn(update: &OutboundRouteUpdate, safi: Safi) -> bool {
+    match safi {
+        Safi::Evpn => !update.evpn_withdraw.is_empty(),
+        Safi::LabeledUnicast => !update.labeled_withdraw.is_empty(),
+        Safi::FlowSpec => !update.flowspec_withdraw.is_empty(),
+        Safi::BgpLs => !update.bgpls_withdraw.is_empty(),
+        other => panic!("no fixture for {other:?}"),
+    }
+}
+
+fn deny_all_chain() -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+fn evpn_has_community(route: &EvpnRibRoute, community: u32) -> bool {
+    route.attributes.iter().any(
+        |attribute| matches!(attribute, PathAttribute::Communities(values) if values.contains(&community)),
+    )
+}
+
+/// Mixed ipv4+EVPN members (private EVPN feed) moved by an authoritative
+/// batch whose new chain adds a community: the private EVPN rows must be
+/// re-exported with it, exactly as the unicast rows are.
+#[test]
+fn batched_authoritative_cohort_reexports_private_evpn_community_change() {
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let mut fleet = mixed_ipv4_evpn_fleet(&old_policy);
+    for peer in &fleet.members {
+        assert_eq!(fleet.manager.adj_ribs_out[peer].evpn_len(), 1, "setup");
+        assert!(
+            fleet.manager.adj_ribs_out[peer]
+                .iter_evpn()
+                .all(|r| evpn_has_community(r, 0xFDE8_0001))
+        );
+    }
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next_policy),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    drain_route_chunks(&mut fleet.manager);
+    // Not a vacuous run: record whether the shared path took the members.
+    let stats = fleet.manager.policy_transition_stats;
+    eprintln!(
+        "shared_members={} fallback_members={}",
+        stats.batched_authoritative_shared_members, stats.batched_authoritative_fallback_members
+    );
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let peer = fleet.members[index];
+        let mut unicast_new = false;
+        let mut evpn_new = false;
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            unicast_new |= update.announce.iter().any(|route| {
+                route
+                    .attributes
+                    .iter()
+                    .any(|a| matches!(a, PathAttribute::Communities(v) if v.contains(&0xFDE8_0002)))
+            });
+            evpn_new |= update
+                .evpn_announce
+                .iter()
+                .any(|route| evpn_has_community(route, 0xFDE8_0002));
+        }
+        assert!(
+            unicast_new,
+            "{peer}: unicast re-exported with new community"
+        );
+        assert!(
+            evpn_new,
+            "{peer}: EVPN announce must carry the new community"
+        );
+        assert!(
+            fleet.manager.adj_ribs_out[&peer]
+                .iter_evpn()
+                .all(|r| evpn_has_community(r, 0xFDE8_0002)),
+            "{peer}: EVPN Adj-RIB-Out must carry the new community"
+        );
+    }
+}
+
+/// Same fleet, new chain rejects everything: the private EVPN row must be
+/// withdrawn, not left announced.
+#[test]
+fn batched_authoritative_cohort_withdraws_private_evpn_rejected_by_new_chain() {
+    let old_policy = community_chain(0xFDE8_0001);
+    let deny_all = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let mut fleet = mixed_ipv4_evpn_fleet(&old_policy);
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &deny_all),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    drain_route_chunks(&mut fleet.manager);
+    let stats = fleet.manager.policy_transition_stats;
+    eprintln!(
+        "shared_members={} fallback_members={}",
+        stats.batched_authoritative_shared_members, stats.batched_authoritative_fallback_members
+    );
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let peer = fleet.members[index];
+        let mut unicast_withdrawn = false;
+        let mut evpn_withdrawn = false;
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            unicast_withdrawn |= update.unicast_withdrawals().next().is_some();
+            evpn_withdrawn |= !update.evpn_withdraw.is_empty();
+        }
+        assert!(unicast_withdrawn, "{peer}: unicast withdrawn");
+        assert!(evpn_withdrawn, "{peer}: EVPN row must be withdrawn");
+        assert_eq!(fleet.manager.adj_ribs_out[&peer].evpn_len(), 0, "{peer}");
+    }
+}
+
+/// A deny-all chain on a group of mixed members plus one unicast-only
+/// member: the mixed members take the per-member path and withdraw their
+/// `private` rows; the unicast-only member keeps the shared path.
+fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
+    let mut fleet = mixed_family_fleet(&community_chain(0xFDE8_0001), private, 1);
+    for (index, &peer) in fleet.members.iter().enumerate() {
+        assert_eq!(
+            private_family_rows(&fleet.manager, peer, private.1),
+            usize::from(index < MIXED_MEMBERS),
+            "{peer}: setup"
+        );
+    }
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &deny_all_chain()),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    drain_route_chunks(&mut fleet.manager);
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let peer = fleet.members[index];
+        let mut unicast_withdrawn = false;
+        let mut private_withdrawn = false;
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            unicast_withdrawn |= update.unicast_withdrawals().next().is_some();
+            private_withdrawn |= private_family_withdrawn(&update, private.1);
+        }
+        assert!(unicast_withdrawn, "{peer}: unicast withdrawn");
+        assert_eq!(
+            private_withdrawn,
+            index < MIXED_MEMBERS,
+            "{peer}: {private:?} row withdrawn"
+        );
+        assert_eq!(
+            private_family_rows(&fleet.manager, peer, private.1),
+            0,
+            "{peer}"
+        );
+    }
+    // The unicast-only member keeps the shared path.
+    let stats = fleet.manager.policy_transition_stats;
+    assert_eq!(stats.batched_authoritative_shared_members, 1);
+    assert_eq!(stats.batched_authoritative_fallback_members, MIXED_MEMBERS);
+}
+
+#[test]
+fn batched_authoritative_cohort_withdraws_private_labeled_rejected_by_new_chain() {
+    assert_batched_cohort_withdraws_private_rows((Afi::Ipv4, Safi::LabeledUnicast));
+}
+
+#[test]
+fn batched_authoritative_cohort_withdraws_private_flowspec_rejected_by_new_chain() {
+    assert_batched_cohort_withdraws_private_rows((Afi::Ipv4, Safi::FlowSpec));
+}
+
+#[test]
+fn batched_authoritative_cohort_withdraws_private_bgpls_rejected_by_new_chain() {
+    assert_batched_cohort_withdraws_private_rows((Afi::BgpLs, Safi::BgpLs));
+}
+
+#[test]
+fn batched_authoritative_cohort_splits_evpn_members_from_unicast_only_members() {
+    assert_batched_cohort_withdraws_private_rows((Afi::L2Vpn, Safi::Evpn));
+}
+
+/// The old chain denies everything, so no member holds an EVPN row; the
+/// new chain permits. Membership must follow the sendable family, not
+/// only existing Adj-RIB-Out rows: the mixed members must announce EVPN.
+#[test]
+fn batched_authoritative_cohort_announces_private_evpn_permitted_by_new_chain() {
+    let mut fleet = mixed_family_fleet(&deny_all_chain(), (Afi::L2Vpn, Safi::Evpn), 1);
+    for &peer in &fleet.members {
+        assert_eq!(fleet.manager.adj_ribs_out[&peer].evpn_len(), 0, "setup");
+    }
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &community_chain(0xFDE8_0002)),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    drain_route_chunks(&mut fleet.manager);
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let peer = fleet.members[index];
+        let mut unicast_new = false;
+        let mut evpn_new = false;
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            unicast_new |= !update.announce.is_empty();
+            evpn_new |= update
+                .evpn_announce
+                .iter()
+                .any(|route| evpn_has_community(route, 0xFDE8_0002));
+        }
+        assert!(unicast_new, "{peer}: unicast announced");
+        assert_eq!(evpn_new, index < MIXED_MEMBERS, "{peer}: EVPN announced");
+        assert_eq!(
+            fleet.manager.adj_ribs_out[&peer].evpn_len(),
+            usize::from(index < MIXED_MEMBERS),
+            "{peer}"
+        );
+    }
+    // The unicast-only member keeps the shared path.
+    let stats = fleet.manager.policy_transition_stats;
+    assert_eq!(stats.batched_authoritative_shared_members, 1);
+    assert_eq!(stats.batched_authoritative_fallback_members, MIXED_MEMBERS);
+}
+
+/// The member rule shared by the clean transition and the batched cohort:
+/// only IPv4/IPv6 unicast senders qualify.
+#[test]
+fn shared_policy_transition_member_ready_requires_unicast_only_families() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(Ipv4Addr::new(10, 42, 0, 1));
+    let unicast = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    manager
+        .peer_sendable_families
+        .insert(peer, unicast.to_vec());
+    assert!(manager.shared_policy_transition_member_ready(peer));
+    for private in [
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv6, Safi::LabeledUnicast),
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+        (Afi::BgpLs, Safi::BgpLs),
+        (Afi::BgpLs, Safi::BgpLsVpn),
+        (Afi::Ipv4, Safi::Multicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::RtConstrain),
+    ] {
+        let mut families = unicast.to_vec();
+        families.push(private);
+        manager.peer_sendable_families.insert(peer, families);
+        assert!(
+            !manager.shared_policy_transition_member_ready(peer),
+            "{private:?}"
+        );
+    }
+    manager.peer_sendable_families.insert(peer, Vec::new());
+    assert!(!manager.shared_policy_transition_member_ready(peer));
+}

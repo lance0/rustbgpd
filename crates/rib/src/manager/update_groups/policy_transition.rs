@@ -716,7 +716,9 @@ impl RibManager {
     /// Whether a source/destination group pair qualifies for the shared
     /// batched authoritative transition: unicast-only on both sides and
     /// differing only in export-chain content (the clean transition's
-    /// narrow shape, checked on the interned keys).
+    /// narrow shape, checked on the interned keys). The keys leave EVPN,
+    /// labeled, `FlowSpec` and BGP-LS out, so each mover must also pass
+    /// [`Self::shared_policy_transition_member_ready`].
     pub(in crate::manager) fn batched_transition_keys_qualify(
         &self,
         source: usize,
@@ -739,6 +741,35 @@ impl RibManager {
                 .get(&destination)
                 .is_some_and(GroupRibOut::owns_evpn_routes)
             && source_key.same_staging_profile_except_chain(destination_key)
+    }
+
+    /// Whether a member may take a shared policy transition (the clean
+    /// transition or the batched authoritative cohort). Both re-export
+    /// IPv4/IPv6 unicast only, so every family the member can send must be
+    /// unicast and its Adj-RIB-Out must hold no other family's rows.
+    /// A unicast-only group key does not prove this: EVPN (private feed),
+    /// labeled unicast, `FlowSpec`, BGP-LS and multicast stay out of the
+    /// key, so a mixed member shares a unicast group and must take the
+    /// per-member path to have its other families re-exported.
+    pub(in crate::manager) fn shared_policy_transition_member_ready(&self, peer: PeerId) -> bool {
+        let only_unicast = self
+            .peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| {
+                !families.is_empty()
+                    && families
+                        .iter()
+                        .all(|(_, safi)| *safi == rustbgpd_wire::Safi::Unicast)
+            });
+        only_unicast
+            && self.adj_ribs_out.get(&peer).is_none_or(|rib| {
+                rib.flowspec_len() == 0
+                    && rib.evpn_len() == 0
+                    && rib.bgpls_len() == 0
+                    && rib.vpn_len() == 0
+                    && rib.labeled_len() == 0
+                    && rib.rtc_len() == 0
+            })
     }
 
     /// The fingerprint itself: disqualifiers first (design §1), then
