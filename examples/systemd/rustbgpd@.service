@@ -19,7 +19,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 # the PeerManager and RIB actors both answered within 5 seconds. A RIB that
 # answers "stalled" from inside a long unit of work fails /readyz but is
 # still pinged. PID 1 independently enforces the deadline: it aborts the
-# daemon between 4 min 50 s and 5 min after the actors stop answering.
+# daemon about five minutes (285 to 305 seconds) after an actor stops
+# answering.
 # Restart=on-failure below covers watchdog expiry.
 WatchdogSec=5min
 # Watchdog expiry sends SIGABRT, which the daemon does not handle, so the

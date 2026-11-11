@@ -660,7 +660,7 @@ def check(root: Path) -> list[str]:
                 exact('test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }'),
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
                 r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',
-                r"^for directive in Type=notify NotifyAccess=main WatchdogSec=5min TimeoutStartSec=10min StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",
+                r"^for directive in Type=notify NotifyAccess=main WatchdogSec=5min TimeoutAbortSec=2min TimeoutStartSec=10min StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",
                 r'^grep -qxF "\$directive" "\$unit"$',
                 r'^template="\$tree/lib/systemd/system/rustbgpd@\.service"$',
                 exact("grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' \"$template\""),

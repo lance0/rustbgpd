@@ -641,6 +641,47 @@ groups:
             warning; bgp_rib_policy_transition_last_duration_milliseconds is
             the previous terminal sample until this transition completes.
 
+      - alert: BgpReadinessRibStalled
+        # The RIB answers "stalled" once one unit of work has run for 30
+        # seconds and keeps answering it until the work ends. The systemd
+        # watchdog deliberately does not restart a daemon in that state, so
+        # this alert is what bounds it. The counter moves only while
+        # something probes /readyz.
+        expr: increase(bgp_readiness_probe_failures_total{reason="rib_stalled"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RIB readiness stalled on {{ $labels.instance }}"
+          description: >-
+            /readyz on {{ $labels.instance }} has reported a stalled RIB unit
+            of work (export-policy transition, selection-deferral release or
+            peer teardown) for 10 minutes. The actor is answering, so the
+            systemd watchdog does not restart it, but inbound route updates
+            wait behind that work. Check the daemon WARN log and
+            bgp_rib_readiness_query_wait_seconds for the seam; restart only
+            if the work is not finishing.
+
+      - alert: BgpSystemdWatchdogPingsSkipped
+        # Each increment is a liveness sample in which PeerManager or the RIB
+        # gave no answer, or a ping the notify socket refused. Under the
+        # shipped WatchdogSec=5min, PID 1 aborts the daemon after five
+        # minutes without a ping. The counter also moves while the peer
+        # manager drains sessions during a stop.
+        expr: increase(bgp_systemd_watchdog_pings_skipped_total[2m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "systemd watchdog pings skipped on {{ $labels.instance }}"
+          description: >-
+            rustbgpd on {{ $labels.instance }} has withheld systemd watchdog
+            pings for over a minute: a core actor is not answering liveness
+            samples, or the notify socket refuses the ping. If this is not a
+            stop in progress, systemd aborts and restarts the daemon once
+            WatchdogSec passes without a ping. The daemon WARN log names the
+            silent actor.
+
       - alert: BgpPolicyTransitionActorPollExceededReadinessBudget
         # Histogram subtraction classifies observations above the exact
         # 200ms bucket boundary. `ignoring(le)` is required to match the

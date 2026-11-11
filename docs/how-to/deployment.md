@@ -558,19 +558,39 @@ Notes on the sandbox:
     selection-deferral release or peer teardown is working, not dead.
     `/readyz` returns `503` for it; the watchdog keeps pinging.
   - Only silence withholds the ping: an actor that does not answer within
-    5 seconds, a closed channel or a dropped reply. The daemon then retries
-    every second, logs a WARN and increments
-    `bgp_systemd_watchdog_pings_skipped_total`.
+    5 seconds, a closed channel or a dropped reply. A ping that the notify
+    socket refuses counts the same way. The daemon logs a WARN, increments
+    `bgp_systemd_watchdog_pings_skipped_total` and samples again one second
+    later, so a silent actor is asked every 6 seconds (5 seconds of waiting,
+    then the 1-second retry).
+  - The sampler runs on its own thread. It does not depend on the telemetry
+    listener being configured, and a busy daemon worker cannot delay it.
   - The sample ignores the shutdown gate, so pings continue through
-    coordinated shutdown for as long as the actors answer.
+    coordinated shutdown for as long as the actors answer. Once the peer
+    manager starts draining sessions it stops answering, so the counter
+    moves until the process exits. That cannot abort a stop: systemd stops
+    enforcing the watchdog when it receives `STOPPING=1`, and
+    `TimeoutStopSec` bounds the stop from then on.
 
-  PID 1 independently sends SIGABRT five minutes after the last ping, which
-  is between 4 min 50 s and 5 min after the actors stop answering, and
-  `Restart=on-failure` covers that expiry. A stopped process (SIGSTOP, a
-  debugger) gets the same 4 min 50 s to 5 min. With another `WatchdogSec`
-  the sample period is a quarter of it and the sample deadline an eighth,
-  capped at 10 and 5 seconds, so the abort comes between three quarters of
-  the timeout and the whole timeout after the actors stop.
+  The watchdog does not bound how long the RIB may keep answering
+  "stalled". A unit of work that keeps making progress is never aborted,
+  however long it runs. Alert on it instead:
+  `bgp_readiness_probe_failures_total{reason="rib_stalled"}` rising for many
+  minutes (the shipped `BgpReadinessRibStalled` rule), and restart by hand
+  only if the work is not finishing.
+
+  PID 1 independently sends SIGABRT five minutes after the last ping, and
+  `Restart=on-failure` covers that expiry. Measured from the moment an actor
+  stops answering, that is about five minutes: 290 to 300 seconds when
+  answers were prompt, and 285 to 305 seconds at the edges. A sample that
+  took almost 5 seconds to answer makes the last ping up to 15 seconds old,
+  and an actor that stops while the other's answer to the same sample is
+  still on its way lets one more ping out up to 5 seconds later. A stopped
+  process (SIGSTOP, a debugger) is aborted 285 to 300 seconds after it
+  stops. With another `WatchdogSec` the sample period is a quarter of it
+  and the sample deadline an eighth, capped at 10 and 5 seconds, so the
+  abort comes between five eighths and nine eighths of the timeout after an
+  actor stops.
 - `TimeoutAbortSec=2min` bounds the wait after that SIGABRT. The daemon does
   not handle the signal, so the kernel writes a core dump and the restart
   waits for it; every session is already down. Two minutes is enough for a
@@ -1054,7 +1074,7 @@ containers:
       - name: telemetry
         containerPort: 9179
     startupProbe:
-      httpGet: {path: /readyz, port: telemetry}
+      httpGet: {path: /livez, port: telemetry}
       periodSeconds: 10
       timeoutSeconds: 1
       failureThreshold: 60   # 10 minutes, the unit's TimeoutStartSec
@@ -1121,7 +1141,10 @@ when a restart is the fix.
 **Startup.** The listener is bound early, but nothing answers HTTP, not even
 `/livez`, until startup wiring has finished and the configured peer roster is
 installed, the same boundary as systemd `READY=1`. Until then, probes connect
-and time out. A startup probe holds liveness off for the 10 minutes the
+and time out. The startup probe uses `/livez` for that reason: its first
+`200` already means startup finished, and unlike `/readyz` it cannot be held
+red by a long RIB unit of work during initial table loading. It holds
+liveness off for the 10 minutes the
 systemd unit allows (`TimeoutStartSec=10min`). BGP ingress opens at that
 boundary, so routes from peers, including full tables, load while the probes
 already answer; the startup probe does not need to cover table loading.
