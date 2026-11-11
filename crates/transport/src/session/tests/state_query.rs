@@ -700,3 +700,64 @@ async fn shutdown_unless_connected_keeps_a_handshake() {
     );
     assert_eq!(flow, std::ops::ControlFlow::Break(()));
 }
+
+/// A session whose `PeerUp` is still held for a full RIB mailbox answers the
+/// warm-checkpoint query as Established. The checkpoint still fails closed:
+/// the RIB's session fence rejects an identity it has not registered.
+#[tokio::test]
+async fn warm_checkpoint_of_a_held_peer_up_fails_at_the_rib_session_fence() {
+    let (mut session, _unregistered) = make_test_session_with_rib(65001, 65002);
+    let (held_tx, _held_rx) = mpsc::channel(1);
+    held_tx.try_send(placeholder_routes_received()).unwrap();
+    session.rib_tx = held_tx;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert!(
+        session
+            .rib_backlog
+            .iter()
+            .any(|(update, _)| matches!(update, RibUpdate::PeerUp { .. })),
+        "the RIB has not admitted this session's PeerUp"
+    );
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryWarmCheckpointState { reply })
+        .await;
+    let state = state.await.unwrap();
+    assert_eq!(state.fsm_state, SessionState::Established);
+
+    let (rib_tx, rib_rx) = mpsc::channel(8);
+    let (_query_tx, query_rx) = mpsc::channel(8);
+    let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
+    let manager_task = tokio::spawn(manager.run());
+    let (reply, snapshot) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryWarmMrtSnapshot {
+            views: vec![rustbgpd_rib::WarmMrtSnapshotView {
+                peer: session.rib_peer(),
+                session_id: session.session_identity.id,
+                peer_asn: state.peer_asn.unwrap(),
+                peer_router_id: state.peer_router_id.unwrap(),
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                add_path_receive: false,
+            }],
+            budget: rustbgpd_rib::WarmMrtSnapshotBudget {
+                deadline: Instant::now() + Duration::from_secs(30),
+                cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                max_materialized_bytes: usize::MAX,
+            },
+            reply,
+        })
+        .await
+        .unwrap();
+    let error = snapshot
+        .await
+        .unwrap()
+        .map(|_| ())
+        .expect_err("a checkpoint must not record a session the RIB has not registered");
+    assert!(error.contains("changed active session"), "{error}");
+    drop(rib_tx);
+    manager_task.await.unwrap();
+}
