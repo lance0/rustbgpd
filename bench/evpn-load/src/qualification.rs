@@ -81,10 +81,9 @@ fn policies_match(clients: &[Client], generation: &str) -> bool {
         view.qualification_communities
             .as_ref()
             .is_some_and(|communities| {
-                communities
-                    .iter()
-                    .enumerate()
-                    .all(|(bit, value)| !view.has(bit) || *value == expected)
+                communities.iter().enumerate().all(|(bit, value)| {
+                    view.watched.contains(&bit) || !view.has(bit) || *value == expected
+                })
             })
     })
 }
@@ -239,22 +238,42 @@ const PROBE_QUIET: Duration = Duration::from_millis(200);
 /// half of its pool, the cycle waits until client 1 holds it, then withdraws
 /// it and waits until no receiver holds it. Only clients 0 and 1 keep their
 /// export policy across the controlled reloads, so neither end moves.
+///
+/// The final cycle, after the stop request, uses a second pool slot as its
+/// marker and waits until every receiver holds and then drops that one. A
+/// receiver delivers in order, so once it holds the marker every earlier
+/// probe event has reached it; a stale pair of the ordinary probe route can
+/// never satisfy that wait.
 struct Probe {
     stop: Arc<AtomicBool>,
+    views: Vec<Arc<std::sync::Mutex<super::View>>>,
     task: tokio::task::JoinHandle<anyhow::Result<(Vec<serde_json::Value>, u64)>>,
 }
 
+/// Pool slots of the probe route and of the final cycle's marker.
+fn probe_slots(shape: Shape) -> [u32; 2] {
+    [shape.pool5() - 1, shape.pool5() - 2]
+}
+
 impl Probe {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the probe train keeps its ordinary and final-marker cycles in one task"
+    )]
     fn start(
         shape: Shape,
         clients: &[Client],
         lost: &Arc<AtomicBool>,
         cap: Duration,
     ) -> anyhow::Result<Self> {
-        let index = shape.pool5() - 1;
+        let slots = probe_slots(shape);
         anyhow::ensure!(
-            clients.len() >= 2 && !shape.window5(clients[0].shifts).any(|live| live == index),
-            "probe route overlaps the source's live window"
+            clients.len() >= 2
+                && shape.type5 >= 2
+                && !shape
+                    .window5(clients[0].shifts)
+                    .any(|live| slots.contains(&live)),
+            "probe routes overlap the source's live window"
         );
         let tx = clients[0]
             .tx
@@ -264,17 +283,18 @@ impl Probe {
             .iter()
             .map(|client| client.view.clone())
             .collect();
-        let bit = (shape.pool2() + index) as usize;
+        let bits = slots.map(|slot| (shape.pool2() + slot) as usize);
         for view in &views {
             view.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .watched = Some(bit);
+                .watched = bits.to_vec();
         }
-        let route = super::type5_route(0, index);
+        let routes = slots.map(|slot| super::type5_route(0, slot));
         let (stop, lost) = (Arc::new(AtomicBool::new(false)), lost.clone());
-        let stopping = stop.clone();
+        let (stopping, task_views) = (stop.clone(), views.clone());
         let task = tokio::spawn(async move {
-            let holds = |view: &Arc<std::sync::Mutex<super::View>>| {
+            let views = task_views;
+            let holds = |view: &Arc<std::sync::Mutex<super::View>>, bit: usize| {
                 view.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .has(bit)
@@ -285,11 +305,12 @@ impl Probe {
             let mut final_cycle = false;
             while !final_cycle {
                 final_cycle = stopping.load(Ordering::SeqCst);
+                let which = usize::from(final_cycle);
+                let (route, bit) = (&routes[which], bits[which]);
                 if final_cycle {
-                    // Let every receiver apply the earlier cycles first: no
-                    // receiver holds the route and no probe event lands for
-                    // one quiet period. A receiver that holds the final
-                    // announcement then holds that one, not a stale one.
+                    // Defence in depth for the marker: let earlier cycles
+                    // land first, so no probe event arrives for one quiet
+                    // period and no receiver holds either route.
                     let events = || -> Vec<u64> {
                         views
                             .iter()
@@ -304,15 +325,22 @@ impl Probe {
                         loop {
                             let before = events();
                             tokio::time::sleep(PROBE_QUIET).await;
-                            if events() == before && !views.iter().any(&holds) {
+                            if events() == before
+                                && !views
+                                    .iter()
+                                    .any(|view| bits.iter().any(|&b| holds(view, b)))
+                            {
                                 break;
                             }
                         }
                     })
                     .await;
                     if quiet.is_err() {
-                        samples.push(serde_json::json!({"sent_us": super::wall_us(), "seen_us": null,
-                                                        "withdrawn": false, "every_receiver": false}));
+                        samples.push(
+                            serde_json::json!({"sent_us": super::wall_us(), "seen_us": null,
+                                                        "withdrawn": false, "every_receiver": false,
+                                                        "quiet": false}),
+                        );
                         break;
                     }
                 }
@@ -320,19 +348,13 @@ impl Probe {
                 tx.send(super::build_update(0, vec![route.clone()], vec![]))
                     .await
                     .map_err(|_| anyhow::anyhow!("probe source writer closed"))?;
-                let seen = wait_until(cap, &lost, || holds(&views[0]))
+                let seen = wait_until(cap, &lost, || holds(&views[0], bit))
                     .await
                     .ok()
                     .map(|()| super::wall_us());
-                // The final cycle also waits until every receiver holds the
-                // route. Each receiver reads in order, so once it holds this
-                // announcement every earlier probe event has reached it, and
-                // the withdrawal wait below then covers all of them. Without
-                // this, a lagging receiver could install the route after the
-                // acknowledgement and break the next inventory check.
                 let every = if final_cycle && seen.is_some() {
                     Some(
-                        wait_until(cap, &lost, || views.iter().all(&holds))
+                        wait_until(cap, &lost, || views.iter().all(|view| holds(view, bit)))
                             .await
                             .is_ok(),
                     )
@@ -343,9 +365,13 @@ impl Probe {
                     .await
                     .map_err(|_| anyhow::anyhow!("probe source writer closed"))?;
                 messages += 2;
-                let withdrawn = wait_until(cap, &lost, || !views.iter().any(&holds))
-                    .await
-                    .is_ok();
+                let withdrawn = wait_until(cap, &lost, || {
+                    !views
+                        .iter()
+                        .any(|view| bits.iter().any(|&b| holds(view, b)))
+                })
+                .await
+                .is_ok();
                 samples.push(serde_json::json!({"sent_us": sent, "seen_us": seen,
                                                 "withdrawn": withdrawn, "every_receiver": every}));
                 if seen.is_none() || !withdrawn {
@@ -355,7 +381,7 @@ impl Probe {
             }
             Ok((samples, messages))
         });
-        Ok(Self { stop, task })
+        Ok(Self { stop, views, task })
     }
 
     async fn finish(self, source: &mut Client) -> anyhow::Result<serde_json::Value> {
@@ -363,6 +389,13 @@ impl Probe {
         let (samples, messages) = self.task.await??;
         // The writer counts probe messages too; later drains must wait for them.
         source.submitted_messages += messages;
+        // The slots are ordinary fixture routes once churn moves the window.
+        for view in &self.views {
+            view.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .watched
+                .clear();
+        }
         Ok(serde_json::json!({"samples": samples}))
     }
 }
@@ -477,7 +510,7 @@ pub(super) async fn run(
                 let (_, running) = probe.take().expect("checked above");
                 running.finish(&mut clients[0]).await?
             }
-            ["policy", generation @ ("a" | "b")] if loaded && !paused && probe.is_none() => {
+            ["policy", generation @ ("a" | "b")] if loaded && !paused => {
                 wait_until(Duration::from_secs(args.converge_cap_secs), lost, || {
                     policies_match(clients, generation)
                 })
@@ -583,6 +616,33 @@ mod tests {
         }
         assert!(policies_match(&clients, "b"));
         assert!(!policies_match(&clients, "a"));
+
+        // A running probe's route is outside the compared inventory: its
+        // community and its presence block neither policy nor convergence.
+        let slot = probe_slots(shape)[0];
+        let bit = (shape.pool2() + slot) as usize;
+        let expected_live = clients[2].view.lock().unwrap().live;
+        {
+            let mut view = clients[2].view.lock().unwrap();
+            view.apply(2, shape, &crate::type5_route(0, slot), true);
+            view.qualification_communities.as_mut().unwrap()[bit] = 1000;
+        }
+        assert!(
+            !policies_match(&clients, "b"),
+            "an unwatched stray route blocks"
+        );
+        assert!(!converged_live(shape, &clients[2], expected_live));
+        clients[2].view.lock().unwrap().watched = probe_slots(shape)
+            .map(|slot| (shape.pool2() + slot) as usize)
+            .to_vec();
+        assert!(policies_match(&clients, "b"));
+        assert!(converged_live(shape, &clients[2], expected_live));
+    }
+
+    /// The live count `check` compares for one receiver.
+    fn converged_live(shape: Shape, client: &Client, expected: u64) -> bool {
+        let result = crate::check(shape, std::slice::from_ref(client));
+        result.min_live == expected
     }
 
     fn probe_clients(shape: Shape) -> (Vec<Client>, tokio::sync::mpsc::Receiver<Message>) {
@@ -666,7 +726,9 @@ mod tests {
         };
         let lost = Arc::new(AtomicBool::new(false));
         // Receiver 1 is prompt; the others lag independently, so non-final
-        // cycles can end before they apply them.
+        // cycles can end before they apply them. Receiver 3 stalls longer
+        // than the quiet period on every message, so a stale ordinary pair
+        // can still be queued when the quiet wait passes.
         let (mut clients, rx) = probe_clients(shape);
         let views: Vec<_> = clients[1..].iter().map(|c| c.view.clone()).collect();
         let withdrawn = delayed_reflector(
@@ -676,7 +738,7 @@ mod tests {
             vec![
                 Duration::ZERO,
                 Duration::from_millis(30),
-                Duration::from_millis(70),
+                PROBE_QUIET * 5 / 2,
             ],
         );
         let probe = Probe::start(shape, &clients, &lost, Duration::from_secs(5)).unwrap();
@@ -704,12 +766,13 @@ mod tests {
                 receiver + 1
             );
         }
-        assert!(views.iter().all(|view| {
-            !view
-                .lock()
-                .unwrap()
-                .has((shape.pool2() + shape.pool5() - 1) as usize)
-        }));
+        for view in &views {
+            let view = view.lock().unwrap();
+            for slot in probe_slots(shape) {
+                assert!(!view.has((shape.pool2() + slot) as usize));
+            }
+            assert!(view.watched.is_empty(), "finish releases the probe slots");
+        }
         assert_eq!(clients[0].submitted_messages, 2 * samples.len() as u64);
 
         // Nothing delivers the probe: the sample records it unseen and ends the train.

@@ -28,9 +28,10 @@ SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers mo
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
 SAMPLE_PERIOD_US = 1_000_000 // Q.RECOVERY_BARS["sample_hz"]
-# The driver's final probe cycle waits at most four of its convergence caps
-# (quiet, arrival, every receiver, withdrawal); stopping gets its own bound.
-PROBE_STOP_SECONDS = 4 * Q.RECOVERY_BARS["convergence_seconds"] + 30
+# Stopping the probe can wait for the ordinary cycle already in progress (its
+# arrival and withdrawal caps) and the final cycle's four (quiet, arrival,
+# every receiver, withdrawal); it gets its own bound.
+PROBE_STOP_SECONDS = 6 * Q.RECOVERY_BARS["convergence_seconds"] + 30
 
 ACTOR_SERIES = re.compile(r'(?P<name>bgp_rib_actor_slice_max_microseconds|bgp_rib_actor_work_duration_seconds_bucket)'
                           r'\{(?P<labels>[^}]*)\} (?P<value>\S+)')
@@ -138,10 +139,12 @@ BATCH_FIELDS = ("input_peers", "present_peers", "shared_members", "fallback_memb
 OPTIONAL_BATCH_FIELDS = ("deferred_members",)
 
 
-def probe_key(routes):
-    """The driver's primary-lane probe route: client 0's last Type 5 pool
-    slot, outside its window until the later churn phases."""
-    return 5, 0, 2 * (routes // 5) - 1
+def probe_keys(routes):
+    """The driver's primary-lane probe route and its final-cycle marker:
+    client 0's last two Type 5 pool slots, outside its window until the
+    later churn phases."""
+    width = routes // 5
+    return frozenset({(5, 0, 2 * width - 1), (5, 0, 2 * width - 2)})
 
 
 def transition_counts(text):
@@ -198,12 +201,15 @@ def probe_window(result, opened_us, closed_us):
         type(sample) is dict and type(sample.get("sent_us")) is int
         and (sample.get("seen_us") is None or type(sample["seen_us"]) is int and sample["seen_us"] >= sample["sent_us"])
         and type(sample.get("withdrawn")) is bool
-        and sample.get("every_receiver") in (None, True, False) for sample in samples)
+        and sample.get("every_receiver") in (None, True, False)
+        and sample.get("quiet", True) in (True, False) for sample in samples)
         and all(left["sent_us"] < right["sent_us"] for left, right in zip(samples, samples[1:])),
         "malformed probe receipt")
     reason = None
     if not samples:
         reason = "no probe sample"
+    elif samples[-1].get("quiet") is False:
+        reason = "probe events did not quiesce before the final cycle"
     elif any(sample["seen_us"] is None for sample in samples):
         reason = "probe route never reached the unmoved receiver"
     elif not all(sample["withdrawn"] for sample in samples):
@@ -392,8 +398,7 @@ def check_reload_receipts(leg, row, events, seconds):
                   and after[-1]["at"] <= done["at"], "stale or copied last-reload completion receipt")
         wire_done = [item for item in events if item["event"] == "complete"
                      and item.get("command") == f"policy {generation}"]
-        Q.require(len(wire_done) == 1 and done["at"] <= wire_done[0]["at"]
-                  <= trigger["at"] + seconds + cleanup_seconds(events, generation),
+        Q.require(len(wire_done) == 1 and done["at"] <= wire_done[0]["at"] <= trigger["at"] + seconds,
                   "wire completion or reload settlement exceeded the original regroup deadline")
         previous, previous_end = reload_record(response), wire_done[0]["at"]
     Q.require(len(controls) == sum(item["generation"] in ("b", "a") for item in controls),
@@ -421,22 +426,6 @@ def recovery_pair(observed, clients, paused_wall_us, resumed_wall_us, arm):
                  and 0 < right["elapsed_us"] - left["elapsed_us"] <= SAMPLE_PERIOD_US), None)
 
 
-def cleanup_seconds(events, generation):
-    """Harness time inside a regroup's wire window that is not wire
-    convergence: stopping the probe train and the closing scrape."""
-    def one(**fields):
-        rows = [row for row in events if all(row.get(key) == value for key, value in fields.items())]
-        Q.require(len(rows) == 1, f"missing/duplicate regroup cleanup boundary {fields}")
-        return rows[0]
-    stop = (one(event="complete", command=f"probe-stop {generation}")["at"]
-            - one(event="command", command=f"probe-stop {generation}")["at"])
-    scrape = one(event="scrape", name=f"regroup-{generation}-end")
-    Q.require(type(scrape.get("requested_at")) in (int, float), "scrape event lacks its request time")
-    seconds = stop + scrape["at"] - scrape["requested_at"]
-    Q.require(seconds >= 0, "reversed regroup cleanup boundaries")
-    return seconds
-
-
 def timings(events):
     def at(event, **fields):
         rows = [row for row in events if row["event"] == event
@@ -444,8 +433,14 @@ def timings(events):
         Q.require(len(rows) == 1, "missing/duplicate timing boundary")
         return rows[0]["at"]
     values = {f"regroup-{generation}-seconds": at("complete", command=f"policy {generation}")
-              - at("reload", generation=generation) - cleanup_seconds(events, generation)
-              for generation in ("a", "b")}
+              - at("reload", generation=generation) for generation in ("a", "b")}
+    # Wire convergence is measured before the probe stops: the final probe
+    # cycle waits for every receiver, so it would absorb the receivers'
+    # drain if it ran first.
+    for generation in ("a", "b"):
+        Q.require(at("command", command=f"probe-stop {generation}")
+                  >= at("complete", command=f"policy {generation}"),
+                  f"probe-stop {generation} overlapped wire convergence")
     values["recovery-seconds"] = at("complete", command="settle") - at("complete", command="resume")
     Q.require(all(value >= 0 for value in values.values()), "reversed timing boundaries")
     return values
@@ -723,7 +718,7 @@ def check_wire(leg, clients, routes):
     Q.require(len(refreshes) == 2, "missing quiescent or paused refresh")
     report = {name: [] for name in PHASES}
     for peer in range(clients):
-        receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5, probe=probe_key(routes))
+        receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5, probe=probe_keys(routes))
         path = leg / "wire" / f"peer-{peer}.bgp"
         cursor = 0
         with path.open("rb") as stream:
@@ -750,7 +745,9 @@ def check_wire(leg, clients, routes):
                     Q.accept(receiver.eors > refreshes[1]["eor_baseline"][peer],
                              "recovery finished before receiver refresh EoR")
                 community = 2000 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1000
-                state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community)
+                # A regroup boundary is taken while that regroup's probe runs.
+                state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community,
+                                          during_probe=name in ("regroup-b", "regroup-a"))
                 if transition:
                     receiver.end_policy()
                 ordered = receiver.ordered_digest()
@@ -832,9 +829,14 @@ def run_cell(output, manifest, arm, index, correctness):
                 record[f"regroup-{generation}"] = controller.witness(
                     lambda row, generation=generation: group_members(row, arm, clients, generation) and settled(row),
                     deadline=deadline)
-                # Probe cleanup has its own bound and, with the closing
-                # scrape, is not charged to wire convergence: the deadline
-                # moves by exactly that time.
+                # Wire convergence first, under the original deadline: the
+                # driver leaves the running probe's routes out of the
+                # inventory it compares, and the probe stops only after.
+                controller.command(f"policy {generation}", deadline=deadline)
+                elapsed = controller.last_completion - started
+                record[f"regroup-{generation}-seconds"] = None if correctness else elapsed
+                # The probe stop has its own bound; a failed stop still
+                # leaves an INVALID probe receipt.
                 try:
                     controller.command(f"probe-stop {generation}", PROBE_STOP_SECONDS)
                 except Q.AcceptanceFailure:
@@ -845,12 +847,7 @@ def run_cell(output, manifest, arm, index, correctness):
                 controller.scrape(f"regroup-{generation}-end")
                 record[f"regroup-{generation}-window"] = regroup_window(
                     leg, generation, record[f"regroup-{generation}"])
-                cleanup = cleanup_seconds([json.loads(line) for line in
-                                           (leg / "events.jsonl").read_text().splitlines()], generation)
-                controller.command(f"policy {generation}", deadline=deadline + cleanup)
-                elapsed = controller.last_completion - started - cleanup
                 Q.accept(elapsed <= bars["convergence_seconds"], "regroup wire convergence exceeded bar")
-                record[f"regroup-{generation}-seconds"] = None if correctness else elapsed
             controller.command("mark refresh-start")
             controller.command("refresh")
             controller.command("refresh-settle", bars["convergence_seconds"])

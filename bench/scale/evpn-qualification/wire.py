@@ -85,10 +85,11 @@ def frames(data):
 class Receiver:
     def __init__(self, peer, clients, type2, type5, probe=None):
         self.peer, self.clients = peer, clients
-        # The primary-lane probe key's events depend on when the probe ran,
-        # so they stay out of the paired per-key digest; the boundary still
-        # requires the probe withdrawn.
-        self.probe, self.probe_events = probe, []
+        # The primary-lane probe keys' events depend on when the probe ran,
+        # so they stay out of the paired per-key digest and the transition
+        # bookkeeping. A boundary taken while the probe runs leaves them out
+        # of its state; any other boundary still requires them withdrawn.
+        self.probe, self.probe_events = frozenset(probe or ()), []
         self.widths = {2: type2, 5: type5}
         self.state = {}
         self.events = defaultdict(list)
@@ -104,7 +105,7 @@ class Receiver:
 
     def end_policy(self):
         require(self.transition is not None, "policy transition not started")
-        require(set(self.state) <= self.transitioned, "policy transition missing live keys")
+        require(set(self.state) - self.probe <= self.transitioned, "policy transition missing live keys")
         self.transition = None
 
     def expected(self, shifts, shift2, shift5):
@@ -141,7 +142,7 @@ class Receiver:
                 for key, _ in nlris(value[3:], self.clients, self.widths):
                     require(key in self.state, "unknown or duplicate withdrawal")
                     del self.state[key]
-                    (self.probe_events if key == self.probe else self.events[key]).append(("withdraw",))
+                    (self.probe_events if key in self.probe else self.events[key]).append(("withdraw",))
             if 14 in attrs:
                 flags, value = attrs[14]
                 require(flags & ~16 == 128 and len(value) >= 9 and value[:4] == b"\0\x19\x46\4"
@@ -166,7 +167,7 @@ class Receiver:
                     require(nh == b"\x0a\1" + octets
                             and (attrs[9][0] & ~16, attrs[9][1]) == (128, b"\xf0\1" + octets),
                             "wrong next hop or originator")
-                    if self.transition is not None:
+                    if self.transition is not None and key not in self.probe:
                         current = integer(community[1][2:])
                         old, new = self.transition
                         require(current in (old, new), "policy outside directional transition")
@@ -176,19 +177,21 @@ class Receiver:
                             require(key not in self.transitioned, "policy rolled back after replacement")
                     token = (body, raw, nh)
                     self.state[key] = token
-                    (self.probe_events if key == self.probe else self.events[key]).append(("announce", *token))
+                    (self.probe_events if key in self.probe else self.events[key]).append(("announce", *token))
                     if self.coverage is not None:
                         self.replay_seen.add(key)
 
-    def boundary(self, shifts, shift2, shift5, community):
-        require(set(self.state) == self.expected(shifts, shift2, shift5), "boundary route set differs")
+    def boundary(self, shifts, shift2, shift5, community, during_probe=False):
+        state = {key: value for key, value in self.state.items()
+                 if not (during_probe and key in self.probe)}
+        require(set(state) == self.expected(shifts, shift2, shift5), "boundary route set differs")
         # Every live value must have the current export policy. consume() also
         # validates every transient value, so a later good value cannot hide it.
         encoded = (65400).to_bytes(2, "big") + community.to_bytes(2, "big")
-        for _, raw, _ in self.state.values():
+        for _, raw, _ in state.values():
             require(b"\xc0\x08\x04" + encoded in raw, "boundary has stale export policy")
         checksum = hashlib.sha256()
-        for key, value in sorted(self.state.items()):
+        for key, value in sorted(state.items()):
             checksum.update(repr(key).encode())
             for item in value:
                 checksum.update(len(item).to_bytes(4, "big") + item)

@@ -98,15 +98,19 @@ class WireTests(unittest.TestCase):
             self.receiver().consume(changed, {1000})
 
     def test_probe_key_stays_out_of_the_ordered_digest_but_must_be_withdrawn(self):
+        probe = {(5, 1, 1)}
         def run(probe_rounds):
-            r = wire.Receiver(0, 3, 1, 1, probe=(5, 1, 1))
+            r = wire.Receiver(0, 3, 1, 1, probe=probe)
             r.consume(self.inventory() + (announce(5, 1, 1) + withdraw(5, 1, 1)) * probe_rounds, {1000})
             return r.boundary([0, 0, 0], 1, 1, 1000), r.ordered_digest(), len(r.probe_events)
         quiet, busy = run(0), run(3)
         self.assertEqual(quiet[:2], busy[:2])
         self.assertEqual((quiet[2], busy[2]), (0, 6))
-        r = wire.Receiver(0, 3, 1, 1, probe=(5, 1, 1))
+        # A boundary taken while the probe runs leaves a live probe out of its
+        # state and digest; any other boundary refuses it.
+        r = wire.Receiver(0, 3, 1, 1, probe=probe)
         r.consume(self.inventory() + announce(5, 1, 1), {1000})
+        self.assertEqual(r.boundary([0, 0, 0], 1, 1, 1000, during_probe=True), quiet[0])
         with self.assertRaisesRegex(ValueError, "boundary route set differs"):
             r.boundary([0, 0, 0], 1, 1, 1000)
         # Without the probe key the same events change the digest.
@@ -114,6 +118,17 @@ class WireTests(unittest.TestCase):
         plain.consume(self.inventory() + announce(5, 1, 1) + withdraw(5, 1, 1), {1000})
         plain.boundary([0, 0, 0], 1, 1, 1000)
         self.assertNotEqual(plain.ordered_digest(), quiet[1])
+
+    def test_probe_key_is_outside_the_directional_transition(self):
+        r = wire.Receiver(0, 3, 1, 1, probe={(5, 1, 1)})
+        r.begin_policy(1000, 2000)
+        r.consume(self.inventory(), {1000, 2000})
+        r.consume(b"".join(announce(kind, origin, community=2000) for origin in (1, 2) for kind in (2, 5)),
+                  {1000, 2000})
+        # A live probe at the new policy, then one at the old: not a rollback
+        # of a fixture key, and not a live key the transition must cover.
+        r.consume(announce(5, 1, 1, community=2000) + announce(5, 1, 1, community=1000), {1000, 2000})
+        r.end_policy()
 
     def test_new_old_new_policy_rollback_fails_in_each_direction(self):
         for old, new in ((1000, 2000), (2000, 1000)):
