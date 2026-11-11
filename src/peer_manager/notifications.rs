@@ -579,11 +579,9 @@ impl PeerManager {
                             .as_ref()
                             .is_some_and(|admission| admission.owner.records_wire_history())
                     }) {
-                        let owners = settled
-                            .sessions
-                            .iter()
-                            .map(|&(id, owner)| owner.unwrap_or(id));
-                        if let Some(acknowledged) = self.dampening_retirement_barrier(peer, owners)
+                        let sessions = settled.sessions.iter().copied();
+                        if let Some(acknowledged) =
+                            self.dampening_retirement_barrier(peer, sessions)
                         {
                             // Admission and acknowledgement share the bound
                             // of every other primary-lane control round trip.
@@ -687,7 +685,7 @@ impl PeerManager {
         mut managed: ManagedPeerState,
         rib_owner: Option<u64>,
     ) {
-        self.defer_retired_session_down(peer, rib_owner.unwrap_or(old_id));
+        self.fence_retired_session(peer, old_id, rib_owner);
         let session_id = self.allocate_session_id();
         let mut transport = managed.transport_config.clone();
         transport.supersedes_session = rib_owner;
@@ -715,7 +713,8 @@ impl PeerManager {
     }
 
     /// Queue the dynamic source-retirement fence without waiting for the
-    /// RIB: the `PeerDown` of every joined session, then an acknowledgement,
+    /// RIB: the end of every joined session (each `(id, registration owner)`
+    /// through [`Self::fence_retired_session`]), then an acknowledgement,
     /// in that order on this actor's primary lane. The RIB therefore answers
     /// only after it has handled every route batch those sessions queued and
     /// has stopped accepting what they still hand off, so a capacity block
@@ -726,15 +725,42 @@ impl PeerManager {
     pub(super) fn dampening_retirement_barrier(
         &mut self,
         peer: &PeerKey,
-        retired_sessions: impl IntoIterator<Item = u64>,
+        retired_sessions: impl IntoIterator<Item = (u64, Option<u64>)>,
     ) -> Option<tokio::sync::oneshot::Receiver<usize>> {
-        for session_id in retired_sessions {
-            self.defer_retired_session_down(peer, session_id);
+        for (session_id, owner) in retired_sessions {
+            self.fence_retired_session(peer, session_id, owner);
         }
         let (reply, acknowledged) = tokio::sync::oneshot::channel();
         self.defer_rib_update(None, rustbgpd_rib::RibUpdate::QueryLocRibCount { reply })
             .ok()
             .map(|()| acknowledged)
+    }
+
+    /// End a joined session in the RIB: the registration it owned when its
+    /// task ended (`owner`: itself, or the predecessor it inherited), and,
+    /// when that is a predecessor, also what the session staged under its
+    /// own id before a `PeerUp` it never delivered. That second end is
+    /// always marked late: with no session registered a plain `PeerDown`
+    /// would run the peer's teardown and could purge retention the
+    /// predecessor's restart end created, where a late one only drops the
+    /// staged context. Neither waits for mailbox room.
+    fn fence_retired_session(&mut self, peer: &PeerKey, session_id: u64, owner: Option<u64>) {
+        if owner.is_some_and(|owner| owner != session_id) {
+            let staged = rustbgpd_rib::RibUpdate::PeerDown {
+                peer: self.rib_peer_of(peer),
+                session_id,
+            };
+            if self
+                .defer_rib_update(
+                    None,
+                    rustbgpd_rib::RibUpdate::LateSessionEnd(Box::new(staged)),
+                )
+                .is_err()
+            {
+                warn!(peer = %peer, session_id, "RIB unavailable while dropping a retired session's staged context");
+            }
+        }
+        self.defer_retired_session_down(peer, owner.unwrap_or(session_id));
     }
 
     /// A queued cleanup can outlive more than one replacement. Mark it late

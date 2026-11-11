@@ -598,11 +598,25 @@ async fn notification_replacement_uses_the_settled_owner_for_cleanup_and_superse
                 .rib_registration_owner(managed.session_id()),
             final_owner
         );
-        assert!(
-            matches!(mgr.deferred_rib.queue.front(), Some((_, RibUpdate::LateSessionEnd(end)))
-            if matches!(end.as_ref(), RibUpdate::PeerDown { session_id, .. }
-                if *session_id == final_owner.unwrap_or(old_id)))
-        );
+        // An inherited owner is fenced after the retired session's own id,
+        // under which it may have staged context it never registered.
+        let ended: Vec<u64> = mgr
+            .deferred_rib
+            .queue
+            .iter()
+            .map(|(_, update)| match update {
+                RibUpdate::LateSessionEnd(end) => match end.as_ref() {
+                    RibUpdate::PeerDown { session_id, .. } => *session_id,
+                    _ => panic!("only session ends are deferred"),
+                },
+                _ => panic!("a full mailbox defers every end as a late one"),
+            })
+            .collect();
+        let expected: Vec<u64> = match final_owner {
+            Some(owner) if owner != old_id => vec![old_id, owner],
+            _ => vec![old_id],
+        };
+        assert_eq!(ended, expected);
         assert!(mgr.peer_key_for_session(old_id).is_none());
         assert!(mgr.retiring_sessions.is_empty());
     }
