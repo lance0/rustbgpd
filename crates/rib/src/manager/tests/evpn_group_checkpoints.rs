@@ -879,6 +879,9 @@ fn refused_feed_pass(
     Vec<Vec<OutboundRouteUpdate>>,
 ) {
     let mut pass = OwnedPass::new(4, 96, true);
+    // Under paused time no budget elapses, so only a forced checkpoint
+    // serves the readiness lane: the batches answered count those.
+    pass.manager.flush_poll_budget = crate::manager::FLUSH_POLL_BUDGET;
     pass.manager.evpn_build_refused_feeds = control;
     let mut changed = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 1), 9);
     if sourced {
@@ -893,6 +896,7 @@ fn refused_feed_pass(
         .distribute_evpn_keys_to_peer(peer, &HashSet::from([changed.key()]), &mut || {});
     let builds = pass.manager.evpn_complete_feed_builds - before;
     pass.manager.evpn_recovery.assert_consistent();
+    let forced_services = pass.batches();
     let state = {
         let manager = &pass.manager;
         let members: Vec<_> = pass
@@ -912,6 +916,7 @@ fn refused_feed_pass(
             format!("{:?}", captured_state(&pass)),
             members,
             manager.evpn_feed_receipt_count,
+            forced_services,
             counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).to_bits(),
             manager.evpn_table_stamp,
         )
@@ -942,8 +947,10 @@ fn refused_feed_pass(
 /// after the pass, the refusal's count, and what it is sent once its writer
 /// drains are those of the build-and-refuse path. A member whose own delta
 /// is empty is not skipped: its empty feed commits without a writer slot.
-#[test]
-fn a_full_writer_is_refused_its_complete_feed_before_the_feed_is_built() {
+/// The refusal's forced readiness service is part of that state: time is
+/// paused, so no unforced checkpoint serves in either arm.
+#[tokio::test(start_paused = true)]
+async fn a_full_writer_is_refused_its_complete_feed_before_the_feed_is_built() {
     for sourced in [false, true] {
         let (skipped, builds, state, sent) = refused_feed_pass(false, sourced);
         let (built, control_builds, control_state, control_sent) = refused_feed_pass(true, sourced);
@@ -977,6 +984,16 @@ fn a_full_writer_is_refused_its_complete_feed_before_the_feed_is_built() {
                 .collect()
         };
         assert_eq!(wire(&sent), wire(&control_sent), "sourced: {sourced}");
+        // Route bodies too: next hop, source and attributes of every row.
+        for (left, right) in sent.iter().flatten().zip(control_sent.iter().flatten()) {
+            assert!(
+                left.evpn_announce
+                    .iter()
+                    .zip(right.evpn_announce.iter())
+                    .all(|(left, right)| crate::manager::helpers::evpn_routes_equal(left, right)),
+                "sourced: {sourced}"
+            );
+        }
         for (index, updates) in sent.iter().enumerate() {
             let changed = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 1), 9).key();
             let announced = updates

@@ -574,6 +574,9 @@ pub(in crate::manager) struct ProvenanceHandle {
 pub(in crate::manager) struct Exhaustion {
     pub(in crate::manager) cause: ExhaustionCause,
     pub(in crate::manager) limiting_peer: Option<PeerId>,
+    /// The peer's charge had the refused request been granted. A request is
+    /// one allocation or one credit: a single slot in a record's own
+    /// capture, every slot of the capture at once in a shared one.
     pub(in crate::manager) attempted_peer_bytes: usize,
     pub(in crate::manager) attempted_daemon_bytes: usize,
 }
@@ -686,6 +689,11 @@ impl EvpnRecoveryProvenance {
     #[cfg(test)]
     fn set_daemon_limit_for_test(&mut self, daemon: usize) {
         self.daemon_limit = daemon;
+    }
+
+    #[cfg(test)]
+    fn set_peer_limit_for_test(&mut self, peer: usize) {
+        self.peer_limit = peer;
     }
 
     #[cfg(test)]
@@ -3019,6 +3027,169 @@ mod tests {
         }
     }
 
+    /// The window the missing doubling opens: a peer cap between the shared
+    /// peak and the doubling's refuses a record's own capture and admits the
+    /// shared one. What is then sealed is charged exactly what its own
+    /// capture retains under a cap that admits it.
+    #[test]
+    fn shared_capture_seals_under_a_cap_only_the_doubling_exceeds() {
+        let owners = [owner(1, 7), owner(2, 7)];
+        let rows: Vec<_> = (0..520).map(|n| (key(n), owner(250, 1).peer)).collect();
+        // Shared peak 45,824 and doubling peak 47,104 above the record.
+        let tight = (size_of::<Record>() + 46_000, DAEMON_LIMIT_BYTES);
+        let roomy = (PEER_LIMIT_BYTES, DAEMON_LIMIT_BYTES);
+        let (alone, alone_handles) = captured(tight, &rows, &owners, false);
+        let (batch, batch_handles) = captured(tight, &rows, &owners, true);
+        let (reference, _) = captured(roomy, &rows, &owners, false);
+        assert_eq!(
+            alone.exhaustion(alone_handles[0]).map(|error| error.cause),
+            Some(ExhaustionCause::PeerLimit),
+            "its own capture is refused at the last doubling"
+        );
+        assert_eq!(
+            batch.proof_keys(batch_handles[0]).unwrap().unwrap().len(),
+            520
+        );
+        assert_eq!(
+            batch.peer_usage(owners[0].peer).retained,
+            reference.peer_usage(owners[0].peer).retained
+        );
+    }
+
+    /// The one buffer reservation matches the doubling's capacity at every
+    /// size around its first step: no rows, one, a full first buffer and
+    /// the row that doubles it. Charge and peak equal the per-entry capture.
+    #[test]
+    fn shared_capture_buffer_matches_per_entry_growth_at_small_sizes() {
+        let owners = [owner(1, 7), owner(2, 7)];
+        let limits = (PEER_LIMIT_BYTES, DAEMON_LIMIT_BYTES);
+        for (count, capacity) in [(0_u32, 0), (1, 16), (15, 16), (16, 16), (17, 32)] {
+            let rows: Vec<_> = (0..count).map(|n| (key(n), owner(250, 1).peer)).collect();
+            let (batch, handles) = captured(limits, &rows, &owners, true);
+            let (alone, _) = captured(limits, &rows, &owners, false);
+            assert_eq!(
+                batch.peer_usage(owners[0].peer),
+                alone.peer_usage(owners[0].peer),
+                "{count} rows"
+            );
+            // So few slots stay sorted entries: the record, its slots and
+            // the buffer.
+            assert_eq!(
+                batch.peer_usage(owners[0].peer).retained,
+                size_of::<Record>() + SLOT_BYTES * count as usize + 4 * capacity,
+                "{count} rows"
+            );
+            assert_eq!(
+                batch.proof_keys(handles[0]).unwrap().unwrap().len(),
+                count as usize
+            );
+        }
+    }
+
+    /// Slot numbering decides whether a sealed proof is a bitset or sorted
+    /// entries, and the shared walk numbers new keys in table order. Here
+    /// slots 0-127 are free below another proof's 128-4223, and 129 new rows
+    /// arrive whose first the first record sourced. Alone, that record takes
+    /// slots 0-127 and seals a 128-byte bitset. Shared, the first row takes
+    /// slot 0, so the record holds 1-127 and 4224 and keeps its 512-byte
+    /// entry buffer. The rows are the same; the storage of a sealed proof
+    /// of N rows lies between `dense_bytes(N - 1)` and four bytes per entry
+    /// of its buffer in every numbering, and the caps meter what is charged.
+    #[test]
+    fn shared_capture_on_a_fragmented_slot_space_seals_the_same_rows() {
+        let owners = [owner(1, 7), owner(2, 7)];
+        let rows: Vec<_> = (0..129_u32)
+            .map(|n| {
+                let source = if n == 0 {
+                    owners[0].peer
+                } else {
+                    owner(250, 1).peer
+                };
+                (key(10_000 + n), source)
+            })
+            .collect();
+        let begun = |peer_limit| {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let low = ledger.register(owner(8, 7)).unwrap();
+            let high = ledger.register(owner(9, 7)).unwrap();
+            capture(&mut ledger, low, &(0..128).map(key).collect::<Vec<_>>());
+            capture(&mut ledger, high, &(128..4224).map(key).collect::<Vec<_>>());
+            assert!(ledger.finish_recovery(low).unwrap());
+            assert_eq!(ledger.slot_usage().live, 4096, "slots 0-127 are free");
+            let handles: Vec<_> = owners
+                .iter()
+                .map(|owner| {
+                    let handle = ledger.register(*owner).unwrap();
+                    assert!(ledger.finish_recovery(handle).unwrap());
+                    assert!(ledger.begin_capture(handle).unwrap());
+                    handle
+                })
+                .collect();
+            ledger.set_peer_limit_for_test(peer_limit);
+            (ledger, handles)
+        };
+        let shared = |ledger: &mut EvpnRecoveryProvenance, handles: &[ProvenanceHandle]| {
+            ledger.capture_shared_with_checkpoint(
+                handles,
+                rows.iter().copied(),
+                rows.len(),
+                &mut |_| {},
+            )
+        };
+        let (mut batch, batch_handles) = begun(PEER_LIMIT_BYTES);
+        shared(&mut batch, &batch_handles).unwrap();
+        let (mut alone, alone_handles) = begun(PEER_LIMIT_BYTES);
+        capture_alone(&mut alone, &alone_handles, &rows);
+        batch.assert_consistent();
+        assert_eq!(batch.holders_for_test(), alone.holders_for_test());
+        for (index, (&left, &right)) in batch_handles.iter().zip(&alone_handles).enumerate() {
+            let keys = batch.proof_keys(left).unwrap().unwrap();
+            assert_eq!(Some(&keys), alone.proof_keys(right).unwrap().as_ref());
+            let rows = keys.len();
+            let slots = size_of::<Record>() + SLOT_BYTES * rows;
+            let bound = slots + dense_bytes(u32::try_from(rows - 1).unwrap())
+                ..=slots + 4 * rows.next_power_of_two().max(16);
+            for ledger in [&batch, &alone] {
+                let retained = ledger.peer_usage(left.owner.peer).retained;
+                assert!(
+                    bound.contains(&retained),
+                    "record {index}: {retained} in {bound:?}"
+                );
+            }
+        }
+        // The case itself: one sourced row, 384 bytes of representation.
+        assert_eq!(
+            (
+                batch.dense_for_test(batch_handles[0]),
+                alone.dense_for_test(alone_handles[0])
+            ),
+            (Some(false), Some(true))
+        );
+        assert_eq!(
+            batch.peer_usage(owners[0].peer).retained - alone.peer_usage(owners[0].peer).retained,
+            4 * 128 - dense_bytes(127)
+        );
+
+        // A peer cap one byte under what the first record's shared capture
+        // needs refuses it whole and cleanly: nothing held, no slot leaked.
+        let needed = size_of::<Record>() + SLOT_BYTES * 128 + 4 * 128;
+        let (mut capped, handles) = begun(needed - 1);
+        let before = capped.holders_for_test();
+        shared(&mut capped, &handles).unwrap();
+        capped.assert_consistent();
+        for &handle in &handles {
+            assert_eq!(
+                capped.exhaustion(handle).map(|error| error.cause),
+                Some(ExhaustionCause::PeerLimit)
+            );
+            assert_eq!(capped.retained_keys_for_test(handle), Some(Vec::new()));
+        }
+        assert_eq!(capped.holders_for_test(), before);
+        let (mut fits, handles) = begun(needed);
+        shared(&mut fits, &handles).unwrap();
+        assert!(fits.proof(handles[0]).unwrap().is_some());
+    }
+
     /// The shared slot list is charged to the daemon at its reserved
     /// capacity for the length of the call, and to no peer. A refusal of
     /// the list, by the daemon cap or by the allocator, leaves every record
@@ -3268,9 +3439,10 @@ mod tests {
 
     /// Slot numbering follows interning order, which the shared walk takes
     /// in table order and separate captures take member by member, as two
-    /// member orders already differ. Above one bitset step a record's span
-    /// can therefore differ, by at most the rows it sourced; its keys, its
-    /// per-slot charge and every holder count cannot.
+    /// member orders already differ. With no free slot below the new rows,
+    /// a record's span above one bitset step can differ by at most the rows
+    /// it sourced; its keys, its per-slot charge and every holder count
+    /// cannot. A fragmented space can move more: see the test above.
     #[test]
     fn shared_capture_numbering_moves_only_a_bitset_span() {
         let owners: Vec<_> = (1..=4).map(|peer| owner(peer, 7)).collect();

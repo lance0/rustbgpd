@@ -1404,28 +1404,42 @@ owned group reaches it today. A capture taken at any other seam (a late
 refusal after staging, a refresh, a membership change) is one member's and is
 unchanged.
 
-**Result.** The shared walk leaves what one capture per member leaves: the
-same proof keys, Ready state, refusal and reset handling, holder counts,
-per-peer retained charge, and retained daemon charge. Five things differ,
-none of them in a proof:
+**Result.** The shared walk seals for each member the proof one capture per
+member seals: the same rows, with the same holder counts and the same 80
+bytes charged per row. It does not promise the same representation, and so
+not the same bytes of storage or the same answer from a cap a member sits
+within those bytes of. Five things differ, none of them in the rows of a
+proof:
 
+- Slot IDs follow interning order: table order here, member by member
+  before, and in either case the lowest free slot first. Sealing keeps a
+  proof as a bitset when the bitset up to its highest slot is smaller than
+  four bytes per row, and otherwise keeps the entry buffer. With N rows and
+  a buffer of C entries (the power of two at or above N, at least 16), a
+  sealed proof's storage is therefore at least the bitset over N slots, N / 8
+  bytes rounded up to a 128-byte step, and at most 4 C bytes, in every
+  numbering. Two numberings of the same rows can differ by up to 4 C less
+  that bitset: under 8 bytes per row, beside the 80 charged per row. One
+  sourced row is enough: with slots 0-127 free below another proof, a member
+  capturing 128 of 129 new rows alone holds slots 0-127 in a 128-byte bitset,
+  and through the shared walk holds 1-127 and one slot above the other
+  proof, in a 512-byte buffer. Separate captures already depend on numbering
+  in the same way, through member order and slot reuse. The peer and daemon
+  caps meter the charge actually made, whichever representation it is.
 - A member's own capture doubles its entry buffer as it goes, and the last
-  doubling charges both buffers beside the slots held so far. With N rows,
-  a final buffer of C entries (the power of two at or above N, at least 16),
-  a record of R bytes and a bitset of D bytes, its peak is R + max(46 C,
-  80 N + 4 C + D). The shared walk reserves the C entries once, so its peak
-  is R + 80 N + 4 C + D. The two are equal unless N is within about 5% above
-  C / 2, where the shared peak is lower by 46 C - (80 N + 4 C + D). The
-  buffer has the same capacity either way, so a sealed record is charged the
-  same.
+  doubling charges both buffers beside the slots held so far. With a record
+  of R bytes and D bytes of bitset credited at sealing (zero for a proof
+  that stays entries), its peak is R + max(46 C, 80 N + 4 C + D). The shared
+  walk reserves the C entries once, so its peak is R + 80 N + 4 C + D. For
+  equal D the two are equal unless N is within about 5% above C / 2, where
+  the shared peak is lower by 46 C - (80 N + 4 C + D). A peer cap inside
+  that gap refuses the member's own capture at the doubling and admits the
+  shared one, which then seals a proof charged what its own capture retains
+  under a cap that admits it.
 - A member whose own peer cap refuses the capture is refused its whole
   credit and is exhausted holding no row. Its own capture stops at the cap
   holding the rows before it. Both reset the session, and nothing reads an
   exhausted record's rows.
-- Slot IDs follow interning order: table order here, member by member before.
-  Two member orders already numbered slots differently. A member's bitset
-  spans up to its highest slot, so above one 1024-slot step its charge can
-  differ by at most the bytes that cover the rows it sourced.
 - The daemon peak includes the slot list described below.
 - If every sharing member exhausts its own credit, the slot space has grown
   for the whole table, and the rows nobody took are free again until the
@@ -1506,14 +1520,23 @@ point of a three-member pass in turn (the list, slot-space growth, each
 member's buffer growths and bitset) leaves every member Ready with no reset
 pending; a peer cap every member exceeds exhausts each holding no row; the
 per-peer peak equals the formula above on both sides of the doubling band and
-the retained charge is equal in both; a sharing member with an unreleased private row is refused
+the retained charge is equal in both; a peer cap inside the band refuses a
+member's own capture and seals the shared one at the same retained charge;
+at 0, 1, 15, 16 and 17 rows the shared charge and peak equal the per-entry
+capture's; on a fragmented slot space the shared walk and separate captures
+seal the same rows in different representations, 384 bytes apart for one
+sourced row, each within the storage bound above, and a peer cap one byte
+under the shared need refuses the member holding nothing with no slot
+leaked; a sharing member with an unreleased private row is refused
 alone, an incomplete projection refuses every sharing member, and a single
 member left after those checks takes its own walk; interning, each member's
 appends and the release of the list's holds do at most 64 units of work
-between two checkpoints; and the bitset-span difference stays within its
-bound; and a pass over four members with full writers builds no complete
+between two checkpoints; with no free slot below the new rows, two
+numberings differ by no more than the bitset bytes covering a member's
+sourced rows; and a pass over four members with full writers builds no complete
 feed where it built four, with the same member state, receipt, refusal count
-and table stamp after the pass and the same envelopes once the writers drain,
+and table stamp and forced readiness services after the pass, and the same
+envelopes, route bodies included, once the writers drain,
 while a member whose delta is empty still builds and commits its empty feed.
 The readiness regressions for refused owned passes hold with the walk's new
 checkpoint count. These are component results with EVPN ownership enabled in
