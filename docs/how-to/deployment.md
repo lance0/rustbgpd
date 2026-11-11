@@ -574,19 +574,11 @@ Notes on the sandbox:
 
   The watchdog does not bound how long the RIB may keep answering
   "stalled". A unit of work that keeps making progress is never aborted,
-  however long it runs. Alert on it instead:
-  `bgp_readiness_probe_failures_total{reason="rib_stalled"}` rising for many
-  minutes (the shipped `BgpReadinessRibStalled` rule), and restart by hand
-  only if the work is not finishing.
-
-  That counter moves only when something requests `/readyz` over HTTP.
-  Scraping `/metrics` does not, and neither does `rbgp health`. A native
-  systemd install with no HTTP prober therefore never fires the alert, and
-  nothing bounds a stalled RIB. Add a recurring probe, at least once a
-  minute: a Prometheus blackbox-exporter HTTP check of `/readyz`, or a
-  systemd timer or cron job that runs
-  `curl -fsS -o /dev/null http://127.0.0.1:9179/readyz` (use your
-  `prometheus_addr`).
+  however long it runs. Alert on it instead: the daemon samples the RIB every
+  5 seconds and exports `bgp_rib_stalled` (1 while the latest sample was a
+  stalled answer). The shipped `BgpReadinessRibStalled` rule fires when it
+  stays 1 for about ten minutes. It needs only a `/metrics` scrape, no
+  `/readyz` probe. Restart by hand only if the work is not finishing.
 
   PID 1 independently sends SIGABRT five minutes after the last ping, and
   `Restart=on-failure` covers that expiry. Measured from the moment an actor

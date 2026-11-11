@@ -140,6 +140,31 @@ pub async fn serve_metrics(
     .await;
 }
 
+/// Cadence of the `bgp_rib_stalled` sample.
+const RIB_STALL_SAMPLE_PERIOD: Duration = Duration::from_secs(5);
+/// Longest wait for one sample: a slow answer is still an answer.
+const RIB_STALL_SAMPLE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// One `bgp_rib_stalled` sample. A sample that gets no answer leaves the
+/// gauge as it was: silence is the watchdog's signal, not a stall answer.
+async fn sample_rib_stall(probe: &CoreReadinessProbe, metrics: &BgpMetrics) {
+    if let Ok(stalled) = probe.rib_stalled(RIB_STALL_SAMPLE_DEADLINE).await {
+        metrics.set_rib_stalled(stalled);
+    }
+}
+
+/// Publish `bgp_rib_stalled` on a fixed cadence, so a stalled RIB is visible
+/// to a scraper that never requests `/readyz`. The cadence belongs to the
+/// sampler: a scrape reads the gauge and sends the RIB nothing.
+async fn run_rib_stall_sampler(probe: CoreReadinessProbe, metrics: BgpMetrics) {
+    let mut tick = tokio::time::interval(RIB_STALL_SAMPLE_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        sample_rib_stall(&probe, &metrics).await;
+    }
+}
+
 /// The metrics/readiness server on its own OS thread and `current_thread`
 /// runtime. Accepting a connection and reading its request line then never
 /// wait for the daemon's runtime workers, so `/livez` and `/metrics` answer
@@ -209,6 +234,10 @@ impl MetricsServerThread {
                         return;
                     }
                 };
+                let sampler = runtime.spawn(run_rib_stall_sampler(
+                    readiness_probe.clone(),
+                    metrics.clone(),
+                ));
                 let serve = runtime.spawn(serve_metrics(
                     server,
                     metrics,
@@ -224,6 +253,7 @@ impl MetricsServerThread {
                         }
                     }
                 });
+                sampler.abort();
                 let _ = exit_tx.send(exit);
                 // An in-flight render on the blocking pool must not hold the
                 // join; it finishes, or dies with the process, on its own.
@@ -1396,6 +1426,52 @@ pub(crate) mod tests {
             readiness_failure_rows(&metrics).await,
             ["bgp_readiness_probe_failures_total{reason=\"peer_manager_unavailable\"} 1"]
         );
+    }
+
+    /// A stalled answer reaches `bgp_rib_stalled` with no HTTP request made,
+    /// and a ready answer clears it. The fake RIB hands each answer over a
+    /// channel, so the order is fixed by the handshake, not by time.
+    #[tokio::test]
+    async fn rib_stall_sample_publishes_gauge_without_readyz_traffic() {
+        use rustbgpd_rib::RibReadinessQuery;
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (ready_tx, mut ready_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_rib_readiness(ready_tx);
+        let metrics = BgpMetrics::new();
+        let gauge = |metrics: &BgpMetrics| {
+            let metrics = metrics.clone();
+            async move {
+                render_text(&metrics)
+                    .await
+                    .unwrap()
+                    .lines()
+                    .find(|line| line.starts_with("bgp_rib_stalled "))
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        assert_eq!(gauge(&metrics).await, "bgp_rib_stalled 0");
+
+        for (answer, expected) in [
+            (
+                Err(rustbgpd_rib::RibReadinessError::PolicyTransitionStalled),
+                "bgp_rib_stalled 1",
+            ),
+            (Ok(0), "bgp_rib_stalled 0"),
+        ] {
+            let sample = sample_rib_stall(&probe, &metrics);
+            let answer_query = async {
+                let Some(RibReadinessQuery::LocRibCount { reply, .. }) = ready_rx.recv().await
+                else {
+                    panic!("expected a RIB readiness query");
+                };
+                let _ = reply.send(answer);
+            };
+            tokio::join!(sample, answer_query);
+            assert_eq!(gauge(&metrics).await, expected);
+        }
+        assert_eq!(readiness_failure_rows(&metrics).await, Vec::<String>::new());
     }
 
     #[tokio::test]

@@ -241,11 +241,6 @@ CLOSED_LABEL_SOURCES = (
         (("fn", REASON_LABELS, "InboundConnectionDropReason", "as_str"),),
     ),
     (
-        ("bgp_readiness_probe_failures_total",),
-        "reason",
-        (("fn", REASON_LABELS, "ReadinessProbeFailureReason", "as_str"),),
-    ),
-    (
         ("bgp_rib_policy_transition_actor_poll_duration_seconds",),
         "le",
         (("buckets", TELEMETRY, "RIB_ACTOR_DURATION_BUCKETS"),),

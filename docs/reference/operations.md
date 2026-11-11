@@ -1832,21 +1832,15 @@ Nothing restarts a daemon in that state automatically. The systemd watchdog
 pings for as long as the RIB answers, so a unit of work that keeps passing its
 checkpoints can answer "stalled" indefinitely and is never aborted. This is
 deliberate: a restart would drop every session and repeat the same work.
-Bound it with alerting instead. `bgp_readiness_probe_failures_total` with
-`reason="rib_stalled"` rises on every probe while the condition lasts (the
-shipped `BgpReadinessRibStalled` rule warns after ten minutes), and
-`bgp_rib_readiness_query_wait_seconds{seam}` names the kind of work. An
-operator who judges that the work is not finishing restarts the daemon by
-hand.
-
-The alert depends on a recurring `/readyz` probe. The counter moves only on
-HTTP `/readyz` requests, not on `/metrics` scrapes or `rbgp health`, so an
-install that only scrapes `/metrics` never fires it and nothing bounds a
-stalled RIB. Request `/readyz` at least once a minute, for example with a
-Prometheus blackbox-exporter HTTP check or a systemd timer that runs `curl`
-against it; see [deployment.md](../how-to/deployment.md#systemd). The rule
-also cannot tell one long stall from separate ones less than five minutes
-apart: it fires for stalled answers recurring or sustained over ten minutes.
+Bound it with alerting instead. The daemon samples the RIB every 5 seconds
+and exports `bgp_rib_stalled` (1 while the latest sample was a stalled
+answer, 0 after a ready one). The sample is the daemon's own, so it needs only
+a `/metrics` scrape, not `/readyz` requests, and a scrape sends the RIB
+nothing. The shipped `BgpReadinessRibStalled` rule warns once the gauge has
+stayed 1 for about ten minutes; a stall that clears resets it, so separate
+brief stalls stay quiet. `bgp_rib_readiness_query_wait_seconds{seam}` names the
+kind of work. An operator who judges that the work is not finishing restarts
+the daemon by hand.
 
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.
@@ -2150,6 +2144,7 @@ name it.
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it. `BgpPolicyTransitionFallback` fires when either fallback outcome increased in the last 15 minutes |
 | `bgp_readiness_probe_failures_total{reason}` | Failed `/readyz` probes, one per `503` response, by the closed `reason` set described under [HTTP probes](#http-probes): `deadline`, `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`, `rib_timeout`, `rib_stalled`, `daemon_unavailable`. All seven series are exported at 0 from startup |
+| `bgp_rib_stalled` | 1 while the daemon's latest sample of the RIB actor (every 5 seconds, 5-second deadline, independent of `/readyz` requests) got a stalled readiness answer: one export-policy transition, selection-deferral release or peer teardown has run 30 seconds or more. 0 after a ready answer and at startup. A sample that gets no answer leaves the value unchanged; silence is covered by `bgp_systemd_watchdog_pings_skipped_total`. Exported only when the telemetry listener is configured. `BgpReadinessRibStalled` fires when it stays 1 for about ten minutes |
 | `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |

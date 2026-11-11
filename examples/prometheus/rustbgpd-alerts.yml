@@ -642,31 +642,29 @@ groups:
             the previous terminal sample until this transition completes.
 
       - alert: BgpReadinessRibStalled
-        # The RIB answers "stalled" once one unit of work has run for 30
-        # seconds and keeps answering it until the work ends. The systemd
+        # bgp_rib_stalled is 1 while the RIB answers "stalled": one unit of
+        # work has run for 30 seconds or more. The daemon samples it every 5
+        # seconds on its own, so no /readyz request is needed. The systemd
         # watchdog deliberately does not restart a daemon in that state, so
-        # this alert is what bounds it. The counter cannot tell one long
-        # stall from separate ones less than five minutes apart; both fire.
-        # It moves only on HTTP /readyz requests: an install that scrapes
-        # /metrics and never requests /readyz never fires this alert.
-        expr: increase(bgp_readiness_probe_failures_total{reason="rib_stalled"}[5m]) > 0
-        for: 10m
+        # this alert is what bounds it. The gauge must stay 1 for a full 5m
+        # window (and the alert for 5m more) before it fires; a stall that
+        # clears, even briefly, resets the clock, so separate brief stalls
+        # stay quiet.
+        expr: min_over_time(bgp_rib_stalled[5m]) == 1
+        for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Stalled RIB readiness answers on {{ $labels.instance }} for 10 minutes"
+          summary: "RIB on {{ $labels.instance }} stalled for 10 minutes"
           description: >-
-            /readyz on {{ $labels.instance }} has returned stalled RIB
-            answers repeatedly or continuously over the last 10 minutes. Either
-            one unit of work (export-policy transition, selection-deferral
-            release or peer teardown) is still running, or separate units each
-            ran past 30 seconds within five minutes of one another. The actor is
-            answering, so the systemd watchdog does not restart it, but inbound
-            route updates wait behind that work. Check the daemon WARN log and
+            The RIB on {{ $labels.instance }} has answered "stalled" to every
+            sample for the last 10 minutes: one unit of work (export-policy
+            transition, selection-deferral release or peer teardown) has been
+            running that long. The actor is answering, so the systemd watchdog
+            does not restart it, but inbound route updates wait behind that
+            work. Check the daemon WARN log and
             bgp_rib_readiness_query_wait_seconds for the seam; restart only if
-            the work is not finishing. This alert needs something to request
-            /readyz at least once a minute: without a recurring probe the
-            counter never moves.
+            the work is not finishing.
 
       - alert: BgpSystemdWatchdogPingsSkipped
         # Each increment is a liveness sample in which PeerManager or the RIB

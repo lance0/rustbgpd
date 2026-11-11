@@ -248,6 +248,27 @@ impl CoreReadinessProbe {
         Ok(())
     }
 
+    /// Ask only the RIB whether it is stalled, for a metrics sampler.
+    /// `Ok(true)` is a prompt stalled answer, `Ok(false)` a ready one. Like
+    /// [`Self::check_liveness`] it ignores the [`DaemonGate`] and takes the
+    /// caller's `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the no-answer failure: a closed lane, a dropped reply, or no
+    /// answer before `deadline`.
+    pub async fn rib_stalled(&self, deadline: Duration) -> Result<bool, CoreReadinessError> {
+        match self.query_rib(Instant::now() + deadline).await {
+            Ok(_) => Ok(false),
+            Err(
+                CoreReadinessError::RibPolicyTransitionStalled
+                | CoreReadinessError::RibSelectionReleaseStalled
+                | CoreReadinessError::RibPeerTeardownStalled,
+            ) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn count_active_peers(&self, deadline: Instant) -> Result<usize, CoreReadinessError> {
         timeout_until(deadline, CoreReadinessError::PeerManagerTimedOut, async {
             let (reply_tx, reply_rx) = oneshot::channel();
