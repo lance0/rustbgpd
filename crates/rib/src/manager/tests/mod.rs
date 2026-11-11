@@ -1704,6 +1704,7 @@ mod flowspec_advertised;
 mod gr_helper_stale_exempt;
 mod gr_llgr;
 mod incremental_best;
+mod ingest_readiness;
 mod injection_lease;
 mod join_cohort;
 mod labeled;

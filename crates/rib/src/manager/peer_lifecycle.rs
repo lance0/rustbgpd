@@ -1790,7 +1790,7 @@ impl RibManager {
         // the `recompute_bgpls_keys` seam) — but if it ever fires, the
         // affected peers still get their resync.
         if self.peer_orr_vantage.remove(&peer).is_some() {
-            let changed = self.recompute_orr();
+            let changed = self.recompute_orr_owned();
             self.resync_orr_bound_peers(&changed);
         }
         self.peer_add_path_send_max.remove(&peer);
@@ -2603,7 +2603,7 @@ impl RibManager {
             // vantages see an unchanged topology), and this peer's
             // per-vantage best flows through `send_initial_table` below —
             // a resync here would double-send the table.
-            self.recompute_orr();
+            self.recompute_orr_owned();
         }
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
