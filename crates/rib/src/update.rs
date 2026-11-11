@@ -3795,8 +3795,7 @@ pub enum RibUpdate {
     /// Contract: replacements naming peers no longer registered for
     /// outbound updates are skipped (a reconnect installs the desired
     /// policy — the same posture as the serial per-peer loop this
-    /// replaces). Residual members carrying EVPN outbound state (private
-    /// EVPN rows or an EVPN-owning source or destination group) are not
+    /// replaces). Residual members whose session sends EVPN are not
     /// applied: their installed chain is left as it was and the reply
     /// names them in caller order, for the caller to apply one per
     /// [`RibUpdate::ReplacePeerExportPolicy`] so that other RIB work runs

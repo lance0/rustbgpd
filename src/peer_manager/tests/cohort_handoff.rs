@@ -2902,6 +2902,15 @@ async fn deferred_refresh_dispatch_serves_readiness_while_a_probe_is_held() {
     assert_eq!(*refreshes.lock().unwrap(), peers.to_vec());
 }
 
+/// The next RIB command, or a test failure if the transaction sends none: a
+/// mutation that stops the walk without rolling back must fail, not hang.
+async fn recv_rib(rib_rx: &mut mpsc::Receiver<RibUpdate>) -> RibUpdate {
+    tokio::time::timeout(Duration::from_secs(30), rib_rx.recv())
+        .await
+        .expect("the transaction sent no further RIB command")
+        .expect("RIB channel closed")
+}
+
 /// Three Established peers moving to one export chain, with a RIB stub the
 /// caller drives through the cohort handoff to the authoritative batch.
 fn paced_handoff_fixture(
@@ -2959,7 +2968,7 @@ async fn defer_from_batch(
     deferred: &[usize],
 ) -> Vec<PeerId> {
     skip_destination_prestage(rib_rx).await;
-    let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap() else {
+    let RibUpdate::ReplacePeerExportPolicies { reply, .. } = recv_rib(rib_rx).await else {
         panic!("expected cohort RIB command");
     };
     reply
@@ -2970,7 +2979,7 @@ async fn defer_from_batch(
     let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
         replacements,
         reply,
-    } = rib_rx.recv().await.unwrap()
+    } = recv_rib(rib_rx).await
     else {
         panic!("expected batched authoritative RIB command");
     };
@@ -2993,7 +3002,7 @@ async fn expect_step(
         peer,
         export_policy,
         reply,
-    } = rib_rx.recv().await.unwrap()
+    } = recv_rib(rib_rx).await
     else {
         panic!("expected one per-peer RIB command for a deferred member");
     };
@@ -3006,7 +3015,7 @@ async fn answer_restore(rib_rx: &mut mpsc::Receiver<RibUpdate>, peers: &[IpAddr]
     let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
         replacements,
         reply,
-    } = rib_rx.recv().await.unwrap()
+    } = recv_rib(rib_rx).await
     else {
         panic!("expected exact rollback RIB batch");
     };
@@ -3120,8 +3129,7 @@ async fn paced_handoff_walk_shares_the_batch_budget() {
     let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
     let drive_rib = async {
         skip_destination_prestage(&mut rib_rx).await;
-        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
-        else {
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = recv_rib(&mut rib_rx).await else {
             panic!("expected cohort RIB command");
         };
         reply
@@ -3132,7 +3140,7 @@ async fn paced_handoff_walk_shares_the_batch_budget() {
         let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
             replacements,
             reply,
-        } = rib_rx.recv().await.unwrap()
+        } = recv_rib(&mut rib_rx).await
         else {
             panic!("expected batched authoritative RIB command");
         };

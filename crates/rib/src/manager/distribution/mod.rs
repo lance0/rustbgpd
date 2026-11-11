@@ -6091,8 +6091,7 @@ impl RibManager {
 
     /// The forward authoritative batch: as
     /// [`Self::apply_export_policy_replacements_synchronously`], except that
-    /// residual members carrying EVPN outbound state (private EVPN rows, or
-    /// an EVPN-owning source or destination group) are left unapplied, with
+    /// residual members whose session sends EVPN are left unapplied, with
     /// their installed chain untouched, and returned in caller order. Each
     /// such move resyncs the member's whole EVPN table, so the caller applies
     /// them one per RIB command through the per-peer replacement and other
@@ -6462,25 +6461,12 @@ impl RibManager {
         // body of the single-peer seam, minus its per-call pass. A member
         // carrying EVPN outbound state is instead restored to its installed
         // chain and handed back for its own per-peer command.
-        let destination_of: HashMap<PeerId, Option<usize>> = if defer_evpn {
-            present
-                .iter()
-                .inspect(|_| checkpoint())
-                .zip(&destinations)
-                .map(|(replacement, destination)| (replacement.peer, *destination))
-                .collect()
-        } else {
-            HashMap::new()
-        };
         let mut deferred: HashSet<PeerId> = HashSet::new();
         let phase = std::time::Instant::now();
         let mut evpn_feeds = HashMap::new();
         for peer in residual {
             checkpoint();
-            if defer_evpn
-                && self
-                    .carries_evpn_outbound_state(peer, destination_of.get(&peer).copied().flatten())
-            {
+            if defer_evpn && self.carries_evpn_outbound_state(peer) {
                 match displaced.remove(&peer) {
                     Some(Some(prior)) => {
                         self.export_chains.insert(peer, prior);
@@ -6529,7 +6515,13 @@ impl RibManager {
         receipt.fallback_members = n_fallback_members;
         receipt.deferred_members = deferred.len();
         receipt.outcome = "committed";
-        receipt.classification = if n_shared_members > 0 && n_fallback_members == 0 {
+        // `paced`: nothing ran on the per-member path, but members were
+        // handed back for their own commands.
+        receipt.classification = if n_fallback_members > 0 {
+            "fallback"
+        } else if !deferred.is_empty() {
+            "paced"
+        } else if n_shared_members > 0 {
             "shared"
         } else {
             "fallback"
@@ -6570,18 +6562,15 @@ impl RibManager {
             .collect())
     }
 
-    /// Whether moving `peer` resyncs EVPN outbound state: private EVPN rows,
-    /// or an EVPN-owning current or destination group (capture and
-    /// complete-feed build). Either costs the member's whole EVPN table.
-    fn carries_evpn_outbound_state(&self, peer: PeerId, destination: Option<usize>) -> bool {
-        self.adj_ribs_out
+    /// Whether moving `peer` can resync EVPN outbound state: the session
+    /// sends EVPN. Its old chain may have denied every row (no private rows,
+    /// no admitted keys) while the new one permits the whole table, so the
+    /// family, not current rows, decides. EVPN group ownership requires the
+    /// family too.
+    fn carries_evpn_outbound_state(&self, peer: PeerId) -> bool {
+        self.peer_sendable_families
             .get(&peer)
-            .is_some_and(|private| private.evpn_len() > 0)
-            || self
-                .grouped_member_of(peer)
-                .into_iter()
-                .chain(destination)
-                .any(|gid| self.planned_group_owns_evpn(gid))
+            .is_some_and(|families| families.contains(&(Afi::L2Vpn, Safi::Evpn)))
     }
 
     /// Commit one qualifying cohort through the shared batched

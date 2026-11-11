@@ -134,13 +134,15 @@ Wire-profile compatibility and each member's ceiling are still checked during
 `ProbeAndPrepare`; `Validate` keeps its exact current owner/generation checks
 before any emission.
 
-**Amended:** 2026-11-11 — the authoritative fallback batch paces members that
-carry EVPN outbound state. Each such move resyncs the member's whole EVPN
-table, so a batch of N of them was one RIB poll growing with N × rows. The
-batch now applies shared cohorts and every other residual member as before,
-but leaves residual members with private EVPN rows, or an EVPN-owning source or
-destination group, unapplied: their installed chain instance is put back and
-the reply names them in caller order. PeerManager applies each through the
+**Amended:** 2026-11-11 — the authoritative fallback batch paces members whose
+sessions send EVPN. Each such move can resync the member's whole EVPN table,
+so a batch of N of them was one RIB poll growing with N × rows. The batch now
+applies shared cohorts and every other residual member as before, but leaves
+residual EVPN senders unapplied. The negotiated family decides, not current
+rows, because an old chain that denied every EVPN route leaves no rows while
+the new one may announce the whole table; EVPN group ownership requires the
+family too. Their installed chain instance is put back and the reply names
+them in caller order. PeerManager applies each through the
 ordinary per-peer replacement, so other RIB work runs between them. The batch
 and every such step share the transaction's forward RIB budget; it is never
 renewed per step. Each step is its own commit point: between steps an `rbgp`
@@ -151,7 +153,11 @@ enqueued. A step that fails, or a budget that expires mid-walk, restores every
 captured prior through the existing rollback batch, which stays one synchronous
 turn. A member that left the RIB answers `NotFound` and is skipped; its
 reconnect registers the session's chain, which cohort setup already
-hot-applied.
+hot-applied. Two limits remain. Rollback after k paced steps restores through
+the non-deferring batch, so the failure path is one turn of k members.
+Residual members of other private families (VPN, labeled unicast, FlowSpec,
+BGP-LS), per-client-best groups, ungrouped peers and sources with mixed
+destinations still run inside the batch.
 
 ## Context
 

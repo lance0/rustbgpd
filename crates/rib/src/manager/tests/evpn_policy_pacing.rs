@@ -414,9 +414,8 @@ fn deferred_member_that_flaps_mid_walk_is_skipped_or_converges_to_the_new_chain(
 }
 
 /// A mixed reload: unicast-only members still move as one shared cohort
-/// inside the batch, while the EVPN-carrying member is handed back. A member
-/// with IPv4 unicast plus private EVPN rows may take either path today; the
-/// walk converges it either way.
+/// inside the batch, while every member that sends EVPN, including one that
+/// also sends IPv4 unicast, is handed back and converges through the walk.
 #[test]
 fn mixed_reload_applies_the_unicast_cohort_inline_and_defers_evpn_members() {
     let mut fleet = evpn_fleet(1, 4, false);
@@ -452,21 +451,23 @@ fn mixed_reload_applies_the_unicast_cohort_inline_and_defers_evpn_members() {
     assert_eq!(fleet.manager.grouped_member_of(unicast[1]), unicast_source);
 
     let deferred = fleet.batch();
-    assert!(deferred.contains(&evpn), "{deferred:?}");
-    assert!(
-        deferred.iter().all(|peer| *peer == evpn || *peer == mixed),
-        "{deferred:?}"
+    assert_eq!(
+        deferred,
+        [evpn, mixed],
+        "every EVPN sender, in caller order"
     );
     let receipt = fleet
         .manager
         .authoritative_transition_receipts
         .last()
         .unwrap();
-    assert_eq!(receipt.deferred_members, deferred.len());
-    assert!(
-        receipt.shared_members >= 2,
+    assert_eq!(receipt.deferred_members, 2);
+    assert_eq!(
+        receipt.shared_members, 2,
         "the unicast cohort shares one transition"
     );
+    assert_eq!(receipt.fallback_members, 0);
+    assert_eq!(receipt.classification, "paced");
     for &peer in &unicast {
         assert_eq!(
             fleet.manager.export_chains.get(&peer),
@@ -488,10 +489,21 @@ fn mixed_reload_applies_the_unicast_cohort_inline_and_defers_evpn_members() {
         );
     }
     let events = drain_events(&mut fleet.outputs);
-    let rows = end_state(&events[0]);
-    assert_eq!(rows.len(), 4);
-    assert!(
-        rows.values()
-            .all(|route| route.communities().contains(&TAGGED))
-    );
+    for (index, peer) in [(0, evpn), (3, mixed)] {
+        assert_eq!(fleet.members[index], peer);
+        let rows = end_state(&events[index]);
+        assert_eq!(rows.len(), 4, "{peer}");
+        assert!(
+            rows.values()
+                .all(|route| route.communities().contains(&TAGGED)),
+            "{peer}: re-exported EVPN rows carry the new policy"
+        );
+        assert!(
+            fleet.manager.adj_ribs_out[&peer]
+                .iter_evpn()
+                .all(|route| route.communities().contains(&TAGGED)),
+            "{peer}: Adj-RIB-Out carries the new policy"
+        );
+        assert_eq!(fleet.manager.adj_ribs_out[&peer].evpn_len(), 4, "{peer}");
+    }
 }

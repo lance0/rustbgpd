@@ -396,14 +396,55 @@ fn policy_reload_work_is_linear() {
     );
 }
 
-/// An export-policy reload moves `size` EVPN receivers holding
+/// The EVPN fleets a cohort reload starts from.
+#[derive(Clone, Copy, Debug)]
+enum EvpnArm {
+    /// Each member holds private EVPN rows.
+    Private,
+    /// The source group and the prepared destination own their EVPN tables.
+    Owned,
+    /// The members' current chain denies every EVPN row, so they hold none;
+    /// the new chain permits the whole table.
+    FromDeny,
+}
+
+/// An export-policy reload moves `size` EVPN receivers onto
 /// [`EVPN_ROWS`] reflected routes each, the peer manager's way: the
 /// authoritative batch, then one per-peer command for every member it hands
 /// back. Each move resyncs one member's table, so the longest single command
 /// must not grow with the moved members; one turn carrying the whole cohort
 /// grows members × rows.
-fn evpn_cohort_reload(size: usize, owned: bool) -> Work {
-    let mut fleet = super::evpn_policy_pacing::evpn_fleet(size, EVPN_ROWS, owned);
+fn evpn_cohort_reload(size: usize, arm: EvpnArm) -> Work {
+    let mut fleet =
+        super::evpn_policy_pacing::evpn_fleet(size, EVPN_ROWS, matches!(arm, EvpnArm::Owned));
+    if matches!(arm, EvpnArm::FromDeny) {
+        let deny = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+            entries: vec![],
+            default_action: rustbgpd_policy::PolicyAction::Deny,
+        }]);
+        for peer in fleet.members.clone() {
+            let (reply, mut response) = tokio::sync::oneshot::channel();
+            fleet
+                .manager
+                .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                    peer,
+                    export_policy: Some(deny.clone()),
+                    reply,
+                });
+            response.try_recv().unwrap().unwrap();
+        }
+        fleet.manager.resync_dirty_peers_bounded();
+        for output in &mut fleet.outputs {
+            while output.try_recv().is_ok() {}
+        }
+        assert!(fleet.members.iter().all(|peer| {
+            fleet
+                .manager
+                .adj_ribs_out
+                .get(peer)
+                .is_none_or(|private| private.evpn_len() == 0)
+        }));
+    }
     let mut deferred = Vec::new();
     let mut longest = checkpoints_in(|| deferred = fleet.batch())[ALL];
     for peer in deferred {
@@ -424,7 +465,7 @@ fn evpn_cohort_reload(size: usize, owned: bool) -> Work {
         assert_eq!(
             tagged.len(),
             EVPN_ROWS as usize,
-            "owned={owned} size {size}: {peer}"
+            "{arm:?} size {size}: {peer}"
         );
     }
     Work::from([("longest command checkpoints", longest)])
@@ -435,16 +476,16 @@ const EVPN_ROWS: u32 = 256;
 
 #[test]
 fn evpn_cohort_reload_longest_command_is_flat_in_moved_members() {
-    for owned in [false, true] {
+    for arm in [EvpnArm::Private, EvpnArm::Owned, EvpnArm::FromDeny] {
         let unit = "longest command checkpoints";
         let (small, large) = (
-            evpn_cohort_reload(SMALL, owned),
-            evpn_cohort_reload(LARGE, owned),
+            evpn_cohort_reload(SMALL, arm),
+            evpn_cohort_reload(LARGE, arm),
         );
         assert!(small[unit] > 0);
         assert!(
             large[unit] < small[unit] * 2,
-            "owned={owned}: the longest single RIB command grew {} -> {} from {SMALL} to {LARGE} \
+            "{arm:?}: the longest single RIB command grew {} -> {} from {SMALL} to {LARGE} \
              moved members at {EVPN_ROWS} rows; one turn carries more than one member's move",
             small[unit],
             large[unit],
