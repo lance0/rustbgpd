@@ -377,7 +377,7 @@ impl PeerManager {
                         // Final: the session reported BackToIdle after leaving
                         // Established.
                         let end_retention = primary_handle.session_end_retention();
-                        let superseded = primary_handle.rib_registration_owner(primary_session_id);
+                        let registration = primary_handle.rib_registration_state();
                         self.retiring_sessions
                             .insert(primary_session_id, peer_key.clone());
                         let mut retired_sessions = vec![primary_session_id];
@@ -393,6 +393,8 @@ impl PeerManager {
                                 )
                                 .await;
                         }
+                        #[cfg(test)]
+                        self.hold_retirement_for_test().await;
                         let _ = self
                             .quiesce_retiring_session(
                                 &peer_key,
@@ -402,6 +404,8 @@ impl PeerManager {
                                 false,
                             )
                             .await;
+                        // Final only now: the task can register until it ends.
+                        let superseded = registration.owner(primary_session_id);
 
                         // Joined producers may already have queued a wire batch
                         // whose capacity failure the RIB has not processed yet.

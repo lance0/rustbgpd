@@ -622,6 +622,14 @@ impl PeerManager {
         self.recompute_next_max_prefix_restart_deadline();
     }
 
+    #[cfg(test)]
+    pub(super) async fn hold_retirement_for_test(&mut self) {
+        if let Some((entered, release)) = self.test_retirement_hold.take() {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+
     /// Keep a removed generation terminally owned until its actor cannot emit
     /// again, then consume every lossless notice it published before retiring
     /// the session id. This is the common ownership-transfer fence.

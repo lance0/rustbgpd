@@ -2428,6 +2428,7 @@ impl PeerSession {
         let connection = read_half
             .as_ref()
             .and_then(|read_half| ConnectionStamp::of(read_half, &config.link_state));
+        let established = crate::handle::EstablishedPublisher::new(config.supersedes_session);
         Self {
             config,
             fsm,
@@ -2552,7 +2553,7 @@ impl PeerSession {
             suppress_gr_retention: false,
             connection,
             gr_retained_connection: crate::handle::RetainedConnectionState::default(),
-            established: crate::handle::EstablishedPublisher::default(),
+            established,
             link_check_due: false,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(

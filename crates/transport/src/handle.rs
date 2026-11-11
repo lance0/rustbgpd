@@ -1393,10 +1393,52 @@ pub struct SessionEndRetention {
 pub(crate) struct EstablishedPublication {
     established: Arc<AtomicBool>,
     end_retention: Arc<Mutex<SessionEndRetention>>,
+    registration: RibRegistrationState,
+}
+
+/// A session's RIB registration publication, kept through its task's shutdown.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct RibRegistrationState(Arc<RibRegistrationPublication>);
+
+#[derive(Debug, Default)]
+struct RibRegistrationPublication {
     /// The RIB channel admitted a `PeerUp` from this session. Never cleared.
-    registered: Arc<AtomicBool>,
-    /// The session this one was spawned to replace, as its `PeerUp` names it.
-    supersedes: Option<u64>,
+    registered: AtomicBool,
+    /// Zero means no predecessor. Updated before starting or promoting a successor.
+    supersedes: AtomicU64,
+}
+
+impl RibRegistrationState {
+    fn new(supersedes: Option<u64>) -> Self {
+        Self(Arc::new(RibRegistrationPublication {
+            registered: AtomicBool::new(false),
+            supersedes: AtomicU64::new(supersedes.unwrap_or(0)),
+        }))
+    }
+
+    fn supersedes(&self) -> Option<u64> {
+        std::num::NonZeroU64::new(self.0.supersedes.load(Ordering::Acquire))
+            .map(std::num::NonZeroU64::get)
+    }
+
+    /// The registered session, or the predecessor it still represents.
+    /// Read after joining the old actor for its final publication.
+    #[must_use]
+    pub fn owner(&self, session_id: u64) -> Option<u64> {
+        if self.0.registered.load(Ordering::Acquire) {
+            Some(session_id)
+        } else {
+            self.supersedes()
+        }
+    }
+
+    fn inherit(&self, previous: &Self, previous_session_id: u64) {
+        self.0.supersedes.store(
+            previous.owner(previous_session_id).unwrap_or(0),
+            Ordering::Release,
+        );
+    }
 }
 
 impl EstablishedPublication {
@@ -1412,11 +1454,7 @@ impl EstablishedPublication {
     }
 
     fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
-        if self.registered.load(Ordering::Acquire) {
-            Some(session_id)
-        } else {
-            self.supersedes
-        }
+        self.registration.owner(session_id)
     }
 
     fn set_end_retention(&self, retention: SessionEndRetention) {
@@ -1432,6 +1470,17 @@ impl EstablishedPublication {
 pub(crate) struct EstablishedPublisher(EstablishedPublication);
 
 impl EstablishedPublisher {
+    pub(crate) fn new(supersedes: Option<u64>) -> Self {
+        Self(EstablishedPublication {
+            registration: RibRegistrationState::new(supersedes),
+            ..EstablishedPublication::default()
+        })
+    }
+
+    pub(crate) fn supersedes(&self) -> Option<u64> {
+        self.0.registration.supersedes()
+    }
+
     pub(crate) fn publish(&self, established: bool) {
         self.0.established.store(established, Ordering::Release);
     }
@@ -1441,7 +1490,11 @@ impl EstablishedPublisher {
     }
 
     pub(crate) fn publish_registered(&self) {
-        self.0.registered.store(true, Ordering::Release);
+        self.0
+            .registration
+            .0
+            .registered
+            .store(true, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -1451,7 +1504,7 @@ impl EstablishedPublisher {
 
     #[cfg(test)]
     pub(crate) fn registered(&self) -> bool {
-        self.0.registered.load(Ordering::Acquire)
+        self.0.registration.0.registered.load(Ordering::Acquire)
     }
 
     /// What a replacement of this session (`session_id`) would name.
@@ -1804,7 +1857,7 @@ impl PeerHandle {
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
         let established = EstablishedPublication {
-            supersedes: config.supersedes_session,
+            registration: RibRegistrationState::new(config.supersedes_session),
             ..EstablishedPublication::default()
         };
         let publisher = EstablishedPublisher(established.clone());
@@ -1989,7 +2042,7 @@ impl PeerHandle {
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
         let established = EstablishedPublication {
-            supersedes: config.supersedes_session,
+            registration: RibRegistrationState::new(config.supersedes_session),
             ..EstablishedPublication::default()
         };
         let publisher = EstablishedPublisher(established.clone());
@@ -2043,6 +2096,26 @@ impl PeerHandle {
     #[doc(hidden)]
     pub fn inherit_retained_connection(&self, previous: &RetainedConnectionState) {
         self.gr_retained_connection.inherit(previous);
+    }
+
+    /// Keep the registration publication readable after joining this actor.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rib_registration_state(&self) -> RibRegistrationState {
+        self.established.registration.clone()
+    }
+
+    /// Name the final RIB owner of an actor already joined by the manager.
+    /// Install before starting this actor or activating a promoted candidate.
+    #[doc(hidden)]
+    pub fn inherit_rib_registration(
+        &self,
+        previous: &RibRegistrationState,
+        previous_session_id: u64,
+    ) {
+        self.established
+            .registration
+            .inherit(previous, previous_session_id);
     }
 
     /// Send a Start command to begin the BGP handshake.
@@ -3111,9 +3184,9 @@ impl PeerHandle {
 
     /// The last session that can own the neighbor's RIB registration, for
     /// a replacement of this session (`session_id`) to name as superseded:
-    /// this session once the RIB admitted its `PeerUp`, otherwise the one
-    /// it was itself spawned to replace. A replacement that never
-    /// registered therefore does not hide the session before it.
+    /// this session once the RIB admitted its `PeerUp`, otherwise the
+    /// predecessor inherited on replacement or promotion. A replacement
+    /// that never registered does not hide the session before it.
     #[must_use]
     pub fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
         self.established.rib_registration_owner(session_id)

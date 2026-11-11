@@ -1104,6 +1104,9 @@ pub struct PeerManager {
     /// Runs synchronously at the start of every dispatched command.
     #[cfg(test)]
     test_command_hook: Option<CommandHook>,
+    /// Hold an inbound replacement before the old task ends.
+    #[cfg(test)]
+    test_retirement_hold: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
 
 impl PeerManager {
@@ -2028,6 +2031,8 @@ impl PeerManager {
             inject_hot_update_failures: std::collections::BTreeMap::new(),
             #[cfg(test)]
             test_command_hook: None,
+            #[cfg(test)]
+            test_retirement_hold: None,
         }
     }
 
