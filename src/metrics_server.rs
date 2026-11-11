@@ -140,6 +140,31 @@ pub async fn serve_metrics(
     .await;
 }
 
+/// Cadence of the `bgp_rib_stalled` sample.
+const RIB_STALL_SAMPLE_PERIOD: Duration = Duration::from_secs(5);
+/// Longest wait for one sample: a slow answer is still an answer.
+const RIB_STALL_SAMPLE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// One `bgp_rib_stalled` sample. A sample that gets no answer leaves the
+/// gauge as it was: silence is the watchdog's signal, not a stall answer.
+async fn sample_rib_stall(probe: &CoreReadinessProbe, metrics: &BgpMetrics) {
+    if let Ok(stalled) = probe.rib_stalled(RIB_STALL_SAMPLE_DEADLINE).await {
+        metrics.set_rib_stalled(stalled);
+    }
+}
+
+/// Publish `bgp_rib_stalled` on a fixed cadence, so a stalled RIB is visible
+/// to a scraper that never requests `/readyz`. The cadence belongs to the
+/// sampler: a scrape reads the gauge and sends the RIB nothing.
+async fn run_rib_stall_sampler(probe: CoreReadinessProbe, metrics: BgpMetrics) {
+    let mut tick = tokio::time::interval(RIB_STALL_SAMPLE_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        sample_rib_stall(&probe, &metrics).await;
+    }
+}
+
 /// The metrics/readiness server on its own OS thread and `current_thread`
 /// runtime. Accepting a connection and reading its request line then never
 /// wait for the daemon's runtime workers, so `/livez` and `/metrics` answer
@@ -209,6 +234,10 @@ impl MetricsServerThread {
                         return;
                     }
                 };
+                let sampler = runtime.spawn(run_rib_stall_sampler(
+                    readiness_probe.clone(),
+                    metrics.clone(),
+                ));
                 let serve = runtime.spawn(serve_metrics(
                     server,
                     metrics,
@@ -224,6 +253,7 @@ impl MetricsServerThread {
                         }
                     }
                 });
+                sampler.abort();
                 let _ = exit_tx.send(exit);
                 // An in-flight render on the blocking pool must not hold the
                 // join; it finishes, or dies with the process, on its own.
@@ -1396,6 +1426,152 @@ pub(crate) mod tests {
             readiness_failure_rows(&metrics).await,
             ["bgp_readiness_probe_failures_total{reason=\"peer_manager_unavailable\"} 1"]
         );
+    }
+
+    async fn rib_stalled_line(metrics: &BgpMetrics) -> String {
+        render_text(metrics)
+            .await
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("bgp_rib_stalled "))
+            .unwrap()
+            .to_string()
+    }
+
+    /// How the fake RIB answers one sample.
+    enum RibAnswer {
+        Reply(Result<usize, rustbgpd_rib::RibReadinessError>),
+        Silent,
+    }
+
+    /// Run one sample against a fake RIB readiness lane; the answer is
+    /// handed over inside the sample, so order comes from the handshake.
+    async fn sample_once(
+        probe: &CoreReadinessProbe,
+        metrics: &BgpMetrics,
+        rib_rx: &mut mpsc::Receiver<rustbgpd_rib::RibReadinessQuery>,
+        answer: RibAnswer,
+    ) {
+        let answer_query = async {
+            let Some(rustbgpd_rib::RibReadinessQuery::LocRibCount { reply, .. }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected a RIB readiness query");
+            };
+            match answer {
+                RibAnswer::Reply(answer) => {
+                    let _ = reply.send(answer);
+                }
+                RibAnswer::Silent => drop(reply),
+            }
+        };
+        tokio::join!(sample_rib_stall(probe, metrics), answer_query);
+    }
+
+    fn readiness_lane_probe() -> (
+        CoreReadinessProbe,
+        mpsc::Receiver<rustbgpd_rib::RibReadinessQuery>,
+    ) {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (ready_tx, ready_rx) = mpsc::channel(1);
+        (
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_rib_readiness(ready_tx),
+            ready_rx,
+        )
+    }
+
+    /// A stalled answer reaches `bgp_rib_stalled` with no HTTP request made,
+    /// and a ready answer clears it.
+    #[tokio::test]
+    async fn rib_stall_sample_publishes_gauge_without_readyz_traffic() {
+        use rustbgpd_rib::RibReadinessError::{
+            PeerTeardownStalled, PolicyTransitionStalled, SelectionReleaseStalled,
+        };
+        let (probe, mut rib_rx) = readiness_lane_probe();
+        let metrics = BgpMetrics::new();
+        assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 0");
+        for stalled in [
+            PolicyTransitionStalled,
+            SelectionReleaseStalled,
+            PeerTeardownStalled,
+        ] {
+            sample_once(
+                &probe,
+                &metrics,
+                &mut rib_rx,
+                RibAnswer::Reply(Err(stalled)),
+            )
+            .await;
+            assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
+            sample_once(&probe, &metrics, &mut rib_rx, RibAnswer::Reply(Ok(0))).await;
+            assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 0");
+        }
+        assert_eq!(readiness_failure_rows(&metrics).await, Vec::<String>::new());
+    }
+
+    /// A sample that gets no answer keeps whatever the gauge held.
+    #[tokio::test]
+    async fn rib_stall_sample_without_an_answer_leaves_the_gauge() {
+        for (before, expected) in [(true, "bgp_rib_stalled 1"), (false, "bgp_rib_stalled 0")] {
+            let (probe, mut rib_rx) = readiness_lane_probe();
+            let metrics = BgpMetrics::new();
+            metrics.set_rib_stalled(before);
+            sample_once(&probe, &metrics, &mut rib_rx, RibAnswer::Silent).await;
+            assert_eq!(rib_stalled_line(&metrics).await, expected);
+        }
+    }
+
+    /// The sample asks the RIB even when the daemon gate is not ready.
+    #[tokio::test]
+    async fn rib_stall_sample_ignores_the_daemon_gate() {
+        let (probe, mut rib_rx) = readiness_lane_probe();
+        let gate = rustbgpd_api::health_probe::DaemonGate::new();
+        gate.mark_not_ready("test fault");
+        let probe = probe.with_gate(gate);
+        let metrics = BgpMetrics::new();
+        sample_once(
+            &probe,
+            &metrics,
+            &mut rib_rx,
+            RibAnswer::Reply(Err(rustbgpd_rib::RibReadinessError::PeerTeardownStalled)),
+        )
+        .await;
+        assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 1");
+    }
+
+    /// The server thread runs the sampler. The runtime is real-time, and the
+    /// sampler's first sample is immediate, so no interval is waited out. The
+    /// proof of publication is the gauge reading 1, which only a stalled
+    /// answer received before the 5 s sample deadline can produce; a timeout
+    /// leaves it at 0. The loop only yields between reads; the outer timeout
+    /// is a failure bound, not a wait the test relies on.
+    #[tokio::test]
+    async fn metrics_thread_runs_the_rib_stall_sampler() {
+        let (probe, mut rib_rx) = readiness_lane_probe();
+        let metrics = BgpMetrics::new();
+        let listener = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let (server, _exited) = MetricsServerThread::spawn(listener, metrics.clone(), probe, None);
+        let guard = Duration::from_secs(30);
+        let first = tokio::time::timeout(guard, rib_rx.recv())
+            .await
+            .expect("the thread must sample the RIB");
+        let Some(rustbgpd_rib::RibReadinessQuery::LocRibCount { reply, .. }) = first else {
+            panic!("expected a RIB readiness query");
+        };
+        let _ = reply.send(Err(
+            rustbgpd_rib::RibReadinessError::PolicyTransitionStalled,
+        ));
+        tokio::time::timeout(guard, async {
+            while rib_stalled_line(&metrics).await != "bgp_rib_stalled 1" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stalled answer must reach the gauge");
+        drop(server);
     }
 
     #[tokio::test]
