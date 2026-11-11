@@ -278,7 +278,7 @@ fn run_bgpls_update(nodes: u8, vantages: u8) -> BTreeMap<&'static str, usize> {
     let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
         manager.handle_update(bgpls_update(0, vec![first_link(7)]));
     });
-    assert_eq!(manager.orr_rebuild, OrrRebuild::Settled);
+    assert_eq!(manager.orr_rebuild_owed_updates, 0);
     assert_eq!(manager.orr.topology.node_count(), usize::from(nodes));
     answered
 }
@@ -388,7 +388,7 @@ impl Burst {
         self.manager.handle_update(update);
         (
             spf_runs(&self.metrics) - before,
-            self.manager.orr_rebuild == OrrRebuild::Owed,
+            self.manager.orr_rebuild_owed_updates > 0,
         )
     }
 }
@@ -458,7 +458,7 @@ fn orr_rebuild_is_owed_only_across_consecutive_bgpls_updates() {
     burst
         .manager
         .handle_update(RibUpdate::QueryLocRibCount { reply });
-    assert_eq!(burst.manager.orr_rebuild, OrrRebuild::Settled);
+    assert_eq!(burst.manager.orr_rebuild_owed_updates, 0);
     assert_eq!(spf_runs(&burst.metrics) - before, 2);
     assert_eq!(burst.step(), (2, false));
 
