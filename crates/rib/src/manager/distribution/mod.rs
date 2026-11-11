@@ -3985,6 +3985,10 @@ impl RibManager {
                 OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
             );
         }
+        let evpn_clean_replay = batch
+            .evpn_complete_feed
+            .as_ref()
+            .is_some_and(super::evpn_recovery::EvpnFeedSeal::is_clean_replay);
         // Retain the existing Arc and slow-path candidate-key vector for the
         // original reservation bound; no route body or OLD proof is copied.
         let common_unicast_candidates = Arc::clone(&batch.unicast.announce);
@@ -4578,7 +4582,7 @@ impl RibManager {
                     &source_excluded,
                     &previously_advertised,
                     |key| {
-                        self.evpn_prior_admitted(peer, key, evpn_stage)
+                        self.evpn_prior_admitted(peer, key, evpn_stage, evpn_clean_replay)
                             .unwrap_or(false)
                     },
                 );
@@ -4789,9 +4793,13 @@ impl RibManager {
             sort_evpn_announcements(&mut evpn_announce, &mut || checkpoint());
             evpn_withdraw.sort_unstable();
             evpn_withdraw.dedup();
-            let Some(count) =
-                self.planned_evpn_admitted_count(peer, &evpn_announce, &evpn_withdraw, evpn_stage)
-            else {
+            let Some(count) = self.planned_evpn_admitted_count(
+                peer,
+                &evpn_announce,
+                &evpn_withdraw,
+                evpn_stage,
+                evpn_clean_replay,
+            ) else {
                 if let Some(handle) = self.evpn_recovery_handle(peer) {
                     self.evpn_recovery.fail_admission(handle);
                 }

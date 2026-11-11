@@ -400,6 +400,10 @@ tombstones and extra duties with it, then retain a duty only when the current
 member view does not contain the key. This targets the heal and also prevents
 a stale failed withdrawal from removing a newly eligible route.
 
+The first missed admission is not the only capture seam. A clean member's
+refresh that leaves a terminal marker owed captures at the end of its own
+actor turn; see the 2026-11-10 amendment.
+
 Do not discard this provenance during a dirty RTC change, repeated regroup or
 source flip. The initial EVPN recovery key-provenance limits are **16 MiB per
 peer** and **256 MiB daemon-wide**, enforced together as internal admission caps.
@@ -1223,7 +1227,8 @@ announced in one batch remains admitted. Announcements stay sorted and unique,
 so a repeated announcement is refused rather than sent twice. Withdrawals need
 only be distinct; the emitter sorts them, and the ledger does not depend on it.
 A proof's iteration order is slot order; callers that need key order sort their
-own output.
+own output. A clean member's refresh replay reserves and applies nothing: it
+holds no proof to admit into (2026-11-10 amendment).
 
 **Hashing.** Keys are chosen by peers. An unkeyed hash is invertible, so a peer
 could build distinct keys that all reach one bucket and make each insert,
@@ -1260,7 +1265,8 @@ universe key allowed under 16 MiB. A lower ceiling would refuse every recovery
 of a member holding between the two, and because an initial feed reserves
 through the same path, that session would reset and reconnect in a loop.
 Allocator overhead, route bodies and RSS remain separate qualification
-surfaces.
+surfaces. A clean member is charged its record only: a refresh that sends its
+terminal markers allocates and charges nothing (2026-11-10 amendment).
 
 **Evidence status.** Component tests pin retention across churn, finish and
 snapshot; adversarial reuse with a retained snapshot, a pin and a slow holder;
@@ -1280,4 +1286,84 @@ selection-deferral oracles do not enable EVPN ownership. A synthetic probe at te
 count checks the ledger peak against the qualification bar. These are component
 results. They do not qualify the recovery memory envelope, readiness or replay
 cost, and production EVPN ownership remains disabled until the mass-dirty and
-replay qualifications pass on this representation.
+replay qualifications pass on this representation. The differential's refresh
+is deferred behind a blocked writer and answered for a dirty member, so it
+still runs the proof cycle; the clean replay has its own evidence in the
+2026-11-10 amendment.
+
+## Amendment (2026-11-10): a clean member's refresh captures no proof
+
+A ROUTE-REFRESH answer for an owned EVPN member captured the member's proof,
+replayed its table through that proof, matched the proof against the projection
+and released it, all in one actor turn. For a clean member that cycle proves
+what section E already states: its admitted set is its eligible projection. An
+attribution of a 20,000-row replay on a shared host put about 31 ms of a 52 ms
+owned replay in that cycle, against about 29 ms for a private replay, and
+removing the cycle in a diagnostic build closed the gap. Those are diagnostic
+timings, not a qualification.
+
+**Invariant.** A grouped EVPN member holds a Ready proof exactly while it is
+dirty or owes a terminal marker (End-of-RIB or End-of-RIB-for-refresh); a
+member with a pending reset recovers through that reset instead. Every other
+member is clean: its admitted set equals its current eligible projection,
+including the exact-export rejection overlay. The first missed admission and
+the sparse renewals behind an owed marker already kept this for ordinary
+deltas. This amendment makes the peer refresh keep it too.
+
+**Clean replay.** A peer refresh for a clean member announces every row of the
+group table that is eligible for the member, each with a fresh exact probe,
+and withdraws nothing, because the peer holds nothing else. It captures no
+proof and mints no completion receipt. A row the probe rejects was admitted
+unless the overlay already listed it, so it is withdrawn in the same envelope
+and leaves the admitted count; the probe result updates the overlay, which
+keeps the admitted set equal to the projection. The replay's admission fence
+is the clean state itself: the commit is refused unless the member is still
+clean on the same session, channel and table stamp the walk read.
+
+A member is clean only when all of these hold: it is not dirty; no reset is
+pending; its recovery handle exists and is dormant; it has no completion
+receipt; it owes no End-of-RIB; it has no unreleased private EVPN row; and the
+group's projection is complete. Any other member, and every replay that is not
+a peer refresh, takes the proof cycle unchanged.
+
+**Section E: the second capture seam.** A refused commit sends nothing, so the
+member's admitted set is unchanged and the dirty mark that follows captures it
+as any first missed admission does. An admitted replay strips its terminal
+markers from the data and sends them behind it in the same turn. If the writer
+refuses them, or a hold keeps them back, they stay owed past the turn, and the
+invariant requires a proof. The refresh tail captures it then, before the turn
+ends. Nothing can stage the group table between the replay's walk and that
+capture: the readiness checkpoints inside the turn answer only the read-only
+readiness lane. The proof therefore equals the admitted set, the completion
+receipt records the owed markers, and the member is in the state the proof
+cycle leaves behind an owed marker. Later deltas renew it sparsely; the resync
+tick retries the marker and never captures. If the markers leave in the
+refresh turn, no proof ever exists.
+
+**Refusal.** A capture the ledger refuses at this seam takes section E's reset
+path: the member goes dirty behind a pending reset, and a receipt without a
+proof releases no marker.
+
+**Admission and accounting.** A clean replay makes no ledger call that
+allocates: no capture, reservation, pin or application. The member's ledger
+charge and peak do not move unless the tail captures. The admitted count is
+maintained from the envelope as for an ordinary clean delta.
+
+**Evidence status.** Unit tests pin: a clean refresh passes no capture
+checkpoint and leaves the peer and daemon ledger usage, peaks included,
+unchanged; its envelopes equal those of the proof cycle for the same member,
+with and without a row the exact probe rejects; a refresh deferred for want
+of an outbound slot does no work that grows with the table; a stale fence and
+the selection gate refuse the commit with nothing sent and no receipt left; a
+rejected row is withdrawn and a later accepted one announced, with the
+admitted count following; a refused marker and a held marker each capture in
+the refresh turn with the proof equal to the admitted set, and their retries
+pass no capture checkpoint; a table change in the next actor message lands on
+either outcome; a member that leaves its group before the marker retry keeps
+its rows and marker debt through the private handoff; a ledger refusal at the
+seam resets and sends no marker; and each condition of the clean definition
+has a case that refuses the proofless replay. A member that already holds a
+proof or marker debt still runs the proof match. These are component results
+with EVPN ownership enabled in tests. The replay-cost and recovery-memory
+qualifications have not been run on this change, and production EVPN ownership
+remains disabled.
