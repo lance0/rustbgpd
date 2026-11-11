@@ -494,15 +494,16 @@ impl RibManager {
     /// over, so it cannot overtake rows the same pass still stages and the
     /// completion hooks never run under an open body.
     pub(super) fn defer_eor_settle(&mut self, peer: PeerId) {
-        if !self.eor.settle_after_pass.contains(&peer) {
-            self.eor.settle_after_pass.push(peer);
-        }
+        self.eor.settle_after_pass.push(peer);
     }
 
     /// Offer the markers of every peer a pass deferred
     /// ([`Self::defer_eor_settle`]). Runs at the end of a distribution pass
     /// and at the end of every actor turn and resync tick.
     pub(super) fn settle_eor_after_pass(&mut self) {
+        // Keep first occurrences so the existing reverse insertion order stays unchanged.
+        let mut seen = HashSet::new();
+        self.eor.settle_after_pass.retain(|peer| seen.insert(*peer));
         while let Some(peer) = self.eor.settle_after_pass.pop() {
             self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
         }

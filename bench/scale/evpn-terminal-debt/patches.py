@@ -139,6 +139,11 @@ def instrument(files, here):
          "        }\n"
          "        if owns_refresh_prior\n")
     path = manager + "eor_hold.rs"
+    edit(path, "    pub(super) fn retry_eor_markers(&mut self, peer: PeerId, obligations: bool) {\n",
+         "    pub(super) fn retry_eor_markers(&mut self, peer: PeerId, obligations: bool) {\n"
+         "        if obligations && self.eor_retry_ready(peer, EVPN) {\n"
+         "            self.bench_terminal_event(peer, \"retry_offer\", 0);\n"
+         "        }\n")
     # The hold set has one sender of a pending marker (`send_eor_markers`) and
     # two callers. `settle_eor_as` is the release/table/initial-table attempt:
     # the former deferred-EoR flush and initial-table sites. `retry_eor_markers`

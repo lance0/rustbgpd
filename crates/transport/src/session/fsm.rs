@@ -1367,8 +1367,8 @@ impl PeerSession {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         supersedes: self
-                            .config
-                            .supersedes_session
+                            .established
+                            .supersedes()
                             .and_then(std::num::NonZeroU64::new),
                         peer_asn,
                         peer_router_id: self

@@ -202,7 +202,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                     break;
                 }
                 PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
-                    let _ = reply.send(true);
+                    let _ = reply.send(Ok(true));
                     dumps.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
@@ -2168,6 +2168,79 @@ async fn inbound_candidate_held_while_primary_active_is_promoted() {
     );
 }
 
+/// A winning candidate is still promoted when the RIB mailbox is full with
+/// another sender queued on it: its export-policy sync waits for admission
+/// inside the manager's bound instead of being refused, which closed the
+/// candidate with Cease/7.
+#[tokio::test]
+async fn winning_candidate_is_promoted_while_another_sender_waits_on_the_rib_mailbox() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, primary.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let notification = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+
+    let filler = || RibUpdate::QueryLocRibCount {
+        reply: oneshot::channel().0,
+    };
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx.try_send(filler()).is_ok() {}
+    // Handshake: another sender is queued on the full mailbox.
+    let mut other = Box::pin(rib_tx.clone().reserve_owned());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(other.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    // Controlled time: the mailbox is released only once every task is
+    // waiting, so the candidate has met it full, and before any manager
+    // deadline can run out.
+    tokio::time::pause();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        rib_rx.recv().await;
+        other.await.unwrap().send(filler());
+        while rib_rx.recv().await.is_some() {}
+    });
+
+    mgr.handle_session_notification(notification).await;
+    tokio::time::resume();
+
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(
+        managed.pending_inbound.is_none() && managed.session_id() != 1,
+        "the candidate must be promoted, not closed for a contended mailbox"
+    );
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("promotion must release the held KEEPALIVE");
+    assert!(matches!(msg, Message::Keepalive));
+    release.abort();
+}
+
 /// A true simultaneous open that the local identifier wins: the candidate has
 /// the peer's OPEN and KEEPALIVE, the primary is in `OpenConfirm`. The
 /// candidate is never Established, never registers with the RIB, and is
@@ -3526,13 +3599,11 @@ async fn replaced_session_behind_a_full_rib_mailbox_still_sends_its_peer_down() 
     );
 }
 
-/// The peer manager marks a replacement, not a collision promotion. The
-/// first inbound is a candidate beside a primary with no connection and is
-/// promoted: its `PeerUp` names no session. Its TCP then fails, the peer
-/// reconnects, and the Idle arm replaces it: that `PeerUp` names the
-/// session it replaced.
-/// Mutation-red: without the id set on the replacement's configuration its
-/// `PeerUp` names nothing.
+/// A candidate promoted over an unregistered primary with no earlier owner
+/// names no predecessor. Its TCP then fails and the Idle arm replaces it:
+/// that replacement names the session whose `PeerUp` was admitted.
+/// Mutation-red: without inheriting the old actor's final registration,
+/// the replacement's `PeerUp` names nothing.
 #[tokio::test]
 async fn inbound_replacement_names_the_session_it_supersedes() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -3566,7 +3637,7 @@ async fn inbound_replacement_names_the_session_it_supersedes() {
     let first_session = mgr.peers[&key(peer_addr)].session_id();
     assert_eq!(
         promoted_names, None,
-        "a promoted candidate names no session"
+        "the unregistered primary had no predecessor for this candidate to inherit"
     );
 
     drop(first);
@@ -3976,4 +4047,646 @@ async fn candidate_lost_during_promotion_sync_keeps_primary() {
     let managed = &mgr.peers[&key(peer_addr)];
     assert!(managed.pending_inbound.is_none());
     assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
+}
+
+fn replacement_residual_manager(
+    primary_state: SessionState,
+) -> (
+    PeerManager,
+    mpsc::Sender<RibUpdate>,
+    mpsc::Receiver<RibUpdate>,
+) {
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        mpsc::channel(16).1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer,
+        65002,
+        fake_peer_handle(
+            peer,
+            primary_state,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    (mgr, rib_tx, rib_rx)
+}
+
+async fn accept_residual_connection(mgr: &mut PeerManager) -> TcpStream {
+    let (server, mut client) = super::inbound_admission::localhost_inbound_stream().await;
+    mgr.handle_inbound(server, sock(IpAddr::V4(Ipv4Addr::LOCALHOST)), None, None)
+        .await;
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut BytesMut::new()).await,
+        Message::Open(_)
+    ));
+    client
+}
+
+async fn residual_notification(
+    mgr: &mut PeerManager,
+    session: u64,
+    idle: bool,
+) -> SessionNotification {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = mgr.session_notify_rx.recv().await.unwrap();
+            let matches = match &notification {
+                SessionNotification::OpenReceived { session_id, .. } => {
+                    !idle && *session_id == session
+                }
+                SessionNotification::BackToIdle { session_id, .. } => {
+                    idle && *session_id == session
+                }
+                _ => false,
+            };
+            if matches {
+                return notification;
+            }
+        }
+    })
+    .await
+    .expect("the session reaches the requested handshake boundary")
+}
+
+async fn residual_peer_up(rib_rx: &mut mpsc::Receiver<RibUpdate>, expected: u64) -> Option<u64> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RibUpdate::PeerUp {
+                session_id,
+                supersedes,
+                ..
+            } = rib_rx.recv().await.unwrap()
+                && session_id == expected
+            {
+                return supersedes.map(std::num::NonZeroU64::get);
+            }
+        }
+    })
+    .await
+    .expect("the selected session registers")
+}
+
+/// The primary establishes after the candidate is accepted, then its TCP
+/// fails behind a full RIB mailbox. The candidate's export-policy sync cannot
+/// complete while that mailbox is full, so the manager refuses promotion at
+/// the sync, before it claims the candidate or asks the primary to retire,
+/// and closes the candidate before it can register beside the old primary.
+#[tokio::test]
+async fn full_rib_refuses_candidate_promotion_at_the_candidate_sync() {
+    let (mut mgr, rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut primary = accept_residual_connection(&mut mgr).await;
+    let primary_id = mgr.peers[&peer].session_id();
+    let mut candidate = accept_residual_connection(&mut mgr).await;
+    let candidate_id = mgr.peers[&peer]
+        .pending_inbound
+        .as_ref()
+        .unwrap()
+        .session_id;
+    send_bgp_message(
+        &mut primary,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    let _primary_open = residual_notification(&mut mgr, primary_id, false).await;
+    send_bgp_message(
+        &mut candidate,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    send_bgp_message(&mut candidate, &Message::Keepalive).await;
+    let candidate_open = residual_notification(&mut mgr, candidate_id, false).await;
+    send_bgp_message(&mut primary, &Message::Keepalive).await;
+    assert_eq!(residual_peer_up(&mut rib_rx, primary_id).await, None);
+    assert_eq!(
+        mgr.peers[&peer].handle().rib_registration_owner(primary_id),
+        Some(primary_id)
+    );
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: rustbgpd_rib::PeerId::UNASSIGNED,
+        })
+        .is_ok()
+    {}
+    drop(primary);
+    let idle = residual_notification(&mut mgr, primary_id, true).await;
+    mgr.handle_session_notification(idle).await;
+    assert_eq!(mgr.peers[&peer].session_id(), primary_id);
+    assert!(mgr.peers[&peer].pending_inbound.is_none());
+    mgr.handle_session_notification(candidate_open).await;
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(
+            !matches!(update, RibUpdate::PeerUp { session_id, .. } if session_id == candidate_id)
+        );
+    }
+}
+
+/// Forward the manager's RIB traffic to a real RIB through the first update
+/// `last` accepts, holding back the session end of `held_session`.
+async fn relay_to_rib(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    rib: &mpsc::Sender<RibUpdate>,
+    held_session: u64,
+    held: &mut Vec<RibUpdate>,
+    mut last: impl FnMut(&RibUpdate) -> bool,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let update = rib_rx.recv().await.unwrap();
+            let done = last(&update);
+            if matches!(update, RibUpdate::PeerDown { session_id, .. } if session_id == held_session)
+            {
+                held.push(update);
+            } else {
+                rib.send(update).await.unwrap();
+            }
+            if done {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the session sends the awaited RIB update");
+}
+
+/// Accept `expected`'s `PeerUp`, recording the session it names.
+fn peer_up(expected: u64, named: &mut Vec<Option<u64>>) -> impl FnMut(&RibUpdate) -> bool + '_ {
+    move |update| match update {
+        RibUpdate::PeerUp {
+            session_id,
+            supersedes,
+            ..
+        } if *session_id == expected => {
+            named.push(supersedes.map(std::num::NonZeroU64::get));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The primary's `PeerUp` is admitted, then its TCP fails and the pending
+/// candidate is promoted over it. The candidate's `PeerUp` names that primary,
+/// so the RIB retires the primary's record there. The primary's own
+/// `PeerDown`, delivered after the candidate's `PeerUp` and first route, then
+/// leaves the promoted session's route in place.
+/// Mutation-red: without the promotion inheriting the joined primary's
+/// registration, the candidate's `PeerUp` names nothing.
+#[tokio::test]
+async fn promoted_candidate_names_the_registered_primary_it_replaces() {
+    let (mut mgr, _rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
+    let (rib, real_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(4);
+    let rib_task = tokio::spawn(
+        rustbgpd_rib::RibManager::new(real_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut primary = accept_residual_connection(&mut mgr).await;
+    let primary_id = mgr.peers[&peer].session_id();
+    let mut candidate = accept_residual_connection(&mut mgr).await;
+    let candidate_id = mgr.peers[&peer]
+        .pending_inbound
+        .as_ref()
+        .unwrap()
+        .session_id;
+    let open = Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)));
+    send_bgp_message(&mut primary, &open).await;
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    let _primary_open = residual_notification(&mut mgr, primary_id, false).await;
+    send_bgp_message(&mut candidate, &open).await;
+    send_bgp_message(&mut candidate, &Message::Keepalive).await;
+    let _candidate_open = residual_notification(&mut mgr, candidate_id, false).await;
+
+    let mut held = Vec::new();
+    let mut named = Vec::new();
+    send_bgp_message(&mut primary, &Message::Keepalive).await;
+    relay_to_rib(
+        &mut rib_rx,
+        &rib,
+        primary_id,
+        &mut held,
+        peer_up(primary_id, &mut named),
+    )
+    .await;
+    assert_eq!(
+        mgr.peers[&peer].handle().rib_registration_owner(primary_id),
+        Some(primary_id),
+        "the RIB channel admitted the primary's registration"
+    );
+
+    drop(primary);
+    let idle = residual_notification(&mut mgr, primary_id, true).await;
+    mgr.handle_session_notification(idle).await;
+    assert_eq!(
+        mgr.peers[&peer].session_id(),
+        candidate_id,
+        "the candidate is promoted over the idle primary"
+    );
+    relay_to_rib(
+        &mut rib_rx,
+        &rib,
+        primary_id,
+        &mut held,
+        peer_up(candidate_id, &mut named),
+    )
+    .await;
+    assert_eq!(
+        named,
+        [None, Some(primary_id)],
+        "the promoted candidate names the registered primary it replaced"
+    );
+
+    send_bgp_message(&mut candidate, &peer_update([203, 0, 113, 0], None)).await;
+    relay_to_rib(&mut rib_rx, &rib, primary_id, &mut held, |update| {
+        matches!(update, RibUpdate::RoutesReceived { session_id, announced, .. }
+            if *session_id == candidate_id && !announced.is_empty())
+    })
+    .await;
+    let loc_rib_count = || async {
+        let (reply, response) = oneshot::channel();
+        rib.send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        response.await.unwrap()
+    };
+    assert_eq!(loc_rib_count().await, 1);
+    assert_eq!(held.len(), 1, "the primary sent one PeerDown");
+    for late in held {
+        rib.send(late).await.unwrap();
+    }
+    assert_eq!(
+        loc_rib_count().await,
+        1,
+        "the retired primary's late PeerDown keeps the promoted session's route"
+    );
+    rib_task.abort();
+}
+
+/// A queued peer KEEPALIVE cannot register an unpromoted candidate. The
+/// explicit `QueryState` reply is after its OPEN and buffered KEEPALIVE; the
+/// candidate is still held in `OpenConfirm`, so retiring it beside the primary
+/// cannot leave a second registered collision record.
+#[tokio::test]
+async fn pending_collision_candidate_does_not_register_before_promotion() {
+    let (mut mgr, _rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::OpenSent);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut candidate = accept_residual_connection(&mut mgr).await;
+    let candidate_id = mgr.peers[&peer]
+        .pending_inbound
+        .as_ref()
+        .unwrap()
+        .session_id;
+    send_bgp_message(
+        &mut candidate,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    send_bgp_message(&mut candidate, &Message::Keepalive).await;
+    let _open = residual_notification(&mut mgr, candidate_id, false).await;
+    let pending = mgr.peers[&peer].pending_inbound.as_ref().unwrap();
+    assert_eq!(
+        pending.handle.query_state().await.unwrap().fsm_state,
+        SessionState::OpenConfirm
+    );
+    assert_eq!(pending.handle.rib_registration_owner(candidate_id), None);
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(
+            !matches!(update, RibUpdate::PeerUp { session_id, .. } if session_id == candidate_id)
+        );
+    }
+    let pending = mgr
+        .peers
+        .get_mut(&peer)
+        .unwrap()
+        .pending_inbound
+        .take()
+        .unwrap();
+    pending
+        .handle
+        .shutdown_timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(
+            !matches!(update, RibUpdate::PeerUp { session_id, .. } if session_id == candidate_id)
+        );
+    }
+}
+
+/// Neither the intermediate replacement nor the promoted candidate completes
+/// its handshake. The next replacement must still name the original session
+/// whose `PeerUp` was admitted, across both unregistered links.
+#[tokio::test]
+async fn unregistered_promoted_candidate_preserves_the_replacement_chain() {
+    let (mut mgr, _rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Active);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let (first, _tx) = establish_inbound(&mut mgr, &mut rib_rx, peer.address).await;
+    let registered = mgr.peers[&peer].session_id();
+    drop(first);
+    let idle = residual_notification(&mut mgr, registered, true).await;
+    mgr.handle_session_notification(idle).await;
+
+    let primary = accept_residual_connection(&mut mgr).await;
+    let unregistered_primary = mgr.peers[&peer].session_id();
+    assert_eq!(
+        mgr.peers[&peer]
+            .handle()
+            .rib_registration_owner(unregistered_primary),
+        Some(registered)
+    );
+    let mut candidate = accept_residual_connection(&mut mgr).await;
+    let promoted = mgr.peers[&peer]
+        .pending_inbound
+        .as_ref()
+        .unwrap()
+        .session_id;
+    send_bgp_message(
+        &mut candidate,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    let open = residual_notification(&mut mgr, promoted, false).await;
+    mgr.handle_session_notification(open).await;
+    assert_eq!(mgr.peers[&peer].session_id(), promoted);
+    assert!(matches!(
+        read_bgp_message(&mut candidate, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    drop(primary);
+    drop(candidate);
+    let idle = residual_notification(&mut mgr, promoted, true).await;
+    mgr.handle_session_notification(idle).await;
+
+    let (_last, _tx, names) =
+        establish_inbound_superseding(&mut mgr, &mut rib_rx, peer.address).await;
+    assert_eq!(names, Some(registered));
+}
+
+/// Control for the defensive disabled-respawn branch: with a terminal latch
+/// already installed, the new actor names the session retirement joined.
+/// The synthetic enabled-plus-latch setup does not reproduce a transport
+/// generated terminal notice arriving during retirement.
+#[tokio::test]
+async fn disabled_dynamic_respawn_names_the_retired_session_when_enabled() {
+    let (mut mgr, _rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Active);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let (first, _tx) = establish_inbound(&mut mgr, &mut rib_rx, peer.address).await;
+    let retired = mgr.peers[&peer].session_id();
+    mgr.current_config = make_dynamic_manager_config();
+    mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&mgr.current_config);
+    let accepted = mgr.dynamic_ranges[0].accepted_attribution();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let managed = mgr.peers.get_mut(&peer).unwrap();
+    managed.is_dynamic = true;
+    managed.accepted_dynamic_range = Some(accepted);
+    managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    mgr.dynamic_peer_count = 1;
+    assert!(mgr.install_max_prefix_latch(
+        peer.clone(),
+        retired,
+        "test terminal latch".into(),
+        None
+    ));
+    drop(first);
+    let idle = residual_notification(&mut mgr, retired, true).await;
+    mgr.handle_session_notification(idle).await;
+    let replacement = mgr.peers[&peer].session_id();
+    assert_ne!(replacement, retired);
+    assert!(!mgr.peers[&peer].enabled);
+    mgr.enable_peer(peer.clone()).await.unwrap();
+    let (mut client, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut BytesMut::new()).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(
+        &mut client,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    send_bgp_message(&mut client, &Message::Keepalive).await;
+    assert_eq!(
+        residual_peer_up(&mut rib_rx, replacement).await,
+        Some(retired)
+    );
+}
+
+/// The dynamic back-to-idle path reads the retired session's registration
+/// after its task ends. A full RIB mailbox holds `PeerUp` through the dynamic
+/// session's fall to Idle; a handshake pauses the manager before it ends that
+/// task and lets the `PeerUp` enter the mailbox. The disabled respawn (kept
+/// by the synthetic terminal latch) must name the session the RIB registered.
+/// Mutation-red: with the registration read before the old task ends, the
+/// respawn's `PeerUp` names nothing.
+#[tokio::test]
+async fn dynamic_idle_retirement_reads_registration_after_the_old_task_ends() {
+    let (mut mgr, rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut primary = accept_residual_connection(&mut mgr).await;
+    let retired = mgr.peers[&peer].session_id();
+    mgr.current_config = make_dynamic_manager_config();
+    mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&mgr.current_config);
+    let accepted = mgr.dynamic_ranges[0].accepted_attribution();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let managed = mgr.peers.get_mut(&peer).unwrap();
+    managed.is_dynamic = true;
+    managed.accepted_dynamic_range = Some(accepted);
+    managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    mgr.dynamic_peer_count = 1;
+    let open = Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)));
+    send_bgp_message(&mut primary, &open).await;
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    let _opened = residual_notification(&mut mgr, retired, false).await;
+    let mut lifecycle = std::mem::replace(&mut mgr.session_lifecycle_rx, mpsc::channel(1).1);
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: rustbgpd_rib::PeerId::UNASSIGNED,
+        })
+        .is_ok()
+    {}
+    send_bgp_message(&mut primary, &Message::Keepalive).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(SessionLifecycleNotification::StateChanged {
+                session_id,
+                new: SessionState::Established,
+                ..
+            }) = lifecycle.recv().await
+                && session_id == retired
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the full mailbox holds an Established session's registration");
+    assert!(mgr.install_max_prefix_latch(
+        peer.clone(),
+        retired,
+        "test terminal latch".into(),
+        None
+    ));
+    mgr.peers[&peer]
+        .handle()
+        .administrative_reset_timeout(None, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let idle = residual_notification(&mut mgr, retired, true).await;
+    drop(primary);
+    assert_eq!(
+        mgr.peers[&peer].handle().rib_registration_owner(retired),
+        None
+    );
+    assert_eq!(rib_tx.capacity(), 0);
+
+    let (entered, at_retirement) = oneshot::channel();
+    let (release, resume) = oneshot::channel();
+    mgr.test_retirement_hold = Some((entered, resume));
+    let retiring = tokio::spawn(async move {
+        mgr.handle_session_notification(idle).await;
+        mgr
+    });
+    at_retirement.await.unwrap();
+    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
+    release.send(()).unwrap();
+    let mut mgr = retiring.await.unwrap();
+    let replacement = mgr.peers[&peer].session_id();
+    assert_ne!(replacement, retired);
+    assert!(!mgr.peers[&peer].enabled);
+    mgr.enable_peer(peer.clone()).await.unwrap();
+    let (mut client, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut BytesMut::new()).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut client, &open).await;
+    send_bgp_message(&mut client, &Message::Keepalive).await;
+    assert_eq!(
+        residual_peer_up(&mut rib_rx, replacement).await,
+        Some(retired),
+        "the respawn must use the final registration publication"
+    );
+}
+
+/// The full RIB mailbox holds `PeerUp` through the original session's fall to
+/// Idle. A handshake pauses the manager with its new actor installed, then
+/// lets that `PeerUp` enter the mailbox before the manager ends the old task.
+/// This verifies finality through the enabled peer's ordinary inbound path.
+#[tokio::test]
+async fn inbound_replacement_reads_registration_after_the_old_task_ends() {
+    let (mut mgr, rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut primary = accept_residual_connection(&mut mgr).await;
+    let retired = mgr.peers[&peer].session_id();
+    send_bgp_message(
+        &mut primary,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    let _opened = residual_notification(&mut mgr, retired, false).await;
+    let mut lifecycle = std::mem::replace(&mut mgr.session_lifecycle_rx, mpsc::channel(1).1);
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: rustbgpd_rib::PeerId::UNASSIGNED,
+        })
+        .is_ok()
+    {}
+    send_bgp_message(&mut primary, &Message::Keepalive).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(SessionLifecycleNotification::StateChanged {
+                session_id,
+                new: SessionState::Established,
+                ..
+            }) = lifecycle.recv().await
+                && session_id == retired
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the full mailbox holds an Established session's registration");
+    // Administrative reset is serviced while Established and RIB-parked,
+    // and leaves the manager enabled for a normal inbound replacement.
+    mgr.peers[&peer]
+        .handle()
+        .administrative_reset_timeout(None, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let _idle = residual_notification(&mut mgr, retired, true).await;
+    drop(primary);
+    assert_eq!(
+        mgr.peers[&peer].handle().rib_registration_owner(retired),
+        None
+    );
+    assert_eq!(rib_tx.capacity(), 0);
+
+    let (entered, at_retirement) = oneshot::channel();
+    let (release, resume) = oneshot::channel();
+    mgr.test_retirement_hold = Some((entered, resume));
+    let (server, mut client) = super::inbound_admission::localhost_inbound_stream().await;
+    let replacing = tokio::spawn(async move {
+        mgr.handle_inbound(server, sock(peer.address), None, None)
+            .await;
+        mgr
+    });
+    at_retirement.await.unwrap();
+    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
+    release.send(()).unwrap();
+    let mgr = replacing.await.unwrap();
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let replacement = mgr.peers[&peer].session_id();
+    assert_ne!(replacement, retired);
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut BytesMut::new()).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(
+        &mut client,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    send_bgp_message(&mut client, &Message::Keepalive).await;
+    assert_eq!(
+        residual_peer_up(&mut rib_rx, replacement).await,
+        Some(retired),
+        "the replacement must use the final registration publication"
+    );
 }

@@ -38,13 +38,13 @@ def witness(arm, clients=3, routes=10):
             "owned_groups": int(candidate), "owned_members": clients if candidate else 0,
             "owned_routes": clients * routes if candidate else 0,
             "private_routes": 0 if candidate else clients * (clients - 1) * routes,
-            "dirty": 0, "dirty_high_water": 0, "retained": clients * 64 if candidate else 0,
+            "dirty": 0, "dirty_high_water": 0, "owing": 0, "recovery_pending": 0, "retained": clients * 64 if candidate else 0,
             "peak": clients * 128 if candidate else 0, "peer_budget": Q.REPORTED_PEER_BUDGET,
             "daemon_budget": 256 * 1024 ** 2, "pending_resets": 0, "completion_receipts": 0,
             "marker_debt": 0, "retained_recovery": 0,
             "refresh_pending": 0, "eor_pending": 0, "protocol_obligations": 0,
             "peers": [[Q.COMMON.peer(index), 1 if candidate else None, False,
-                       64 if candidate else 0, 128 if candidate else 0, 0, False, False, False, False]
+                       64 if candidate else 0, 128 if candidate else 0, 0, False, False, False, False, False]
                       for index in range(clients)]}
 
 

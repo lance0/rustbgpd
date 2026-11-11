@@ -779,12 +779,13 @@ pub enum PeerCommand {
     },
     /// Shut the task down unless its session is Established, deciding in one
     /// actor turn so no KEEPALIVE can land between the check and the
-    /// shutdown. Replies `false` and keeps running when Established;
-    /// otherwise replies `true` and ends exactly as [`Self::Shutdown`] would
-    /// for a session that is not Established, so it can never establish.
+    /// shutdown. Replies `Ok(false)` and keeps running when Established;
+    /// otherwise replies `Ok(true)` and ends exactly as [`Self::Shutdown`]
+    /// would for a session that is not Established, so it can never establish.
+    /// While RIB admission is held, a retirement is refused before it happens.
     ShutdownUnlessEstablished {
-        /// Whether the task was shut down.
-        reply: oneshot::Sender<bool>,
+        /// Whether the task was shut down, or why retirement was refused.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
         /// Withdrawn by a caller whose wait ended: the command is then a
         /// no-op.
         ticket: CommandTicket,
@@ -793,8 +794,8 @@ pub enum PeerCommand {
     /// `OpenSent` or `OpenConfirm`: only an Idle, Connect or Active session,
     /// with no connection past TCP, is shut down.
     ShutdownUnlessConnected {
-        /// Whether the task was shut down.
-        reply: oneshot::Sender<bool>,
+        /// Whether the task was shut down, or why retirement was refused.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
         /// Withdrawn by a caller whose wait ended: the command is then a
         /// no-op.
         ticket: CommandTicket,
@@ -805,11 +806,12 @@ pub enum PeerCommand {
     /// one actor turn so no KEEPALIVE can land between the check and the
     /// dump. RFC 4271 §6.8: an Established connection wins a collision, so a
     /// primary that established while the manager resolved the collision is
-    /// kept. Replies `false` and keeps running when Established; otherwise
-    /// replies `true` and ends as [`Self::CollisionDump`] does.
+    /// kept. Replies `Ok(false)` and keeps running when Established; otherwise
+    /// replies `Ok(true)` and ends as [`Self::CollisionDump`] does. While RIB
+    /// admission is held, a dump is refused before it happens.
     CollisionDumpUnlessEstablished {
-        /// Whether the session was dumped.
-        reply: oneshot::Sender<bool>,
+        /// Whether the session was dumped, or why retirement was refused.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
         /// Withdrawn by a caller whose wait ended: the command is then a
         /// no-op.
         ticket: CommandTicket,
@@ -863,20 +865,6 @@ impl PeerCommand {
             Self::QueryImportPolicyTermHits { reply } => reply.is_closed(),
             _ => false,
         }
-    }
-
-    /// Session closes that must not wait for a full RIB channel to drain: a
-    /// parked session still sends their NOTIFICATION and closes TCP at once.
-    /// Their RIB-bound messages queue behind the held ones, in order.
-    pub(crate) fn runs_while_rib_parked(&self) -> bool {
-        matches!(
-            self,
-            Self::Shutdown
-                | Self::Stop { .. }
-                | Self::AdministrativeReset { .. }
-                | Self::PurgeReset
-                | Self::BfdDown
-        )
     }
 
     /// Wake shared-output consumers when their deferred snapshot is abandoned.
@@ -1400,10 +1388,52 @@ pub struct SessionEndRetention {
 pub(crate) struct EstablishedPublication {
     established: Arc<AtomicBool>,
     end_retention: Arc<Mutex<SessionEndRetention>>,
+    registration: RibRegistrationState,
+}
+
+/// A session's RIB registration publication, kept through its task's shutdown.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct RibRegistrationState(Arc<RibRegistrationPublication>);
+
+#[derive(Debug, Default)]
+struct RibRegistrationPublication {
     /// The RIB channel admitted a `PeerUp` from this session. Never cleared.
-    registered: Arc<AtomicBool>,
-    /// The session this one was spawned to replace, as its `PeerUp` names it.
-    supersedes: Option<u64>,
+    registered: AtomicBool,
+    /// Zero means no predecessor. Updated before starting or promoting a successor.
+    supersedes: AtomicU64,
+}
+
+impl RibRegistrationState {
+    fn new(supersedes: Option<u64>) -> Self {
+        Self(Arc::new(RibRegistrationPublication {
+            registered: AtomicBool::new(false),
+            supersedes: AtomicU64::new(supersedes.unwrap_or(0)),
+        }))
+    }
+
+    fn supersedes(&self) -> Option<u64> {
+        std::num::NonZeroU64::new(self.0.supersedes.load(Ordering::Acquire))
+            .map(std::num::NonZeroU64::get)
+    }
+
+    /// The registered session, or the predecessor it still represents.
+    /// Read after joining the old actor for its final publication.
+    #[must_use]
+    pub fn owner(&self, session_id: u64) -> Option<u64> {
+        if self.0.registered.load(Ordering::Acquire) {
+            Some(session_id)
+        } else {
+            self.supersedes()
+        }
+    }
+
+    fn inherit(&self, previous: &Self, previous_session_id: u64) {
+        self.0.supersedes.store(
+            previous.owner(previous_session_id).unwrap_or(0),
+            Ordering::Release,
+        );
+    }
 }
 
 impl EstablishedPublication {
@@ -1419,11 +1449,7 @@ impl EstablishedPublication {
     }
 
     fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
-        if self.registered.load(Ordering::Acquire) {
-            Some(session_id)
-        } else {
-            self.supersedes
-        }
+        self.registration.owner(session_id)
     }
 
     fn set_end_retention(&self, retention: SessionEndRetention) {
@@ -1439,6 +1465,17 @@ impl EstablishedPublication {
 pub(crate) struct EstablishedPublisher(EstablishedPublication);
 
 impl EstablishedPublisher {
+    pub(crate) fn new(supersedes: Option<u64>) -> Self {
+        Self(EstablishedPublication {
+            registration: RibRegistrationState::new(supersedes),
+            ..EstablishedPublication::default()
+        })
+    }
+
+    pub(crate) fn supersedes(&self) -> Option<u64> {
+        self.0.registration.supersedes()
+    }
+
     pub(crate) fn publish(&self, established: bool) {
         self.0.established.store(established, Ordering::Release);
     }
@@ -1448,7 +1485,11 @@ impl EstablishedPublisher {
     }
 
     pub(crate) fn publish_registered(&self) {
-        self.0.registered.store(true, Ordering::Release);
+        self.0
+            .registration
+            .0
+            .registered
+            .store(true, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -1458,7 +1499,7 @@ impl EstablishedPublisher {
 
     #[cfg(test)]
     pub(crate) fn registered(&self) -> bool {
-        self.0.registered.load(Ordering::Acquire)
+        self.0.registration.0.registered.load(Ordering::Acquire)
     }
 
     /// What a replacement of this session (`session_id`) would name.
@@ -1820,7 +1861,7 @@ impl PeerHandle {
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
         let established = EstablishedPublication {
-            supersedes: config.supersedes_session,
+            registration: RibRegistrationState::new(config.supersedes_session),
             ..EstablishedPublication::default()
         };
         let publisher = EstablishedPublisher(established.clone());
@@ -2005,7 +2046,7 @@ impl PeerHandle {
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
         let established = EstablishedPublication {
-            supersedes: config.supersedes_session,
+            registration: RibRegistrationState::new(config.supersedes_session),
             ..EstablishedPublication::default()
         };
         let publisher = EstablishedPublisher(established.clone());
@@ -2059,6 +2100,26 @@ impl PeerHandle {
     #[doc(hidden)]
     pub fn inherit_retained_connection(&self, previous: &RetainedConnectionState) {
         self.gr_retained_connection.inherit(previous);
+    }
+
+    /// Keep the registration publication readable after joining this actor.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rib_registration_state(&self) -> RibRegistrationState {
+        self.established.registration.clone()
+    }
+
+    /// Name the final RIB owner of an actor already joined by the manager.
+    /// Install before starting this actor or activating a promoted candidate.
+    #[doc(hidden)]
+    pub fn inherit_rib_registration(
+        &self,
+        previous: &RibRegistrationState,
+        previous_session_id: u64,
+    ) {
+        self.established
+            .registration
+            .inherit(previous, previous_session_id);
     }
 
     /// Send a Start command to begin the BGP handshake.
@@ -2349,6 +2410,8 @@ impl PeerHandle {
     /// timeout means the session never acted and never will: the command is
     /// withdrawn ([`CommandTicket`]), and the session keeps running in its
     /// current state, which the caller must re-check.
+    /// Held RIB admission returns [`PeerCommandError::CommandFailed`] before
+    /// retirement, leaving the live session owned by this handle.
     ///
     /// # Errors
     ///
@@ -2392,7 +2455,10 @@ impl PeerHandle {
     /// its reply is awaited.
     async fn conditional_shutdown(
         &self,
-        command: impl FnOnce(oneshot::Sender<bool>, CommandTicket) -> PeerCommand,
+        command: impl FnOnce(
+            oneshot::Sender<Result<bool, PeerCommandError>>,
+            CommandTicket,
+        ) -> PeerCommand,
         operation: &'static str,
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
@@ -2448,7 +2514,10 @@ impl PeerHandle {
 
     async fn conditional_shutdown_until(
         commands: mpsc::Sender<PeerCommand>,
-        command: impl FnOnce(oneshot::Sender<bool>, CommandTicket) -> PeerCommand,
+        command: impl FnOnce(
+            oneshot::Sender<Result<bool, PeerCommandError>>,
+            CommandTicket,
+        ) -> PeerCommand,
         operation: &'static str,
         deadline_at: tokio::time::Instant,
         deadline: Duration,
@@ -2469,7 +2538,7 @@ impl PeerHandle {
                 .map_err(|_| PeerCommandError::SessionExited)?;
             (&mut shut_down)
                 .await
-                .map_err(|_| PeerCommandError::ReplyDropped)
+                .map_err(|_| PeerCommandError::ReplyDropped)?
         })
         .await;
         match outcome {
@@ -2479,7 +2548,9 @@ impl PeerHandle {
                 deadline,
             }),
             // The session claimed it first and replies in the same turn.
-            Err(_elapsed) => shut_down.await.map_err(|_| PeerCommandError::ReplyDropped),
+            Err(_elapsed) => shut_down
+                .await
+                .map_err(|_| PeerCommandError::ReplyDropped)?,
         }
     }
 
@@ -3232,9 +3303,9 @@ impl PeerHandle {
 
     /// The last session that can own the neighbor's RIB registration, for
     /// a replacement of this session (`session_id`) to name as superseded:
-    /// this session once the RIB admitted its `PeerUp`, otherwise the one
-    /// it was itself spawned to replace. A replacement that never
-    /// registered therefore does not hide the session before it.
+    /// this session once the RIB admitted its `PeerUp`, otherwise the
+    /// predecessor inherited on replacement or promotion. A replacement
+    /// that never registered does not hide the session before it.
     #[must_use]
     pub fn rib_registration_owner(&self, session_id: u64) -> Option<u64> {
         self.established.rib_registration_owner(session_id)
@@ -3258,17 +3329,17 @@ mod tests {
 
     #[tokio::test]
     async fn abort_reads_the_final_rib_owner_after_publication_settles() {
-        struct PublishOnCancel(Arc<AtomicBool>);
+        struct PublishOnCancel(RibRegistrationState);
         impl Drop for PublishOnCancel {
             fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
+                self.0.0.registered.store(true, Ordering::Release);
             }
         }
         let publication = EstablishedPublication {
-            supersedes: Some(41),
+            registration: RibRegistrationState::new(Some(41)),
             ..EstablishedPublication::default()
         };
-        let registered = publication.registered.clone();
+        let registered = publication.registration.clone();
         let (entered, ready) = oneshot::channel();
         let (commands, receiver) = mpsc::channel(1);
         let task = tokio::spawn(async move {
@@ -3294,7 +3365,7 @@ mod tests {
             std::future::pending::<Result<(), TransportError>>().await
         });
         let mut handle = PeerHandle::from_parts(commands, task);
-        handle.established.supersedes = Some(41);
+        handle.established.registration = RibRegistrationState::new(Some(41));
         assert_eq!(handle.abort_and_rib_registration_owner(42).await, Some(41));
     }
 
@@ -4249,7 +4320,7 @@ mod tests {
             };
             assert!(ticket.claim(), "the session claims it first");
             tokio::time::sleep(deadline * 2).await;
-            let _ = reply.send(true);
+            let _ = reply.send(Ok(true));
         });
         let result = handle.shutdown_unless_established_timeout(deadline).await;
         assert!(matches!(result, Ok(true)), "{result:?}");

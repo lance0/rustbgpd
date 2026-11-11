@@ -268,7 +268,7 @@ async fn unnumbered_round_does_not_renew_the_budget_after_the_state_reply() {
         retirement_permission.await.unwrap();
         let acted = ticket.claim();
         if acted {
-            let _ = reply.send(true);
+            let _ = reply.send(Ok(true));
         }
         retirement_finished.send(acted).unwrap();
         while let Some(command) = rx.recv().await {
@@ -342,7 +342,7 @@ async fn unnumbered_withdrawn_retirement_does_not_end_a_returning_binding() {
                     let claimed = ticket.claim();
                     checked.take().unwrap().send(claimed).unwrap();
                     if claimed {
-                        let _ = reply.send(true);
+                        let _ = reply.send(Ok(true));
                         break;
                     }
                 }
@@ -420,7 +420,7 @@ async fn admitted_retention_reply_does_not_hold_healthy_or_conditional_ports() {
         released.await.unwrap();
         let claimed = ticket.claim();
         if claimed {
-            let _ = reply.send(true);
+            let _ = reply.send(Ok(true));
         }
         acted.send(claimed).unwrap();
         while let Some(command) = receiver.recv().await {

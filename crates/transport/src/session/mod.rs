@@ -2428,6 +2428,7 @@ impl PeerSession {
         let connection = read_half
             .as_ref()
             .and_then(|read_half| ConnectionStamp::of(read_half, &config.link_state));
+        let established = crate::handle::EstablishedPublisher::new(config.supersedes_session);
         Self {
             config,
             fsm,
@@ -2552,7 +2553,7 @@ impl PeerSession {
             suppress_gr_retention: false,
             connection,
             gr_retained_connection: crate::handle::RetainedConnectionState::default(),
-            established: crate::handle::EstablishedPublisher::default(),
+            established,
             link_check_due: false,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
@@ -3000,16 +3001,6 @@ impl PeerSession {
         self.run_loop().await
     }
 
-    /// A terminal close runs while RIB-bound messages are held. An
-    /// administrative reset also restarts the session, so it runs then only
-    /// when it closes an Established one: repeated resets would otherwise
-    /// append a `PeerDown` each while the RIB stays full.
-    fn closes_while_rib_parked(&self, command: &PeerCommand) -> bool {
-        command.runs_while_rib_parked()
-            && (!matches!(command, PeerCommand::AdministrativeReset { .. })
-                || self.fsm.state() == SessionState::Established)
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "the run loop keeps every select! arm and its state wiring in one place"
@@ -3017,20 +3008,17 @@ impl PeerSession {
     async fn run_loop(&mut self) -> Result<(), TransportError> {
         loop {
             self.run_due_link_check().await;
-            // A deferred command waits behind held RIB-bound messages like
-            // the peer input it may follow, unless it is a close that must
-            // not wait. It is the oldest command, so FIFO order holds.
-            if (self.rib_backlog.is_empty()
-                || self
-                    .deferred_command
-                    .as_ref()
-                    .is_some_and(|command| self.closes_while_rib_parked(command)))
-                && let Some(command) = self.deferred_command.take()
-                && self.handle_command(command).await == ControlFlow::Break(())
-            {
-                self.join_closed_writer().await;
-                self.flush_rib_backlog().await;
-                return Ok(());
+            // Owned output/replay work finished before returning here. The
+            // oldest command now runs or refuses without hiding its successors.
+            if let Some(command) = self.deferred_command.take() {
+                if self.handle_command(command).await == ControlFlow::Break(()) {
+                    self.join_closed_writer().await;
+                    self.flush_rib_backlog().await;
+                    return Ok(());
+                }
+                // This command may itself have retained the next command
+                // during an owned wait. Run that command before its successors.
+                continue;
             }
             // Gate the TCP read arm closed while the FSM is still in `Idle`.
             // An inbound session is constructed with `read_half` already set
@@ -3073,7 +3061,6 @@ impl PeerSession {
                 && !replay_waiting
                 && self.pending_outbound.is_none();
             let revalidating = self.revalidation_pending() && !rib_parked;
-            let receive_command = self.deferred_command.is_none();
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -3109,9 +3096,9 @@ impl PeerSession {
                     self.handle_tcp_read_result(result).await;
                 }
 
-                // External command. A deferred one keeps its successors
-                // queued behind it.
-                cmd = commands.recv(), if receive_command => {
+                // Parked mutations refuse explicitly; reads and closes keep
+                // running while RIB-bound messages retain their FIFO order.
+                cmd = commands.recv() => {
                     let Some(cmd) = cmd else {
                         // All senders dropped — shut down. A close already
                         // under way (for example after a stop) still gets
@@ -3123,11 +3110,7 @@ impl PeerSession {
                         self.flush_rib_backlog().await;
                         return Ok(());
                     };
-                    if rib_parked && !self.closes_while_rib_parked(&cmd) {
-                        // Answer snapshots; defer the rest until the held
-                        // messages are delivered, as before the park.
-                        self.handle_read_during_wait(cmd);
-                    } else if self.handle_command(cmd).await == ControlFlow::Break(()) {
+                    if self.handle_command(cmd).await == ControlFlow::Break(()) {
                         self.join_closed_writer().await;
                         self.flush_rib_backlog().await;
                         return Ok(());

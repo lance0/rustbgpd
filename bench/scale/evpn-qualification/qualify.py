@@ -38,8 +38,8 @@ CAUSES = ("peer_limit", "daemon_limit", "allocation_failure", "capture_unavailab
 SHAPES = ((75, 500), (150, 250), (100, 1000), (200, 500))
 SCHEDULE = ("candidate", "private") * 3
 MAX_SLOPE_BYTES = 10
-RECOVERY_BARS = {"clients": 150, "routes_per_client": 250, "dirty_members": 150,
-                 "dirty_witness": "high-water", "sample_hz": 20,
+RECOVERY_BARS = {"clients": 150, "routes_per_client": 250, "recovery_members": 150,
+                 "recovery_witness": "simultaneous-dirty-or-owing", "sample_hz": 20,
                  "readiness_seconds": .2, "convergence_seconds": 60,
                  "candidate_median_ratio": 1.03, "max_budget_fraction": .8,
                  "max_churn_rounds": 32, "overlap_source_spacing_ms": 50}
@@ -395,12 +395,12 @@ def validate_provenance(row, clients):
     expected_peers = {COMMON.peer(index) for index in range(clients)}
     seen = set()
     for peer in row["peers"]:
-        require(type(peer) is list and len(peer) == 10, "invalid provenance peer shape")
+        require(type(peer) is list and len(peer) == 11, "invalid provenance peer shape")
         require(type(peer[0]) is str and peer[0] in expected_peers and peer[0] not in seen,
                 "unknown or duplicate provenance peer")
         seen.add(peer[0])
         require(peer[1] is None or (type(peer[1]) is int and peer[1] >= 0), "invalid provenance group")
-        require(all(type(peer[index]) is bool for index in (2, 6, 7, 8, 9))
+        require(all(type(peer[index]) is bool for index in (2, 6, 7, 8, 9, 10))
                 and all(type(peer[index]) is int and peer[index] >= 0 for index in (3, 4, 5))
                 and peer[3] <= peer[4] <= row["peer_budget"], "invalid peer provenance charge")
 
@@ -414,18 +414,19 @@ def accept_provenance_headroom(row):
 
 OBSERVER_COUNTS = ("owned_groups", "owned_members", "owned_routes", "private_routes", "dirty",
                    "pending_resets", "completion_receipts", "marker_debt", "retained_recovery",
-                   "refresh_pending", "eor_pending", "protocol_obligations")
+                   "refresh_pending", "eor_pending", "protocol_obligations", "owing", "recovery_pending")
 
 
 def ownership(row, arm, clients, routes):
     validate_provenance(row, clients)
     require(all(type(row[name]) is int and row[name] >= 0 for name in OBSERVER_COUNTS), "invalid ownership count")
-    require(row["members"] == clients and row["dirty"] == row["pending_resets"] == row["marker_debt"] == row["retained_recovery"] == 0,
+    require(row["members"] == clients and row["dirty"] == row["owing"] == row["recovery_pending"]
+            == row["pending_resets"] == row["marker_debt"] == row["retained_recovery"] == 0,
             "ownership witness is incomplete or unsettled")
     require(row["refresh_pending"] == row["eor_pending"] == row["protocol_obligations"] == 0,
             "ownership witness retains a refresh/EoR obligation")
     for peer in row["peers"]:
-        require(all(peer[index] is False for index in (2, 6, 7, 8, 9)) and peer[5] == 0,
+        require(all(peer[index] is False for index in (2, 6, 7, 8, 9, 10)) and peer[5] == 0,
                 "unsettled peer provenance")
     if arm == "candidate":
         require(row["owned_members"] == clients and row["owned_groups"] == 1

@@ -19,15 +19,19 @@
                 .swap(dirty, std::sync::atomic::Ordering::Relaxed)
                 .max(dirty);
             let (mut refresh_pending, mut eor_pending, mut protocol_obligations) = (0, 0, 0);
+            let (mut owing, mut recovery_pending) = (0, 0);
             let peers = receipt.peers.iter().map(|peer| {
                 let refresh = self.pending_refresh.get(&peer.peer)
                     .is_some_and(|families| families.contains(&(Afi::L2Vpn, Safi::Evpn)));
                 let eor = self.eor.owes(peer.peer, (Afi::L2Vpn, Safi::Evpn));
+                let owes = self.owes(peer.peer, (Afi::L2Vpn, Safi::Evpn));
+                owing += usize::from(owes);
+                recovery_pending += usize::from(peer.dirty || owes);
                 refresh_pending += usize::from(refresh);
                 eor_pending += usize::from(eor);
                 protocol_obligations += usize::from(refresh || eor || peer.owed_markers != 0);
                 format!(
-                    "[\"{}\",{},{},{},{},{},{},{},{},{}]",
+                    "[\"{}\",{},{},{},{},{},{},{},{},{},{}]",
                     peer.peer,
                     peer.owned_group.map_or_else(|| "null".to_string(), |id| id.to_string()),
                     peer.dirty,
@@ -38,10 +42,11 @@
                     peer.retained_recovery,
                     refresh,
                     eor,
+                    owes,
                 )
             }).collect::<Vec<_>>().join(",");
             eprintln!(
-                "evpn_qualification {{\"live_provenance_slots\":{},\"provenance_slot_capacity\":{},\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
+                "evpn_qualification {{\"live_provenance_slots\":{},\"provenance_slot_capacity\":{},\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"owing\":{},\"recovery_pending\":{},\"peers\":[{}]}}",
                 receipt.live_provenance_slots,
                 receipt.provenance_slot_capacity,
                 elapsed_us,
@@ -65,6 +70,8 @@
                 refresh_pending,
                 eor_pending,
                 protocol_obligations,
+                owing,
+                recovery_pending,
                 peers,
             );
         }

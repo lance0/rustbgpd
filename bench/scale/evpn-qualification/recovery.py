@@ -22,7 +22,7 @@ import wire
 
 SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers moving; "
          "initial/clean-regroup per-key wire order, quiescent-refresh coverage before EoR, "
-         "recovery final bytes, strict withdrawals and common refresh/EoR obligation overlap; "
+         "simultaneous per-peer dirty/owed recovery, recovery final bytes, strict withdrawals and common refresh/EoR obligation overlap; "
          "not terminal-only complete-feed marker debt, repeated-producer cost, full-fleet/new-group "
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
@@ -89,7 +89,9 @@ def roster(row, arm, clients):
               and row["retained_recovery"] == sum(p[7] for p in row["peers"])
               and row["refresh_pending"] == sum(p[8] for p in row["peers"])
               and row["eor_pending"] == sum(p[9] for p in row["peers"])
-              and row["protocol_obligations"] == sum(p[5] != 0 or p[8] or p[9] for p in row["peers"]),
+              and row["protocol_obligations"] == sum(p[5] != 0 or p[8] or p[9] for p in row["peers"])
+              and row["owing"] == sum(p[10] for p in row["peers"])
+              and row["recovery_pending"] == sum(p[2] or p[10] for p in row["peers"]),
               "aggregate observer differs from peer witnesses")
     high_water = row.get("dirty_high_water")
     Q.require(type(high_water) is int and row["dirty"] <= high_water <= row["members"],
@@ -109,7 +111,7 @@ def roster(row, arm, clients):
 
 
 def settled(row):
-    return all(row[key] == 0 for key in ("dirty", "marker_debt", "pending_resets", "retained_recovery",
+    return all(row[key] == 0 for key in ("dirty", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery",
                                         "completion_receipts", "refresh_pending", "eor_pending", "protocol_obligations"))
 
 
@@ -200,12 +202,20 @@ def check_reload_receipts(leg, row, events, seconds):
               "unknown reload control generation")
 
 
-def dirty_pair(observed, clients, paused_wall_us, resumed_wall_us):
-    """The first row whose high-water mark shows every member dirty at once,
-    with its one-slot window (from the previous row) wholly inside the paused
-    interval: the observer cannot miss a peak between its 20 Hz rows."""
+def recovery_pair(observed, clients, paused_wall_us, resumed_wall_us, arm):
+    """Every receiver has pending EVPN recovery in one actual actor snapshot.
+
+    The candidate owns its groups and must show every receiver dirty. Only the
+    private control, whose distribution owes keys without a dirty flag, may
+    count a receiver that is owing instead.
+    Keep the adjacent 20 Hz window inside the pause; a high-water mark or a
+    union of peers from separate rows cannot establish this witness.
+    """
+    expected = {Q.COMMON.peer(index) for index in range(clients)}
     return next(((left, right) for left, right in zip(observed, observed[1:])
-                 if right["dirty_high_water"] == clients
+                 if right["recovery_pending"] == clients
+                 and len(right["peers"]) == clients
+                 and {peer[0] for peer in right["peers"] if peer[2] or (arm == "private" and peer[10])} == expected
                  and paused_wall_us <= left["wall_us"] and right["wall_us"] <= resumed_wall_us
                  and left["sample_slot"] == left["elapsed_us"] // SAMPLE_PERIOD_US
                  and right["sample_slot"] == right["elapsed_us"] // SAMPLE_PERIOD_US
@@ -273,6 +283,7 @@ def protocol_overlap(record, events, controls):
     write = writes[0]
     before, during, after = [record[key] for key in
                             ("protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn")]
+    Q.accept(before["recovery_pending"] > 0, "recovery work absent before overlap")
     Q.accept(all(row["protocol_obligations"] > 0 for row in (before, during, after)), "refresh/EoR obligation absent")
     Q.require(before["elapsed_us"] < during["elapsed_us"] < after["elapsed_us"]
               and starts[-1]["wall_us"] <= write["write_started_us"] <= write["writers_drained_us"] <= ends[-1]["wall_us"]
@@ -604,25 +615,25 @@ def run_cell(output, manifest, arm, index, correctness):
             controller.witness(settled)
             controller.command("pause")
             paused = controller.last_command_complete["wall_us"]
-            dirty = None
+            recovery = None
             for _ in range(bars["max_churn_rounds"]):
                 start = len(controller.observations)
                 controller.command("churn")
-                if dirty is not None:
+                if recovery is not None:
                     continue
                 # The socket read acknowledgement alone is never the witness.
                 try:
-                    controller.witness(lambda row: row["dirty_high_water"] == clients, timeout=2, after=start)
-                    dirty = dirty_pair(controller.observations[max(start - 1, 0):], clients, paused, float("inf"))
-                    if dirty is None:
-                        raise MissingWitness("high-water window not inside the paused interval")
+                    controller.witness(lambda row: row["recovery_pending"] == clients, timeout=2, after=start)
+                    recovery = recovery_pair(controller.observations[max(start - 1, 0):], clients, paused, float("inf"), arm)
+                    if recovery is None:
+                        raise MissingWitness("recovery snapshot window not inside the paused interval")
                 except MissingWitness:
                     continue
-            Q.accept(dirty is not None, "simultaneous all-peer mass-dirty witness missing")
-            record["mass_dirty_previous"], record["mass_dirty"] = dirty
+            Q.accept(recovery is not None, "simultaneous all-peer recovery snapshot missing")
+            record["mass_recovery_previous"], record["mass_recovery"] = recovery
             controller.source_barrier()
             controller.command("refresh")
-            debt = controller.witness(lambda row: row["protocol_obligations"] > 0 and row["dirty"] > 0)
+            debt = controller.witness(lambda row: row["protocol_obligations"] > 0 and row["recovery_pending"] > 0)
             start = len(controller.observations)
             writes = controller.command("churn-overlap")
             during = [row for row in controller.observations[start:] if row["protocol_obligations"] > 0
@@ -663,6 +674,27 @@ def run_cell(output, manifest, arm, index, correctness):
         Q.cleanup_cell(record, leg, fixture, driver, daemon, controller)
 
 
+def median_report(rows):
+    """Timed campaigns: the 60 s bound and the regroup median ratio gate.
+
+    The recovery-phase ratio is report-only. The private arm owes keys and
+    drains on the 10 ms backlog cadence; the candidate is dirty and waits for
+    the 1 s resync tick, so their medians are not a like-for-like comparison.
+    """
+    ratio, report = Q.RECOVERY_BARS["candidate_median_ratio"], {}
+    for phase in ("regroup-a-seconds", "regroup-b-seconds", "recovery-seconds"):
+        samples = {arm: [row[phase] for row in rows if row["arm"] == arm] for arm in ("candidate", "private")}
+        Q.accept(all(0 <= value <= 60 for values in samples.values() for value in values), "convergence bar failed")
+        medians = {arm: statistics.median(values) for arm, values in samples.items()}
+        gated = phase != "recovery-seconds"
+        report[phase] = {**medians, "ratio": medians["candidate"] / medians["private"] if medians["private"] else None,
+                         "within_ratio": medians["candidate"] <= medians["private"] * ratio, "gated": gated}
+        print(f"{phase}: candidate {medians['candidate']:.6f} s, private {medians['private']:.6f} s, "
+              f"within x{ratio}: {report[phase]['within_ratio']} ({'gate' if gated else 'report-only'})")
+        Q.accept(report[phase]["within_ratio"] or not gated, f"candidate median regressed: {phase}")
+    return report
+
+
 def analyze(output):
     path = output / "recovery-summary.json"
     Q.write_json(path, {"status": "INVALID", "scope": SCOPE, "terminal_only_qualified": False,
@@ -701,7 +733,6 @@ def analyze_results(output):
         Q.require(row["driver_exit"] == 0, "driver did not finish successfully")
         Q.require((clients, row["routes"]) == ((3, 10_000) if correctness else (150, 250)),
                   "recovery cell shape differs from fixed campaign")
-        Q.require(row["wire"] == check_wire(leg, clients, row["routes"]), "wire receipt differs from raw captures")
         Q.require(row["executed_resets"] == Q.metrics((leg / "metrics.txt").read_text())["executed_resets"],
                   "reset receipt differs from raw metrics")
         cgroup = json.loads((leg / "cgroup.json").read_text())
@@ -711,7 +742,7 @@ def analyze_results(output):
                     (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_qualification ")]
         for observation in observed:
             roster(observation, row["arm"], clients)
-        for key in ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_dirty_previous", "mass_dirty",
+        for key in ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_recovery_previous", "mass_recovery",
                     "protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn", "settled"):
             Q.require(row[key] in observed and row[key]["members"] == clients,
                       f"{key} absent from raw observer or not a full roster")
@@ -721,15 +752,15 @@ def analyze_results(output):
         resumed = next((event["wall_us"] for event in events
                         if event["event"] == "command" and event.get("command") == "resume"), None)
         Q.require(type(paused) is int and type(resumed) is int and paused < resumed,
-                  "pause/resume events missing for the mass-dirty window")
-        Q.accept(dirty_pair([row["mass_dirty_previous"], row["mass_dirty"]], clients, paused, resumed) is not None
+                  "pause/resume events missing for the recovery window")
+        Q.accept(recovery_pair([row["mass_recovery_previous"], row["mass_recovery"]], clients, paused, resumed, row["arm"]) is not None
                  and row["protocol_obligation_before_churn"]["protocol_obligations"] > 0
                  and row["protocol_obligation_during_churn"]["protocol_obligations"] > 0
                  and row["protocol_obligation_after_churn"]["protocol_obligations"] > 0,
-                 "missing actual 20 Hz dirty pair or protocol overlap witness")
-        first = observed.index(row["mass_dirty_previous"])
-        Q.require(first + 1 < len(observed) and observed[first + 1] == row["mass_dirty"],
-                  "mass-dirty snapshots are not consecutive actual observations")
+                 "missing actual 20 Hz recovery snapshot or protocol overlap witness")
+        first = observed.index(row["mass_recovery_previous"])
+        Q.require(first + 1 < len(observed) and observed[first + 1] == row["mass_recovery"],
+                  "recovery snapshots are not consecutive actual observations")
         Q.accept(settled(row["settled"]), "proof duty did not settle")
         check_readiness(leg, correctness)
         controls = [json.loads(line.removeprefix("evpn_control ")) for line in
@@ -745,6 +776,7 @@ def analyze_results(output):
         resume = [event for event in events if event["event"] == "command" and event.get("command") == "resume"]
         Q.require(len(resume) == 1 and applied[-1]["at"] < resume[0]["at"],
                   "readers resumed before the final actor-applied input barrier")
+        Q.require(row["wire"] == check_wire(leg, clients, row["routes"]), "wire receipt differs from raw captures")
         for key, seconds in timings(events).items():
             Q.require(row[key] == (None if correctness else seconds), "timing receipt differs from raw events")
 
@@ -770,17 +802,16 @@ def analyze_results(output):
             for left, right in zip(candidate["wire"][phase], private["wire"][phase], strict=True):
                 Q.accept(left["state"] == right["state"] and left["ordered"] == right["ordered"],
                          f"paired wire parity differs: {phase}")
-    median_timings = {}
-    if not correctness:
-        for phase in ("regroup-a-seconds", "regroup-b-seconds", "recovery-seconds"):
-            samples = {arm: [row[phase] for row in rows if row["arm"] == arm] for arm in ("candidate", "private")}
-            Q.accept(all(0 <= value <= 60 for values in samples.values() for value in values), "convergence bar failed")
-            medians = {arm: statistics.median(values) for arm, values in samples.items()}
-            Q.accept(medians["candidate"] <= medians["private"] * 1.03, f"candidate median regressed: {phase}")
-            median_timings[phase] = medians
+    median_timings = {} if correctness else median_report(rows)
     summary = {"status": "PASS", "correctness_only": correctness, "scope": SCOPE,
                "production_activation_qualified": False, "terminal_only_qualified": False,
-               "cells": len(rows), "medians": median_timings}
+               "cells": len(rows), "medians": median_timings,
+               "recovery_witness": Q.RECOVERY_BARS["recovery_witness"],
+               "recovery": [{"cell": path.parent.name, "arm": row["arm"],
+                             "pending": row["mass_recovery"]["recovery_pending"],
+                             "dirty": [peer[0] for peer in row["mass_recovery"]["peers"] if peer[2]],
+                             "owing": [peer[0] for peer in row["mass_recovery"]["peers"] if peer[10]]}
+                            for path, row in zip(paths, rows, strict=True)]}
     Q.write_json(output / "recovery-summary.json", summary)
 
 

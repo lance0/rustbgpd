@@ -263,7 +263,11 @@ impl PeerSession {
         // order, but must not reopen or sweep this connection's windows. A
         // held `PeerUp` still registers the session when it is admitted.
         for (_, then) in &mut self.rib_backlog {
-            if !matches!(then, super::inbound::OnRibAdmission::Registered) {
+            if matches!(
+                then,
+                super::inbound::OnRibAdmission::BeginRefreshAccounting(..)
+                    | super::inbound::OnRibAdmission::EndRefreshAccounting(..)
+            ) {
                 *then = super::inbound::OnRibAdmission::Nothing;
             }
         }

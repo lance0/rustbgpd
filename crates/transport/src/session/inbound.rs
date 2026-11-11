@@ -1305,6 +1305,7 @@ impl PeerSession {
     fn on_rib_admission(&mut self, then: OnRibAdmission) {
         match then {
             OnRibAdmission::Nothing => {}
+            OnRibAdmission::Acknowledge(reply) => reply(),
             OnRibAdmission::Registered => self.established.publish_registered(),
             OnRibAdmission::BeginRefreshAccounting(afi, safi) => {
                 self.begin_refresh_accounting(afi, safi);
@@ -4275,9 +4276,11 @@ impl PeerSession {
 
 /// Transport-local state a held RIB-bound message changes once the RIB has
 /// admitted it, as it did right after the blocking send it replaces.
-#[derive(Clone, Copy)]
 pub(super) enum OnRibAdmission {
     Nothing,
+    /// A command whose caller acts on the RIB next: reply once the RIB has
+    /// admitted its message. Dropped unsent when the message is.
+    Acknowledge(Box<dyn FnOnce() + Send>),
     /// The session's `PeerUp`: the RIB now knows this session.
     Registered,
     /// A peer `BoRR`: open the local refresh window when the RIB opens its own.

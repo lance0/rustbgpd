@@ -929,7 +929,7 @@ fn unconditional_collision_dump(
     use rustbgpd_transport::PeerCommand;
     match command {
         PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
-            let _ = reply.send(true);
+            let _ = reply.send(Ok(true));
             PeerCommand::CollisionDump
         }
         other => other,
@@ -1192,7 +1192,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                     }
                     let dumped = state != SessionState::Established
                         && !counters.established_before_dump.load(Ordering::SeqCst);
-                    let _ = reply.send(dumped);
+                    let _ = reply.send(Ok(dumped));
                     if dumped {
                         counters.collision_dump.fetch_add(1, Ordering::SeqCst);
                         break;
@@ -1205,7 +1205,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                             | SessionState::OpenSent
                             | SessionState::OpenConfirm
                     );
-                    let _ = reply.send(shut_down);
+                    let _ = reply.send(Ok(shut_down));
                     if shut_down {
                         counters.shutdown.fetch_add(1, Ordering::SeqCst);
                         break;
@@ -1213,7 +1213,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                 }
                 PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     let shut_down = state != SessionState::Established;
-                    let _ = reply.send(shut_down);
+                    let _ = reply.send(Ok(shut_down));
                     if shut_down {
                         counters.shutdown.fetch_add(1, Ordering::SeqCst);
                         break;

@@ -2342,10 +2342,12 @@ async fn withheld_ipv6_unicast_is_staged_before_peer_up() {
     );
 }
 
-/// Hot-apply `local_ipv6_nexthop`, keeping every other runtime knob as is.
-async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) -> bool {
+fn local_ipv6_nexthop_update(
+    session: &PeerSession,
+    value: Option<Ipv6Addr>,
+) -> crate::handle::PeerRuntimeConfigUpdate {
     let config = &session.config;
-    let update = crate::handle::PeerRuntimeConfigUpdate {
+    crate::handle::PeerRuntimeConfigUpdate {
         max_prefixes: config.max_prefixes,
         max_prefixes_ipv4: config.max_prefixes_ipv4,
         max_prefixes_ipv6: config.max_prefixes_ipv6,
@@ -2358,7 +2360,12 @@ async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<I
         gr_peer_restart_time_max: config.gr_peer_restart_time_max,
         local_ipv6_nexthop: value,
         remove_private_as: config.remove_private_as,
-    };
+    }
+}
+
+/// Hot-apply `local_ipv6_nexthop`, keeping every other runtime knob as is.
+async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) -> bool {
+    let update = local_ipv6_nexthop_update(session, value);
     let (reply, done) = oneshot::channel();
     assert_eq!(
         session
@@ -2370,6 +2377,64 @@ async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<I
         ControlFlow::Continue(())
     );
     done.await.unwrap().unwrap()
+}
+
+/// A full RIB mailbox must not fail the unlock. The handler returns at once,
+/// so the run loop keeps reading commands, and the acknowledgement the peer
+/// manager's refresh waits for follows RIB admission.
+#[tokio::test]
+async fn ipv6_unlock_holds_for_a_full_mailbox_and_acks_on_admission() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let families = establish_v6_over_v4(&mut session, &mut rib_rx).await;
+    assert!(!families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    assert!(session.ipv6_unicast_withheld);
+    assert!(session.rib_backlog.is_empty());
+    let (rib_tx, mut blocked) = mpsc::channel(1);
+    rib_tx.try_send(placeholder_routes_received()).unwrap();
+    session.rib_tx = rib_tx;
+    let next_hop = "2001:db8::1".parse().unwrap();
+    let update = local_ipv6_nexthop_update(&session, Some(next_hop));
+    let (reply, mut response) = oneshot::channel();
+    let completion = {
+        let mut command =
+            std::pin::pin!(session.handle_command(PeerCommand::UpdateRuntimeConfig {
+                config: Box::new(update),
+                reply,
+            }));
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(command.as_mut(), cx))
+        })
+        .await
+    };
+    assert!(
+        matches!(
+            completion,
+            std::task::Poll::Ready(ControlFlow::Continue(()))
+        ),
+        "the handler must not wait on the mailbox"
+    );
+    assert!(
+        matches!(
+            response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "a full mailbox neither refuses nor acknowledges early"
+    );
+    assert_eq!(session.rib_backlog.len(), 1);
+
+    assert!(matches!(
+        blocked.recv().await.unwrap(),
+        RibUpdate::RoutesReceived { .. }
+    ));
+    session.flush_rib_backlog().await;
+    assert_eq!(response.await.unwrap(), Ok(true));
+    assert!(!session.ipv6_unicast_withheld);
+    assert_eq!(session.config.local_ipv6_nexthop, Some(next_hop));
+    assert_eq!(
+        drain_family_sendable(&mut blocked),
+        vec![((Afi::Ipv6, Safi::Unicast), None)],
+        "the unlock must be admitted before success is acknowledged"
+    );
 }
 
 /// The `PeerFamilySendable` `(family, add_path_send_limit)` pairs the
