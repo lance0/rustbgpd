@@ -239,3 +239,75 @@ fn prune_finds_live_unindexed_family_identities_by_key() {
         "each identity costs its own probe and one keyed lookup in the one table"
     );
 }
+
+/// Several peers rejecting the same routes share one liveness probe per
+/// distinct identity. The live routes have no Loc-RIB row, so each is found
+/// through the announcing-peers index.
+#[test]
+fn prune_probes_each_shared_identity_once() {
+    let source_addr = Ipv4Addr::new(198, 51, 100, 8);
+    let source = peer_v4(source_addr);
+    let key = |third| {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 8, third, 0), 24);
+        (prefix, ExactExportKey::Unicast(Prefix::V4(prefix), 0))
+    };
+    let mut manager = test_manager();
+    let mut rib = AdjRibIn::new(source);
+    for third in 0..3 {
+        rib.insert(make_route(key(third).0, source_addr));
+        manager.register_unicast_announcer(source, Prefix::V4(key(third).0));
+    }
+    manager.ribs.insert(source, rib);
+    let targets: Vec<_> = (1..=4)
+        .map(|host| peer_v4(Ipv4Addr::new(192, 0, 2, host)))
+        .collect();
+    for &target in &targets {
+        manager
+            .peer_unexportable
+            .insert(target, (0..4).map(|third| key(third).1).collect());
+    }
+
+    manager.prune_exact_export_rejections();
+
+    let live: HashSet<_> = (0..3).map(|third| key(third).1).collect();
+    for target in &targets {
+        assert_eq!(manager.peer_unexportable[target], live);
+    }
+    assert_eq!(
+        manager.test_exact_export_liveness_reads, 7,
+        "three live identities cost a probe and one announcer each, the dead one a probe"
+    );
+}
+
+/// A `FlowSpec` or RT-Constrain row stored under a non-zero path id misses
+/// the keyed lookup and is still found by the row walk.
+#[test]
+fn prune_finds_unindexed_family_rows_under_another_path_id() {
+    let source_addr = Ipv4Addr::new(198, 51, 100, 9);
+    let source = peer_v4(source_addr);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 9));
+    let mut flowspec = make_flowspec_route(source_addr);
+    flowspec.path_id = 7;
+    let mut rtc = make_rtc_rib_route(source_addr, 9, 100);
+    rtc.path_id = 7;
+    let (flowspec_key, rtc_key) = (flowspec.key(), rtc.key());
+    let rejected = HashSet::from([
+        ExactExportKey::FlowSpec(flowspec.selection_key()),
+        ExactExportKey::Rtc(rtc_key.clone()).nlri_identity(),
+    ]);
+    let mut rib = AdjRibIn::new(source);
+    rib.insert_flowspec(flowspec);
+    rib.insert_rtc(rtc);
+    let mut manager = test_manager();
+    manager.ribs.insert(source, rib);
+    manager.peer_unexportable.insert(target, rejected.clone());
+
+    manager.prune_exact_export_rejections();
+    assert_eq!(manager.peer_unexportable[&target], rejected);
+
+    let rib = manager.ribs.get_mut(&source).unwrap();
+    rib.withdraw_flowspec(&flowspec_key);
+    rib.withdraw_rtc(&rtc_key);
+    manager.prune_exact_export_rejections();
+    assert!(!manager.peer_unexportable.contains_key(&target));
+}

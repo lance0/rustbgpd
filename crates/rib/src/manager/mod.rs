@@ -5929,21 +5929,53 @@ impl RibManager {
     /// Remove sparse rejection-overlay keys whose NLRI identity no longer
     /// exists in any Adj-RIB-In or as a frozen Loc-RIB row. Lifecycle sweeps
     /// (End-of-RIB, peer down, GR, LLGR and refresh-window expiry) remove
-    /// routes in bulk and then call this; it probes each rejected identity
-    /// like a targeted withdrawal, so its cost follows the overlay, not the
-    /// table.
+    /// routes in bulk and then call this. One pass over the overlay computes
+    /// each entry's identity once and probes each distinct identity once, so
+    /// peers rejecting the same routes share the probes and the cost follows
+    /// the overlay, not the table.
     fn prune_exact_export_rejections(&mut self) {
         #[cfg(test)]
         {
             self.test_exact_export_full_prune_calls += 1;
         }
-        let rejected = self
-            .peer_unexportable
-            .values()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        self.retire_exact_export_rejections(rejected);
+        if self.peer_unexportable.is_empty() {
+            return;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || {
+            replacement_readiness_checkpoint_at(&readiness, "exact_rejection_retirement", false);
+        };
+        #[cfg(test)]
+        let reads = std::cell::Cell::new(0_u64);
+        // The liveness probe reads the route tables only, so the overlay can
+        // leave the manager for the pass.
+        let mut overlay = std::mem::take(&mut self.peer_unexportable);
+        let mut live = HashMap::new();
+        overlay.retain(|_, rejected| {
+            checkpoint();
+            rejected.retain(|key| {
+                checkpoint();
+                match live.entry(key.nlri_identity()) {
+                    std::collections::hash_map::Entry::Occupied(probed) => *probed.get(),
+                    std::collections::hash_map::Entry::Vacant(unprobed) => {
+                        #[cfg(test)]
+                        reads.set(reads.get() + 1);
+                        let is_live = self.exact_export_nlri_is_live(unprobed.key(), &mut || {
+                            #[cfg(test)]
+                            reads.set(reads.get() + 1);
+                            checkpoint();
+                        });
+                        *unprobed.insert(is_live)
+                    }
+                }
+            });
+            !rejected.is_empty()
+        });
+        self.peer_unexportable = overlay;
+        #[cfg(test)]
+        {
+            self.test_exact_export_liveness_reads += reads.get();
+        }
     }
 
     fn exact_export_nlri_is_live(

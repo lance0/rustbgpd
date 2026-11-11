@@ -3604,7 +3604,7 @@ fn lifecycle_rejection_prune_reads_follow_the_overlay_not_the_table() {
 #[test]
 fn lifecycle_sweeps_prune_dead_rejections_and_keep_live_ones() {
     type Event = fn(&mut RibManager, PeerId);
-    let events: [(&str, Event); 5] = [
+    let events: [(&str, Event); 6] = [
         ("end-of-rib", |manager, peer| {
             overlay_end_of_rib(manager, peer, 7);
         }),
@@ -3617,6 +3617,9 @@ fn lifecycle_sweeps_prune_dead_rejections_and_keep_live_ones() {
         ("gr expiry", RibManager::sweep_gr_stale),
         ("llgr expiry", |manager, _| {
             manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
+        }),
+        ("llgr family expiry", |manager, peer| {
+            manager.sweep_llgr_stale(peer, &[]);
         }),
         ("refresh window expiry", |manager, _| {
             manager.expire_refresh_windows(tokio::time::Instant::now());
