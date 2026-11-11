@@ -4586,8 +4586,16 @@ async fn dynamic_idle_retirement_reads_registration_after_the_old_task_ends() {
         mgr
     });
     at_retirement.await.unwrap();
-    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
+    // The round now owns the session's shutdown, which waits on the full
+    // mailbox. Its `PeerUp` is admitted only here, while the task is ending:
+    // a registration read at any point before the join misses it.
     release.send(()).unwrap();
+    super::session_wait_rounds::poll_round_tasks().await;
+    assert!(
+        !retiring.is_finished(),
+        "the round is joining the session behind the full mailbox"
+    );
+    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
     let mut mgr = retiring.await.unwrap();
     let replacement = mgr.peers[&peer].session_id();
     assert_ne!(replacement, retired);
