@@ -1822,22 +1822,21 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateExportPolicy { policy, reply } => {
-                // Queue the accepting session's replay state before acknowledging
-                // the command. The peer manager still owns the outbound commit.
-                let Ok(permit) = self.rib_tx.clone().try_reserve_owned() else {
-                    let _ = reply.send(Err(PeerCommandError::CommandFailed(
-                        "RIB admission unavailable while updating export policy".to_string(),
-                    )));
-                    return ControlFlow::Continue(());
-                };
-                let policy = policy.map(|policy| *policy);
-                self.export_policy = policy;
-                permit.send(RibUpdate::SetPeerSessionExportPolicy {
-                    peer: self.rib_peer(),
-                    session_id: self.session_identity.id,
-                    export_policy: self.export_policy.clone(),
-                });
-                let _ = reply.send(Ok(()));
+                // The reply follows RIB admission of the accepting session's
+                // replay state; the peer manager still owns the outbound
+                // commit. A full mailbox holds the message like peer input,
+                // so the run loop keeps reading commands meanwhile.
+                self.export_policy = policy.map(|policy| *policy);
+                let _ = self.send_to_rib_then(
+                    RibUpdate::SetPeerSessionExportPolicy {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        export_policy: self.export_policy.clone(),
+                    },
+                    super::inbound::OnRibAdmission::Acknowledge(Box::new(move || {
+                        let _ = reply.send(Ok(()));
+                    })),
+                );
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateRuntimeConfig { config, reply } => {
@@ -1855,21 +1854,6 @@ impl PeerSession {
                     local_ipv6_nexthop,
                     remove_private_as,
                 } = *config;
-                let ipv6_unlock = self.negotiated.clone().filter(|neg| {
-                    self.ipv6_unicast_withheld
-                        && !self.withholds_ipv6_unicast_export(neg, local_ipv6_nexthop)
-                });
-                let unlock_permit = if ipv6_unlock.is_some() {
-                    let Ok(permit) = self.rib_tx.clone().try_reserve_owned() else {
-                        let _ = reply.send(Err(PeerCommandError::CommandFailed(
-                            "RIB admission unavailable while enabling IPv6 export".into(),
-                        )));
-                        return ControlFlow::Continue(());
-                    };
-                    Some(permit)
-                } else {
-                    None
-                };
                 // LAN-341 hot-apply: these knobs are read from
                 // `self.config` on every evaluation (see the command's
                 // doc) — no FSM event, no TCP impact. A lowered
@@ -1928,8 +1912,10 @@ impl PeerSession {
                 // configured, before the reply lets the peer manager's
                 // outbound refresh follow. The reverse change keeps the
                 // family; its routes are then refused one at a time.
-                let mut ipv6_unlock_only = false;
-                if let (Some(neg), Some(permit)) = (ipv6_unlock, unlock_permit) {
+                if let Some(neg) = self.negotiated.clone()
+                    && self.ipv6_unicast_withheld
+                    && !self.withholds_ipv6_unicast_export(&neg)
+                {
                     // Scoped IPv4 Extended Next Hop may already be exporting
                     // with the socket's link-local address. The new global
                     // IPv6 next hop changes that existing family too.
@@ -1948,20 +1934,30 @@ impl PeerSession {
                         family = "ipv6_unicast",
                         "local_ipv6_nexthop now provides an IPv6 next hop: exporting IPv6 unicast"
                     );
-                    permit.send(RibUpdate::PeerFamilySendable {
-                        peer: self.rib_peer(),
-                        session_id: self.session_identity.id,
-                        family,
-                        add_path_send_limit: neg
-                            .effective_add_path_send_limits
-                            .get(&family)
-                            .copied()
-                            .filter(|_| self.config.peer.add_path_send),
-                    });
-                    ipv6_unlock_only = !ipv4_next_hop_changes;
+                    // The reply follows RIB admission, so the peer manager's
+                    // refresh cannot overtake the unlock; a full mailbox
+                    // holds it while the run loop keeps reading commands.
+                    let ipv6_unlock_only = !ipv4_next_hop_changes;
+                    info!(peer = %self.peer_label, "hot-applied runtime config knobs");
+                    let _ = self.send_to_rib_then(
+                        RibUpdate::PeerFamilySendable {
+                            peer: self.rib_peer(),
+                            session_id: self.session_identity.id,
+                            family,
+                            add_path_send_limit: neg
+                                .effective_add_path_send_limits
+                                .get(&family)
+                                .copied()
+                                .filter(|_| self.config.peer.add_path_send),
+                        },
+                        super::inbound::OnRibAdmission::Acknowledge(Box::new(move || {
+                            let _ = reply.send(Ok(ipv6_unlock_only));
+                        })),
+                    );
+                } else {
+                    info!(peer = %self.peer_label, "hot-applied runtime config knobs");
+                    let _ = reply.send(Ok(false));
                 }
-                info!(peer = %self.peer_label, "hot-applied runtime config knobs");
-                let _ = reply.send(Ok(ipv6_unlock_only));
                 // ADR-0108: a per-family limit lowered below the family's
                 // current unique-prefix count enforces immediately, not on
                 // the next UPDATE — a quiet peer must not keep a table that
