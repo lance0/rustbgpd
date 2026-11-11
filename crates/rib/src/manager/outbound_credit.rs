@@ -187,6 +187,19 @@ impl RibManager {
         true
     }
 
+    /// The refusal [`Self::begin_outbound_operation`] gives a one-envelope
+    /// operation of `peer` whose channel has no room, counted as the
+    /// refused send is. `false`, with nothing counted, while the channel
+    /// has room, is gone, or carries a live operation (a different refusal).
+    pub(super) fn refuse_operation_for_full_writer(&mut self, peer: PeerId) -> bool {
+        if !self.outbound_channel_full(peer) || self.outbound_operation_live(peer) {
+            return false;
+        }
+        self.outbound_credit.entry(peer).or_default();
+        let _ = self.outbound_commit_failed(peer, OutboundCommitFailure::WriterUnavailable);
+        true
+    }
+
     /// Whether a whole-table operation of `peer` is still live.
     pub(super) fn outbound_operation_live(&self, peer: PeerId) -> bool {
         self.outbound_credit

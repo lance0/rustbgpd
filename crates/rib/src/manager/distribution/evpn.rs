@@ -1176,6 +1176,8 @@ impl RibManager {
             .into_iter()
             .flat_map(|group| group.members.iter().copied())
             .collect();
+        // Whether the staged table is complete: the member loop changes none.
+        let mut table_complete = None;
         for peer in members {
             checkpoint();
             // One member's commit is the unit of this loop, as one receiver's
@@ -1284,6 +1286,15 @@ impl RibManager {
                 self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
                 self.complete_feed_deferred(peer);
                 continue;
+            } else if retained
+                && (!announce.is_empty() || !withdraw.is_empty())
+                && self.refuse_unwritable_complete_evpn_feed(peer, gid, &mut table_complete)
+            {
+                // The commit would refuse the feed for want of a writer
+                // slot: build none, and leave the member as that refusal does.
+                self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
+                self.mark_outbound_dirty_inner(peer, false);
+                continue;
             } else if retained {
                 // Full borrowed OLD proves coverage for successful clean
                 // updates too, without replaying unchanged keys during debt.
@@ -1373,15 +1384,17 @@ impl RibManager {
         // sendable_evpn key bit, mixed-PCB exclusion, and the EVPN exclusion
         // in GroupKey::is_unicast_only for clean transitions, plus qualified
         // non-RTC admission, ownership transfer, views and counts.
-        let members: Vec<_> = group.members.iter().copied().collect();
-        for member in members {
-            if self.dirty_peers.contains(&member)
-                || self.force_outbound_peers.contains(&member)
-                || self.outbound_channel_full(member)
-            {
-                self.capture_shared_evpn_admitted(member);
-            }
-        }
+        let begins: Vec<_> = group
+            .members
+            .iter()
+            .copied()
+            .filter(|member| {
+                self.dirty_peers.contains(member)
+                    || self.force_outbound_peers.contains(member)
+                    || self.outbound_channel_full(*member)
+            })
+            .collect();
+        self.capture_evpn_before_stage(gid, &begins);
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::super::replacement_readiness_checkpoint_at(&readiness, "staging_evpn", false);

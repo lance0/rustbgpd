@@ -767,6 +767,13 @@ pub struct RibManager {
     peer_unexportable: HashMap<PeerId, HashSet<ExactExportKey>>,
     #[cfg(test)]
     grouped_advertised_count_calls: std::sync::atomic::AtomicUsize,
+    /// Complete EVPN feed builds started, for work regressions.
+    #[cfg(test)]
+    evpn_complete_feed_builds: usize,
+    /// Build a complete EVPN feed even when its commit's refusal is known,
+    /// as before that preflight existed: the differential's control arm.
+    #[cfg(test)]
+    evpn_build_refused_feeds: bool,
     /// Installed export chains, per peer and global fallback, and their
     /// published counter roster (ADR-0136).
     export_chains: export_chains::ExportChains,
@@ -2864,6 +2871,10 @@ impl RibManager {
             peer_unexportable: HashMap::new(),
             #[cfg(test)]
             grouped_advertised_count_calls: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            evpn_complete_feed_builds: 0,
+            #[cfg(test)]
+            evpn_build_refused_feeds: false,
             // ADR-0136: publishes the first roster, creating the global
             // fallback's counters.
             export_chains: export_chains::ExportChains::new(export_policy),

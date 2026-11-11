@@ -329,8 +329,11 @@ fn refused_owned_pass(members: u8, rows: u16) -> (usize, usize) {
 fn refused_owned_captures_serve_readiness_at_every_stride_for_any_size() {
     for (members, rows) in [(2, 64), (8, 64), (2, 512), (8, 512)] {
         let (batches, visited) = refused_owned_pass(members, rows);
+        // The members share one walk: completeness and the projection each
+        // visit every row once, and every member appends at the ledger's
+        // stride of 64.
         assert!(
-            visited >= usize::from(members) * usize::from(rows),
+            visited >= usize::from(rows) * 2 + usize::from(members) * usize::from(rows) / 64,
             "{members} members x {rows} rows: the captures walked {visited} checkpoints"
         );
         assert!(
@@ -503,6 +506,513 @@ fn skipped_dirty_members_of_an_owned_pass_each_pass_a_live_checkpoint() {
             boundaries.load(Ordering::SeqCst) >= usize::from(members),
             "{members} skipped members passed {} live boundary checkpoints",
             boundaries.load(Ordering::SeqCst)
+        );
+    }
+}
+
+/// Six members of one owning group over 400 rows, in every state the
+/// pre-stage capture meets: `peers[1]` and `peers[2]` each sourced a tenth of
+/// the rows, `peers[3]` has an exact-export rejection overlay, `peers[4]`
+/// already holds a proof (of the first 120 rows). `rtc` puts RT-Constrain
+/// on the group's sendable set, which gives every member a filter (for
+/// `peers[5]` one that admits every Route Target) and ends the group's
+/// EVPN ownership, so no member can share a walk and none captures. With
+/// `non_client` the group stops being a client group, so rows from the
+/// non-client source are not reflected.
+fn capture_states(rtc: bool, non_client: bool) -> OwnedPass {
+    let mut pass = OwnedPass::new(6, 0, false);
+    let gid = pass.gid;
+    let mut keys = Vec::new();
+    for index in 0..400_u16 {
+        if index == 120 {
+            assert!(pass.manager.capture_shared_evpn_admitted(pass.peers[4]));
+        }
+        let [high, low] = index.to_be_bytes();
+        let mut route = received(100);
+        route.route = make_evpn_imet(Ipv4Addr::new(198, 51, high, low), 1).route;
+        match index % 10 {
+            0 => route.peer = pass.peers[1],
+            1 => route.peer = pass.peers[2],
+            _ => {}
+        }
+        assert_eq!(stage(&mut pass.manager, gid, &route).deltas.len(), 1);
+        keys.push(route.key());
+    }
+    pass.manager.peer_unexportable.insert(
+        pass.peers[3],
+        keys.iter()
+            .skip(5)
+            .step_by(10)
+            .map(|key| ExactExportKey::Evpn(*key))
+            .collect(),
+    );
+    if rtc {
+        pass.manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .sendable
+            .push((Afi::Ipv4, Safi::RtConstrain));
+        pass.manager.peer_rt_membership.insert(
+            pass.peers[5],
+            RtcMembership {
+                has_default: true,
+                entries: Vec::new(),
+            },
+        );
+    }
+    if non_client {
+        pass.manager.group_ribs.get_mut(&gid).unwrap().is_rr_client = false;
+    }
+    pass
+}
+
+/// Everything a capture leaves in the ledger, apart from the daemon peak.
+fn captured_state(pass: &OwnedPass) -> impl PartialEq + std::fmt::Debug {
+    let ledger = &pass.manager.evpn_recovery;
+    let members: Vec<_> = pass
+        .peers
+        .iter()
+        .map(|&peer| {
+            let handle = pass.manager.evpn_recovery_handle(peer).unwrap();
+            (
+                // `Some` only for a Ready proof, which the clean-member
+                // replay and every later admission read.
+                ledger.proof_keys(handle).unwrap(),
+                ledger.is_dormant(handle),
+                ledger.dense_for_test(handle),
+                ledger.peer_usage(peer),
+                pass.manager.dirty_peers.contains(&peer),
+                pass.manager.evpn_recovery_reset_pending(peer),
+            )
+        })
+        .collect();
+    (
+        members,
+        ledger.holders_for_test(),
+        ledger.slot_usage(),
+        ledger.daemon_usage().retained,
+    )
+}
+
+/// The shared walk is an optimisation of work, never of state: from the same
+/// start it must leave exactly what one capture per member leaves. A member
+/// with an RT-Constrain filter or a rejection overlay, and one that already
+/// holds a proof, must take its own capture (or none) inside the same pass.
+#[test]
+fn shared_capture_walk_leaves_what_one_capture_per_member_leaves() {
+    for (rtc, non_client) in [(false, false), (false, true), (true, false)] {
+        let mut batch = capture_states(rtc, non_client);
+        let mut alone = capture_states(rtc, non_client);
+        let order = batch.peers.clone();
+        assert_eq!(order, alone.peers);
+        assert_eq!(captured_state(&batch), captured_state(&alone));
+        let peak = batch.manager.evpn_recovery.daemon_usage().peak;
+        assert_eq!(peak, alone.manager.evpn_recovery.daemon_usage().peak);
+        let earlier = batch
+            .manager
+            .evpn_recovery
+            .proof_keys(batch.manager.evpn_recovery_handle(order[4]).unwrap())
+            .unwrap()
+            .unwrap();
+
+        let gid = batch.gid;
+        let capture_work =
+            |work: super::work_scaling::Work| work.get("capture_evpn").copied().unwrap_or_default();
+        let batch_work = capture_work(super::work_scaling::checkpoints_in(|| {
+            batch.manager.capture_evpn_before_stage(gid, &order);
+        }));
+        let alone_work = capture_work(super::work_scaling::checkpoints_in(|| {
+            for &peer in &order {
+                alone.manager.capture_shared_evpn_admitted(peer);
+            }
+        }));
+        batch.manager.evpn_recovery.assert_consistent();
+        assert_eq!(
+            captured_state(&batch),
+            captured_state(&alone),
+            "rtc {rtc}, non-client group {non_client}"
+        );
+
+        let ledger = &batch.manager.evpn_recovery;
+        let proofs: Vec<_> = order
+            .iter()
+            .map(|&peer| {
+                ledger
+                    .proof_keys(batch.manager.evpn_recovery_handle(peer).unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            proofs[4].as_ref(),
+            Some(&earlier),
+            "an existing proof is kept"
+        );
+        let expected = match (rtc, non_client) {
+            // peers[0]: every row; a sourcing member: all but its own 40;
+            // the overlay member: all but its 40 rejected rows.
+            (false, false) => [400, 360, 360, 360, 120, 400].map(Some),
+            // Only the rows the two client members sourced are reflected.
+            (false, true) => [80, 40, 40, 80, 120, 80].map(Some),
+            // RT-Constrain ends the group's ownership: no capture begins.
+            (true, _) => [None, None, None, None, Some(120), None],
+        };
+        assert_eq!(
+            proofs
+                .iter()
+                .map(|proof| proof.as_ref().map(Vec::len))
+                .collect::<Vec<_>>(),
+            expected,
+            "rtc {rtc}, non-client group {non_client}"
+        );
+
+        let (batch_peak, alone_peak) = (
+            ledger.daemon_usage().peak,
+            alone.manager.evpn_recovery.daemon_usage().peak,
+        );
+        if rtc {
+            assert_eq!((batch_work, batch_peak), (alone_work, alone_peak));
+        } else {
+            // Four members shared one walk; the overlay member walked alone.
+            assert!(
+                batch_work < alone_work,
+                "{batch_work} capture checkpoints against {alone_work}"
+            );
+            // The daemon peak alone may differ, by at most the slot list
+            // charged while the walk ran (12 bytes per table row).
+            assert!(
+                batch_peak >= alone_peak && batch_peak <= alone_peak.max(peak) + 400 * 12,
+                "peak {batch_peak} against {alone_peak}"
+            );
+        }
+    }
+}
+
+/// N members beginning capture in one pass used to hash and probe every key
+/// N times. The shared walk interns each key once, so the ledger's index
+/// work must not grow with the member count.
+#[test]
+fn shared_capture_walk_index_probes_do_not_grow_with_members() {
+    let probes = |members: u8| {
+        let mut pass = OwnedPass::new(members, 128, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        let before = pass.manager.evpn_recovery.probes_for_test();
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        for peer in &pass.peers {
+            let handle = pass.manager.evpn_recovery_handle(*peer).unwrap();
+            assert_eq!(
+                pass.manager
+                    .evpn_recovery
+                    .proof(handle)
+                    .unwrap()
+                    .unwrap()
+                    .len(),
+                128
+            );
+        }
+        pass.manager.evpn_recovery.probes_for_test() - before
+    };
+    let (few, many) = (probes(2), probes(16));
+    assert!(few >= 128, "every key was interned: {few} probes");
+    assert!(
+        many < few * 2,
+        "{many} index probes for 16 members against {few} for 2: per-member interning is 8x"
+    );
+}
+
+/// The shared slot list is refunded before the pass returns: afterwards the
+/// daemon's retained charge is exactly the records and the slot space, and
+/// releasing every proof returns the ledger to its charge before the pass.
+/// The ledger's own test pins that the list was charged while it lived.
+#[test]
+fn shared_capture_walk_charge_returns_to_baseline() {
+    let mut pass = OwnedPass::new(8, 256, true);
+    let keys = pass.changed();
+    let gid = pass.gid;
+    let before = pass.manager.evpn_recovery.daemon_usage();
+    pass.manager.stage_group_evpn_keys(gid, &keys);
+    // Recomputes the daemon charge from the records and the slot space.
+    pass.manager.evpn_recovery.assert_consistent();
+    for peer in &pass.peers {
+        let handle = pass.manager.evpn_recovery_handle(*peer).unwrap();
+        assert!(pass.manager.evpn_recovery.finish_recovery(handle).unwrap());
+    }
+    pass.manager.evpn_recovery.assert_consistent();
+    assert_eq!(
+        pass.manager.evpn_recovery.daemon_usage().retained,
+        before.retained
+    );
+    assert!(pass.manager.evpn_recovery.holders_for_test().is_empty());
+}
+
+/// The cause a member's capture was refused for, or `None` with its proof
+/// length when it holds a Ready proof.
+fn capture_outcome(
+    pass: &OwnedPass,
+    peer: PeerId,
+) -> Result<usize, crate::update::EvpnRecoveryExhaustionCause> {
+    let ledger = &pass.manager.evpn_recovery;
+    let handle = pass.manager.evpn_recovery_handle(peer).unwrap();
+    match ledger.exhaustion(handle) {
+        Some(error) => Err(error.cause),
+        None => Ok(ledger
+            .proof(handle)
+            .unwrap()
+            .expect("neither refused nor Ready")
+            .len()),
+    }
+}
+
+/// A member with an unreleased private EVPN row cannot prove its admitted
+/// set from the group table. The shared walk must refuse that member, as
+/// its own walk does, and still capture for the others.
+#[test]
+fn shared_capture_walk_refuses_only_the_member_with_unreleased_private_rows() {
+    for members in [3_u8, 2] {
+        let mut pass = OwnedPass::new(members, 64, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        let held = pass.peers[1];
+        pass.manager
+            .adj_ribs_out
+            .get_mut(&held)
+            .unwrap()
+            .insert_evpn(make_evpn_imet(Ipv4Addr::new(203, 0, 113, 77), 3));
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        pass.manager.evpn_recovery.assert_consistent();
+        for &peer in &pass.peers {
+            if peer == held {
+                assert_eq!(
+                    capture_outcome(&pass, peer),
+                    Err(crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable)
+                );
+                assert!(pass.manager.dirty_peers.contains(&peer));
+            } else {
+                // With two members, the one left takes its own walk.
+                assert_eq!(capture_outcome(&pass, peer), Ok(64), "{members} members");
+            }
+        }
+    }
+}
+
+/// Desired state is usable only after a complete transfer: a table row with
+/// no received input refuses every sharing member, as it refuses one.
+#[test]
+fn shared_capture_walk_refuses_every_member_of_an_incomplete_projection() {
+    let mut pass = OwnedPass::new(3, 64, true);
+    let keys = pass.changed();
+    let gid = pass.gid;
+    let group = pass.manager.group_ribs.get_mut(&gid).unwrap();
+    let displaced = group.table.iter_evpn().next().unwrap().key();
+    group.table.remove_evpn(&displaced);
+    group
+        .table
+        .insert_evpn(make_evpn_imet(Ipv4Addr::new(203, 0, 113, 77), 3));
+    assert!(!group.evpn_projection_complete());
+    pass.manager.stage_group_evpn_keys(gid, &keys);
+    pass.manager.evpn_recovery.assert_consistent();
+    for &peer in &pass.peers {
+        assert_eq!(
+            capture_outcome(&pass, peer),
+            Err(crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable)
+        );
+    }
+}
+
+/// One allocation refused anywhere in the shared walk (the slot list, the
+/// slot space, a member's entry buffer or its bitset) is not a refusal of
+/// any member's own capture: the pass falls back and every member still
+/// ends with its whole proof, with nothing left charged for the attempt.
+#[test]
+fn one_refused_allocation_in_the_shared_walk_leaves_every_member_ready() {
+    let whole = {
+        let mut pass = OwnedPass::new(3, 64, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        pass.manager.evpn_recovery.daemon_usage().retained
+    };
+    // The list, one slot-space growth, then three buffer growths and a
+    // bitset per member: fourteen allocations, each refused once in turn.
+    for refused in 0..16 {
+        let mut pass = OwnedPass::new(3, 64, true);
+        let keys = pass.changed();
+        let gid = pass.gid;
+        pass.manager
+            .evpn_recovery
+            .fail_allocation_after_for_test(Some(refused));
+        pass.manager.stage_group_evpn_keys(gid, &keys);
+        pass.manager
+            .evpn_recovery
+            .fail_allocation_after_for_test(None);
+        pass.manager.evpn_recovery.assert_consistent();
+        for &peer in &pass.peers {
+            assert_eq!(
+                capture_outcome(&pass, peer),
+                Ok(64),
+                "allocation {refused} refused"
+            );
+            assert!(!pass.manager.evpn_recovery_reset_pending(peer));
+        }
+        assert_eq!(
+            pass.manager.evpn_recovery.daemon_usage().retained,
+            whole,
+            "allocation {refused} refused"
+        );
+    }
+}
+
+/// One changed key distributed to four members whose writers are all full
+/// and none dirty: each is captured before staging and then meets the member
+/// loop with a retained proof. `sourced` makes the change a member's own
+/// route, so that member's delta is empty. Returns the pass after it ran,
+/// the complete feeds it built, and, once every writer has drained and the
+/// resync has run, what each member was sent.
+fn refused_feed_pass(
+    control: bool,
+    sourced: bool,
+) -> (
+    OwnedPass,
+    usize,
+    impl PartialEq + std::fmt::Debug,
+    Vec<Vec<OutboundRouteUpdate>>,
+) {
+    let mut pass = OwnedPass::new(4, 96, true);
+    // Under paused time no budget elapses, so only a forced checkpoint
+    // serves the readiness lane: the batches answered count those.
+    pass.manager.flush_poll_budget = crate::manager::FLUSH_POLL_BUDGET;
+    pass.manager.evpn_build_refused_feeds = control;
+    let mut changed = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 1), 9);
+    if sourced {
+        changed.peer = pass.peers[1];
+    }
+    pass.manager
+        .loc_rib
+        .recompute_evpn(changed.key(), [&changed].into_iter());
+    let before = pass.manager.evpn_complete_feed_builds;
+    let peer = pass.peers[0];
+    pass.manager
+        .distribute_evpn_keys_to_peer(peer, &HashSet::from([changed.key()]), &mut || {});
+    let builds = pass.manager.evpn_complete_feed_builds - before;
+    pass.manager.evpn_recovery.assert_consistent();
+    let forced_services = pass.batches();
+    let state = {
+        let manager = &pass.manager;
+        let members: Vec<_> = pass
+            .peers
+            .iter()
+            .map(|&peer| {
+                (
+                    manager.has_evpn_feed_completion(peer),
+                    manager.evpn_feed_owed_markers(peer),
+                    manager.outbound_operation_live(peer),
+                    manager.outbound_credit.contains_key(&peer),
+                    manager.force_outbound_peers.contains(&peer),
+                )
+            })
+            .collect();
+        (
+            format!("{:?}", captured_state(&pass)),
+            members,
+            manager.evpn_feed_receipt_count,
+            forced_services,
+            counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).to_bits(),
+            manager.evpn_table_stamp,
+        )
+    };
+    // The writers drain; the resync tick then recovers every dirty member.
+    for output in &mut pass.outputs {
+        while output.try_recv().is_ok() {}
+    }
+    let mut ticks = 0;
+    while !pass.manager.dirty_peers.is_empty() {
+        pass.manager.resync_dirty_peers_bounded();
+        ticks += 1;
+        assert!(ticks <= 32, "the dirty members did not recover");
+    }
+    let sent = pass
+        .outputs
+        .iter_mut()
+        .map(|output| std::iter::from_fn(|| output.try_recv().ok()).collect())
+        .collect();
+    (pass, builds, state, sent)
+}
+
+/// A member captured because its writer was full is not dirty yet, so the
+/// member loop built it a complete feed, a walk of the whole table, and the
+/// commit then refused the feed for want of a writer slot: at 150 members
+/// that was 70% of a 0.9 s actor turn. The refusal is known before the
+/// build. Skipping the build must change nothing else: the member's state
+/// after the pass, the refusal's count, and what it is sent once its writer
+/// drains are those of the build-and-refuse path. A member whose own delta
+/// is empty is not skipped: its empty feed commits without a writer slot.
+/// The refusal's forced readiness service is part of that state: time is
+/// paused, so no unforced checkpoint serves in either arm.
+#[tokio::test(start_paused = true)]
+async fn a_full_writer_is_refused_its_complete_feed_before_the_feed_is_built() {
+    for sourced in [false, true] {
+        let (skipped, builds, state, sent) = refused_feed_pass(false, sourced);
+        let (built, control_builds, control_state, control_sent) = refused_feed_pass(true, sourced);
+        assert_eq!(control_builds, 4, "before: one build per retained member");
+        assert_eq!(
+            builds,
+            usize::from(sourced),
+            "only a member with an empty delta still builds (sourced: {sourced})"
+        );
+        assert_eq!(state, control_state, "sourced: {sourced}");
+        assert_eq!(skipped.peers, built.peers);
+        let wire = |sent: &[Vec<OutboundRouteUpdate>]| -> Vec<_> {
+            sent.iter()
+                .map(|updates| {
+                    updates
+                        .iter()
+                        .map(|update| {
+                            (
+                                update
+                                    .evpn_announce
+                                    .iter()
+                                    .map(EvpnRibRoute::key)
+                                    .collect::<Vec<_>>(),
+                                update.evpn_withdraw.clone(),
+                                update.end_of_rib.clone(),
+                                update.refresh_markers.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        assert_eq!(wire(&sent), wire(&control_sent), "sourced: {sourced}");
+        // Route bodies too: next hop, source and attributes of every row.
+        for (left, right) in sent.iter().flatten().zip(control_sent.iter().flatten()) {
+            assert!(
+                left.evpn_announce
+                    .iter()
+                    .zip(right.evpn_announce.iter())
+                    .all(|(left, right)| crate::manager::helpers::evpn_routes_equal(left, right)),
+                "sourced: {sourced}"
+            );
+        }
+        for (index, updates) in sent.iter().enumerate() {
+            let changed = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 1), 9).key();
+            let announced = updates
+                .iter()
+                .flat_map(|update| update.evpn_announce.iter())
+                .filter(|route| route.key() == changed)
+                .count();
+            // The source never gets its own route back.
+            assert_eq!(
+                announced,
+                usize::from(!(sourced && index == 1)),
+                "member {index} was sent the change once its writer drained (sourced: {sourced})"
+            );
+            assert!(!skipped.manager.dirty_peers.contains(&skipped.peers[index]));
+        }
+        assert_eq!(
+            format!("{:?}", captured_state(&skipped)),
+            format!("{:?}", captured_state(&built)),
+            "after recovery, sourced: {sourced}"
         );
     }
 }

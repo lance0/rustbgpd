@@ -1247,7 +1247,8 @@ application cost one lookup per key. Ledger loops over keys and slots, release,
 renumbering and index rebuilds offer the readiness checkpoint at a fixed
 stride. The manager passes its checkpoint through capture, sealing,
 admission, finish and retirement, and snapshots take one too. No checkpoint
-runs inside a comparison.
+runs inside a comparison. Members that begin capture in the same owned pass
+share one walk and one interning of the keys (2026-11-11 amendment).
 
 **Accounting.** The daemon cap is unchanged and still provisional. The daemon
 charge is exact for the ledger's own allocations: its header, record array,
@@ -1367,3 +1368,180 @@ proof or marker debt still runs the proof match. These are component results
 with EVPN ownership enabled in tests. The replay-cost and recovery-memory
 qualifications have not been run on this change, and production EVPN ownership
 remains disabled.
+
+## Amendment (2026-11-11): members of one owned pass share the capture walk
+
+The 2026-11-02 cost paragraph prices one member: its capture walks the group
+table once and pays one keyed hash and one index lookup per key. An owned pass
+begins a capture for every member that is dirty, forced or has a full writer
+and holds no proof yet, before it stages the table. Each of those captures
+walked the whole table, so N members beginning in one pass cost N walks and N
+hashes of every key inside one actor turn. One diagnostic mass-dirty run at
+150 members, not a qualification, saw an actor turn of more than a second in
+which 69 members captured. The readiness lane was served throughout; every
+other actor input waited.
+
+**Shared walk.** For a member with no RT-Constrain filter and no exact-export
+rejection, section E's eligibility has one term that depends on the member:
+it does not receive the rows it sourced. The pass therefore walks the table
+once for all such members. The walk checks the projection is complete, keeps
+the rows the group's sessions may carry, interns each key once and records
+its slot beside its source peer. Each member then takes every recorded slot
+except those it sourced: its rows are counted, its entry buffer is reserved
+once, their per-slot credit is taken once, and each row costs a holder count
+and an entry. It is sealed before the next member appends. The walk still
+runs before the batch's projection change, from the prior clean view.
+
+**Fallback rule.** A member shares the walk only when all of these hold: its
+capture would begin in this pass (its record is absent or dormant); it has no
+RT-Constrain filter; and its exact-export rejection overlay is empty. Every
+other member takes its own capture, unchanged, in the same pass. When fewer
+than two members qualify, or fewer than two are left after registration, the
+completeness check and the unreleased-private-row check, each takes its own
+capture. A group that negotiated RT-Constrain does not own EVPN, so the
+filter condition is a guard that matches the single capture's own filter; no
+owned group reaches it today. A capture taken at any other seam (a late
+refusal after staging, a refresh, a membership change) is one member's and is
+unchanged.
+
+**Result.** The shared walk seals for each member the proof one capture per
+member seals: the same rows, with the same holder counts and the same 80
+bytes charged per row. It does not promise the same representation, and so
+not the same bytes of storage or the same answer from a cap a member sits
+within those bytes of. Five things differ, none of them in the rows of a
+proof:
+
+- Slot IDs follow interning order: table order here, member by member
+  before, and in either case the lowest free slot first. Sealing keeps a
+  proof as a bitset when the bitset up to its highest slot is smaller than
+  four bytes per row, and otherwise keeps the entry buffer. With N rows and
+  a buffer of C entries (the power of two at or above N, at least 16), a
+  sealed proof's storage is therefore at least the bitset over N slots, N / 8
+  bytes rounded up to a 128-byte step, and at most 4 C bytes, in every
+  numbering. Two numberings of the same rows can differ by up to 4 C less
+  that bitset: under 8 bytes per row, beside the 80 charged per row. One
+  sourced row is enough: with slots 0-127 free below another proof, a member
+  capturing 128 of 129 new rows alone holds slots 0-127 in a 128-byte bitset,
+  and through the shared walk holds 1-127 and one slot above the other
+  proof, in a 512-byte buffer. Separate captures already depend on numbering
+  in the same way, through member order and slot reuse. The peer and daemon
+  caps meter the charge actually made, whichever representation it is.
+- A member's own capture doubles its entry buffer as it goes, and the last
+  doubling charges both buffers beside the slots held so far. With a record
+  of R bytes and D bytes of bitset credited at sealing (zero for a proof
+  that stays entries), its peak is R + max(46 C, 80 N + 4 C + D). The shared
+  walk reserves the C entries once, so its peak is R + 80 N + 4 C + D. For
+  equal D the two are equal unless N is within about 5% above C / 2, where
+  the shared peak is lower by 46 C - (80 N + 4 C + D). A peer cap inside
+  that gap refuses the member's own capture at the doubling and admits the
+  shared one, which then seals a proof charged what its own capture retains
+  under a cap that admits it.
+- A member whose own peer cap refuses the capture is exhausted holding no
+  row, whether the cap refuses its whole credit or, with every entry taken,
+  its bitset at sealing. Its own capture stops at the cap holding the rows
+  before it. Both reset the session, and nothing reads an exhausted record's
+  rows.
+- The daemon peak includes the slot list described below.
+- If every sharing member exhausts its own credit, the slot space has grown
+  for the whole table, and the rows nobody took are free again until the
+  space next settles. Separate captures would have stopped growing it at the
+  first refusal.
+
+**Slot list.** The recorded slots live in one list inside the ledger call:
+twelve bytes per table row, reserved once at the table's length, so it never
+resizes. Section E charges reserved capacity, and this is charged to the
+daemon, not to any peer, before it is allocated, and refunded before the call
+returns. The list holds each slot it names, so a key no member has taken yet
+cannot be reused under it; those holds are released before the call returns.
+Slot IDs still never leave the ledger and no state outlives the call.
+
+The list stays charged while each member appends and is sealed, so the daemon
+total a member's entry buffer or bitset is checked against is larger than the
+one its own capture would meet. A daemon-cap or allocator refusal met while
+the list is charged therefore never exhausts a member. Wherever it lands (the
+list itself, slot-space growth during the walk, or a member's own storage),
+the walk stops sharing: members already sealed keep their proofs, the member
+that met the refusal gives back the entries it had taken and their credit,
+the list's holds and charge are released, and that member and every later one
+take their own capture, which meets the cap without the list. Only a member's
+own peer cap exhausts it, and the others complete.
+
+**Withdrawal order.** A proof iterates in slot order, and callers that need
+key order sort their own output. A replay that emits proof-derived
+withdrawals without sorting them (the private handoff and the resync walk of
+the admitted set) therefore puts them in slot order. The set of withdrawn
+NLRI is identical; their order inside an UPDATE can differ from separate
+captures, as it already could between two member orders. A grouped member's
+commit sorts its withdrawals and is unaffected.
+
+**Complete feeds for a full writer.** A member captured before staging
+because its writer was full is not dirty yet, so the member loop reached it
+with a retained proof and built it a complete feed, a second walk of the
+table, whose commit was then refused for want of a writer slot. One
+diagnostic run at 150 members attributed 643 ms of a 921 ms actor turn to 71
+such builds, every one refused. The pass now asks first whether that commit
+would be refused, with the commit's own checks in its order: the feed's seal,
+with its receipt minted as the build mints it, is current; the member has an
+export encoder; the member's delta is not empty, so the commit is not a
+suppressed no-op; and the one-envelope operation the commit asks for is
+refused because the channel has no room. When all hold, the pass counts the
+refusal as the commit does, serves readiness as the commit's failure tail
+does, and leaves the member as that refusal does: its proof retained, its
+receipt minted, the member dirty for the resync that builds the feed once the
+writer drains. In every other case it builds and commits as before; that
+includes a member whose own delta is empty, whose empty feed commits without
+a writer slot, and every refusal that is not the full writer. A receiver can
+free a slot at any moment, so this is the refusal of a commit attempted now,
+as the commit's own was.
+
+**Readiness.** The shared walk takes the ingest readiness owner when none
+holds the lane, as one member's walk does. It offers a checkpoint for every
+table row visited by the completeness check and by the walk, and at the
+ledger's stride of 64 while interning, while each member appends and while
+the list's holds are released; allocations stay bracketed. The work between
+two checkpoints is at most 64 appended entries. The member-boundary service
+of the owned pass is unchanged.
+
+**Evidence status.** Unit tests pin: from one starting state, the shared pass
+and one capture per member leave identical proof keys, Ready state, per-peer
+charge and peak, holder counts, slot usage and retained daemon charge, for a
+group that includes members that sourced rows, a member with a rejection
+overlay, a member that already holds a proof, rows the group may not reflect,
+and a group whose sendable set gains RT-Constrain, where neither captures;
+the daemon peak differs by no more than
+the slot list; the ledger's index probes do not grow from 2 to 16 members
+beginning in one pass, and do when sharing is disabled; the slot list is
+charged while it lives and the daemon charge returns to its baseline; across
+daemon caps from "the list fits" to "the whole walk fits", with the slot space
+already grown so that each refusal lands on a member's entry buffer or
+bitset, no member is exhausted, sealed members stay Ready, the refused
+member's charge returns to its record alone, and every member ends with the
+proof, charge and peak separate captures leave; one allocation refused at each
+point of a three-member pass in turn (the list, slot-space growth, each
+member's buffer growths and bitset) leaves every member Ready with no reset
+pending; a peer cap every member exceeds exhausts each holding no row, and
+so does one that admits a member's credit and refuses its bitset at sealing,
+while the next member still captures; the
+per-peer peak equals the formula above on both sides of the doubling band and
+the retained charge is equal in both; a peer cap inside the band refuses a
+member's own capture and seals the shared one at the same retained charge;
+at 0, 1, 15, 16 and 17 rows the shared charge and peak equal the per-entry
+capture's; on a fragmented slot space the shared walk and separate captures
+seal the same rows in different representations, 384 bytes apart for one
+sourced row, each within the storage bound above, and a peer cap one byte
+under the shared need refuses the member holding nothing with no slot
+leaked; a sharing member with an unreleased private row is refused
+alone, an incomplete projection refuses every sharing member, and a single
+member left after those checks takes its own walk; interning, each member's
+appends and the release of the list's holds do at most 64 units of work
+between two checkpoints; with no free slot below the new rows, two
+numberings differ by no more than the bitset bytes covering a member's
+sourced rows; and a pass over four members with full writers builds no complete
+feed where it built four, with the same member state, receipt, refusal count
+and table stamp and forced readiness services after the pass, and the same
+envelopes, route bodies included, once the writers drain,
+while a member whose delta is empty still builds and commits its empty feed.
+The readiness regressions for refused owned passes hold with the walk's new
+checkpoint count. These are component results with EVPN ownership enabled in
+tests. The turn-length, cost and recovery-memory qualifications have not been
+run on this change, and production EVPN ownership remains disabled.

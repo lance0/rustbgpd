@@ -951,10 +951,6 @@ impl RibManager {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one complete producer keeps old-value eligibility, the sparse diff and its admission fence together"
-    )]
     pub(in crate::manager) fn prepare_complete_evpn_feed_before_deltas(
         &mut self,
         peer: PeerId,
@@ -963,30 +959,13 @@ impl RibManager {
         old_is_clean: bool,
         old_deltas: &[super::update_groups::EvpnGroupDelta],
     ) -> Option<EvpnCompleteFeed> {
-        let table_stamp = self
-            .group_ribs
-            .get(&destination)
-            .filter(|group| group.owns_evpn_routes())?
-            .evpn_table_stamp;
-        if table_stamp == 0 {
-            return None;
-        }
-        let target = EvpnFeedTarget::Grouped {
-            group_id: destination,
-            table_stamp,
-        };
-        let revision = self.ensure_evpn_feed_receipt(peer, target)?;
-        let group = self.group_ribs.get(&destination)?;
-        let provenance = self.evpn_recovery_handle(peer)?;
-        let session_id = *self.outbound_session_ids.get(&peer)?;
-        let outbound = self.outbound_peers.get(&peer)?.clone();
-        if outbound.is_closed()
-            || self.evpn_recovery_reset_pending(peer)
-            || self.selection_deferred(EVPN_FAMILY)
-            || group.evpn_table_stamp == 0
+        #[cfg(test)]
         {
-            return None;
+            self.evpn_complete_feed_builds += 1;
         }
+        let seal = self.complete_evpn_feed_seal(peer, destination)?;
+        let provenance = seal.provenance;
+        let group = self.group_ribs.get(&destination)?;
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if !group.evpn_projection_complete_with_checkpoint(&mut checkpoint) {
@@ -1078,19 +1057,109 @@ impl RibManager {
             }
         }
         Some(EvpnCompleteFeed {
-            seal: EvpnFeedSeal {
-                session_id,
-                outbound,
-                provenance,
-                target,
-                revision,
-                required_markers: 0,
-                sparse_keys: None,
-                clean_replay: false,
-            },
+            seal,
             announce,
             withdraw,
         })
+    }
+
+    /// The seal of a complete feed into `destination`, with its receipt
+    /// minted, or `None` where no feed can be built: everything
+    /// [`Self::prepare_complete_evpn_feed_before_deltas`] decides before it
+    /// walks a table.
+    fn complete_evpn_feed_seal(
+        &mut self,
+        peer: PeerId,
+        destination: usize,
+    ) -> Option<EvpnFeedSeal> {
+        let table_stamp = self
+            .group_ribs
+            .get(&destination)
+            .filter(|group| group.owns_evpn_routes())?
+            .evpn_table_stamp;
+        if table_stamp == 0 {
+            return None;
+        }
+        let target = EvpnFeedTarget::Grouped {
+            group_id: destination,
+            table_stamp,
+        };
+        let revision = self.ensure_evpn_feed_receipt(peer, target)?;
+        let provenance = self.evpn_recovery_handle(peer)?;
+        let session_id = *self.outbound_session_ids.get(&peer)?;
+        let outbound = self.outbound_peers.get(&peer)?.clone();
+        if outbound.is_closed()
+            || self.evpn_recovery_reset_pending(peer)
+            || self.selection_deferred(EVPN_FAMILY)
+            || self.group_ribs.get(&destination)?.evpn_table_stamp == 0
+        {
+            return None;
+        }
+        Some(EvpnFeedSeal {
+            session_id,
+            outbound,
+            provenance,
+            target,
+            revision,
+            required_markers: 0,
+            sparse_keys: None,
+            clean_replay: false,
+        })
+    }
+
+    /// Whether a retained member's complete feed for a non-empty delta of
+    /// `gid` would be built only for its commit to refuse it for want of a
+    /// writer slot, and if so, the refusal itself.
+    ///
+    /// The feed is a table-sized walk, and a member captured because its
+    /// writer was full reaches it in the same pass. Its commit would pass
+    /// every check before admission and then ask
+    /// [`Self::begin_outbound_operation`] for the feed's one envelope, which
+    /// refuses a channel with no room. This runs those checks in the same
+    /// order with the same functions: the seal (its receipt minted, as the
+    /// build mints it) is current, the peer has an export encoder, the
+    /// caller's delta makes the payload non-empty so the commit is not a
+    /// suppressed no-op, and the writer is full. It then counts the
+    /// refusal as the commit does and serves readiness as its failure tail
+    /// does. `false` leaves every other case to the build and the commit.
+    ///
+    /// `complete` caches the group's completeness for the pass, which
+    /// changes no table. Only the actor sends, but a receiver can free a
+    /// slot at any time: this is the refusal of a commit attempted now.
+    pub(in crate::manager) fn refuse_unwritable_complete_evpn_feed(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        complete: &mut Option<bool>,
+    ) -> bool {
+        #[cfg(test)]
+        if self.evpn_build_refused_feeds {
+            return false;
+        }
+        if !self.outbound_channel_full(peer) || !self.peer_export_encoders.contains_key(&peer) {
+            return false;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let Some(group) = self.group_ribs.get(&gid) else {
+            return false;
+        };
+        if !*complete.get_or_insert_with(|| {
+            group.evpn_projection_complete_with_checkpoint(&mut || {
+                super::replacement_readiness_checkpoint(&readiness, false);
+            })
+        }) {
+            return false;
+        }
+        let Some(seal) = self.complete_evpn_feed_seal(peer, gid) else {
+            return false;
+        };
+        if !self.evpn_feed_seal_is_current(peer, &seal)
+            || !self.refuse_operation_for_full_writer(peer)
+        {
+            return false;
+        }
+        self.replacement_checkpoint(true);
+        true
     }
 
     /// The grouped member whose admitted EVPN set is its current eligible
@@ -1310,12 +1379,33 @@ impl RibManager {
         destination: Option<usize>,
     ) -> bool {
         let gid = destination.or_else(|| self.evpn_grouped_member_of(peer));
+        let handle = match self.begin_evpn_capture(peer, private, gid) {
+            Ok(handle) => handle,
+            Err(settled) => return settled,
+        };
+        // The walk is table-sized. Ordinary ingest holds no readiness owner,
+        // which would leave every checkpoint below inert, so the walk takes
+        // the lane itself: it serves at its start and end and at its stride.
+        // Inside an owner (a refresh, a resync) this installs nothing.
+        self.with_ingest_readiness(|manager| {
+            manager.walk_evpn_capture(peer, private, old_deltas, gid, handle)
+        })
+    }
+
+    /// Register `peer` and open its capture. `Err` carries the answer of a
+    /// capture that needs no walk: an existing proof, or a refusal.
+    fn begin_evpn_capture(
+        &mut self,
+        peer: PeerId,
+        private: bool,
+        gid: Option<usize>,
+    ) -> Result<ProvenanceHandle, bool> {
         if let Some(gid) = gid {
             if !self.register_evpn_recovery_for_group(peer, gid, false) {
-                return false;
+                return Err(false);
             }
         } else if !private || self.evpn_recovery_handle(peer).is_none() {
-            return false;
+            return Err(false);
         }
         let handle = self
             .evpn_recovery_handle(peer)
@@ -1327,24 +1417,117 @@ impl RibManager {
                     .proof(handle)
                     .is_ok_and(|proof| proof.is_some())
                 {
-                    return true;
+                    return Err(true);
                 }
                 self.refuse_evpn_capture(peer, handle);
-                return false;
+                Err(false)
             }
             Err(_) => {
                 self.retry_evpn_recovery_reset(peer);
-                return false;
+                Err(false)
             }
-            Ok(true) => {}
+            Ok(true) => Ok(handle),
         }
-        // The walk is table-sized. Ordinary ingest holds no readiness owner,
-        // which would leave every checkpoint below inert, so the walk takes
-        // the lane itself: it serves at its start and end and at its stride.
-        // Inside an owner (a refresh, a resync) this installs nothing.
-        self.with_ingest_readiness(|manager| {
-            manager.walk_evpn_capture(peer, private, old_deltas, gid, handle)
-        })
+    }
+
+    /// The captures an owned pass takes from `gid`'s table before it stages
+    /// it, for the members in `begins`. One capture walks the whole table
+    /// and hashes every key, so N members capturing one at a time cost N
+    /// walks in one actor turn. Members whose projection is the same rows
+    /// less their own share one walk and one interning of the keys.
+    ///
+    /// A member shares when its capture would begin (its record is absent
+    /// or dormant) and nothing narrows its view: it has no RT-Constrain
+    /// filter and no exact-export rejection. Every other member, and every
+    /// member when fewer than two share, takes its own capture unchanged.
+    pub(in crate::manager) fn capture_evpn_before_stage(&mut self, gid: usize, begins: &[PeerId]) {
+        let sendable = self.group_ribs.get(&gid).map(|group| &group.sendable);
+        let (sharing, alone): (Vec<PeerId>, Vec<PeerId>) = begins.iter().partition(|&&peer| {
+            self.rtc_export_filter(peer, sendable).is_none()
+                && self
+                    .peer_unexportable
+                    .get(&peer)
+                    .is_none_or(std::collections::HashSet::is_empty)
+                && self
+                    .evpn_recovery_handle(peer)
+                    .is_none_or(|handle| self.evpn_recovery.is_dormant(handle))
+        });
+        if sharing.len() < 2 {
+            for &peer in begins {
+                self.capture_shared_evpn_admitted(peer);
+            }
+            return;
+        }
+        for peer in alone {
+            self.capture_shared_evpn_admitted(peer);
+        }
+        // Table-sized, like one member's walk: take the lane if no owner
+        // holds it, so every checkpoint below serves.
+        self.with_ingest_readiness(|manager| manager.walk_shared_evpn_capture(gid, &sharing));
+    }
+
+    fn walk_shared_evpn_capture(&mut self, gid: usize, sharing: &[PeerId]) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = std::cell::RefCell::new(|| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
+        });
+        let mut ledger_checkpoint = |force| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", force);
+        };
+        let mut capturing = Vec::with_capacity(sharing.len());
+        for &peer in sharing {
+            if let Ok(handle) = self.begin_evpn_capture(peer, false, Some(gid)) {
+                capturing.push((peer, handle));
+            }
+        }
+        // The same two refusals as one member's walk: desired state is
+        // usable only before mutation and after a complete transfer.
+        let complete = !capturing.is_empty()
+            && self.group_ribs.get(&gid).is_some_and(|group| {
+                group.evpn_projection_complete_with_checkpoint(&mut || checkpoint.borrow_mut()())
+            });
+        let mut walking = Vec::with_capacity(capturing.len());
+        for (peer, handle) in capturing {
+            if complete
+                && self
+                    .adj_ribs_out
+                    .get(&peer)
+                    .is_none_or(|rib| rib.evpn_len() == 0)
+            {
+                walking.push((peer, handle));
+            } else {
+                self.refuse_evpn_capture(peer, handle);
+            }
+        }
+        let shared = walking.len() >= 2 && {
+            let handles: Vec<_> = walking.iter().map(|&(_, handle)| handle).collect();
+            let group = &self.group_ribs[&gid];
+            self.evpn_recovery
+                .capture_shared_with_checkpoint(
+                    &handles,
+                    group.evpn_unfiltered_projection(self.cluster_id, || checkpoint.borrow_mut()()),
+                    group.table.evpn_len(),
+                    &mut ledger_checkpoint,
+                )
+                .is_ok()
+        };
+        for (peer, handle) in walking {
+            if self
+                .evpn_recovery
+                .proof(handle)
+                .is_ok_and(|proof| proof.is_some())
+            {
+                continue;
+            }
+            if shared || self.evpn_recovery.exhaustion(handle).is_some() {
+                // Its own peer cap refused it, as in its own capture.
+                self.refuse_evpn_capture(peer, handle);
+            } else {
+                // One member left, or the ledger stopped sharing before
+                // this member was sealed: it is still capturing, empty.
+                self.walk_evpn_capture(peer, false, &[], Some(gid), handle);
+            }
+        }
     }
 
     fn walk_evpn_capture(

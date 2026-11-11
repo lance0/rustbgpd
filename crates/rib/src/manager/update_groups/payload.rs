@@ -1968,6 +1968,19 @@ pub(in crate::manager) struct EvpnGroupEntry {
 }
 
 impl EvpnGroupInput {
+    /// The part of [`Self::eligible`] that is the same for every member:
+    /// whether the group's sessions may carry the route at all.
+    pub(in crate::manager) fn reflectable(
+        &self,
+        route: &crate::route::EvpnRibRoute,
+        group: &super::GroupRibOut,
+        cluster_id: Option<std::net::Ipv4Addr>,
+    ) -> bool {
+        group.is_ebgp
+            || route.origin_type != crate::route::RouteOrigin::Ibgp
+            || (cluster_id.is_some() && (self.source_is_rr_client || group.is_rr_client))
+    }
+
     pub(in crate::manager) fn eligible(
         &self,
         route: &crate::route::EvpnRibRoute,
@@ -1977,11 +1990,8 @@ impl EvpnGroupInput {
         membership: Option<&super::RtcMembership>,
         rejected: Option<&HashSet<crate::update::ExactExportKey>>,
     ) -> bool {
-        let rr_allowed = group.is_ebgp
-            || route.origin_type != crate::route::RouteOrigin::Ibgp
-            || (cluster_id.is_some() && (self.source_is_rr_client || group.is_rr_client));
         route.peer != member
-            && rr_allowed
+            && self.reflectable(route, group, cluster_id)
             && membership.is_none_or(|filter| {
                 filter.matches_any(
                     self.attributes

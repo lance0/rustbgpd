@@ -53,7 +53,124 @@ def write_readiness(leg, times, **fields):
                                                  for at in times))
 
 
+def actor_text(maximum, buckets):
+    """A scrape as the daemon renders it: unrelated stages and work units beside the two read series."""
+    lines = ['# TYPE bgp_rib_actor_slice_max_microseconds gauge',
+             'bgp_rib_actor_slice_max_microseconds{stage="selection"} 7000000',
+             f'bgp_rib_actor_slice_max_microseconds{{stage="actor_poll"}} {maximum}',
+             'bgp_rib_actor_work_duration_seconds_bucket{work_unit="distribute_flush",le="0.2"} 999',
+             'bgp_rib_actor_work_duration_seconds_bucket{work_unit="distribute_flush",le="+Inf"} 999']
+    lines += [f'bgp_rib_actor_work_duration_seconds_bucket{{work_unit="route_chunk",le="{edge}"}} {count}'
+              for edge, count in buckets.items()]
+    lines += [f'bgp_rib_actor_work_duration_seconds_count{{work_unit="route_chunk"}} {max(buckets.values())}']
+    return "\n".join(lines) + "\n"
+
+
 class RecoveryTests(unittest.TestCase):
+    def test_mass_dirty_actor_reads_the_closing_window_and_the_phase_bucket_delta(self):
+        start = actor_text(900_000, {"0.2": 5, "0.5": 6, "+Inf": 6})
+        end = actor_text(1_300_000, {"0.2": 40, "0.5": 43, "+Inf": 44})
+        # The opening scrape's maximum belongs to earlier phases; other
+        # stages and work units never leak into the receipt.
+        self.assertEqual(R.mass_dirty_actor(start, end), {
+            "actor_poll_max_microseconds": 1_300_000,
+            "route_chunk_buckets": {"0.2": 35, "0.5": 37, "+Inf": 38},
+            "route_chunk_over_200ms": 3})
+
+    def test_mass_dirty_actor_rejects_missing_duplicate_and_inconsistent_series(self):
+        good = actor_text(10, {"0.2": 1, "+Inf": 2})
+        maximum = 'bgp_rib_actor_slice_max_microseconds{stage="actor_poll"} 10\n'
+        broken = {
+            # A scrape of a build without the gauge, with every other stage present.
+            "no maximum": good.replace(maximum, ""),
+            "duplicate maximum": good + maximum,
+            "fractional maximum": good.replace(maximum, maximum.replace(" 10", " 10.5")),
+            "no 0.2 edge": actor_text(10, {"0.5": 1, "+Inf": 2}),
+            "no +Inf": actor_text(10, {"0.2": 1, "0.5": 2}),
+            "not cumulative": actor_text(10, {"0.2": 3, "+Inf": 2}),
+            "duplicate bucket": good + 'bgp_rib_actor_work_duration_seconds_bucket{work_unit="route_chunk",le="0.2"} 1\n',
+        }
+        # Two cumulative scrapes whose difference is not: five chunks left
+        # the slow bucket's complement, which no counter can do.
+        with self.assertRaises(ValueError) as caught:
+            R.mass_dirty_actor(actor_text(10, {"0.2": 5, "+Inf": 6}), actor_text(10, {"0.2": 10, "+Inf": 10}))
+        self.assertIn("not cumulative", str(caught.exception))
+        for name, text in broken.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                R.mass_dirty_actor(good, text)
+        with self.assertRaises(ValueError):  # a restarted daemon's counters
+            R.mass_dirty_actor(actor_text(10, {"0.2": 5, "+Inf": 5}), good)
+        with self.assertRaises(ValueError):
+            R.mass_dirty_actor(actor_text(10, {"0.2": 1, "0.5": 1, "+Inf": 2}), good)
+
+    def test_mass_dirty_window_closes_only_after_every_source_applied_the_last_round(self):
+        def barrier(peer, at):
+            return {"peer": Q.COMMON.peer(peer), "wall_us": at}
+        load = [barrier(peer, 100 + peer) for peer in range(3)]
+        churn = [barrier(peer, 500 + peer * 10) for peer in range(3)]
+        row = lambda at: {"wall_us": at}
+        # Two of three sources applied: no snapshot can close the window yet.
+        self.assertIsNone(R.churn_applied_at(load + churn[:2], 3))
+        self.assertFalse(R.closes_mass_dirty(row(10_000), load + churn[:2], 3))
+        # The boundary is the last source's second barrier, not the first
+        # source's, not the load barriers, and not a later third one.
+        self.assertEqual(R.churn_applied_at(load + churn, 3), 520)
+        self.assertEqual(R.churn_applied_at(load + churn + [barrier(0, 900)], 3), 520)
+        # Per source, the second barrier in arrival order is the churn one.
+        self.assertEqual(R.churn_applied_at([load[0], churn[0], load[1], load[2], churn[2], churn[1]], 3), 520)
+        for at, closes in ((499, False), (505, False), (520, False), (521, True), (6999, True)):
+            self.assertEqual(R.closes_mass_dirty(row(at), load + churn, 3, 7000), closes, at)
+        # A snapshot taken after the receivers resumed is outside the phase.
+        self.assertFalse(R.closes_mass_dirty(row(7000), load + churn, 3, 7000))
+        with self.assertRaises(ValueError):
+            R.churn_applied_at(load + [barrier(9, 1)], 3)
+
+    def test_analyze_rejects_a_mass_dirty_window_closed_before_the_last_round_applied(self):
+        for defect in ("early", "after-resume", "not-observed", "missing"):
+            with self.subTest(defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = self.analysis_fixture(root)
+                leg = root / "recovery-00-candidate"
+                row = json.loads((leg / "result.json").read_text())
+                if defect == "early":  # the second barriers are at 200
+                    row["mass_dirty_close"] = row["regroup-b"]
+                elif defect == "after-resume":  # resume is at 7000
+                    late = dict(row["settled"], wall_us=7001)
+                    row["mass_dirty_close"] = row["settled"] = late
+                    with (leg / "observer.log").open("a") as log:
+                        log.write("evpn_qualification " + json.dumps(late) + "\n")
+                elif defect == "not-observed":
+                    row["mass_dirty_close"] = dict(row["mass_dirty_close"], wall_us=951)
+                else:
+                    del row["mass_dirty_close"]
+                Q.write_json(leg / "result.json", row)
+                with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
+                    R.analyze(root)
+                self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+                self.assertIn("mass-dirty scrape window", str(caught.exception))
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+
+    def test_analyze_rechecks_the_mass_dirty_actor_receipt_against_both_raw_scrapes(self):
+        for defect in ("copied-value", "missing-field", "missing-start", "corrupt-end"):
+            with self.subTest(defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = self.analysis_fixture(root)
+                leg = root / "recovery-00-candidate"
+                row = json.loads((leg / "result.json").read_text())
+                if defect == "copied-value":
+                    row["mass_dirty_actor"] = {"actor_poll_max_microseconds": 1}
+                elif defect == "missing-field":
+                    del row["mass_dirty_actor"]
+                elif defect == "missing-start":
+                    (leg / "metrics-mass-dirty-start.txt").unlink()
+                else:
+                    (leg / "metrics-mass-dirty-end.txt").write_text(metrics_text())
+                Q.write_json(leg / "result.json", row)
+                with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
+                    R.analyze(root)
+                self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+
     def test_build_pins_same_source_cli_without_using_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -456,6 +573,10 @@ class RecoveryTests(unittest.TestCase):
                     for data in observation["peers"]: data[8] = True
                 row[name] = observation
                 snapshots.append(observation)
+            # The actor's next snapshot after the second barriers (at 200).
+            row["mass_dirty_close"] = dict(copy.deepcopy(row["settled"]), elapsed_us=len(names) * 50_000,
+                                           sample_slot=len(names), wall_us=950)
+            snapshots.append(row["mass_dirty_close"])
             row["protocol_obligation_before_churn"]["wall_us"] = 1000
             row["protocol_obligation_during_churn"]["wall_us"] = 3000
             row["protocol_obligation_after_churn"]["wall_us"] = 6000
@@ -487,6 +608,9 @@ class RecoveryTests(unittest.TestCase):
             # One 20 Hz probe series covering the first through last workload event.
             write_readiness(leg, [1 + n * .05 for n in range(round((56 - 1) / .05) + 1)])
             (leg / "metrics.txt").write_text(metrics_text())
+            (leg / "metrics-mass-dirty-start.txt").write_text(actor_text(900_000, {"0.2": 5, "0.5": 6, "+Inf": 6}))
+            (leg / "metrics-mass-dirty-end.txt").write_text(actor_text(1_300_000, {"0.2": 40, "0.5": 43, "+Inf": 44}))
+            row["mass_dirty_actor"] = None
             row.update({key: None for key in R.timings(events)})
             row["cgroup"] = {"memory.current": 1000, "memory.peak": 2000, "memory.max": Q.DAEMON_BYTES,
                              "memory.swap.max": 0, "memory.swap.current": 0, "memory.swap.peak": 0}
