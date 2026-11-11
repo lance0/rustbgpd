@@ -54,15 +54,30 @@ dispatches (`mono_us`, microseconds).
   ordinary refresh's data then takes the last slot (an admitted refresh row with
   `capacity == 0`). The candidate must record a `refresh_refused` row for that
   debtor whose complete, current feed owes markers, with the `refresh` refusal
-  counter at least one; its absence is INVALID. After the readers resume and every
-  receiver has its refresh EoR, source zero withdraws the fill and a source
+  counter at least one; its absence is INVALID. After the readers resume, the controller waits for both the candidate retry
+  send and a post-resume empty-channel sample before source zero withdraws the
+  fill. The private arm waits for the same empty-channel sample. A source
   barrier proves the withdrawal applied, so the final inventory is unchanged.
   - Drain clock: the first debtor `sample` row at or after the resume dispatch,
     and no later than the withdrawal dispatch, whose channel is empty
     (`capacity == max_capacity`). Its absence is INVALID.
-  - Tick clock: the first debtor row after the refusal that no longer owes
-    markers. It must be the resync tick's `retry_sent`, and
-    `tick − resume ≤ 1 s + (drain − resume)`; otherwise the cell FAILs.
+  - Retry proof: a read-only `retry_offer` event identifies the first eligible
+    resync attempt with marker debt and channel capacity. The very next event
+    for that peer must be `retry_sent`, with debt cleared, one added retry
+    attempt and no added refusal. A skipped offer FAILs even if a later attempt
+    is fast. An adjacent successful retry also proves capacity if the receiver
+    freed a slot after a zero-capacity offer snapshot. A zero-capacity offer
+    followed by neither `retry_sent` nor `retry_refused` is INVALID.
+    Either the retry or the drain can occur first. The retry may precede
+    resume, but must follow the witnessed refusal.
+  - Retry latency: the send must also satisfy `tick <= 1 s + drain`, both
+    measured from the resume dispatch. The offer and its send are logged in
+    the same synchronous call, so the causal proof alone would pass a resync
+    tick that reaches the debtor late; a retry before resume has a negative
+    tick and passes.
+    The controller waits for both under the existing 60-second bound. The
+    causal bar is prospective; earlier receipts retain their original result
+    and rule.
   - The private arm runs the same fill and must also show the refresh taking the
     last slot; it carries no debt and has no timing comparison.
   - Every root from the refresh dispatch to settlement, including the fill

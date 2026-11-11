@@ -25,7 +25,7 @@ def validate_feed(rows, peers):
     for row in rows:
         require(row["peer"] in peers and row["event"] in {
             "sample", "root_before", "data_admitted", "terminal_admitted", "marker_refused", "complete_noop",
-            "refresh_refused", "refresh_sent", "retry_refused", "retry_sent"},
+            "refresh_refused", "refresh_sent", "retry_offer", "retry_refused", "retry_sent"},
             "unknown feed identity/event")
         require(all(type(row[name]) is bool for name in ("complete", "current", "channel_match", "dirty"))
                 and all(type(row[name]) is int and row[name] >= 0 for name in
@@ -61,7 +61,7 @@ def marker_refusals(interval):
 
 
 def settled(row):
-    fields = ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+    fields = ("dirty", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
               "refresh_pending", "eor_pending", "protocol_obligations")
     require(all(type(row[name]) is int and row[name] >= 0 for name in fields), "malformed settlement observation")
     return not any(row[name] for name in fields)
@@ -295,15 +295,27 @@ def refusal_witness(feed, peer, after_us):
     return row
 
 
+def drain_clock(feed, peer, resume_us, limit_us):
+    """An actual empty-channel sample before the fill withdrawal, in either arm."""
+    empty = next((row for row in feed if row["peer"] == peer and resume_us <= row["wall_us"] <= limit_us
+                  and row["event"] == "sample" and row["capacity"] == row["max_capacity"]), None)
+    require(empty is not None, "missing drain clock: no empty-channel sample after resume")
+    return empty["wall_us"]
+
+
 def fallback(feed, refusal, resume_us, limit_us):
-    """Clocks for the resync-tick fallback after a refused refresh-site send.
+    """Causal retry proof, with retry and drain clocks retained as diagnostics.
 
     resume_us is the controller's wall-clock dispatch of the reader resume. The
     drain clock is the first daemon sample at or after it, and no later than
     limit_us (the unfill dispatch), showing the debtor's outbound channel empty
     (capacity == max_capacity). The send clock is the first feed row after the
-    refusal whose feed no longer owes markers; the bar requires it to be the
-    tick's successful send.
+    refusal whose feed no longer owes markers. The first eligible retry offer
+    must send those markers before another observation of this peer: the offer
+    and send are synchronous in the RIB actor, with no intervening producer.
+    A successful retry also proves capacity the receiver freed after its snapshot.
+    The causal check alone cannot see a tick that reaches the debtor late, so
+    the bar also bounds the send at one resync interval plus the drain.
     """
     rows = [row for row in feed if row["peer"] == refusal["peer"]]
     counts = [marker_counts(row) for row in rows]
@@ -316,19 +328,34 @@ def fallback(feed, refusal, resume_us, limit_us):
     # The fill is withdrawn only after the fallback send, so the drain window
     # [resume, unfill] contains the drain the bar measures.
     require(sent is None or sent["wall_us"] <= limit_us, "fill withdrawn before the fallback send")
-    empty = next((row for row in rows if resume_us <= row["wall_us"] <= limit_us and row["event"] == "sample"
-                  and row["capacity"] == row["max_capacity"]), None)
-    require(empty is not None, "missing drain clock: no empty-channel sample after resume")
-    return {"refused_us": refusal["wall_us"], "resume_us": resume_us, "empty_us": empty["wall_us"],
-            "drain_us": empty["wall_us"] - resume_us,
+    empty_us = drain_clock(rows, refusal["peer"], resume_us, limit_us)
+    # A full-channel offer is synchronous with its send attempt: one that
+    # records neither outcome left the retry path unobserved.
+    require(all(index + 1 < len(later) and later[index + 1]["event"] in ("retry_sent", "retry_refused")
+                for index, row in enumerate(later)
+                if row["event"] == "retry_offer" and positive(row) and row["capacity"] == 0),
+            "zero-capacity retry offer has neither a send nor a refusal")
+    offered = next((index for index, row in enumerate(later) if row["event"] == "retry_offer"
+                    and positive(row) and (row["capacity"] > 0 or (index + 1 < len(later)
+                        and later[index + 1]["event"] == "retry_sent"))), None)
+    offer = later[offered] if offered is not None else None
+    first_offer_sent = (offer is not None and sent is not None and offered + 1 < len(later)
+                        and later[offered + 1] == sent and refusal["wall_us"] < offer["wall_us"] <= sent["wall_us"]
+                        and marker_counts(sent)["retry_attempts"] == marker_counts(offer)["retry_attempts"] + 1
+                        and marker_counts(sent)["retry_refused"] == marker_counts(offer)["retry_refused"])
+    return {"refused_us": refusal["wall_us"], "resume_us": resume_us, "empty_us": empty_us,
+            "drain_us": empty_us - resume_us,
+            "eligible_offer_us": offer["wall_us"] if offer else None, "first_offer_sent": first_offer_sent,
             "sent_event": sent["event"] if sent else None, "sent_us": sent["wall_us"] if sent else None,
             "tick_us": sent["wall_us"] - resume_us if sent else None,
             "retry_refusals": marker_counts(sent or rows[-1])["retry_refused"] - marker_counts(refusal)["retry_refused"]}
 
 
 def fallback_within_bar(result):
-    """The tick, not another path, sent the markers within 1 s plus the drain."""
-    return result["sent_event"] == "retry_sent" and result["tick_us"] <= MARKER_RETRY_US + result["drain_us"]
+    """The first eligible resync offer, not a later retry, discharged the debt,
+    within one resync interval plus the drain after the reader resume."""
+    return (result["sent_event"] == "retry_sent" and result["first_offer_sent"]
+            and result["tick_us"] <= MARKER_RETRY_US + result["drain_us"])
 
 
 def mono(row, what):

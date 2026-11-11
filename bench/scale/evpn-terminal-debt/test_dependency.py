@@ -263,10 +263,10 @@ class DependencyChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(terminal.BARS, routes_per_source=10):
             leg = Path(directory)
             self.write_wire_fixture(leg)
-            row = {name: 0 for name in ("dirty", "dirty_high_water", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+            row = {name: 0 for name in ("dirty", "dirty_high_water", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
                                         "refresh_pending", "eor_pending", "protocol_obligations", "retained", "peak", "owned_routes", "private_routes")}
             row.update(members=3, owned_groups=2, owned_members=3, peer_budget=self.q.REPORTED_PEER_BUDGET, daemon_budget=268435456,
-                       peers=[[self.q.COMMON.peer(peer), 1 if peer == 1 else 0, False, 0, 0, 0, False, False, False, False]
+                       peers=[[self.q.COMMON.peer(peer), 1 if peer == 1 else 0, False, 0, 0, 0, False, False, False, False, False]
                               for peer in range(3)])
             controls = terminal.check.lines(leg / "driver.log", "evpn_control ")
             applied = {"event": "input-applied", "generation": 2, "wall_us": 400, "at": 4.0}
@@ -372,7 +372,7 @@ class DependencyChecks(unittest.TestCase):
                 terminal.evidence(leg, record, self.q, self.r, self.wire)
             self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
             (leg / "readiness.jsonl").write_text(readiness)
-            for defect in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts", "refresh_pending", "eor_pending", "protocol_obligations",
+            for defect in ("dirty", "owing", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts", "refresh_pending", "eor_pending", "protocol_obligations",
                            "peer_limit", "daemon_limit", "allocation_failure", "capture_unavailable", "admission_invariant", "hidden-peer-peak", "hidden-daemon-peak"):
                 with self.subTest(defect=defect):
                     bad = copy.deepcopy(row)
@@ -391,9 +391,10 @@ class DependencyChecks(unittest.TestCase):
                         observer([bad, row])
                     else:
                         bad[defect] = 1
-                        if defect == "dirty":
-                            bad["peers"][0][2] = True
-                            bad["dirty_high_water"] = 1
+                        if defect in ("dirty", "owing"):
+                            bad["peers"][0][2 if defect == "dirty" else 10] = True
+                            bad["dirty_high_water"] = bad["dirty"]
+                            bad["recovery_pending"] = 1
                         elif defect == "pending_resets":
                             bad["peers"][0][6] = True
                         elif defect == "retained_recovery":
@@ -555,10 +556,10 @@ class DependencyChecks(unittest.TestCase):
             leg = Path(directory)
             self.write_wire_fixture(leg, forced=True)
             peer = self.q.COMMON.peer(1)
-            row = {name: 0 for name in ("dirty", "dirty_high_water", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+            row = {name: 0 for name in ("dirty", "dirty_high_water", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
                                         "refresh_pending", "eor_pending", "protocol_obligations", "retained", "peak", "owned_routes", "private_routes")}
             row.update(members=3, owned_groups=2, owned_members=3, peer_budget=self.q.REPORTED_PEER_BUDGET, daemon_budget=268435456,
-                       peers=[[self.q.COMMON.peer(index), 1 if index == 1 else 0, False, 0, 0, 0, False, False, False, False]
+                       peers=[[self.q.COMMON.peer(index), 1 if index == 1 else 0, False, 0, 0, 0, False, False, False, False, False]
                               for index in range(3)])
             (leg / "readiness.jsonl").write_text("".join(
                 json.dumps({"scheduled": index * .05, "at": index * .05 + .001, "seconds": .01, "status": 200}) + "\n"
@@ -581,6 +582,7 @@ class DependencyChecks(unittest.TestCase):
             feed = [debt("sample", 60, owed=0, capacity=4096), debt("data_admitted", 62, owed=0, capacity=2, rows=1), filled,
                     full, refusal, debt("retry_refused", 120, retry_attempts=1, retry_refused=1, **refused),
                     debt("sample", 540, capacity=4096, retry_attempts=1, retry_refused=1, **refused),
+                    debt("retry_offer", 544, capacity=4096, retry_attempts=1, retry_refused=1, **refused),
                     debt("retry_sent", 545, owed=0, capacity=4095, retry_attempts=2, retry_refused=1, **refused),
                     debt("root_before", 570, owed=0, capacity=4096, root=1, retry_attempts=2, retry_refused=1, **refused)]
             work = {name: 0 for name in terminal.check.COUNTERS}
@@ -633,40 +635,29 @@ class DependencyChecks(unittest.TestCase):
                              (10, 15, "retry_sent"))
             self.assertEqual(good["work"]["inventory_visits"], 0)
             terminal.accept_report(good, "candidate", self.q)
+            with self.subTest(mode="capacity-freed-after-offer"):
+                rows = copy.deepcopy(feed)
+                rows[7]["capacity"] = rows[8]["capacity"] = 0
+                empty = rows.pop(6)
+                empty.update(wall_us=546, owed=0, markers=dict(rows[7]["markers"]))
+                rows.insert(8, empty)
+                observer(rows)
+                report = terminal.evidence(leg, record, self.q, self.r, self.wire)
+                self.assertEqual((report["fallback"]["drain_us"], report["fallback"]["tick_us"]), (16, 15))
+                terminal.accept_report(report, "candidate", self.q)
             for mode, failure in (("no-refusal", "no refused refresh-site"), ("no-drain-clock", "missing drain clock"),
-                                  ("free-slot", "last outbound slot"), ("late-tick", "resync tick within 1 s")):
+                                  ("free-slot", "last outbound slot"), ("skipped-offer", "first eligible resync offer")):
                 with self.subTest(mode=mode):
                     rows, current, raw = copy.deepcopy(feed), copy.deepcopy(record), copy.deepcopy(events)
                     if mode == "no-refusal":
                         rows.remove(refusal)
                     elif mode == "no-drain-clock":
                         rows[6]["capacity"] = 4095
-                    elif mode == "late-tick":
-                        # One microsecond past resume + 1 s + the 10 us drain. The
-                        # runner withdraws the fill only after that send, so every
-                        # later clock moves with it. Last mode: shifts in place.
-                        late = 530 + 1_000_000 + 10 + 1
-                        delta = late - rows[7]["wall_us"]
-
-                        def shift(value, delta=delta):
-                            if isinstance(value, dict):
-                                for key, item in value.items():
-                                    if key.endswith("_us") and isinstance(item, int) and item > 545:
-                                        value[key] = item + delta
-                                    else:
-                                        shift(item, delta)
-                            elif isinstance(value, list):
-                                for item in value:
-                                    shift(item, delta)
-                        for value in (rows, raw, current, work, barriers):
-                            shift(value)
-                        rows[7]["wall_us"] = late
-                        controls = [json.loads(line.split(" ", 1)[1])
-                                    for line in (leg / "driver.log").read_text().splitlines()]
-                        prefixes = [line.split(" ", 1)[0] for line in (leg / "driver.log").read_text().splitlines()]
-                        shift(controls)
-                        (leg / "driver.log").write_text("".join(f"{prefix} {json.dumps(value)}\n"
-                                                                for prefix, value in zip(prefixes, controls)))
+                    elif mode == "skipped-offer":
+                        # A later successful offer is fast enough for the former
+                        # wall-clock bar but does not discharge the first offer.
+                        rows.insert(7, debt("retry_offer", 541, capacity=4096,
+                                            retry_attempts=1, retry_refused=1, **refused))
                     else:
                         rows[3]["capacity"] = 1
                         current["refresh_full"]["admitted"]["capacity"] = 1
@@ -675,7 +666,7 @@ class DependencyChecks(unittest.TestCase):
                     (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in raw))
                     with self.assertRaisesRegex(ValueError, failure) as raised:
                         terminal.accept_report(terminal.evidence(leg, current, self.q, self.r, self.wire), "candidate", self.q)
-                    self.assertEqual(isinstance(raised.exception, self.q.AcceptanceFailure), mode == "late-tick")
+                    self.assertEqual(isinstance(raised.exception, self.q.AcceptanceFailure), mode == "skipped-offer")
 
     def test_final_summary_reapplies_raw_work_bar_and_rejects_incomplete_pass_or_cleanup(self):
         manifest = {"head": "a" * 40, "qualification_head": PIN, "bars": terminal.BARS}

@@ -46,13 +46,13 @@ BARS = {"clients": 3, "routes_per_source": 10000, "type2_fraction": .8,
         # single-route announcements from source zero's unused pool indices,
         # stopping when a debtor has one free slot for the refresh's data.
         "fill_target_capacity": 1, "fill_spare_routes": 10000, "fill_seconds": 60,
-        "marker_retry_seconds": 1}
+        "marker_retry": "first-eligible-offer"}
 SCOPE = ("non-RTC Type 2/5, three real TCP peers, ordinary route refresh; "
          "timed overlap cells: churn-applied during refresh replay overlap (performance, <=1.03x medians); "
          "pressure cells: immediate refresh-tail EVPN marker send and churn correctness under witnessed kernel "
          "backpressure (timings diagnostic; no <=1.03x claim under witnessed pressure); "
          "forced-refusal cells: refresh-site marker refused by a full 4,096-entry outbound channel and "
-         "sent by the 1 s resync tick; complete actual-caller producer work and raw receiver UPDATE/EoR order; "
+         "sent on the first eligible resync offer; complete actual-caller producer work and raw receiver UPDATE/EoR order; "
          "not ERR, RTC, full-fleet recovery, soak or production activation")
 
 
@@ -123,16 +123,14 @@ def readiness_type(r):
     return Readiness
 
 
-def resume_after_fallback(controller, q, arm, debtor):
-    """Resume the readers; in a candidate forced cell, withdraw nothing until
-    the tick has sent the owed markers, so the drain the fallback bar measures
-    lies inside [resume, unfill]. The wait is bounded by the convergence bar."""
+def resume_after_fallback(controller, q, full):
+    """Keep the fill until both the retry and the channel drain are observed.
+    Private output has no completion debt, but must establish the same drain."""
     controller.command("resume")
     started = controller.last_completion
-    if arm == "candidate":
-        resumed = controller.last_command_start["wall_us"]
-        sent = controller.fallback_send(resumed, debtor, BARS["convergence_seconds"])
-        q.accept(sent is not None, "fallback marker send exceeded the convergence bar")
+    resumed = controller.last_command_start["wall_us"]
+    drained = controller.fallback_send(resumed, full, BARS["convergence_seconds"])
+    q.accept(drained is not None, "marker retry/channel drain exceeded the convergence bar")
     return started
 
 
@@ -281,14 +279,18 @@ def controller_type(r):
                     return self.last_event.copy()
             raise ValueError("refresh did not take the last outbound slot with a refused marker send")
 
-        def fallback_send(self, after, debtor, seconds):
-            """The debtor's owed markers sent by the resync tick after `after`, or
-            None when the bounded wait expires."""
+        def fallback_send(self, after, full, seconds):
+            """Wait for the retry (owned arm) and an empty channel in either order,
+            under one deadline. The retry may precede resume, but must follow this refusal."""
             end = time.monotonic() + seconds
             while time.monotonic() < end:
                 self.poll()
-                if any(row["peer"] == debtor and row["wall_us"] >= after and row["event"] == "retry_sent"
-                       for row in self.feed):
+                rows = [row for row in self.feed if row["peer"] == full["peer"]]
+                sent = self.arm == "private" or any(row["event"] == "retry_sent"
+                                                   and row["wall_us"] > full["refusal"]["wall_us"] for row in rows)
+                empty = any(row["event"] == "sample" and row["wall_us"] >= after
+                            and row["capacity"] == row["max_capacity"] for row in rows)
+                if sent and empty:
                     return True
                 time.sleep(.01)
             return None
@@ -551,6 +553,8 @@ def evidence(leg, record, q, r, wire):
         roots = {row["root"] for row in feed if row["event"] == "root_before"
                  and refresh_start[0]["wall_us"] <= row["wall_us"] <= settle_end}
         report["work"] = check.work_receipt(work, sorted(roots))
+    else:
+        report["drain_us"] = check.drain_clock(feed, peer, resume_start[0]["wall_us"], starts[0]["wall_us"]) - resume_start[0]["wall_us"]
     return report
 
 
@@ -560,7 +564,7 @@ def accept_report(report, arm, q):
                  "complete current-feed churn repeated full-inventory producer work")
     if "fallback" in report:
         q.accept(check.fallback_within_bar(report["fallback"]),
-                 "markers did not leave the refusal through the resync tick within 1 s plus the measured drain")
+                 "markers did not leave the refusal on the first eligible resync offer within 1 s plus the drain")
 
 def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
     leg = output / f"terminal-{index:02}-{shape}-{arm}"
@@ -644,7 +648,7 @@ def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
                 controller.command("refresh", BARS["convergence_seconds"])
                 refresh_started = controller.last_command_start["wall_us"]
                 record["refresh_full"] = controller.refusal(refresh_started, record["fill"]["peer"])
-                started = resume_after_fallback(controller, q, arm, record["fill"]["peer"])
+                started = resume_after_fallback(controller, q, record["refresh_full"])
                 controller.command("terminal-unfill", BARS["convergence_seconds"])
                 unfill_started = controller.last_command_start.copy()
                 record["applied"] = controller.source_barrier()

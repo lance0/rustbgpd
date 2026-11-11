@@ -232,6 +232,7 @@ def forced_feed():
             row("refresh_refused", 96, capacity=0, **refused),
             row("retry_refused", 1_000_096, capacity=0, retry_attempts=1, retry_refused=1, **refused),
             row("sample", 2_100_000, capacity=4096, retry_attempts=1, retry_refused=1, **refused),
+            row("retry_offer", 2_199_999, retry_attempts=1, retry_refused=1, **refused),
             row("retry_sent", 2_200_000, owed=0, retry_attempts=2, retry_refused=1, **refused)]
 
 
@@ -277,15 +278,72 @@ class ForcedRefusalChecks(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "missing terminal-marker send-site counter"):
                     check.fallback(rows, forced_feed()[2] if position != 2 else rows[2], RESUME, UNFILL)
 
-    def test_tick_send_later_than_retry_interval_plus_drain_fails(self):
+    def test_skipping_the_first_eligible_retry_offer_fails(self):
+        for later_capacity in (4096, 0):
+            with self.subTest(later_capacity=later_capacity):
+                rows = forced_feed()
+                refusal = check.refusal_witness(rows, "127.1.0.2", 70)
+                first = dict(rows[-2], wall_us=2_199_990)
+                rows[-2]["capacity"] = later_capacity
+                rows.insert(-2, first)
+                result = check.fallback(rows, refusal, RESUME, UNFILL)
+                self.assertLess(result["tick_us"], 1_000_000 + result["drain_us"], "the former timing bar would pass")
+                self.assertFalse(check.fallback_within_bar(result))
+
+    def test_a_late_first_retry_fails_the_latency_bound(self):
+        for late, passes in ((30_000_000, False), (1_100_001, False), (1_100_000, True)):
+            with self.subTest(late=late):
+                rows = forced_feed()
+                rows[-2]["wall_us"], rows[-1]["wall_us"] = RESUME + late - 1, RESUME + late
+                result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, RESUME + late)
+                self.assertTrue(result["first_offer_sent"], "the causal check alone would pass")
+                self.assertEqual((result["drain_us"], result["tick_us"]), (100_000, late))
+                self.assertEqual(check.fallback_within_bar(result), passes)
+
+    def test_zero_capacity_offer_without_a_send_or_refusal_is_invalid(self):
+        for mode in ("sample-follows", "feed-ends"):
+            with self.subTest(mode=mode):
+                rows = forced_feed()
+                if mode == "sample-follows":
+                    rows.insert(4, dict(rows[3], event="retry_offer", wall_us=2_050_000))
+                else:
+                    del rows[-1]
+                    rows[-1]["capacity"] = 0
+                with self.assertRaisesRegex(ValueError, "zero-capacity retry offer has neither"):
+                    check.fallback(rows, rows[2], RESUME, UNFILL)
+
+    def test_capacity_freed_after_the_retry_offer_snapshot_passes(self):
         rows = forced_feed()
-        refusal = check.refusal_witness(rows, "127.1.0.2", 70)
-        rows[-1]["wall_us"] = RESUME + check.MARKER_RETRY_US + 100_000
-        # The runner withdraws the fill only after the tick's send.
-        late_unfill = rows[-1]["wall_us"] + 10
-        self.assertTrue(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, late_unfill)))
-        rows[-1]["wall_us"] += 1
-        self.assertFalse(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, late_unfill)))
+        rows[-2]["capacity"] = rows[-1]["capacity"] = 0
+        empty = rows.pop(4)
+        empty.update(wall_us=2_300_000, owed=0, markers=dict(rows[-1]["markers"]))
+        rows.append(empty)
+        rows.insert(3, dict(rows[3], event="retry_offer", wall_us=1_000_095,
+                            markers=dict(rows[2]["markers"])))
+        result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, UNFILL)
+        self.assertLess(result["tick_us"], result["drain_us"])
+        self.assertEqual(result["eligible_offer_us"], rows[-3]["wall_us"])
+        self.assertTrue(check.fallback_within_bar(result))
+
+    def test_retry_send_before_the_drain_sample_passes(self):
+        rows = forced_feed()
+        rows[4]["wall_us"] = 2_300_000
+        rows[4]["owed"] = 0
+        rows[4]["markers"] = dict(rows[-1]["markers"])
+        rows.append(rows.pop(4))
+        result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, UNFILL)
+        self.assertLess(result["tick_us"], result["drain_us"])
+        self.assertTrue(check.fallback_within_bar(result))
+
+    def test_retry_before_resume_passes_with_a_post_resume_drain(self):
+        rows = forced_feed()
+        rows[-2]["wall_us"], rows[-1]["wall_us"] = RESUME - 2, RESUME - 1
+        rows[4]["owed"] = 0
+        rows[4]["markers"] = dict(rows[-1]["markers"])
+        rows.append(rows.pop(4))
+        result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, UNFILL)
+        self.assertLess(result["tick_us"], 0)
+        self.assertTrue(check.fallback_within_bar(result))
 
     def test_markers_settled_outside_the_tick_fail(self):
         for event in ("refresh_sent", "sample"):
@@ -355,7 +413,7 @@ def series():
 
 class ReadinessAndWireChecks(unittest.TestCase):
     def test_every_settlement_duty_and_every_reset_cause_must_be_zero(self):
-        settled = {name: 0 for name in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+        settled = {name: 0 for name in ("dirty", "owing", "recovery_pending", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
                                        "refresh_pending", "eor_pending", "protocol_obligations")}
         self.assertTrue(check.settled(settled))
         for name in settled:
@@ -476,6 +534,72 @@ class SamplerStop(unittest.TestCase):
 
 
 class ForcedResumeOrder(unittest.TestCase):
+    def test_retry_send_waits_for_the_empty_channel_sample(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import terminal
+
+        for events in (("retry_sent", "sample"), ("sample", "retry_sent")):
+            with self.subTest(events=events):
+                controller = object.__new__(terminal.controller_type(SimpleNamespace(
+                    Readiness=type("Readiness", (), {"issues_slot_due_before_stop": True}), Controller=object)))
+                controller.arm, controller.feed = "candidate", []
+                polls = []
+
+                def poll(events=events, polls=polls, controller=controller):
+                    event = events[len(polls)]
+                    controller.feed.append(feed(event, RESUME + len(polls) + 1,
+                                                capacity=4096 if event == "sample" else 4095, owed=0))
+                    polls.append(event)
+
+                controller.poll = poll
+                with mock.patch.object(terminal.time, "sleep"):
+                    self.assertTrue(controller.fallback_send(RESUME, {"peer": "127.1.0.2", "refusal": {"wall_us": 96}}, 60))
+                self.assertEqual(polls, list(events), "a retry send alone does not prove the channel drained")
+
+    def test_private_waits_for_a_post_resume_empty_sample(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import terminal
+
+        controller = object.__new__(terminal.controller_type(SimpleNamespace(
+            Readiness=type("Readiness", (), {"issues_slot_due_before_stop": True}), Controller=object)))
+        controller.arm, controller.feed = "private", [feed("sample", RESUME - 1, capacity=4096, owed=0)]
+        polls = []
+
+        def poll():
+            polls.append(True)
+            if len(polls) == 2:
+                controller.feed.append(feed("sample", RESUME + 1, capacity=4096, owed=0))
+
+        controller.poll = poll
+        with mock.patch.object(terminal.time, "sleep"):
+            self.assertTrue(controller.fallback_send(RESUME, {"peer": "127.1.0.2", "refusal": {"wall_us": 96}}, 60))
+        self.assertEqual(len(polls), 2)
+
+    def test_retry_may_precede_resume_but_must_follow_this_refusal(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import terminal
+
+        full = {"peer": "127.1.0.2", "refusal": {"wall_us": 96}}
+        for retry, expected_polls in ((95, 2), (97, 1)):
+            with self.subTest(retry=retry):
+                controller = object.__new__(terminal.controller_type(SimpleNamespace(
+                    Readiness=type("Readiness", (), {"issues_slot_due_before_stop": True}), Controller=object)))
+                controller.arm, controller.feed = "candidate", [feed("retry_sent", retry, owed=0)]
+                polls = []
+
+                def poll(controller=controller, polls=polls):
+                    polls.append(True)
+                    controller.feed.append(feed("sample" if len(polls) == 1 else "retry_sent",
+                                                RESUME + len(polls), capacity=4096, owed=0))
+
+                controller.poll = poll
+                with mock.patch.object(terminal.time, "sleep"):
+                    self.assertTrue(controller.fallback_send(RESUME, full, 60))
+                self.assertEqual(len(polls), expected_polls)
+
     def run_order(self, arm, sent=True):
         from types import SimpleNamespace
         import terminal
@@ -488,27 +612,27 @@ class ForcedResumeOrder(unittest.TestCase):
             def command(self, name, *args):
                 calls.append(name)
 
-            def fallback_send(self, after, debtor, seconds):
-                calls.append(("wait", after, debtor, seconds))
+            def fallback_send(self, after, full, seconds):
+                calls.append(("wait", after, full["peer"], seconds))
                 return True if sent else None
 
         failures = []
         q = SimpleNamespace(accept=lambda ok, reason: ok or failures.append(reason))
-        started = terminal.resume_after_fallback(Controller(), q, arm, "127.1.0.2")
+        started = terminal.resume_after_fallback(Controller(), q, {"peer": "127.1.0.2", "refusal": None})
         calls.append("terminal-unfill")
         return calls, started, failures
 
-    def test_candidate_withdraws_the_fill_only_after_the_fallback_send(self):
+    def test_both_arms_withdraw_the_fill_only_after_the_drain_wait(self):
         import terminal
 
-        calls, started, failures = self.run_order("candidate")
-        self.assertEqual(calls, ["resume", ("wait", 123, "127.1.0.2", terminal.BARS["convergence_seconds"]),
-                                 "terminal-unfill"])
-        self.assertEqual((started, failures), (5.0, []))
-        calls, _, failures = self.run_order("candidate", sent=False)
-        self.assertEqual(failures, ["fallback marker send exceeded the convergence bar"])
-        calls, _, failures = self.run_order("private")
-        self.assertEqual((calls, failures), (["resume", "terminal-unfill"], []))
+        for arm in ("candidate", "private"):
+            with self.subTest(arm=arm):
+                calls, started, failures = self.run_order(arm)
+                self.assertEqual(calls, ["resume", ("wait", 123, "127.1.0.2", terminal.BARS["convergence_seconds"]),
+                                         "terminal-unfill"])
+                self.assertEqual((started, failures), (5.0, []))
+                calls, _, failures = self.run_order(arm, sent=False)
+                self.assertEqual(failures, ["marker retry/channel drain exceeded the convergence bar"])
 
 
 PEERS = ("127.1.0.1", "127.1.0.2", "127.1.0.3")
