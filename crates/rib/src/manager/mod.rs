@@ -1175,6 +1175,11 @@ pub struct RibManager {
     /// distribution window, held until the run loop's next ordinary receive
     /// so a non-extending update keeps its FIFO position.
     primary_lookahead: Option<RibUpdate>,
+    /// BGP-LS UPDATEs dispatched since one changed an ORR topology input
+    /// without the cache being rebuilt for it; zero when the cache is
+    /// current. Nonzero only while the next queued primary update is another
+    /// BGP-LS UPDATE ([`Self::settle_orr_rebuild`]).
+    orr_rebuild_owed_updates: u32,
     /// ADR-0137 admission cutoffs, one per run-loop timer: while a timer is
     /// due, the primary updates still admitted before it fires, which is
     /// the backlog when it was first seen due. Every admission counts,
@@ -2166,6 +2171,11 @@ const fn initial_flush_poll_budget() -> std::time::Duration {
 /// Maximum deferred inbound-refresh retries in a resync-timer tick. Dirty
 /// route replays poll the work budget after each complete peer instead.
 const RESYNC_PEERS_PER_TICK: usize = 8;
+/// Most consecutive queued BGP-LS UPDATEs that share one ORR rebuild. A feed
+/// that never leaves the queue empty then still moves ORR-bound peers to the
+/// new topology every this many UPDATEs, each of which costs only its own
+/// selection; a convergence burst of a few tens of UPDATEs rebuilds once.
+const ORR_REBUILD_COALESCE_MAX: u32 = 32;
 /// Re-arm interval while a withheld dirty-resync backlog remains. Short by
 /// design: the backlog is work the actor already owes, so the next slice
 /// should run as soon as queued updates and queries have had a turn.
@@ -3016,6 +3026,7 @@ impl RibManager {
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
             expiry_cutoffs: ExpiryCutoffs::default(),
             primary_lookahead: None,
+            orr_rebuild_owed_updates: 0,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
@@ -4501,7 +4512,15 @@ impl RibManager {
                 %peer,
                 "discarding a session message that names a deleted neighbor's handle"
             );
+            // The discarded message may be the one an owed rebuild waited on.
+            self.settle_orr_rebuild();
             return;
+        }
+        // Only a following BGP-LS UPDATE may see the cache behind its inputs.
+        if self.orr_rebuild_owed_updates > 0
+            && !matches!(update, RibUpdate::BgpLsRoutesReceived { .. })
+        {
+            self.rebuild_orr_and_resync();
         }
         let receipt_peer = match &update {
             RibUpdate::BgpLsRoutesReceived { peer, .. }
@@ -4515,6 +4534,7 @@ impl RibManager {
         };
         let before = receipt_peer.map(|peer| (peer, self.retained_stale_count(peer)));
         self.dispatch_update(update);
+        self.settle_orr_rebuild();
         if let Some((peer, before)) = before {
             self.republish_gr_stale_routes_if_moved(peer, before);
         }
@@ -6451,6 +6471,9 @@ impl RibManager {
         let mut affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut displaced = 0usize;
+        // Selection reconsiders every announced key; the ORR cache is owed a
+        // rebuild only when a stored route actually changed.
+        let mut orr_input_changed = false;
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
@@ -6459,6 +6482,7 @@ impl RibManager {
                 if rib.withdraw_bgpls(&key) {
                     displaced += 1;
                     affected.insert(key.clone());
+                    orr_input_changed = true;
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
@@ -6472,6 +6496,14 @@ impl RibManager {
                 let key = route.key();
                 let family = route.family.to_afi_safi();
                 self.attr_intern.intern(&mut route.attributes);
+                orr_input_changed |= rib.get_bgpls(&key).is_none_or(|held| {
+                    held.nlri != route.nlri
+                        || held.attributes != route.attributes
+                        || held.next_hop != route.next_hop
+                        || held.peer_router_id != route.peer_router_id
+                        || held.is_stale
+                        || held.is_llgr_stale
+                });
                 displaced += usize::from(rib.insert_bgpls(route));
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
@@ -6487,7 +6519,11 @@ impl RibManager {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
         self.update_peer_refresh_metrics(peer);
-        self.recompute_bgpls_keys(&affected);
+        self.recompute_and_distribute_bgpls(&affected);
+        // Settled by `handle_update_untimed` once this UPDATE is dispatched.
+        if orr_input_changed && self.orr_rebuild_owed_updates == 0 {
+            self.orr_rebuild_owed_updates = 1;
+        }
         if !affected.is_empty() {
             self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
@@ -6679,7 +6715,12 @@ impl RibManager {
             self.sync_attr_intern_gauge();
         }
         if !self.selection_deferred(family) {
-            self.rebuild_rtc_membership_and_restage_vpn(peer);
+            // Deriving the membership is membership-sized and a changed one
+            // walks the member's group VPN table per membership entry (or
+            // restages the peer), so the unit takes the readiness lane.
+            self.with_ingest_readiness(|manager| {
+                manager.rebuild_rtc_membership_and_restage_vpn(peer);
+            });
         }
     }
 
@@ -6762,19 +6803,28 @@ impl RibManager {
                 let mut checkpoint = || {
                     replacement_readiness_checkpoint_at(&readiness, "selection_evpn", false);
                 };
-                let mut keys: HashSet<rustbgpd_wire::EvpnRouteKey> = self
-                    .loc_rib
-                    .iter_evpn()
-                    .inspect(|_| checkpoint())
-                    .map(crate::route::EvpnRibRoute::key)
-                    .collect();
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                // The restage is a no-op for a peer that cannot be sent
+                // EVPN: collect no keys for it.
+                let evpn_sendable = self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&(Afi::L2Vpn, Safi::Evpn)));
+                let mut keys: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+                if evpn_sendable {
                     keys.extend(
-                        rib_out
+                        self.loc_rib
                             .iter_evpn()
                             .inspect(|_| checkpoint())
                             .map(crate::route::EvpnRibRoute::key),
                     );
+                    if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                        keys.extend(
+                            rib_out
+                                .iter_evpn()
+                                .inspect(|_| checkpoint())
+                                .map(crate::route::EvpnRibRoute::key),
+                        );
+                    }
                 }
                 self.distribute_evpn_keys_to_peer(peer, &keys, &mut checkpoint);
                 retire_hash_set(&mut keys, &mut checkpoint);
@@ -6890,14 +6940,75 @@ impl RibManager {
         if affected.is_empty() {
             return;
         }
-        // Every BGP-LS mutation seam routes through here — receive
-        // (`handle_bgpls_routes_received`), the enhanced-refresh EoRR
-        // sweep (`finish_route_refresh`), the GR entry sweep
-        // (`handle_peer_graceful_restart`, recompute-then-GC ordering),
-        // and BGP-LS-bearing peer teardown (`clear_peer_adj_rib_in`) —
-        // so the ORR cache rebuild needs exactly one call site.
-        let changed = self.recompute_orr();
+        // Every BGP-LS mutation seam but receive routes through here — the
+        // enhanced-refresh EoRR sweep (`finish_route_refresh`), the GR
+        // entry sweep (`handle_peer_graceful_restart`, recompute-then-GC
+        // ordering), and BGP-LS-bearing peer teardown
+        // (`clear_peer_adj_rib_in`). Receive owes the same rebuild through
+        // `settle_orr_rebuild`, once per queued burst of UPDATEs.
+        self.rebuild_orr_and_resync();
+    }
+
+    /// Rebuild the ORR cache now and resync the peers bound to a changed
+    /// vantage. The resync marks them dirty first, so its distribution pass
+    /// takes its own readiness owners.
+    fn rebuild_orr_and_resync(&mut self) {
+        self.orr_rebuild_owed_updates = 0;
+        let changed = self.recompute_orr_owned();
         self.resync_orr_bound_peers(&changed);
+    }
+
+    /// [`Self::recompute_orr`] for a caller that may hold no readiness
+    /// owner. Building the topology, one SPF per vantage and retiring the
+    /// replaced cache are topology-sized, so the rebuild takes the lane for
+    /// its checkpoints to serve. With no vantage and nothing cached it is a
+    /// constant-time early-out and takes nothing.
+    ///
+    /// A rebuild still owed for received BGP-LS UPDATEs is paid first, with
+    /// its resync: this call's changed set is relative to the cache it
+    /// replaces, and a caller may discard it.
+    pub(super) fn recompute_orr_owned(&mut self) -> HashSet<IpAddr> {
+        if self.orr_rebuild_owed_updates > 0 {
+            self.rebuild_orr_and_resync();
+        }
+        if self.peer_orr_vantage.is_empty() && self.orr.is_empty() {
+            self.recompute_orr()
+        } else {
+            self.with_ingest_readiness(Self::recompute_orr)
+        }
+    }
+
+    /// Pay an owed ORR rebuild unless the next queued primary update is
+    /// another BGP-LS UPDATE: a burst of them rebuilds the topology once, at
+    /// its end, instead of once per UPDATE. Selection and BGP-LS
+    /// distribution are never deferred.
+    ///
+    /// While a rebuild is owed the actor dispatches only those queued BGP-LS
+    /// UPDATEs and serves the readiness lane: `run_actor` drains them before
+    /// any timer, resync tick, prestage slice, deferred registration or
+    /// validation chunk, and `handle_update_untimed` rebuilds before any
+    /// other update or query. So nothing that reads the cache, and no
+    /// staging for an ORR-bound peer, runs against the older topology. The
+    /// burst ends at [`ORR_REBUILD_COALESCE_MAX`] UPDATEs, or at once when a
+    /// due timer's admission cutoff is exhausted.
+    fn settle_orr_rebuild(&mut self) {
+        if self.orr_rebuild_owed_updates == 0 {
+            return;
+        }
+        if self.orr_rebuild_owed_updates < ORR_REBUILD_COALESCE_MAX && !self.expiry_cutoff_reached()
+        {
+            if self.primary_lookahead.is_none() {
+                self.primary_lookahead = self.rx.try_recv().ok();
+            }
+            if matches!(
+                self.primary_lookahead,
+                Some(RibUpdate::BgpLsRoutesReceived { .. })
+            ) {
+                self.orr_rebuild_owed_updates += 1;
+                return;
+            }
+        }
+        self.rebuild_orr_and_resync();
     }
 
     /// Resync every established peer bound to a changed ORR vantage: a
@@ -7203,6 +7314,16 @@ impl RibManager {
                     "dampening capacity disable owner unavailable; terminating RIB actor"
                 );
                 return self;
+            }
+            // An owed ORR rebuild waits only on the BGP-LS UPDATEs queued
+            // behind it. Dispatch them before anything below (timers, the
+            // resync tick, a prestage slice, a deferred registration, a
+            // validation chunk) can stage from the older cache.
+            if self.orr_rebuild_owed_updates > 0 {
+                if self.drain_ready_updates().await {
+                    continue;
+                }
+                self.rebuild_orr_and_resync();
             }
             // The export roster's one publication point (ADR-0136): after
             // each completed unit, never while a grouped transition is

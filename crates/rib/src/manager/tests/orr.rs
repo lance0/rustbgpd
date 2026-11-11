@@ -2632,3 +2632,325 @@ async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
     drop(tx);
     handle.await.unwrap();
 }
+
+// --- BGP-LS bursts and the ORR cache (wire-visible behaviour) -------------
+
+/// The first fixture link, A→X, re-advertised with `metric`. From vantage
+/// A the scenario prefix exits via NH-X while this stays below 10.
+fn a_x_link(metric: u32) -> crate::route::BgpLsRibRoute {
+    use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
+    link_route(
+        ORR_FEED,
+        A,
+        X,
+        Some(metric),
+        &[
+            v4_interface(Ipv4Addr::new(10, 0, A, X)),
+            v4_neighbor(Ipv4Addr::new(10, 0, X, A)),
+        ],
+    )
+}
+
+/// The B→Y link re-advertised with `metric`: it moves no cost seen from
+/// vantage A.
+fn b_y_link(metric: u32) -> crate::route::BgpLsRibRoute {
+    use crate::orr::fixtures::{B, Y, link_route, v4_interface, v4_neighbor};
+    link_route(
+        ORR_FEED,
+        B,
+        Y,
+        Some(metric),
+        &[
+            v4_interface(Ipv4Addr::new(10, 0, B, Y)),
+            v4_neighbor(Ipv4Addr::new(10, 0, Y, B)),
+        ],
+    )
+}
+
+fn feed_update(
+    announced: Vec<crate::route::BgpLsRibRoute>,
+    withdrawn: Vec<crate::route::BgpLsRouteKey>,
+) -> RibUpdate {
+    RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: peer_v4(ORR_FEED),
+        announced,
+        withdrawn,
+    }
+}
+
+/// The divergence scenario driven without the actor loop: one RR client
+/// bound to vantage A, registered for export over a channel of
+/// `client_capacity`, with the scenario prefix learned via NH-X and NH-Y.
+struct OrrClientBurst {
+    manager: RibManager,
+    tx: mpsc::Sender<RibUpdate>,
+    out: mpsc::Receiver<OutboundRouteUpdate>,
+}
+
+impl OrrClientBurst {
+    fn new(client_capacity: usize) -> Self {
+        let (tx, rx) = mpsc::channel(128);
+        let mut manager = RibManager::new(
+            rx,
+            dummy_query_rx(),
+            None,
+            Some(Ipv4Addr::new(10, 255, 0, 1)),
+            BgpMetrics::new(),
+        );
+        for source in [ORR_SRC_X, ORR_SRC_Y] {
+            let mut registration = registering_peer_up(peer_v4(source), 0);
+            if let RibUpdate::PeerUp {
+                is_ebgp, peer_asn, ..
+            } = &mut registration
+            {
+                *is_ebgp = false;
+                *peer_asn = 65000;
+            }
+            manager.handle_update(registration);
+        }
+        manager.handle_update(registering_peer_up(peer_v4(ORR_FEED), 0));
+        manager.handle_update(feed_update(
+            crate::orr::fixtures::square_topology(ORR_FEED),
+            vec![],
+        ));
+        let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+        let (outbound_tx, out) = mpsc::channel(client_capacity);
+        manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: client,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: Some(vantage_at_node_a()),
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        for (source, next_hop) in [(ORR_SRC_X, orr_nh_x()), (ORR_SRC_Y, orr_nh_y())] {
+            manager.handle_update(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: peer_v4(source),
+                announced: vec![ibgp_route(orr_prefix(), source, next_hop)],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            });
+            drain_route_chunks(&mut manager);
+        }
+        Self { manager, tx, out }
+    }
+
+    /// Queue `updates` back to back, then dispatch them as the actor loop
+    /// does, delivering the client's envelopes after each. Returns whether
+    /// each left an ORR rebuild owed, and every next hop announced.
+    fn dispatch_queued(&mut self, updates: Vec<RibUpdate>) -> (Vec<bool>, Vec<IpAddr>) {
+        for update in updates {
+            self.tx.try_send(update).unwrap();
+        }
+        let (mut owed, mut next_hops) = (Vec::new(), Vec::new());
+        while let Some(update) = self.manager.try_recv_primary() {
+            self.manager.handle_update(update);
+            owed.push(self.manager.orr_rebuild_owed_updates > 0);
+            next_hops.extend(self.announced_next_hops());
+        }
+        (owed, next_hops)
+    }
+
+    /// The next hop of every announcement of the scenario prefix queued to
+    /// the client, in order.
+    fn announced_next_hops(&mut self) -> Vec<IpAddr> {
+        let mut next_hops = Vec::new();
+        while let Ok(update) = self.out.try_recv() {
+            assert_eq!(update.unicast_withdrawals().count(), 0);
+            next_hops.extend(
+                update
+                    .announce
+                    .iter()
+                    .filter(|route| route.prefix == Prefix::V4(orr_prefix()))
+                    .map(|route| route.next_hop),
+            );
+        }
+        next_hops
+    }
+}
+
+/// An ORR-bound client is sent the net change of a queued BGP-LS burst and
+/// nothing for a topology that only existed inside it: a metric flip that
+/// is restored, or a link withdrawn and re-announced, sends nothing, where
+/// the same UPDATEs dispatched with nothing queued behind them each send
+/// their own flip.
+#[test]
+fn orr_client_receives_only_the_net_change_of_a_queued_bgpls_burst() {
+    let mut burst = OrrClientBurst::new(64);
+    assert_eq!(burst.announced_next_hops(), vec![orr_nh_x()]);
+
+    let restored = burst.dispatch_queued(vec![
+        feed_update(vec![a_x_link(100)], vec![]),
+        feed_update(vec![a_x_link(1)], vec![]),
+    ]);
+    assert_eq!(
+        restored,
+        (vec![true, false], vec![]),
+        "a flip restored inside the burst reached the client"
+    );
+
+    let reannounced = burst.dispatch_queued(vec![
+        feed_update(vec![], vec![a_x_link(1).key()]),
+        feed_update(vec![a_x_link(1)], vec![]),
+    ]);
+    assert_eq!(
+        reannounced,
+        (vec![true, false], vec![]),
+        "a link withdrawn and re-announced inside the burst reached the client"
+    );
+
+    let net = burst.dispatch_queued(vec![
+        feed_update(vec![a_x_link(100)], vec![]),
+        feed_update(vec![b_y_link(2)], vec![]),
+    ]);
+    assert_eq!(net, (vec![true, false], vec![orr_nh_y()]));
+
+    // With nothing queued behind it, each UPDATE sends its own flip.
+    let mut alone = Vec::new();
+    for metric in [1, 100] {
+        alone.extend(
+            burst
+                .dispatch_queued(vec![feed_update(vec![a_x_link(metric)], vec![])])
+                .1,
+        );
+    }
+    assert_eq!(alone, vec![orr_nh_x(), orr_nh_y()]);
+}
+
+/// A burst longer than the coalescing bound rebuilds at the bound with
+/// BGP-LS UPDATEs still queued, so a feed that never leaves the queue empty
+/// cannot hold the client on an old topology.
+#[test]
+fn bgpls_burst_rebuilds_the_orr_cache_at_the_coalescing_bound() {
+    let mut burst = OrrClientBurst::new(64);
+    let _ = burst.announced_next_hops();
+    let bound = usize::try_from(ORR_REBUILD_COALESCE_MAX).unwrap();
+    // Every UPDATE up to the bound raises the A→X metric past the A→Y
+    // cost; the one queued behind the bound restores it.
+    let (owed, next_hops) = burst.dispatch_queued(
+        (0..=ORR_REBUILD_COALESCE_MAX)
+            .map(|index| {
+                let metric = if index == ORR_REBUILD_COALESCE_MAX {
+                    1
+                } else {
+                    100 + index
+                };
+                feed_update(vec![a_x_link(metric)], vec![])
+            })
+            .collect(),
+    );
+    assert!(owed[..bound - 1].iter().all(|&owed| owed));
+    assert!(
+        !owed[bound - 1],
+        "the UPDATE at the bound rebuilds with one more still queued"
+    );
+    assert_eq!(
+        next_hops,
+        vec![orr_nh_y(), orr_nh_x()],
+        "the flip at the bound, then the last UPDATE's restore"
+    );
+}
+
+/// A due timer whose admission cutoff is exhausted ends the burst: the
+/// UPDATE rebuilds in its own turn though another BGP-LS UPDATE is queued.
+#[test]
+fn bgpls_burst_ends_at_an_exhausted_expiry_cutoff() {
+    let mut burst = OrrClientBurst::new(64);
+    let _ = burst.announced_next_hops();
+    let now = tokio::time::Instant::now();
+    burst
+        .manager
+        .expiry_cutoffs
+        .observe(ExpiryTimer::GrStale, Some(now), now, 1);
+    let ended = burst.dispatch_queued(vec![
+        feed_update(vec![a_x_link(100)], vec![]),
+        feed_update(vec![a_x_link(1)], vec![]),
+    ]);
+    assert_eq!(ended, (vec![false, false], vec![orr_nh_y(), orr_nh_x()]));
+}
+
+/// A direct ORR rebuild whose caller discards the changed set (a vantage
+/// bind at session up) first pays a rebuild still owed for received BGP-LS
+/// UPDATEs, with its resync; otherwise the refreshed cache would hide the
+/// change from the later rebuild and the bound client would never move.
+#[test]
+fn direct_orr_rebuild_pays_an_owed_rebuild_with_its_resync() {
+    let mut burst = OrrClientBurst::new(64);
+    let _ = burst.announced_next_hops();
+    burst
+        .manager
+        .handle_bgpls_routes_received(peer_v4(ORR_FEED), vec![a_x_link(100)], vec![]);
+    assert!(burst.manager.orr_rebuild_owed_updates > 0);
+    let _ = burst.manager.recompute_orr_owned();
+    assert_eq!(burst.manager.orr_rebuild_owed_updates, 0);
+    assert_eq!(burst.announced_next_hops(), vec![orr_nh_y()]);
+}
+
+/// The actor loop runs nothing but the queued BGP-LS UPDATEs while a
+/// rebuild is owed. A dirty client's resync tick that comes due during the
+/// first UPDATE of a burst must not restage it from the pre-burst cache:
+/// the client is sent the post-burst best only.
+#[tokio::test]
+async fn resync_tick_due_inside_a_bgpls_burst_waits_for_the_orr_rebuild() {
+    // The initial End-of-RIB fills the one-slot channel, so the scenario
+    // prefix is never sent and the client waits on a resync tick.
+    let mut burst = OrrClientBurst::new(1);
+    assert!(burst.manager.resync_tick_pending());
+    assert_eq!(burst.announced_next_hops(), Vec::<IpAddr>::new());
+
+    let first = std::sync::atomic::AtomicBool::new(true);
+    burst.manager.test_primary_update_hook = Some(Arc::new(move |update| {
+        if matches!(update, RibUpdate::BgpLsRoutesReceived { .. })
+            && first.swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            // The tick armed when the loop started comes due in this turn.
+            std::thread::sleep(DIRTY_RESYNC_INTERVAL + Duration::from_millis(50));
+        }
+    }));
+    for update in [
+        feed_update(vec![a_x_link(100)], vec![]),
+        feed_update(vec![b_y_link(2)], vec![]),
+    ] {
+        burst.tx.try_send(update).unwrap();
+    }
+    let OrrClientBurst {
+        manager,
+        tx,
+        mut out,
+    } = burst;
+    drop(tx);
+    // The loop returns once the queue is drained and closed. The one-slot
+    // channel keeps the first envelope staged after the burst began.
+    drop(Box::pin(manager.run_actor()).await);
+    let mut next_hops = Vec::new();
+    while let Ok(update) = out.try_recv() {
+        next_hops.extend(
+            update
+                .announce
+                .iter()
+                .filter(|route| route.prefix == Prefix::V4(orr_prefix()))
+                .map(|route| route.next_hop),
+        );
+    }
+    assert!(
+        !next_hops.is_empty() && next_hops.iter().all(|next_hop| *next_hop == orr_nh_y()),
+        "the client was staged from the pre-burst cache: {next_hops:?}"
+    );
+}

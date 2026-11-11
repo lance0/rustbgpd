@@ -492,13 +492,13 @@ const ORR_STAGES: [&str; 7] = [
     "orr_retire",
 ];
 
-fn orr_vantage() -> IpAddr {
+pub(super) fn orr_vantage() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2))
 }
 
 /// A bidirectional chain of `nodes` with one prefix per node; node 1 owns
 /// the vantage's interface address.
-fn chain_topology(peer: Ipv4Addr, nodes: u8) -> Vec<crate::route::BgpLsRibRoute> {
+pub(super) fn chain_topology(peer: Ipv4Addr, nodes: u8) -> Vec<crate::route::BgpLsRibRoute> {
     use crate::orr::fixtures::{link_route, prefix_route, v4_interface, v4_neighbor};
     let mut routes = Vec::new();
     for node in 1..=nodes {
@@ -618,13 +618,13 @@ fn sweep_gr_stale_with_readiness_probe(
 
 /// Stage key recording whether a query queued before `work` was answered
 /// by the time `work` returned.
-const PRE_QUEUED: &str = "pre_queued_answered_inside";
+pub(super) const PRE_QUEUED: &str = "pre_queued_answered_inside";
 
 /// Run actual-caller `work` while every readiness checkpoint queues a query
 /// that the next checkpoint must find already answered. A query is also
 /// queued before `work`; `PRE_QUEUED` counts it when `work` answered it.
 /// Returns how many queries each stage answered.
-fn run_with_readiness_probe(
+pub(super) fn run_with_readiness_probe(
     manager: &mut RibManager,
     readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
     work: impl FnOnce(&mut RibManager),
@@ -696,7 +696,7 @@ fn run_with_readiness_observations(
     (answered, observations)
 }
 
-fn readiness_manager() -> (RibManager, mpsc::Sender<crate::RibReadinessQuery>) {
+pub(super) fn readiness_manager() -> (RibManager, mpsc::Sender<crate::RibReadinessQuery>) {
     let (_tx, rx) = mpsc::channel(1);
     // One query queued before the work plus one outstanding per checkpoint.
     let (readiness_tx, readiness_rx) = mpsc::channel(2);
