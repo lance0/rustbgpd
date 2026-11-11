@@ -972,6 +972,9 @@ async fn parked_conditional_retirement_is_refused(retirement: ParkedRetirement) 
     assert_eq!(session.rib_backlog.len(), 2);
     let task = tokio::spawn(async move { session.run().await });
     let handle = crate::PeerHandle::from_parts(commands, task);
+    // Paused: the deadline cannot elapse while the session still has the
+    // command to answer, however loaded the host is.
+    tokio::time::pause();
     let deadline = Duration::from_millis(100);
     let result = match retirement {
         ParkedRetirement::UnlessEstablished => {
@@ -993,6 +996,7 @@ async fn parked_conditional_retirement_is_refused(retirement: ParkedRetirement) 
     let crate::StateQueryOutcome::State(state) = handle.query_state_outcome(deadline).await else {
         panic!("refusal must leave the live actor available for state queries");
     };
+    tokio::time::resume();
     assert_eq!(state.fsm_state, SessionState::Idle);
     assert_eq!(
         rib_rx.len(),
@@ -1031,6 +1035,37 @@ async fn rib_park_refuses_connected_shutdown_without_claiming_retirement() {
 #[tokio::test]
 async fn rib_park_refuses_conditional_collision_dump_without_claiming_retirement() {
     parked_conditional_retirement_is_refused(ParkedRetirement::CollisionUnlessEstablished).await;
+}
+
+/// A conditional retirement that keeps the session changes nothing, so a
+/// parked Established session answers it by state instead of refusing.
+#[tokio::test]
+async fn rib_park_answers_a_kept_conditional_retirement_by_state() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        server: _server,
+        ..
+    } = rib_park().await;
+    park_with_buffered(&mut session, &[]).await;
+    for command in [
+        |reply, ticket| PeerCommand::ShutdownUnlessEstablished { reply, ticket },
+        |reply, ticket| PeerCommand::ShutdownUnlessConnected { reply, ticket },
+        |reply, ticket| PeerCommand::CollisionDumpUnlessEstablished { reply, ticket },
+    ] {
+        let (reply, response) = oneshot::channel();
+        assert_eq!(
+            session
+                .handle_command(command(reply, crate::handle::CommandTicket::default()))
+                .await,
+            ControlFlow::Continue(())
+        );
+        assert_eq!(response.await.unwrap(), Ok(false));
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert!(!session.stop_requested);
+        assert_eq!(session.rib_backlog.len(), 1);
+    }
 }
 
 #[tokio::test]

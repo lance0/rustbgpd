@@ -18,10 +18,12 @@ while the session task is parked on a blocking RIB delivery.
 When inbound messages wait for RIB mailbox capacity, the session continues
 serving snapshots, Route Refresh, validation scheduling, and terminal commands.
 Policy, runtime-config, and TCP-AO mutations, new explicit replay requests, and
-conditional retirement return explicit refusal before changing state. An
-accepted start uses the existing reconnect timer until held RIB messages are
-admitted; a later Stop or BFD-down cancels it. Held messages keep their original
-order ahead of any session end.
+a conditional retirement that would end the session return explicit refusal
+before changing state. An export-policy update or IPv6 export unlock that
+finds the mailbox full is held like peer input and acknowledged once the RIB
+admits it. An accepted start uses the existing reconnect timer until held RIB
+messages are admitted; a later Stop or BFD-down cancels it. Held messages keep
+their original order ahead of any session end.
 
 Grouped unicast output services session-state and import-counter queries
 between encoding slices, between bounded chunk batches, and while waiting for

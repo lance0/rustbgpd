@@ -1468,6 +1468,12 @@ impl PeerSession {
                     "session has pending RIB admission; retry the command".into(),
                 )
             };
+            // A conditional retirement that keeps the session changes
+            // nothing, so it is answered below as usual.
+            let state = self.fsm.state();
+            let kept = state == SessionState::Established
+                || (matches!(cmd, PeerCommand::ShutdownUnlessConnected { .. })
+                    && matches!(state, SessionState::OpenSent | SessionState::OpenConfirm));
             match cmd {
                 PeerCommand::UpdateImportPolicy { reply, .. }
                 | PeerCommand::UpdateExportPolicy { reply, .. }
@@ -1495,7 +1501,9 @@ impl PeerSession {
                 }
                 PeerCommand::ShutdownUnlessEstablished { reply, ticket }
                 | PeerCommand::ShutdownUnlessConnected { reply, ticket }
-                | PeerCommand::CollisionDumpUnlessEstablished { reply, ticket } => {
+                | PeerCommand::CollisionDumpUnlessEstablished { reply, ticket }
+                    if !kept =>
+                {
                     // A refusal keeps the live actor owned by its caller;
                     // dropping the reply would falsely report retirement.
                     if ticket.claim() {

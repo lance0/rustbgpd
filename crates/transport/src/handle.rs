@@ -775,7 +775,7 @@ pub enum PeerCommand {
     /// shutdown. Replies `Ok(false)` and keeps running when Established;
     /// otherwise replies `Ok(true)` and ends exactly as [`Self::Shutdown`]
     /// would for a session that is not Established, so it can never establish.
-    /// Held RIB admission is refused before retirement.
+    /// While RIB admission is held, a retirement is refused before it happens.
     ShutdownUnlessEstablished {
         /// Whether the task was shut down, or why retirement was refused.
         reply: oneshot::Sender<Result<bool, PeerCommandError>>,
@@ -800,8 +800,8 @@ pub enum PeerCommand {
     /// dump. RFC 4271 §6.8: an Established connection wins a collision, so a
     /// primary that established while the manager resolved the collision is
     /// kept. Replies `Ok(false)` and keeps running when Established; otherwise
-    /// replies `Ok(true)` and ends as [`Self::CollisionDump`] does. Held RIB
-    /// admission is refused before retirement.
+    /// replies `Ok(true)` and ends as [`Self::CollisionDump`] does. While RIB
+    /// admission is held, a dump is refused before it happens.
     CollisionDumpUnlessEstablished {
         /// Whether the session was dumped, or why retirement was refused.
         reply: oneshot::Sender<Result<bool, PeerCommandError>>,
