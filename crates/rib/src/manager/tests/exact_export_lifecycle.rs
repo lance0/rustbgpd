@@ -198,3 +198,44 @@ fn targeted_retirement_preserves_duplicate_source_identity() {
     assert!(manager.peer_unexportable[&target].contains(&identity));
     assert_eq!(manager.test_exact_export_full_prune_calls, 0);
 }
+
+/// `FlowSpec`, BGP-LS and RT-Constrain have no per-NLRI index. The prune
+/// still finds a live rejected identity by key, without walking the
+/// family's rows.
+#[test]
+fn prune_finds_live_unindexed_family_identities_by_key() {
+    let source_addr = Ipv4Addr::new(198, 51, 100, 7);
+    let source = peer_v4(source_addr);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 7));
+    let mut rib = AdjRibIn::new(source);
+    let mut rejected = HashSet::new();
+    for row in 0..200_u8 {
+        let mut flowspec = make_flowspec_route(source_addr);
+        flowspec.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+            rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 7, row, 0), 24)),
+        )];
+        let bgpls = make_bgpls_route(source_addr, row, 100);
+        let rtc = make_rtc_rib_route(source_addr, u16::from(row), 100);
+        if row == 0 {
+            rejected.extend([
+                ExactExportKey::FlowSpec(flowspec.selection_key()),
+                ExactExportKey::BgpLs(bgpls.key()),
+                ExactExportKey::Rtc(rtc.key()),
+            ]);
+        }
+        rib.insert_flowspec(flowspec);
+        rib.insert_bgpls(bgpls);
+        rib.insert_rtc(rtc);
+    }
+    let mut manager = test_manager();
+    manager.ribs.insert(source, rib);
+    manager.peer_unexportable.insert(target, rejected.clone());
+
+    manager.prune_exact_export_rejections();
+
+    assert_eq!(manager.peer_unexportable[&target], rejected);
+    assert_eq!(
+        manager.test_exact_export_liveness_reads, 6,
+        "each identity costs its own probe and one keyed lookup in the one table"
+    );
+}
