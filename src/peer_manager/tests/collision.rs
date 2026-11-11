@@ -4407,6 +4407,110 @@ async fn disabled_dynamic_respawn_names_the_retired_session_when_enabled() {
     );
 }
 
+/// The dynamic back-to-idle path reads the retired session's registration
+/// after its task ends. A full RIB mailbox holds `PeerUp` through the dynamic
+/// session's fall to Idle; a handshake pauses the manager before it ends that
+/// task and lets the `PeerUp` enter the mailbox. The disabled respawn (kept
+/// by the synthetic terminal latch) must name the session the RIB registered.
+/// Mutation-red: with the registration read before the old task ends, the
+/// respawn's `PeerUp` names nothing.
+#[tokio::test]
+async fn dynamic_idle_retirement_reads_registration_after_the_old_task_ends() {
+    let (mut mgr, rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut primary = accept_residual_connection(&mut mgr).await;
+    let retired = mgr.peers[&peer].session_id();
+    mgr.current_config = make_dynamic_manager_config();
+    mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&mgr.current_config);
+    let accepted = mgr.dynamic_ranges[0].accepted_attribution();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let managed = mgr.peers.get_mut(&peer).unwrap();
+    managed.is_dynamic = true;
+    managed.accepted_dynamic_range = Some(accepted);
+    managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    mgr.dynamic_peer_count = 1;
+    let open = Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)));
+    send_bgp_message(&mut primary, &open).await;
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    let _opened = residual_notification(&mut mgr, retired, false).await;
+    let mut lifecycle = std::mem::replace(&mut mgr.session_lifecycle_rx, mpsc::channel(1).1);
+    while rib_rx.try_recv().is_ok() {}
+    while rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: rustbgpd_rib::PeerId::UNASSIGNED,
+        })
+        .is_ok()
+    {}
+    send_bgp_message(&mut primary, &Message::Keepalive).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(SessionLifecycleNotification::StateChanged {
+                session_id,
+                new: SessionState::Established,
+                ..
+            }) = lifecycle.recv().await
+                && session_id == retired
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the full mailbox holds an Established session's registration");
+    assert!(mgr.install_max_prefix_latch(
+        peer.clone(),
+        retired,
+        "test terminal latch".into(),
+        None
+    ));
+    mgr.peers[&peer]
+        .handle()
+        .administrative_reset_timeout(None, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let idle = residual_notification(&mut mgr, retired, true).await;
+    drop(primary);
+    assert_eq!(
+        mgr.peers[&peer].handle().rib_registration_owner(retired),
+        None
+    );
+    assert_eq!(rib_tx.capacity(), 0);
+
+    let (entered, at_retirement) = oneshot::channel();
+    let (release, resume) = oneshot::channel();
+    mgr.test_retirement_hold = Some((entered, resume));
+    let retiring = tokio::spawn(async move {
+        mgr.handle_session_notification(idle).await;
+        mgr
+    });
+    at_retirement.await.unwrap();
+    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
+    release.send(()).unwrap();
+    let mut mgr = retiring.await.unwrap();
+    let replacement = mgr.peers[&peer].session_id();
+    assert_ne!(replacement, retired);
+    assert!(!mgr.peers[&peer].enabled);
+    mgr.enable_peer(peer.clone()).await.unwrap();
+    let (mut client, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut BytesMut::new()).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut client, &open).await;
+    send_bgp_message(&mut client, &Message::Keepalive).await;
+    assert_eq!(
+        residual_peer_up(&mut rib_rx, replacement).await,
+        Some(retired),
+        "the respawn must use the final registration publication"
+    );
+}
+
 /// The full RIB mailbox holds `PeerUp` through the original session's fall to
 /// Idle. A handshake pauses the manager with its new actor installed, then
 /// lets that `PeerUp` enter the mailbox before the manager ends the old task.

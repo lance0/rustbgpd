@@ -1424,7 +1424,8 @@ impl RibRegistrationState {
 
     /// The registered session, or the predecessor it still represents.
     /// Read after joining the old actor for its final publication.
-    fn owner(&self, session_id: u64) -> Option<u64> {
+    #[must_use]
+    pub fn owner(&self, session_id: u64) -> Option<u64> {
         if self.0.registered.load(Ordering::Acquire) {
             Some(session_id)
         } else {
