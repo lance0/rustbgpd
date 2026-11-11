@@ -862,3 +862,140 @@ fn one_refused_allocation_in_the_shared_walk_leaves_every_member_ready() {
         );
     }
 }
+
+/// One changed key distributed to four members whose writers are all full
+/// and none dirty: each is captured before staging and then meets the member
+/// loop with a retained proof. `sourced` makes the change a member's own
+/// route, so that member's delta is empty. Returns the pass after it ran,
+/// the complete feeds it built, and, once every writer has drained and the
+/// resync has run, what each member was sent.
+fn refused_feed_pass(
+    control: bool,
+    sourced: bool,
+) -> (
+    OwnedPass,
+    usize,
+    impl PartialEq + std::fmt::Debug,
+    Vec<Vec<OutboundRouteUpdate>>,
+) {
+    let mut pass = OwnedPass::new(4, 96, true);
+    pass.manager.evpn_build_refused_feeds = control;
+    let mut changed = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 1), 9);
+    if sourced {
+        changed.peer = pass.peers[1];
+    }
+    pass.manager
+        .loc_rib
+        .recompute_evpn(changed.key(), [&changed].into_iter());
+    let before = pass.manager.evpn_complete_feed_builds;
+    let peer = pass.peers[0];
+    pass.manager
+        .distribute_evpn_keys_to_peer(peer, &HashSet::from([changed.key()]), &mut || {});
+    let builds = pass.manager.evpn_complete_feed_builds - before;
+    pass.manager.evpn_recovery.assert_consistent();
+    let state = {
+        let manager = &pass.manager;
+        let members: Vec<_> = pass
+            .peers
+            .iter()
+            .map(|&peer| {
+                (
+                    manager.has_evpn_feed_completion(peer),
+                    manager.evpn_feed_owed_markers(peer),
+                    manager.outbound_operation_live(peer),
+                    manager.outbound_credit.contains_key(&peer),
+                    manager.force_outbound_peers.contains(&peer),
+                )
+            })
+            .collect();
+        (
+            format!("{:?}", captured_state(&pass)),
+            members,
+            manager.evpn_feed_receipt_count,
+            counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).to_bits(),
+            manager.evpn_table_stamp,
+        )
+    };
+    // The writers drain; the resync tick then recovers every dirty member.
+    for output in &mut pass.outputs {
+        while output.try_recv().is_ok() {}
+    }
+    let mut ticks = 0;
+    while !pass.manager.dirty_peers.is_empty() {
+        pass.manager.resync_dirty_peers_bounded();
+        ticks += 1;
+        assert!(ticks <= 32, "the dirty members did not recover");
+    }
+    let sent = pass
+        .outputs
+        .iter_mut()
+        .map(|output| std::iter::from_fn(|| output.try_recv().ok()).collect())
+        .collect();
+    (pass, builds, state, sent)
+}
+
+/// A member captured because its writer was full is not dirty yet, so the
+/// member loop built it a complete feed, a walk of the whole table, and the
+/// commit then refused the feed for want of a writer slot: at 150 members
+/// that was 70% of a 0.9 s actor turn. The refusal is known before the
+/// build. Skipping the build must change nothing else: the member's state
+/// after the pass, the refusal's count, and what it is sent once its writer
+/// drains are those of the build-and-refuse path. A member whose own delta
+/// is empty is not skipped: its empty feed commits without a writer slot.
+#[test]
+fn a_full_writer_is_refused_its_complete_feed_before_the_feed_is_built() {
+    for sourced in [false, true] {
+        let (skipped, builds, state, sent) = refused_feed_pass(false, sourced);
+        let (built, control_builds, control_state, control_sent) = refused_feed_pass(true, sourced);
+        assert_eq!(control_builds, 4, "before: one build per retained member");
+        assert_eq!(
+            builds,
+            usize::from(sourced),
+            "only a member with an empty delta still builds (sourced: {sourced})"
+        );
+        assert_eq!(state, control_state, "sourced: {sourced}");
+        assert_eq!(skipped.peers, built.peers);
+        let wire = |sent: &[Vec<OutboundRouteUpdate>]| -> Vec<_> {
+            sent.iter()
+                .map(|updates| {
+                    updates
+                        .iter()
+                        .map(|update| {
+                            (
+                                update
+                                    .evpn_announce
+                                    .iter()
+                                    .map(EvpnRibRoute::key)
+                                    .collect::<Vec<_>>(),
+                                update.evpn_withdraw.clone(),
+                                update.end_of_rib.clone(),
+                                update.refresh_markers.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        assert_eq!(wire(&sent), wire(&control_sent), "sourced: {sourced}");
+        for (index, updates) in sent.iter().enumerate() {
+            let changed = make_evpn_imet(Ipv4Addr::new(203, 0, 113, 1), 9).key();
+            let announced = updates
+                .iter()
+                .flat_map(|update| update.evpn_announce.iter())
+                .filter(|route| route.key() == changed)
+                .count();
+            // The source never gets its own route back.
+            assert_eq!(
+                announced,
+                usize::from(!(sourced && index == 1)),
+                "member {index} was sent the change once its writer drained (sourced: {sourced})"
+            );
+            assert!(!skipped.manager.dirty_peers.contains(&skipped.peers[index]));
+        }
+        assert_eq!(
+            format!("{:?}", captured_state(&skipped)),
+            format!("{:?}", captured_state(&built)),
+            "after recovery, sourced: {sourced}"
+        );
+    }
+}

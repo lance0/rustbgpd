@@ -1176,6 +1176,8 @@ impl RibManager {
             .into_iter()
             .flat_map(|group| group.members.iter().copied())
             .collect();
+        // Whether the staged table is complete: the member loop changes none.
+        let mut table_complete = None;
         for peer in members {
             checkpoint();
             // One member's commit is the unit of this loop, as one receiver's
@@ -1283,6 +1285,15 @@ impl RibManager {
                 // operation still owns actual OLD; the resync builds the feed.
                 self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
                 self.complete_feed_deferred(peer);
+                continue;
+            } else if retained
+                && (!announce.is_empty() || !withdraw.is_empty())
+                && self.refuse_unwritable_complete_evpn_feed(peer, gid, &mut table_complete)
+            {
+                // The commit would refuse the feed for want of a writer
+                // slot: build none, and leave the member as that refusal does.
+                self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
+                self.mark_outbound_dirty_inner(peer, false);
                 continue;
             } else if retained {
                 // Full borrowed OLD proves coverage for successful clean

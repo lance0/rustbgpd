@@ -1447,6 +1447,26 @@ NLRI is identical; their order inside an UPDATE can differ from separate
 captures, as it already could between two member orders. A grouped member's
 commit sorts its withdrawals and is unaffected.
 
+**Complete feeds for a full writer.** A member captured before staging
+because its writer was full is not dirty yet, so the member loop reached it
+with a retained proof and built it a complete feed, a second walk of the
+table, whose commit was then refused for want of a writer slot. One
+diagnostic run at 150 members attributed 643 ms of a 921 ms actor turn to 71
+such builds, every one refused. The pass now asks first whether that commit
+would be refused, with the commit's own checks in its order: the feed's seal,
+with its receipt minted as the build mints it, is current; the member has an
+export encoder; the member's delta is not empty, so the commit is not a
+suppressed no-op; and the one-envelope operation the commit asks for is
+refused because the channel has no room. When all hold, the pass counts the
+refusal as the commit does, serves readiness as the commit's failure tail
+does, and leaves the member as that refusal does: its proof retained, its
+receipt minted, the member dirty for the resync that builds the feed once the
+writer drains. In every other case it builds and commits as before; that
+includes a member whose own delta is empty, whose empty feed commits without
+a writer slot, and every refusal that is not the full writer. A receiver can
+free a slot at any moment, so this is the refusal of a commit attempted now,
+as the commit's own was.
+
 **Readiness.** The shared walk takes the ingest readiness owner when none
 holds the lane, as one member's walk does. It offers a checkpoint for every
 table row visited by the completeness check and by the walk, and at the
@@ -1478,7 +1498,11 @@ alone, an incomplete projection refuses every sharing member, and a single
 member left after those checks takes its own walk; interning, each member's
 appends and the release of the list's holds do at most 64 units of work
 between two checkpoints; and the bitset-span difference stays within its
-bound. The readiness regressions for refused owned passes hold with the
-walk's new checkpoint count. These are component results with EVPN ownership enabled in
+bound; and a pass over four members with full writers builds no complete
+feed where it built four, with the same member state, receipt, refusal count
+and table stamp after the pass and the same envelopes once the writers drain,
+while a member whose delta is empty still builds and commits its empty feed.
+The readiness regressions for refused owned passes hold with the walk's new
+checkpoint count. These are component results with EVPN ownership enabled in
 tests. The turn-length, cost and recovery-memory qualifications have not been
 run on this change, and production EVPN ownership remains disabled.

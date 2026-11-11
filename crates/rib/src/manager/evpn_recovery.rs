@@ -951,10 +951,6 @@ impl RibManager {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one complete producer keeps old-value eligibility, the sparse diff and its admission fence together"
-    )]
     pub(in crate::manager) fn prepare_complete_evpn_feed_before_deltas(
         &mut self,
         peer: PeerId,
@@ -963,30 +959,13 @@ impl RibManager {
         old_is_clean: bool,
         old_deltas: &[super::update_groups::EvpnGroupDelta],
     ) -> Option<EvpnCompleteFeed> {
-        let table_stamp = self
-            .group_ribs
-            .get(&destination)
-            .filter(|group| group.owns_evpn_routes())?
-            .evpn_table_stamp;
-        if table_stamp == 0 {
-            return None;
-        }
-        let target = EvpnFeedTarget::Grouped {
-            group_id: destination,
-            table_stamp,
-        };
-        let revision = self.ensure_evpn_feed_receipt(peer, target)?;
-        let group = self.group_ribs.get(&destination)?;
-        let provenance = self.evpn_recovery_handle(peer)?;
-        let session_id = *self.outbound_session_ids.get(&peer)?;
-        let outbound = self.outbound_peers.get(&peer)?.clone();
-        if outbound.is_closed()
-            || self.evpn_recovery_reset_pending(peer)
-            || self.selection_deferred(EVPN_FAMILY)
-            || group.evpn_table_stamp == 0
+        #[cfg(test)]
         {
-            return None;
+            self.evpn_complete_feed_builds += 1;
         }
+        let seal = self.complete_evpn_feed_seal(peer, destination)?;
+        let provenance = seal.provenance;
+        let group = self.group_ribs.get(&destination)?;
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if !group.evpn_projection_complete_with_checkpoint(&mut checkpoint) {
@@ -1078,19 +1057,109 @@ impl RibManager {
             }
         }
         Some(EvpnCompleteFeed {
-            seal: EvpnFeedSeal {
-                session_id,
-                outbound,
-                provenance,
-                target,
-                revision,
-                required_markers: 0,
-                sparse_keys: None,
-                clean_replay: false,
-            },
+            seal,
             announce,
             withdraw,
         })
+    }
+
+    /// The seal of a complete feed into `destination`, with its receipt
+    /// minted, or `None` where no feed can be built: everything
+    /// [`Self::prepare_complete_evpn_feed_before_deltas`] decides before it
+    /// walks a table.
+    fn complete_evpn_feed_seal(
+        &mut self,
+        peer: PeerId,
+        destination: usize,
+    ) -> Option<EvpnFeedSeal> {
+        let table_stamp = self
+            .group_ribs
+            .get(&destination)
+            .filter(|group| group.owns_evpn_routes())?
+            .evpn_table_stamp;
+        if table_stamp == 0 {
+            return None;
+        }
+        let target = EvpnFeedTarget::Grouped {
+            group_id: destination,
+            table_stamp,
+        };
+        let revision = self.ensure_evpn_feed_receipt(peer, target)?;
+        let provenance = self.evpn_recovery_handle(peer)?;
+        let session_id = *self.outbound_session_ids.get(&peer)?;
+        let outbound = self.outbound_peers.get(&peer)?.clone();
+        if outbound.is_closed()
+            || self.evpn_recovery_reset_pending(peer)
+            || self.selection_deferred(EVPN_FAMILY)
+            || self.group_ribs.get(&destination)?.evpn_table_stamp == 0
+        {
+            return None;
+        }
+        Some(EvpnFeedSeal {
+            session_id,
+            outbound,
+            provenance,
+            target,
+            revision,
+            required_markers: 0,
+            sparse_keys: None,
+            clean_replay: false,
+        })
+    }
+
+    /// Whether a retained member's complete feed for a non-empty delta of
+    /// `gid` would be built only for its commit to refuse it for want of a
+    /// writer slot, and if so, the refusal itself.
+    ///
+    /// The feed is a table-sized walk, and a member captured because its
+    /// writer was full reaches it in the same pass. Its commit would pass
+    /// every check before admission and then ask
+    /// [`Self::begin_outbound_operation`] for the feed's one envelope, which
+    /// refuses a channel with no room. This runs those checks in the same
+    /// order with the same functions: the seal (its receipt minted, as the
+    /// build mints it) is current, the peer has an export encoder, the
+    /// caller's delta makes the payload non-empty so the commit is not a
+    /// suppressed no-op, and the writer is full. It then counts the
+    /// refusal as the commit does and serves readiness as its failure tail
+    /// does. `false` leaves every other case to the build and the commit.
+    ///
+    /// `complete` caches the group's completeness for the pass, which
+    /// changes no table. Only the actor sends, but a receiver can free a
+    /// slot at any time: this is the refusal of a commit attempted now.
+    pub(in crate::manager) fn refuse_unwritable_complete_evpn_feed(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        complete: &mut Option<bool>,
+    ) -> bool {
+        #[cfg(test)]
+        if self.evpn_build_refused_feeds {
+            return false;
+        }
+        if !self.outbound_channel_full(peer) || !self.peer_export_encoders.contains_key(&peer) {
+            return false;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let Some(group) = self.group_ribs.get(&gid) else {
+            return false;
+        };
+        if !*complete.get_or_insert_with(|| {
+            group.evpn_projection_complete_with_checkpoint(&mut || {
+                super::replacement_readiness_checkpoint(&readiness, false);
+            })
+        }) {
+            return false;
+        }
+        let Some(seal) = self.complete_evpn_feed_seal(peer, gid) else {
+            return false;
+        };
+        if !self.evpn_feed_seal_is_current(peer, &seal)
+            || !self.refuse_operation_for_full_writer(peer)
+        {
+            return false;
+        }
+        self.replacement_checkpoint(true);
+        true
     }
 
     /// The grouped member whose admitted EVPN set is its current eligible
