@@ -60,13 +60,40 @@ core-actor probe. PID 1 independently enforces the unit's five-minute watchdog
 deadline; see [deployment.md](../how-to/deployment.md#systemd).
 
 Session-retirement notifications and interface-only reconciliation keep serving
-readiness while independent session checks finish. Each session-wait round
-shares one 500 ms deadline across command admission, replies, and retirement
-phases; healthy peers finish without waiting for a stalled peer. An unanswered
-conditional retirement keeps the current binding and retries. A full RIB
-mailbox also makes an interface-only retention query retry immediately. Collision
-selection, listener updates, and BFD work have their own operation boundaries;
-the round deadline is not a bound on the entire reconciliation pass.
+readiness while their session waits run, and wait on all affected peers at once
+instead of one after another:
+
+- **Retirement rounds.** The sessions retired by one batch of notifications
+  share one 500 ms window, which starts when their waits start. Within a peer
+  the primary's Stop and each session's shutdown run together, so a pending
+  collision candidate still gets its Cease when the primary cannot take a
+  command. A session that has not stopped when the window ends is aborted: its
+  TCP connection closes without a Cease, and its final `PeerDown` reaches the
+  RIB when the mailbox has room. A healthy peer finishes without waiting for a
+  stalled one.
+- **Dynamic dampening sources.** A dynamic neighbor whose routes feed
+  dampening history is removed only after the RIB acknowledges a barrier
+  queued behind that neighbor's session ends. The barrier never waits for
+  mailbox room: behind a full mailbox it queues with the other deferred RIB
+  updates and is sent in order. The acknowledgement is awaited for up to 5 s
+  with readiness served. Only a barrier still unacknowledged after 5 s, or a
+  RIB that has exited, keeps the neighbor as a disabled recovery target and
+  stops the peer manager.
+- **Interface-only reconciliation.** Each port's session checks (state,
+  conditional retirement, retention, stop) share one 500 ms window that
+  starts with that port's first wait; time spent preparing another port's
+  retirement is not charged to it. A session holding messages for a full RIB
+  mailbox refuses a conditional retirement at once; an unanswered one is
+  withdrawn. Either way the binding is kept and the check retried about a
+  second later. A full RIB mailbox makes the retention query retry instead of
+  waiting.
+
+Operator reads (`ListPeers`, peer lookups) stay queued while a round is in
+flight, including the interface-only retention reply, which earlier served
+them; the wait is bounded by the round's window, or by the 5 s barrier bound
+for a dynamic dampening source. Collision selection, listener updates and BFD
+work have their own bounds; a window bounds one round's session waits, not a
+whole reconciliation pass.
 
 ### Runtime-config settlement fail-stop
 

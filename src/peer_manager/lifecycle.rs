@@ -2651,18 +2651,8 @@ impl PeerManager {
         removed
     }
 
-    pub(super) async fn finish_stopped_peer_delete(
-        &mut self,
-        stopped: StoppedPeerDelete,
-        deadline_at: tokio::time::Instant,
-    ) {
-        Box::pin(
-            self.drain_ready_session_notifications_until(
-                Some(&stopped.settlement.peer),
-                deadline_at,
-            ),
-        )
-        .await;
+    pub(super) async fn finish_stopped_peer_delete(&mut self, stopped: StoppedPeerDelete) {
+        Box::pin(self.drain_ready_session_notifications(Some(&stopped.settlement.peer))).await;
         for session_id in stopped
             .pending_session_id
             .into_iter()

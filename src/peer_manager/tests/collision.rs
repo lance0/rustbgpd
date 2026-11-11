@@ -1598,27 +1598,38 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
     assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
     let presence = query_session_event_history(&mgr, Some(peer_addr), BTreeSet::new(), 0).await;
-    let events: Vec<_> = presence.iter().map(|event| event.event_type).collect();
-    assert_eq!(events.first(), Some(&SessionLifecycleEventType::PeerAdded));
-    assert_eq!(events.last(), Some(&SessionLifecycleEventType::PeerRemoved));
+    // The handler publishes the session's queued transitions before it takes
+    // the notification, as the run loop does: the inbound session's own
+    // Idle -> Connect -> OpenSent follow the transition published above, and
+    // all of them precede the removal.
     assert_eq!(
-        events
+        presence
             .iter()
-            .filter(|&&event| event == SessionLifecycleEventType::PeerAdded)
-            .count(),
-        1
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|&&event| event == SessionLifecycleEventType::PeerRemoved)
-            .count(),
-        1
-    );
-    assert!(
-        events[1..events.len() - 1]
-            .iter()
-            .all(|&event| event == SessionLifecycleEventType::StateChanged)
+            .map(|event| (event.event_type, event.old_state, event.new_state))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                SessionLifecycleEventType::PeerAdded,
+                None,
+                Some(SessionState::Idle)
+            ),
+            (
+                SessionLifecycleEventType::StateChanged,
+                Some(SessionState::Idle),
+                Some(SessionState::Connect)
+            ),
+            (
+                SessionLifecycleEventType::StateChanged,
+                Some(SessionState::Idle),
+                Some(SessionState::Connect)
+            ),
+            (
+                SessionLifecycleEventType::StateChanged,
+                Some(SessionState::Connect),
+                Some(SessionState::OpenSent)
+            ),
+            (SessionLifecycleEventType::PeerRemoved, None, None),
+        ]
     );
 
     drop(client_stream);

@@ -1,8 +1,8 @@
 //! Interface-only session checks make progress independently within one round.
 
 use super::super::session_wait_rounds::{
-    ROUND_WINDOW, established_round_session, fill_round_rib, pause_round_clock, poll_round_tasks,
-    receive_round_idle, round_ping,
+    ROUND_WINDOW, established_round_session, fill_round_rib, gated_round_shutdown,
+    pause_round_clock, poll_round_tasks, receive_round_idle, round_breach, round_ping,
 };
 use super::*;
 use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
@@ -129,12 +129,141 @@ async fn check_held_bindings_and_withdrawn_commands(
     }
 }
 
+/// A session holding messages for a full RIB mailbox answers a conditional
+/// retirement at once: it would retire, and refuses until they are admitted.
+/// The round therefore spends none of its window on it, keeps the binding and
+/// asks again; the refused command never acts later.
 #[tokio::test(start_paused = true)]
-async fn unnumbered_round_serves_readiness_while_real_conditional_retirement_is_parked() {
+async fn a_parked_session_refuses_conditional_retirement_at_once_and_is_retried() {
     let clock_origin = tokio::time::Instant::now();
     tokio::time::resume();
-    let (mut h, readiness, commands) = parked_reconcile_fixture().await;
+    let (mut h, _, commands) = parked_reconcile_fixture().await;
     pause_round_clock(clock_origin).await;
+    let started = tokio::time::Instant::now();
+    h.reconcile().await;
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "a refusal is an answer: no port waits out the round"
+    );
+    check_held_bindings_and_withdrawn_commands(&mut h, commands).await;
+}
+
+/// What a test learns from a session that admits a conditional retirement
+/// and neither claims nor answers it until released.
+struct HeldConditional {
+    entered: oneshot::Receiver<()>,
+    release: oneshot::Sender<()>,
+    claimed: oneshot::Receiver<bool>,
+}
+
+/// A session that reports Active, then holds the conditional retirement it
+/// is sent, as an actor busy in an owned wait would.
+fn held_conditional_session() -> (PeerHandle, HeldConditional) {
+    let (commands, mut receiver) = mpsc::channel(8);
+    let (entered_tx, entered) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let (claimed_tx, claimed) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut hold = Some((entered_tx, released, claimed_tx));
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply, ticket } => {
+                    let (entered, released, claimed) = hold.take().expect("one retirement");
+                    entered.send(()).unwrap();
+                    released.await.unwrap();
+                    let acted = ticket.claim();
+                    if acted {
+                        let _ = reply.send(Ok(true));
+                    }
+                    claimed.send(acted).unwrap();
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    (
+        PeerHandle::from_parts(commands, task),
+        HeldConditional {
+            entered,
+            release,
+            claimed,
+        },
+    )
+}
+
+/// `swp1` and `swp2` each hold their conditional retirement; `swp3` is
+/// Established and answers. All three have a new binding to act on.
+async fn held_reconcile_fixture() -> (
+    Harness,
+    mpsc::Sender<PeerManagerReadinessQuery>,
+    Vec<HeldConditional>,
+) {
+    let mut h = harness(
+        &["swp1", "swp2", "swp3"],
+        &[("swp1", 7, true), ("swp2", 8, true), ("swp3", 9, true)],
+    );
+    let (readiness, receiver) = mpsc::channel(4);
+    h.mgr = h.mgr.with_readiness_queries(receiver);
+    let mut held = Vec::new();
+    for (name, scope) in [("swp1", 7), ("swp2", 8), ("swp3", 9)] {
+        h.bind(name, Some(endpoint(2, scope))).await;
+        let key = PeerKey::new(IpAddr::V6(ll(2)), Some(name.into()));
+        if name == "swp3" {
+            h.replace_session(
+                &key,
+                fake_peer_handle(key.address, SessionState::Established, None, Arc::default()),
+            );
+        } else {
+            let (handle, conditional) = held_conditional_session();
+            h.replace_session(&key, handle);
+            held.push(conditional);
+        }
+    }
+    h.drain();
+    for (name, scope) in [("swp1", 7), ("swp2", 8), ("swp3", 9)] {
+        h.mgr
+            .handle_discovery_event(DiscoveryEvent::BindingChanged {
+                interface: name.into(),
+                previous: Some(endpoint(2, scope)),
+                current: Some(endpoint(3, scope)),
+            });
+    }
+    (h, readiness, held)
+}
+
+/// Every binding stands, the held ports are retried, and a retirement the
+/// round withdrew does nothing once its session gets to it.
+async fn check_held_ports_kept_and_withdrawn(h: &Harness, held: Vec<HeldConditional>) {
+    for name in ["swp1", "swp2", "swp3"] {
+        assert!(
+            h.mgr
+                .peers
+                .contains_key(&PeerKey::new(IpAddr::V6(ll(2)), Some(name.into()))),
+            "the existing binding remains on {name}"
+        );
+    }
+    assert!(h.mgr.unnumbered_retry_at().is_some());
+    for hold in held {
+        hold.release.send(()).unwrap();
+        assert!(
+            !hold.claimed.await.unwrap(),
+            "the round's timeout withdrew the unclaimed retirement"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unnumbered_round_serves_readiness_while_conditional_retirements_are_held() {
+    let (mut h, readiness, held) = held_reconcile_fixture().await;
     let ping = round_ping(&readiness).await;
     let task = tokio::spawn(async move {
         h.reconcile().await;
@@ -144,18 +273,15 @@ async fn unnumbered_round_serves_readiness_while_real_conditional_retirement_is_
         .await
         .expect("unnumbered retirement must answer readiness before its unchanged 200 ms deadline")
         .unwrap();
-    let mut h = task.await.unwrap();
-    check_held_bindings_and_withdrawn_commands(&mut h, commands).await;
+    let h = task.await.unwrap();
+    check_held_ports_kept_and_withdrawn(&h, held).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn unnumbered_round_reports_a_healthy_port_before_held_ports_settle() {
-    let clock_origin = tokio::time::Instant::now();
-    tokio::time::resume();
-    let (mut h, _, commands) = parked_reconcile_fixture().await;
+    let (mut h, _, held) = held_reconcile_fixture().await;
     let (_, receiver) = mpsc::unbounded_channel();
     let mut discovery = std::mem::replace(&mut h.commands, receiver);
-    pause_round_clock(clock_origin).await;
     let started = tokio::time::Instant::now();
     let task = tokio::spawn(async move {
         h.reconcile().await;
@@ -168,50 +294,183 @@ async fn unnumbered_round_reports_a_healthy_port_before_held_ports_settle() {
         recorded.contains(&Command::SessionEstablished("swp3".into(), ll(2))),
         "the healthy port's result reaches discovery before any held retirement expires: {recorded:?}"
     );
-    let mut h = task.await.unwrap();
-    check_held_bindings_and_withdrawn_commands(&mut h, commands).await;
+    assert!(!task.is_finished(), "the held ports still own the round");
+    let h = task.await.unwrap();
+    check_held_ports_kept_and_withdrawn(&h, held).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn unnumbered_round_uses_one_window_for_all_held_ports() {
-    let clock_origin = tokio::time::Instant::now();
-    tokio::time::resume();
-    let (mut h, _, commands) = parked_reconcile_fixture().await;
-    pause_round_clock(clock_origin).await;
+    let (mut h, _, mut held) = held_reconcile_fixture().await;
     let started = tokio::time::Instant::now();
     let task = tokio::spawn(async move {
         h.reconcile().await;
         h
     });
     poll_round_tasks().await;
-    let mut entered = Vec::new();
-    for sender in &commands {
-        let (reply, response) = oneshot::channel();
-        sender
-            .send(PeerCommand::QueryState { reply })
-            .await
-            .unwrap();
-        entered.push(response);
+    for hold in &mut held {
+        hold.entered
+            .try_recv()
+            .expect("each held session owns its conditional command before any time passes");
     }
-    poll_round_tasks().await;
-    for response in &mut entered {
-        assert!(
-            matches!(
-                response.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ),
-            "each held actor must already own a conditional command ahead of its follow-up read"
-        );
-    }
+    assert_eq!(started.elapsed(), Duration::ZERO);
     tokio::time::advance(ROUND_WINDOW).await;
     poll_round_tasks().await;
     assert!(
         task.is_finished(),
-        "all held ports share the original 500 ms round deadline"
+        "all held ports share one 500 ms round window"
     );
     assert_eq!(started.elapsed(), ROUND_WINDOW);
-    let mut h = task.await.unwrap();
-    check_held_bindings_and_withdrawn_commands(&mut h, commands).await;
+    let h = task.await.unwrap();
+    check_held_ports_kept_and_withdrawn(&h, held).await;
+}
+
+/// Give `key`'s peer `handle` under a session id no other peer has.
+async fn own_session(h: &mut Harness, key: &PeerKey, handle: PeerHandle) -> u64 {
+    h.mgr.next_session_id = h.mgr.next_session_id.max(100);
+    let id = h.mgr.allocate_session_id();
+    let (old, old_id) = h.mgr.peers.replace_handle(key, handle, id).unwrap();
+    old.abort_for_transport_safety_and_wait().await;
+    h.mgr.unregister_session(old_id);
+    h.mgr.register_session(id, key);
+    id
+}
+
+/// `swp1` loses its link; preparing its retirement drains a queued breach
+/// whose primary cannot take its Stop, which costs a whole command window
+/// inside the round. That time is the preparation's: `swp1`'s own session is
+/// still stopped with a Shutdown, and `swp2`'s state query, asked afterwards,
+/// is still sent.
+#[tokio::test(start_paused = true)]
+async fn a_slow_retirement_preparation_does_not_spend_another_ports_window() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    let mut counters = Vec::new();
+    for (name, scope) in [("swp1", 7), ("swp2", 8)] {
+        h.bind(name, Some(endpoint(2, scope))).await;
+        let key = PeerKey::new(IpAddr::V6(ll(2)), Some(name.into()));
+        let counted = Arc::new(FakePeerCounters::default());
+        let session = fake_peer_handle(key.address, SessionState::Active, None, counted.clone());
+        own_session(&mut h, &key, session).await;
+        counters.push(counted);
+    }
+    let unstoppable: IpAddr = "10.0.0.50".parse().unwrap();
+    insert_test_managed_peer(
+        &mut h.mgr,
+        unstoppable,
+        super::super::command_fan_out::wedged_session(),
+        false,
+    );
+    let breached = h.mgr.peers[&key(unstoppable)].session_id();
+    h.mgr
+        .session_notify_tx
+        .send(round_breach(breached, unstoppable))
+        .unwrap();
+    h.links_changed(snapshot(true, &[("swp1", 7, false), ("swp2", 8, true)]));
+    h.mgr
+        .handle_discovery_event(DiscoveryEvent::BindingChanged {
+            interface: "swp2".into(),
+            previous: Some(endpoint(2, 8)),
+            current: Some(endpoint(3, 8)),
+        });
+    let started = tokio::time::Instant::now();
+    h.reconcile().await;
+    assert!(
+        started.elapsed() >= ROUND_WINDOW,
+        "the preparation waited out the unstoppable primary"
+    );
+    assert_ne!(h.mgr.peers[&key(unstoppable)].session_id(), breached);
+    assert_eq!(
+        counters[0].shutdown.load(Ordering::SeqCst),
+        1,
+        "swp1's session gets its Shutdown after the slow preparation"
+    );
+    assert_eq!(
+        counters[1].query_state.load(Ordering::SeqCst),
+        1,
+        "swp2's state query is sent, not timed out unsent"
+    );
+    assert!(
+        h.mgr
+            .peers
+            .contains_key(&PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()))),
+        "swp2 went on to its new binding in the same round"
+    );
+}
+
+/// A state answer belongs to the session that gave it. `swp1`'s session
+/// reports Established, but is replaced (an unstoppable primary after a
+/// max-prefix breach, handled while `swp2`'s deletion settles) before the
+/// round reads the answer: the answer is dropped and the port retried, so
+/// discovery is never told the replacement is Established.
+#[tokio::test(start_paused = true)]
+async fn a_state_answer_from_a_session_replaced_mid_round_is_dropped() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    // Reported first: the link checks it dispatches go to the sessions the
+    // bindings started, not to the scripted ones installed below.
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    let (commands, mut receiver) = mpsc::channel(1);
+    let (asked_tx, asked) = oneshot::channel();
+    let (answer, answered) = oneshot::channel();
+    let stale = tokio::spawn(async move {
+        let Some(PeerCommand::QueryState { reply }) = receiver.recv().await else {
+            panic!("the round asks for the bound session's state")
+        };
+        asked_tx.send(()).unwrap();
+        answered.await.unwrap();
+        reply
+            .send(policy_test_peer_state(
+                IpAddr::V6(ll(2)),
+                SessionState::Established,
+            ))
+            .unwrap();
+        // Reads nothing further: the Stop sent to it later finds no room.
+        std::future::pending::<Result<(), rustbgpd_transport::TransportError>>().await
+    });
+    let stale = PeerHandle::from_parts(commands.clone(), stale);
+    let stale_id = own_session(&mut h, &swp1_key(2), stale).await;
+    let (stopping, stop_entered, release_stop) = gated_round_shutdown(None);
+    own_session(&mut h, &swp2, stopping).await;
+    h.drain();
+    h.mgr
+        .handle_discovery_event(DiscoveryEvent::BindingChanged {
+            interface: "swp1".into(),
+            previous: Some(endpoint(2, 7)),
+            current: Some(endpoint(3, 7)),
+        });
+    let notices = h.mgr.session_notify_tx.clone();
+    let round = tokio::spawn(async move {
+        h.reconcile().await;
+        h
+    });
+    asked.await.unwrap();
+    stop_entered.await.unwrap();
+    // swp1's session breaches and cannot take a Stop. swp2's deletion then
+    // settles, and its drain handles the breach for a whole command window.
+    commands
+        .try_send(PeerCommand::Start)
+        .expect("fill the session's only command slot");
+    notices
+        .send(round_breach(stale_id, IpAddr::V6(ll(2))))
+        .unwrap();
+    release_stop.send(()).unwrap();
+    poll_round_tasks().await;
+    // The old session answers while the manager is inside that drain.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    answer.send(()).unwrap();
+    let mut h = round.await.unwrap();
+    let replacement = &h.mgr.peers[&swp1_key(2)];
+    assert_ne!(replacement.session_id(), stale_id);
+    assert!(!replacement.enabled);
+    assert!(
+        !h.drain()
+            .contains(&Command::SessionEstablished("swp1".into(), ll(2))),
+        "the replaced session's answer must not be reported for its replacement"
+    );
+    assert!(h.mgr.unnumbered_retry_at().is_some());
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
 }
 
 #[tokio::test(start_paused = true)]

@@ -1420,18 +1420,18 @@ async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
         2,
     );
 
-    let candidate_commands = mgr.peers[&key(peer_addr)]
-        .pending_inbound
-        .as_ref()
-        .unwrap()
-        .handle
-        .commands_sender();
+    let started = tokio::time::Instant::now();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id: 1,
         role: rustbgpd_transport::SessionRole::Primary,
         peer_addr,
     })
     .await;
+    assert_eq!(
+        started.elapsed(),
+        PEER_QUERY_TIMEOUT,
+        "the unanswered query costs its own short bound, and the candidate then stops at once"
+    );
 
     let managed = &mgr.peers[&key(peer_addr)];
     assert_eq!(
@@ -1441,8 +1441,5 @@ async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
     );
     assert!(managed.pending_inbound.is_none());
     assert_eq!(candidate.activate.load(Ordering::SeqCst), 0);
-    assert!(
-        candidate_commands.is_closed(),
-        "the candidate actor is joined even when the primary query consumes the round"
-    );
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
 }

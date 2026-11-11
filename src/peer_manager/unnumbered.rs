@@ -72,6 +72,9 @@ const RETENTION_RECHECK: std::time::Duration = std::time::Duration::from_secs(30
     reason = "outer None means unasked; an answered inner None records unavailable retention and retries without querying twice"
 )]
 struct PortSessionChecks {
+    /// One window for all of this port's session phases, opened when its
+    /// first wait starts: another port's inline work is never charged to it.
+    deadline_at: Option<tokio::time::Instant>,
     state: Option<StateQueryOutcome>,
     retirement: Option<Result<bool, PeerCommandError>>,
     retention_before: Option<Option<rustbgpd_rib::PeerRetention>>,
@@ -702,6 +705,14 @@ impl PeerManager {
                 self.port_mut(name).established = true;
                 false
             }
+            Err(rustbgpd_transport::PeerCommandError::CommandFailed(reason)) => {
+                // The session answered: it would retire, but holds messages
+                // for a full RIB mailbox and stays owned until they are
+                // admitted. Nothing is wrong with it; ask again.
+                debug!(interface = %name, peer = %key, %reason, "unnumbered: bound session is waiting on the RIB mailbox; retrying its retirement");
+                self.arm_unnumbered_retry();
+                false
+            }
             Err(error) => {
                 warn!(interface = %name, peer = %key, %error, "unnumbered: bound session did not answer the retirement check; retrying");
                 self.arm_unnumbered_retry();
@@ -1226,7 +1237,6 @@ impl PeerManager {
         };
         unnumbered.reconcile_due = false;
         let names: Vec<String> = unnumbered.ports.keys().cloned().collect();
-        let deadline_at = tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT;
         let mut ready: std::collections::VecDeque<_> = names
             .into_iter()
             .map(|name| (name, PortSessionChecks::default()))
@@ -1241,10 +1251,16 @@ impl PeerManager {
                         continue;
                     };
                     if let PortSessionRequest::Delete { reason } = request {
-                        match self
+                        let preparing = tokio::time::Instant::now();
+                        let prepared = self
                             .prepare_bound_peer_retirement(&name, &key, reason)
-                            .await
-                        {
+                            .await;
+                        // The preparation's own drains are not session time.
+                        let deadline_at = checks.deadline_at.map_or_else(
+                            || tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT,
+                            |deadline_at| deadline_at + preparing.elapsed(),
+                        );
+                        match prepared {
                             Ok((detached, retirement)) => {
                                 pending.push(
                                     async move {
@@ -1272,6 +1288,9 @@ impl PeerManager {
                         }
                         continue;
                     }
+                    let deadline_at = *checks.deadline_at.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + BOUND_STATE_QUERY_TIMEOUT
+                    });
                     let managed = self.peers.get(&key);
                     let id = managed.map(super::ManagedPeer::session_id);
                     let commands = managed.map(|managed| managed.handle().commands_sender());
@@ -1322,7 +1341,7 @@ impl PeerManager {
                     retirement,
                 } => {
                     if let Some(stopped) = stopped {
-                        self.finish_stopped_peer_delete(*stopped, deadline_at).await;
+                        self.finish_stopped_peer_delete(*stopped).await;
                     }
                     if self
                         .unnumbered

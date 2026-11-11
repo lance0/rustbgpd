@@ -2253,11 +2253,6 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
         "try_send never waits; a full lane transfers the exact retired owner's late end to the existing deferred FIFO",
     ),
     (
-        "notifications.rs::finish_notification_round",
-        1,
-        "barrier admission uses try_send; an admitted reply is an owned future polled with the other retirements under await_session_sweep and the original round deadline",
-    ),
-    (
         "unnumbered.rs::query_peer_retention_until",
         1,
         "an owned round future: admission is immediate try_send and its reply shares the round deadline; reconcile_unnumbered polls it under await_session_sweep beside all other targets",

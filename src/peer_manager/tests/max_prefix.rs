@@ -1149,12 +1149,6 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
         session_id: 2,
     });
     mgr.register_session(2, &key(addr.addr()));
-    let candidate_commands = mgr.peers[&key(addr.addr())]
-        .pending_inbound
-        .as_ref()
-        .unwrap()
-        .handle
-        .commands_sender();
     mgr.next_session_id = 3;
 
     rib_tx
@@ -1203,10 +1197,7 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
     assert!(managed.pending_inbound.is_none());
     assert!(mgr.peer_key_for_session(1).is_none());
     assert_eq!(mgr.peer_key_for_session(3), Some(key(addr.addr())));
-    assert!(
-        candidate_commands.is_closed(),
-        "the pending actor is joined even when primary Stop consumes the round"
-    );
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
     mgr.enable_peer(key(addr.addr())).await.unwrap();
     assert!(mgr.peers.get(&key(addr.addr())).unwrap().enabled);
     assert!(!mgr.max_prefix_latches.contains_key(&key(addr.addr())));

@@ -399,7 +399,7 @@ fn attach_round_candidate(
     (primary, candidate)
 }
 
-fn round_breach(session_id: u64, peer_addr: IpAddr) -> SessionNotification {
+pub(super) fn round_breach(session_id: u64, peer_addr: IpAddr) -> SessionNotification {
     SessionNotification::MaxPrefixExceeded {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -608,7 +608,7 @@ async fn notification_replacement_uses_the_settled_owner_for_cleanup_and_superse
     }
 }
 
-fn gated_round_shutdown(
+pub(super) fn gated_round_shutdown(
     on_exit: Option<(
         rustbgpd_transport::SessionNotificationSender,
         SessionNotification,
@@ -760,4 +760,88 @@ async fn late_primary_breach_during_candidate_join_does_not_hold_healthy_bookkee
     assert!(mgr.max_prefix_latches.contains_key(&key(address)));
     assert!(!mgr.peers[&key(address)].enabled);
     assert!(mgr.retiring_sessions.is_empty());
+}
+
+/// A collision candidate that reports `notice` as it takes over the peer's
+/// max-prefix metrics: the last command of its promotion, after the old
+/// primary's retirement drain.
+fn candidate_reporting_on_activation(
+    address: IpAddr,
+    notices: rustbgpd_transport::SessionNotificationSender,
+    notice: SessionNotification,
+) -> PeerHandle {
+    let (commands, mut receiver) = mpsc::channel(8);
+    let task = tokio::spawn(async move {
+        let mut notice = Some(notice);
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(address, SessionState::OpenConfirm));
+                }
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    let _ = reply.send(true);
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
+                }
+                PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
+                    if let Some(notice) = notice.take() {
+                        notices.send(notice).unwrap();
+                    }
+                    let _ = reply.send(());
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+/// An inbound accept drains the session notices first so a queued max-prefix
+/// latch is applied before the connection is admitted. That needs the channel
+/// empty when the drain returns: a notice queued while an earlier one was
+/// being handled, after that handler's last look at the channel, is handled
+/// by the same drain.
+#[tokio::test]
+async fn depth_zero_drain_applies_a_notice_queued_while_an_earlier_one_was_handled() {
+    let mut mgr = test_peer_manager();
+    let address: IpAddr = "10.0.0.47".parse().unwrap();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        address,
+        65002,
+        fake_peer_handle(address, SessionState::Idle, None, Arc::default()),
+        false,
+    );
+    let primary_id = mgr.peers[&key(address)].session_id();
+    let candidate = candidate_reporting_on_activation(
+        address,
+        mgr.session_notify_tx.clone(),
+        round_breach(202, address),
+    );
+    attach_test_pending_inbound(&mut mgr, address, candidate, 202);
+    mgr.session_notify_tx
+        .send(round_idle(primary_id, address))
+        .unwrap();
+
+    mgr.drain_ready_session_notifications(None).await;
+
+    assert_eq!(
+        mgr.peers[&key(address)].session_id(),
+        202,
+        "the candidate was promoted"
+    );
+    assert!(
+        mgr.max_prefix_latches.contains_key(&key(address)),
+        "the breach it reported during the promotion is latched before the drain returns"
+    );
+    assert!(!mgr.peers[&key(address)].enabled);
+    assert_eq!(mgr.session_notify_rx.ready_count(), 0);
 }
