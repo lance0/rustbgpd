@@ -169,6 +169,24 @@ consumer derives the receipt from them again. An actor poll includes executor
 handoffs, so the maximum is wall-clock turn length, not worker occupancy. The
 functional exercise takes both scrapes and reports no value.
 
+Each regroup is bracketed the same way: one scrape before the SIGHUP and one
+after the settled roster witness. `regroup-b-window` and `regroup-a-window`
+hold that regroup's `actor_poll` maximum and `route_chunk` bucket increases,
+the increase of `bgp_rib_policy_transition_total` by outcome, and every
+`authoritative_batch_phase` log event between the signal and the closing scrape
+(input, shared and fallback members, fallback regroup, distribution and total
+microseconds). A primary-lane probe runs through the same window: client 0,
+whose policy never changes, announces one Type 5 route from the unused half of
+its pool; the driver records when client 1, also unmoved, holds it, withdraws
+it, waits until no receiver holds it, and repeats until one cycle after the
+witness. The window's `probe.max_latency_us` is the longest announce-to-receipt
+time. A probe that never arrives, a route left behind, or a train that does not
+span the signal and the witness records the probe `INVALID`, never a pass. The
+probe key is excluded from the paired per-key digest because its events depend
+on when each probe ran; the boundary still requires it withdrawn. These fields
+are recorded in both modes and the final consumer derives them again from the
+raw scrapes, events, driver and daemon logs. They carry no bar here.
+
 The observer captures timestamps before building each receipt and emits at most
 once per anchored 50,000 µs slot, skipping missed slots without catch-up or
 interpolation. Both online and final checks require the witness row and its

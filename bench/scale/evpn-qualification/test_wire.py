@@ -97,6 +97,24 @@ class WireTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "altered announcement NLRI"):
             self.receiver().consume(changed, {1000})
 
+    def test_probe_key_stays_out_of_the_ordered_digest_but_must_be_withdrawn(self):
+        def run(probe_rounds):
+            r = wire.Receiver(0, 3, 1, 1, probe=(5, 1, 1))
+            r.consume(self.inventory() + (announce(5, 1, 1) + withdraw(5, 1, 1)) * probe_rounds, {1000})
+            return r.boundary([0, 0, 0], 1, 1, 1000), r.ordered_digest(), len(r.probe_events)
+        quiet, busy = run(0), run(3)
+        self.assertEqual(quiet[:2], busy[:2])
+        self.assertEqual((quiet[2], busy[2]), (0, 6))
+        r = wire.Receiver(0, 3, 1, 1, probe=(5, 1, 1))
+        r.consume(self.inventory() + announce(5, 1, 1), {1000})
+        with self.assertRaisesRegex(ValueError, "boundary route set differs"):
+            r.boundary([0, 0, 0], 1, 1, 1000)
+        # Without the probe key the same events change the digest.
+        plain = wire.Receiver(0, 3, 1, 1)
+        plain.consume(self.inventory() + announce(5, 1, 1) + withdraw(5, 1, 1), {1000})
+        plain.boundary([0, 0, 0], 1, 1, 1000)
+        self.assertNotEqual(plain.ordered_digest(), quiet[1])
+
     def test_new_old_new_policy_rollback_fails_in_each_direction(self):
         for old, new in ((1000, 2000), (2000, 1000)):
             with self.subTest(old=old):

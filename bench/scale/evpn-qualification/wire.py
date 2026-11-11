@@ -83,8 +83,12 @@ def frames(data):
 
 
 class Receiver:
-    def __init__(self, peer, clients, type2, type5):
+    def __init__(self, peer, clients, type2, type5, probe=None):
         self.peer, self.clients = peer, clients
+        # The primary-lane probe key's events depend on when the probe ran,
+        # so they stay out of the paired per-key digest; the boundary still
+        # requires the probe withdrawn.
+        self.probe, self.probe_events = probe, []
         self.widths = {2: type2, 5: type5}
         self.state = {}
         self.events = defaultdict(list)
@@ -137,7 +141,7 @@ class Receiver:
                 for key, _ in nlris(value[3:], self.clients, self.widths):
                     require(key in self.state, "unknown or duplicate withdrawal")
                     del self.state[key]
-                    self.events[key].append(("withdraw",))
+                    (self.probe_events if key == self.probe else self.events[key]).append(("withdraw",))
             if 14 in attrs:
                 flags, value = attrs[14]
                 require(flags & ~16 == 128 and len(value) >= 9 and value[:4] == b"\0\x19\x46\4"
@@ -172,7 +176,7 @@ class Receiver:
                             require(key not in self.transitioned, "policy rolled back after replacement")
                     token = (body, raw, nh)
                     self.state[key] = token
-                    self.events[key].append(("announce", *token))
+                    (self.probe_events if key == self.probe else self.events[key]).append(("announce", *token))
                     if self.coverage is not None:
                         self.replay_seen.add(key)
 

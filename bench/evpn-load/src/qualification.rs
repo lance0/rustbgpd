@@ -231,6 +231,88 @@ async fn settle_clients(
     Ok(())
 }
 
+/// Primary-lane probe: client 0 announces one Type 5 route from the unused
+/// half of its pool, the cycle waits until client 1 holds it, then withdraws
+/// it and waits until no receiver holds it. Only clients 0 and 1 keep their
+/// export policy across the controlled reloads, so neither end moves.
+struct Probe {
+    stop: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<anyhow::Result<(Vec<serde_json::Value>, u64)>>,
+}
+
+impl Probe {
+    fn start(
+        shape: Shape,
+        clients: &[Client],
+        lost: &Arc<AtomicBool>,
+        cap: Duration,
+    ) -> anyhow::Result<Self> {
+        let index = shape.pool5() - 1;
+        anyhow::ensure!(
+            clients.len() >= 2 && !shape.window5(clients[0].shifts).any(|live| live == index),
+            "probe route overlaps the source's live window"
+        );
+        let tx = clients[0]
+            .tx
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("probe source has no session"))?;
+        let views: Vec<_> = clients[1..]
+            .iter()
+            .map(|client| client.view.clone())
+            .collect();
+        let bit = (shape.pool2() + index) as usize;
+        let route = super::type5_route(0, index);
+        let (stop, lost) = (Arc::new(AtomicBool::new(false)), lost.clone());
+        let stopping = stop.clone();
+        let task = tokio::spawn(async move {
+            let holds = |view: &Arc<std::sync::Mutex<super::View>>| {
+                view.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .has(bit)
+            };
+            let (mut samples, mut messages) = (Vec::new(), 0_u64);
+            // One more cycle after the stop request, so the train always
+            // ends after the caller's closing witness.
+            let mut final_cycle = false;
+            while !final_cycle {
+                final_cycle = stopping.load(Ordering::SeqCst);
+                let sent = super::wall_us();
+                tx.send(super::build_update(0, vec![route.clone()], vec![]))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("probe source writer closed"))?;
+                let seen = wait_until(cap, &lost, || holds(&views[0]))
+                    .await
+                    .ok()
+                    .map(|()| super::wall_us());
+                tx.send(super::build_update(0, vec![], vec![route.clone()]))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("probe source writer closed"))?;
+                messages += 2;
+                let withdrawn = wait_until(cap, &lost, || !views.iter().any(&holds))
+                    .await
+                    .is_ok();
+                samples.push(
+                    serde_json::json!({"sent_us": sent, "seen_us": seen, "withdrawn": withdrawn}),
+                );
+                if seen.is_none() || !withdrawn {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok((samples, messages))
+        });
+        Ok(Self { stop, task })
+    }
+
+    async fn finish(self, source: &mut Client) -> anyhow::Result<serde_json::Value> {
+        self.stop.store(true, Ordering::SeqCst);
+        let (samples, messages) = self.task.await??;
+        // The writer counts probe messages too; later drains must wait for them.
+        source.submitted_messages += messages;
+        Ok(serde_json::json!({"samples": samples}))
+    }
+}
+
 /// Commands are acknowledged after actual work, never merely queue admission.
 /// `connected` precedes all route injection so the runner can prove both groups
 /// exist before the bench constructor's initial-registration window closes.
@@ -248,6 +330,7 @@ pub(super) async fn run(
     let (mut loaded, mut paused, mut rounds) = (false, false, 0_u32);
     let mut refresh_before = None;
     let mut input_barrier_generation = 0_u64;
+    let mut probe: Option<(String, Probe)> = None;
     println!(
         "evpn_control {}",
         serde_json::json!({"command": "connected", "clients": shape.clients})
@@ -324,7 +407,23 @@ pub(super) async fn run(
                 .await?;
                 boundary("refresh", clients)?
             }
-            ["policy", generation @ ("a" | "b")] if loaded && !paused => {
+            ["probe-start", generation @ ("a" | "b")] if loaded && !paused && probe.is_none() => {
+                let cap = Duration::from_secs(args.converge_cap_secs);
+                probe = Some((
+                    (*generation).to_string(),
+                    Probe::start(shape, clients, lost, cap)?,
+                ));
+                serde_json::json!({"probe": generation})
+            }
+            ["probe-stop", generation]
+                if probe
+                    .as_ref()
+                    .is_some_and(|(started, _)| started == generation) =>
+            {
+                let (_, running) = probe.take().expect("checked above");
+                running.finish(&mut clients[0]).await?
+            }
+            ["policy", generation @ ("a" | "b")] if loaded && !paused && probe.is_none() => {
                 wait_until(Duration::from_secs(args.converge_cap_secs), lost, || {
                     policies_match(clients, generation)
                 })
@@ -352,7 +451,7 @@ pub(super) async fn run(
                 boundary("settled", clients)?
             }
             ["mark", name] if loaded => boundary(name, clients)?,
-            ["finish"] if loaded && !paused => {
+            ["finish"] if loaded && !paused && probe.is_none() => {
                 let result = boundary("finished", clients)?;
                 anyhow::ensure!(
                     converged(&check(shape, clients), shape),
@@ -378,6 +477,7 @@ pub(super) async fn run(
 mod tests {
     use super::*;
     use crate::{Mutex, View, build_update, type2_route};
+    use rustbgpd_wire::attribute::PathAttribute;
 
     #[test]
     fn policy_completion_checks_every_live_key_and_preserves_anchors() {
@@ -429,6 +529,82 @@ mod tests {
         }
         assert!(policies_match(&clients, "b"));
         assert!(!policies_match(&clients, "a"));
+    }
+
+    fn probe_clients(shape: Shape) -> (Vec<Client>, tokio::sync::mpsc::Receiver<Message>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let clients = (0..shape.clients)
+            .map(|index| Client {
+                index,
+                tx: (index == 0).then(|| tx.clone()),
+                view: Arc::new(Mutex::new(View::new(shape))),
+                up: Arc::new(AtomicBool::new(true)),
+                expect_down: Arc::new(AtomicBool::new(false)),
+                shifts: 0,
+                io_control: None,
+                submitted_messages: 0,
+            })
+            .collect();
+        (clients, rx)
+    }
+
+    #[tokio::test]
+    async fn probe_records_arrival_and_withdrawal_and_marks_a_lost_route_unseen() {
+        let shape = Shape {
+            clients: 3,
+            type2: 2,
+            type5: 2,
+            shift2: 1,
+            shift5: 1,
+        };
+        let lost = Arc::new(AtomicBool::new(false));
+        // A reflector that delivers every probe UPDATE to both receivers.
+        let (mut clients, mut rx) = probe_clients(shape);
+        let views: Vec<_> = clients[1..].iter().map(|c| c.view.clone()).collect();
+        tokio::spawn(async move {
+            while let Some(Message::Update(update)) = rx.recv().await {
+                let parsed = update.parse(true, false, &[]).unwrap();
+                for attribute in &parsed.attributes {
+                    let (routes, present) = match attribute {
+                        PathAttribute::MpReachNlri(mp) => (&mp.evpn_announced, true),
+                        PathAttribute::MpUnreachNlri(mp) => (&mp.evpn_withdrawn, false),
+                        _ => continue,
+                    };
+                    for view in &views {
+                        for route in routes {
+                            view.lock().unwrap().apply(
+                                view_owner(&views, view),
+                                shape,
+                                route,
+                                present,
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        let probe = Probe::start(shape, &clients, &lost, Duration::from_secs(5)).unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let result = probe.finish(&mut clients[0]).await.unwrap();
+        let samples = result["samples"].as_array().unwrap();
+        assert!(samples.len() >= 2, "{result}");
+        for sample in samples {
+            assert!(sample["seen_us"].as_u64().unwrap() >= sample["sent_us"].as_u64().unwrap());
+            assert_eq!(sample["withdrawn"], true);
+        }
+        assert_eq!(clients[0].submitted_messages, 2 * samples.len() as u64);
+
+        // Nothing delivers the probe: the sample records it unseen and ends the train.
+        let (mut clients, _rx) = probe_clients(shape);
+        let probe = Probe::start(shape, &clients, &lost, Duration::from_millis(50)).unwrap();
+        let result = probe.finish(&mut clients[0]).await.unwrap();
+        let samples = result["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0]["seen_us"].is_null());
+    }
+
+    fn view_owner(views: &[Arc<Mutex<View>>], view: &Arc<Mutex<View>>) -> u32 {
+        1 + u32::try_from(views.iter().position(|v| Arc::ptr_eq(v, view)).unwrap()).unwrap()
     }
 
     #[test]
