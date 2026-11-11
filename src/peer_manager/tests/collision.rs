@@ -4052,11 +4052,12 @@ async fn residual_peer_up(rib_rx: &mut mpsc::Receiver<RibUpdate>, expected: u64)
 }
 
 /// The primary establishes after the candidate is accepted, then its TCP
-/// fails behind a full RIB mailbox. Conditional retirement cannot confirm
-/// while that mailbox is full, so the manager refuses promotion and closes
-/// the candidate before it can register beside the old primary.
+/// fails behind a full RIB mailbox. The candidate's export-policy sync cannot
+/// complete while that mailbox is full, so the manager refuses promotion at
+/// the sync, before it claims the candidate or asks the primary to retire,
+/// and closes the candidate before it can register beside the old primary.
 #[tokio::test]
-async fn full_rib_refuses_candidate_promotion_before_primary_retirement() {
+async fn full_rib_refuses_candidate_promotion_at_the_candidate_sync() {
     let (mut mgr, rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
     let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let mut primary = accept_residual_connection(&mut mgr).await;
@@ -4108,6 +4109,149 @@ async fn full_rib_refuses_candidate_promotion_before_primary_retirement() {
             !matches!(update, RibUpdate::PeerUp { session_id, .. } if session_id == candidate_id)
         );
     }
+}
+
+/// Forward the manager's RIB traffic to a real RIB through the first update
+/// `last` accepts, holding back the session end of `held_session`.
+async fn relay_to_rib(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    rib: &mpsc::Sender<RibUpdate>,
+    held_session: u64,
+    held: &mut Vec<RibUpdate>,
+    mut last: impl FnMut(&RibUpdate) -> bool,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let update = rib_rx.recv().await.unwrap();
+            let done = last(&update);
+            if matches!(update, RibUpdate::PeerDown { session_id, .. } if session_id == held_session)
+            {
+                held.push(update);
+            } else {
+                rib.send(update).await.unwrap();
+            }
+            if done {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the session sends the awaited RIB update");
+}
+
+/// Accept `expected`'s `PeerUp`, recording the session it names.
+fn peer_up(expected: u64, named: &mut Vec<Option<u64>>) -> impl FnMut(&RibUpdate) -> bool + '_ {
+    move |update| match update {
+        RibUpdate::PeerUp {
+            session_id,
+            supersedes,
+            ..
+        } if *session_id == expected => {
+            named.push(supersedes.map(std::num::NonZeroU64::get));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The primary's `PeerUp` is admitted, then its TCP fails and the pending
+/// candidate is promoted over it. The candidate's `PeerUp` names that primary,
+/// so the RIB retires the primary's record there. The primary's own
+/// `PeerDown`, delivered after the candidate's `PeerUp` and first route, then
+/// leaves the promoted session's route in place.
+/// Mutation-red: without the promotion inheriting the joined primary's
+/// registration, the candidate's `PeerUp` names nothing.
+#[tokio::test]
+async fn promoted_candidate_names_the_registered_primary_it_replaces() {
+    let (mut mgr, _rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Idle);
+    let (rib, real_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(4);
+    let rib_task = tokio::spawn(
+        rustbgpd_rib::RibManager::new(real_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut primary = accept_residual_connection(&mut mgr).await;
+    let primary_id = mgr.peers[&peer].session_id();
+    let mut candidate = accept_residual_connection(&mut mgr).await;
+    let candidate_id = mgr.peers[&peer]
+        .pending_inbound
+        .as_ref()
+        .unwrap()
+        .session_id;
+    let open = Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)));
+    send_bgp_message(&mut primary, &open).await;
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut BytesMut::new()).await,
+        Message::Keepalive
+    ));
+    let _primary_open = residual_notification(&mut mgr, primary_id, false).await;
+    send_bgp_message(&mut candidate, &open).await;
+    send_bgp_message(&mut candidate, &Message::Keepalive).await;
+    let _candidate_open = residual_notification(&mut mgr, candidate_id, false).await;
+
+    let mut held = Vec::new();
+    let mut named = Vec::new();
+    send_bgp_message(&mut primary, &Message::Keepalive).await;
+    relay_to_rib(
+        &mut rib_rx,
+        &rib,
+        primary_id,
+        &mut held,
+        peer_up(primary_id, &mut named),
+    )
+    .await;
+    assert_eq!(
+        mgr.peers[&peer].handle().rib_registration_owner(primary_id),
+        Some(primary_id),
+        "the RIB channel admitted the primary's registration"
+    );
+
+    drop(primary);
+    let idle = residual_notification(&mut mgr, primary_id, true).await;
+    mgr.handle_session_notification(idle).await;
+    assert_eq!(
+        mgr.peers[&peer].session_id(),
+        candidate_id,
+        "the candidate is promoted over the idle primary"
+    );
+    relay_to_rib(
+        &mut rib_rx,
+        &rib,
+        primary_id,
+        &mut held,
+        peer_up(candidate_id, &mut named),
+    )
+    .await;
+    assert_eq!(
+        named,
+        [None, Some(primary_id)],
+        "the promoted candidate names the registered primary it replaced"
+    );
+
+    send_bgp_message(&mut candidate, &peer_update([203, 0, 113, 0], None)).await;
+    relay_to_rib(&mut rib_rx, &rib, primary_id, &mut held, |update| {
+        matches!(update, RibUpdate::RoutesReceived { session_id, announced, .. }
+            if *session_id == candidate_id && !announced.is_empty())
+    })
+    .await;
+    let loc_rib_count = || async {
+        let (reply, response) = oneshot::channel();
+        rib.send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        response.await.unwrap()
+    };
+    assert_eq!(loc_rib_count().await, 1);
+    assert_eq!(held.len(), 1, "the primary sent one PeerDown");
+    for late in held {
+        rib.send(late).await.unwrap();
+    }
+    assert_eq!(
+        loc_rib_count().await,
+        1,
+        "the retired primary's late PeerDown keeps the promoted session's route"
+    );
+    rib_task.abort();
 }
 
 /// A queued peer KEEPALIVE cannot register an unpromoted candidate. The
