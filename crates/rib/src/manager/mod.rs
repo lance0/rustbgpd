@@ -6580,7 +6580,7 @@ impl RibManager {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
         self.update_peer_refresh_metrics(peer);
-        self.recompute_vpn_keys(&affected);
+        self.recompute_and_distribute_vpn(&affected, Some(peer));
         if !affected.is_empty() {
             self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
@@ -6594,7 +6594,7 @@ impl RibManager {
     /// to the next-best candidate (or are withdrawn downstream), mirroring
     /// the unicast/FlowSpec/EVPN/BGP-LS recompute + distribution pattern.
     fn recompute_vpn_keys(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
-        self.recompute_and_distribute_vpn(affected);
+        self.recompute_and_distribute_vpn(affected, None);
     }
 
     fn handle_labeled_routes_received(
@@ -6647,7 +6647,7 @@ impl RibManager {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
         self.update_peer_refresh_metrics(peer);
-        self.recompute_labeled_keys(&affected);
+        self.recompute_and_distribute_labeled(&affected, Some(peer));
         if !affected.is_empty() {
             self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
@@ -6658,7 +6658,7 @@ impl RibManager {
     /// the current set of peer Adj-RIB-Ins, then distribute the changes to
     /// eligible peers, mirroring [`Self::recompute_vpn_keys`].
     fn recompute_labeled_keys(&mut self, affected: &HashSet<crate::route::LabeledRibRouteKey>) {
-        self.recompute_and_distribute_labeled(affected);
+        self.recompute_and_distribute_labeled(affected, None);
     }
 
     /// RT-Constrain ingest (RFC 4684). Mirrors the VPN receive path; after

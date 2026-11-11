@@ -720,6 +720,14 @@ impl RibManager {
     /// operate per prefix identity — received Add-Path path IDs are
     /// distinct Adj-RIB-In entries but collapse into one candidate set per
     /// identity.
+    ///
+    /// `source` names the peer whose received UPDATE produced `affected`,
+    /// and only that caller passes it: nothing but that peer's entries for
+    /// the affected path IDs changed. A key whose stored best is not among
+    /// them is then selected from those entries and the stored best alone;
+    /// the comparator is a total order, so no untouched path can win. Every
+    /// other caller passes `None` and each key is selected from all of its
+    /// stored paths.
     #[expect(
         clippy::too_many_lines,
         reason = "labeled recompute keeps loc-rib selection and per-peer ORR/Add-Path staging together"
@@ -727,6 +735,7 @@ impl RibManager {
     pub(in crate::manager) fn recompute_and_distribute_labeled(
         &mut self,
         affected: &HashSet<LabeledRibRouteKey>,
+        source: Option<PeerId>,
     ) {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {
@@ -764,6 +773,19 @@ impl RibManager {
             &affected_nlri,
         );
 
+        // The source's changed path IDs, grouped by key.
+        let mut touched: Vec<(Prefix, u32)> = Vec::new();
+        if source.is_some() {
+            touched.reserve_exact(affected.len());
+            touched.extend(
+                affected
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .map(|key| (key.prefix, key.path_id)),
+            );
+            touched.sort_unstable();
+        }
+
         // Changed keys are a subset of the selected inputs: an owner
         // reserves them so inserts never rehash between checkpoints.
         let mut changed_keys: HashSet<Prefix> = HashSet::with_capacity(if readiness.is_some() {
@@ -775,14 +797,42 @@ impl RibManager {
         let reserved = changed_keys.capacity();
         for key in &affected_nlri {
             checkpoint();
-            let candidates: Vec<&LabeledRibRoute> = self
-                .ribs
-                .values()
-                .inspect(|_| checkpoint())
-                .flat_map(|rib| rib.iter_labeled_for_prefix(key))
-                .inspect(|_| checkpoint())
-                .collect();
-            if self.loc_rib.recompute_labeled(*key, candidates.into_iter()) {
+            let path = |path_id| LabeledRibRouteKey {
+                prefix: *key,
+                path_id,
+            };
+            // The source's rib and the rib-resident stored best, when this
+            // UPDATE left that best alone.
+            let untouched_best = source.and_then(|peer| {
+                let best = self.loc_rib.get_labeled(key)?;
+                if best.peer == peer && affected.contains(&path(best.path_id)) {
+                    return None;
+                }
+                let best = self
+                    .ribs
+                    .get(&best.peer)?
+                    .get_labeled(&path(best.path_id))?;
+                Some((self.ribs.get(&peer)?, best))
+            });
+            let changed = if let Some((rib, best)) = untouched_best {
+                let first = touched.partition_point(|(touched_key, _)| touched_key < key);
+                let candidates = touched[first..]
+                    .iter()
+                    .take_while(|(touched_key, _)| touched_key == key)
+                    .filter_map(|&(_, path_id)| rib.get_labeled(&path(path_id)))
+                    .chain(std::iter::once(best))
+                    .inspect(|_| checkpoint());
+                self.loc_rib.recompute_labeled(*key, candidates)
+            } else {
+                let candidates = self
+                    .ribs
+                    .values()
+                    .inspect(|_| checkpoint())
+                    .flat_map(|rib| rib.iter_labeled_for_prefix(key))
+                    .inspect(|_| checkpoint());
+                self.loc_rib.recompute_labeled(*key, candidates)
+            };
+            if changed {
                 changed_keys.insert(*key);
             }
         }
