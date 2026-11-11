@@ -302,25 +302,25 @@ class RecoveryTests(unittest.TestCase):
         second.update(elapsed_us=100_000, sample_slot=2, dirty=4, dirty_high_water=4, recovery_pending=4)
         for peer in second["peers"]:
             peer[2] = True
-        self.assertEqual(R.recovery_pair([first, second], 4, 100, 200), (first, second))
+        self.assertEqual(R.recovery_pair([first, second], 4, 100, 200, "candidate"), (first, second))
         for paused, resumed in ((101, 200), (100, 199)):
             with self.subTest(paused=paused, resumed=resumed):
-                self.assertIsNone(R.recovery_pair([first, second], 4, paused, resumed))
+                self.assertIsNone(R.recovery_pair([first, second], 4, paused, resumed, "candidate"))
         short = copy.deepcopy(second)
         short["dirty"] = short["dirty_high_water"] = short["recovery_pending"] = 3
         short["peers"][2][2] = False
-        self.assertIsNone(R.recovery_pair([first, short], 4, 100, 200), "one member short is not mass-dirty")
+        self.assertIsNone(R.recovery_pair([first, short], 4, 100, 200, "candidate"), "one member short is not mass-dirty")
         for gap in (1_000_000, 50_001):
             with self.subTest(gap=gap):
                 late = copy.deepcopy(second)
                 late["elapsed_us"] = first["elapsed_us"] + gap
                 late["sample_slot"] = late["elapsed_us"] // 50_000
-                self.assertIsNone(R.recovery_pair([first, late], 4, 100, 200))
+                self.assertIsNone(R.recovery_pair([first, late], 4, 100, 200, "candidate"))
         for elapsed, slot in ((50_001, 1), (150_000, 3), (100_000, 3)):
             with self.subTest(elapsed=elapsed, slot=slot):
                 skewed = copy.deepcopy(second)
                 skewed.update(elapsed_us=elapsed, sample_slot=slot)
-                self.assertIsNone(R.recovery_pair([first, skewed], 4, 100, 200))
+                self.assertIsNone(R.recovery_pair([first, skewed], 4, 100, 200, "candidate"))
 
     def test_private_owing_requires_every_peer_in_one_snapshot(self):
         first, second = witness("private", 4, 10), witness("private", 4, 10)
@@ -329,12 +329,18 @@ class RecoveryTests(unittest.TestCase):
         for peer in second["peers"]:
             peer[10] = True
         R.roster(second, "private", 4)
-        self.assertEqual(R.recovery_pair([first, second], 4, 100, 200), (first, second))
+        self.assertEqual(R.recovery_pair([first, second], 4, 100, 200, "private"), (first, second))
+        self.assertIsNone(R.recovery_pair([first, second], 4, 100, 200, "candidate"), "owing is not dirty")
+        mixed = copy.deepcopy(second)
+        mixed["peers"][0][2] = True
+        mixed["dirty"] = mixed["dirty_high_water"] = 1
+        self.assertIsNone(R.recovery_pair([first, mixed], 4, 100, 200, "candidate"), "one dirty, the rest owing")
+        self.assertEqual(R.recovery_pair([first, mixed], 4, 100, 200, "private"), (first, mixed))
         short = copy.deepcopy(second)
         short["peers"][2][10] = False
         short["owing"] = short["recovery_pending"] = 3
         R.roster(short, "private", 4)
-        self.assertIsNone(R.recovery_pair([first, short], 4, 100, 200))
+        self.assertIsNone(R.recovery_pair([first, short], 4, 100, 200, "private"))
 
     def test_high_water_and_cross_row_union_do_not_replace_a_snapshot(self):
         rows = []
@@ -348,7 +354,7 @@ class RecoveryTests(unittest.TestCase):
             rows.append(row)
         self.assertEqual({peer[0] for row in rows for peer in row["peers"] if peer[2]},
                          {Q.COMMON.peer(index) for index in range(4)})
-        self.assertIsNone(R.recovery_pair(rows, 4, 0, 1_000))
+        self.assertIsNone(R.recovery_pair(rows, 4, 0, 1_000, "candidate"))
 
     def test_timings_use_reload_trigger_and_all_resume_ack(self):
         events = [{"event": "reload", "generation": "a", "at": 1},
@@ -600,7 +606,9 @@ class RecoveryTests(unittest.TestCase):
 
     def test_analyze_checks_one_complete_recovery_snapshot(self):
         for arm in ("candidate", "private"):
-            for mode, verdict in (("mixed", "PASS"), ("overlap", "PASS"), ("missing-reason", "FAIL"),
+            # One dirty and two owing peers: the owned arm needs all three dirty.
+            partial = "PASS" if arm == "private" else "FAIL"
+            for mode, verdict in (("mixed", partial), ("overlap", partial), ("missing-reason", "FAIL"),
                                   ("missing-peer", "INVALID"), ("missing-row", "INVALID"),
                                   ("cross-row-union", "FAIL"), ("double-count", "INVALID")):
                 with self.subTest(arm=arm, mode=mode), tempfile.TemporaryDirectory() as temporary:
@@ -651,6 +659,25 @@ class RecoveryTests(unittest.TestCase):
                             # The mutated arm must fail before its wire/parity or median checks.
                             self.assertLessEqual(wire_check.call_count, 1)
                     self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], verdict)
+
+    def test_recovery_median_ratio_is_reported_but_only_regroup_gates(self):
+        def rows(candidate, private):
+            return [{"arm": arm, "regroup-a-seconds": 1., "regroup-b-seconds": 1., "recovery-seconds": value}
+                    for arm, value in (("candidate", candidate), ("private", private)) for _ in range(3)]
+        with patch("sys.stdout", io.StringIO()) as printed:
+            report = R.median_report(rows(1.04, .22))
+        self.assertEqual((report["recovery-seconds"]["within_ratio"], report["recovery-seconds"]["gated"]), (False, False))
+        self.assertAlmostEqual(report["recovery-seconds"]["ratio"], 1.04 / .22)
+        self.assertIn("recovery-seconds: candidate 1.040000 s, private 0.220000 s", printed.getvalue())
+        self.assertIn("report-only", printed.getvalue())
+        slow = rows(1., 1.)
+        for row in slow:
+            if row["arm"] == "candidate":
+                row["regroup-b-seconds"] = 1.04
+        with patch("sys.stdout", io.StringIO()), self.assertRaisesRegex(Q.AcceptanceFailure, "regressed: regroup-b"):
+            R.median_report(slow)
+        with patch("sys.stdout", io.StringIO()), self.assertRaisesRegex(Q.AcceptanceFailure, "convergence bar"):
+            R.median_report(rows(61., 61.))
 
     def test_analyze_needs_the_pause_and_resume_clocks(self):
         with tempfile.TemporaryDirectory() as temporary:

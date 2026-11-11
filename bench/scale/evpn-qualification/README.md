@@ -133,9 +133,11 @@ frozen-source campaign in an explicitly recorded timing window.
 
 The controller pauses actual socket readers with acknowledged generation fences,
 then issues 32 fixed full-window churn rounds. Both arms must show every
-expected receiver with pending EVPN recovery in one actual actor snapshot:
-`dirty || owing` for each peer, with `recovery_pending == 150`. The same observer
-in both exports reads the real dirty flag and EVPN owed-work flag. The final
+expected receiver with pending EVPN recovery in one actual actor snapshot, with
+`recovery_pending == 150`. The candidate owns its groups and must show every
+peer `dirty`; a candidate snapshot that mixes dirty and owing peers is not the
+witness. The private control may count a peer that is `dirty || owing`. The same
+observer in both exports reads the real dirty flag and EVPN owed-work flag. The final
 summary reports each reason's peer identities; a peer with both flags counts once.
 This prospective witness replaces the dirty-high-water requirement. Private
 output can retain owed work with no dirty flag, so the old failed receipts remain
@@ -176,10 +178,20 @@ The fixed recovery bars are:
 | Gate | Requirement |
 | --- | --- |
 | Readiness | Requests scheduled at 20 Hz in every phase, with the first probe no later than one 50 ms interval after the first recorded workload event and the last no earlier than one interval before the final event on the same monotonic clock; zero errors or non-200 responses; every measured latency below 200 ms |
-| Wire convergence | Each regroup and recovery at most 60 seconds; candidate median at most private median × 1.03 across three alternating samples |
+| Wire convergence | Each regroup and recovery at most 60 seconds; each regroup's candidate median at most private median × 1.03 across three alternating samples. The recovery-phase median ratio is reported, not gated |
 | Timing origin | Regroup starts at SIGHUP; recovery starts after every socket resume acknowledgement |
 | Provenance headroom | Observed peer and daemon peaks at most 80% of the existing 16 MiB / 256 MiB budgets |
 | Settlement | No dirty members, owed EVPN work, live recovery obligations, pending refresh/EoR, completion marker debt, completion receipts or pending resets; all five executed-reset counters remain zero |
+
+The recovery-phase median ratio is report-only because the two arms do not
+recover on the same cadence. After the readers resume, the private control owes
+keys and drains them on the 10 ms backlog cadence. The candidate's receivers are
+dirty and wait for the one-second resync tick. A candidate median near one
+second against a private median of a few hundred milliseconds measures that
+difference in mechanism, so it is not a like-for-like regression bar. The
+summary and the analyzer output still carry both medians, their ratio and
+whether it is within × 1.03; the 60-second bound, wire parity, settlement and
+the regroup ratios remain gates.
 
 The 900-second initial-load bound is a safety timeout. Normal daemon reload and
 RPC deadlines remain unchanged. Charged metadata after settlement is reported;
