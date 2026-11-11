@@ -1347,6 +1347,83 @@ fn vpn_cmp_chain(
         return cmp;
     }
 
+    // The attribute steps read the sets' cached selection summaries, which
+    // hold the first matching attribute and the comparator's defaults.
+    let (sa, sb) = (a.attributes.summary(), b.attributes.summary());
+
+    let cmp = sb.local_pref.cmp(&sa.local_pref);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = sa.as_path_len.cmp(&sb.as_path_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = sa.origin.cmp(&sb.origin);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = sa.med.cmp(&sb.med);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // RFC 9107 ORR interior cost to NEXT_HOP — only when the caller
+    // supplies vantage costs (the Loc-RIB never does). Lower cost wins;
+    // Some beats None (unknown metric MUST be least preferred); equal
+    // or both-None falls through.
+    if let Some((cost_a, cost_b)) = orr_costs {
+        let cmp = match (cost_a, cost_b) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, sa.originator_id, a.peer_router_id),
+        (b.origin_type, sb.originator_id, b.peer_router_id),
+    ) {
+        return cmp;
+    }
+
+    let cmp = sa.cluster_list_len.cmp(&sb.cluster_list_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // Lowest peer address, then inbound Add-Path identifier: the family
+    // negotiates Add-Path, so one peer can hold several otherwise-tied
+    // routes. The identifier has no preference semantics (RFC 7911 §2);
+    // it only makes the order total, independent of candidate order.
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
+}
+
+/// The chain as it read the attribute list on every comparison: the
+/// reference `vpn_cmp_chain` must match. Do not refactor this copy.
+#[cfg(test)]
+fn vpn_cmp_chain_legacy(
+    a: &VpnRibRoute,
+    b: &VpnRibRoute,
+    orr_costs: Option<(Option<u64>, Option<u64>)>,
+) -> Ordering {
+    let cmp = vpn_stale_rank(a).cmp(&vpn_stale_rank(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
     let cmp = b
         .local_pref_attr()
         .unwrap_or(100)
@@ -1418,6 +1495,7 @@ pub(crate) fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
     })
 }
 
+#[cfg(test)]
 fn vpn_origin(route: &VpnRibRoute) -> Origin {
     route
         .attributes
@@ -1429,6 +1507,7 @@ fn vpn_origin(route: &VpnRibRoute) -> Origin {
         .unwrap_or(Origin::Incomplete)
 }
 
+#[cfg(test)]
 fn vpn_cluster_list_len(route: &VpnRibRoute) -> usize {
     route
         .attributes
@@ -1440,6 +1519,7 @@ fn vpn_cluster_list_len(route: &VpnRibRoute) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn vpn_originator_id(route: &VpnRibRoute) -> Option<std::net::Ipv4Addr> {
     route.attributes.iter().find_map(|attr| match attr {
         PathAttribute::OriginatorId(id) => Some(*id),
@@ -1473,6 +1553,83 @@ pub(crate) fn labeled_tiebreak_orr(
 /// None`, the Loc-RIB selection) and [`labeled_tiebreak_orr`] (`orr_costs =
 /// Some(..)`, per-vantage staging), mirroring `vpn_cmp_chain`.
 fn labeled_cmp_chain(
+    a: &LabeledRibRoute,
+    b: &LabeledRibRoute,
+    orr_costs: Option<(Option<u64>, Option<u64>)>,
+) -> Ordering {
+    let cmp = labeled_stale_rank(a).cmp(&labeled_stale_rank(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // The attribute steps read the sets' cached selection summaries, which
+    // hold the first matching attribute and the comparator's defaults.
+    let (sa, sb) = (a.attributes.summary(), b.attributes.summary());
+
+    let cmp = sb.local_pref.cmp(&sa.local_pref);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = sa.as_path_len.cmp(&sb.as_path_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = sa.origin.cmp(&sb.origin);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = sa.med.cmp(&sb.med);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // RFC 9107 ORR interior cost to NEXT_HOP — only when the caller
+    // supplies vantage costs (the Loc-RIB never does). Lower cost wins;
+    // Some beats None (unknown metric MUST be least preferred); equal
+    // or both-None falls through.
+    if let Some((cost_a, cost_b)) = orr_costs {
+        let cmp = match (cost_a, cost_b) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, sa.originator_id, a.peer_router_id),
+        (b.origin_type, sb.originator_id, b.peer_router_id),
+    ) {
+        return cmp;
+    }
+
+    let cmp = sa.cluster_list_len.cmp(&sb.cluster_list_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // Lowest peer address, then inbound Add-Path identifier: the family
+    // negotiates Add-Path, so one peer can hold several otherwise-tied
+    // routes. The identifier has no preference semantics (RFC 7911 §2);
+    // it only makes the order total, independent of candidate order.
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
+}
+
+/// The chain as it read the attribute list on every comparison: the
+/// reference `labeled_cmp_chain` must match. Do not refactor this copy.
+#[cfg(test)]
+fn labeled_cmp_chain_legacy(
     a: &LabeledRibRoute,
     b: &LabeledRibRoute,
     orr_costs: Option<(Option<u64>, Option<u64>)>,
@@ -1553,6 +1710,7 @@ fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
     })
 }
 
+#[cfg(test)]
 fn labeled_origin(route: &LabeledRibRoute) -> Origin {
     route
         .attributes
@@ -1564,6 +1722,7 @@ fn labeled_origin(route: &LabeledRibRoute) -> Origin {
         .unwrap_or(Origin::Incomplete)
 }
 
+#[cfg(test)]
 fn labeled_cluster_list_len(route: &LabeledRibRoute) -> usize {
     route
         .attributes
@@ -1575,6 +1734,7 @@ fn labeled_cluster_list_len(route: &LabeledRibRoute) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn labeled_originator_id(route: &LabeledRibRoute) -> Option<std::net::Ipv4Addr> {
     route.attributes.iter().find_map(|attr| match attr {
         PathAttribute::OriginatorId(id) => Some(*id),
@@ -4164,5 +4324,103 @@ mod tests {
             loc.recompute_evpn(key, [&r2].into_iter()),
             "same-peer VNI change must be detected"
         );
+    }
+
+    /// The VPN and labeled chains read the cached selection summary; the
+    /// frozen attribute-scanning copies are the reference.
+    mod summary_chain {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        fn attr() -> impl Strategy<Value = PathAttribute> {
+            prop_oneof![
+                (99u32..102).prop_map(PathAttribute::LocalPref),
+                (0u32..3).prop_map(PathAttribute::Med),
+                (0u8..3).prop_map(|origin| PathAttribute::Origin(match origin {
+                    0 => Origin::Igp,
+                    1 => Origin::Egp,
+                    _ => Origin::Incomplete,
+                })),
+                (0usize..3, any::<bool>()).prop_map(|(len, set)| {
+                    let mut segments = vec![AsPathSegment::AsSequence(vec![65_000; len])];
+                    if set {
+                        segments.push(AsPathSegment::AsSet(vec![1, 2, 3]));
+                    }
+                    PathAttribute::AsPath(AsPath { segments })
+                }),
+                (1u8..4).prop_map(|id| PathAttribute::OriginatorId(Ipv4Addr::new(192, 0, 2, id))),
+                (0usize..3)
+                    .prop_map(|len| PathAttribute::ClusterList(vec![Ipv4Addr::LOCALHOST; len])),
+                any::<bool>().prop_map(|stale| PathAttribute::Communities(if stale {
+                    vec![rustbgpd_wire::COMMUNITY_LLGR_STALE]
+                } else {
+                    vec![]
+                })),
+            ]
+        }
+
+        /// (attributes, peer, path id, origin type, router id, stale, LLGR stale)
+        type Inputs = (Vec<PathAttribute>, u8, u32, u8, u8, bool, bool);
+
+        fn inputs() -> impl Strategy<Value = Inputs> {
+            (
+                // Repeats are likely, so first-match semantics are compared.
+                proptest::collection::vec(attr(), 0..8),
+                1u8..4,
+                0u32..3,
+                0u8..3,
+                1u8..3,
+                any::<bool>(),
+                any::<bool>(),
+            )
+        }
+
+        macro_rules! apply {
+            ($route:expr, $inputs:expr) => {{
+                let (attrs, _, path_id, origin, router_id, stale, llgr_stale) = $inputs;
+                let mut route = $route;
+                route.attributes = AttrSet::new(attrs);
+                route.path_id = path_id;
+                route.origin_type = match origin {
+                    0 => RouteOrigin::Ebgp,
+                    1 => RouteOrigin::Ibgp,
+                    _ => RouteOrigin::Local,
+                };
+                route.peer_router_id = Ipv4Addr::new(192, 0, 2, router_id);
+                route.is_stale = stale;
+                route.is_llgr_stale = llgr_stale;
+                route
+            }};
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 2048, ..ProptestConfig::default() })]
+
+            #[test]
+            fn vpn_and_labeled_summary_chains_match_the_attribute_scan(
+                a in inputs(),
+                b in inputs(),
+                orr_costs in proptest::option::of((
+                    proptest::option::of(0u64..3),
+                    proptest::option::of(0u64..3),
+                )),
+            ) {
+                let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+                let va = apply!(make_vpn_route(nlri.clone(), a.1, 0), a.clone());
+                let vb = apply!(make_vpn_route(nlri, b.1, 0), b.clone());
+                prop_assert_eq!(
+                    vpn_cmp_chain(&va, &vb, orr_costs),
+                    vpn_cmp_chain_legacy(&va, &vb, orr_costs)
+                );
+                let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+                let la = apply!(make_labeled_route(nlri.clone(), a.1, 0), a);
+                let lb = apply!(make_labeled_route(nlri, b.1, 0), b);
+                prop_assert_eq!(
+                    labeled_cmp_chain(&la, &lb, orr_costs),
+                    labeled_cmp_chain_legacy(&la, &lb, orr_costs)
+                );
+            }
+        }
     }
 }

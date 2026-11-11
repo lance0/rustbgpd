@@ -83,3 +83,8 @@ required-features = ["bench-internals"]
 name = "contested_prefix_scoped"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "addpath_selection_rescan"
+harness = false
+required-features = ["bench-internals"]

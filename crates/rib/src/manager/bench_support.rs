@@ -3216,6 +3216,52 @@ impl RibManager {
             .try_recv()
             .expect("FIB dataplane page handler replies synchronously")
     }
+
+    /// Apply one message through the production dispatcher and drain the
+    /// route chunks it queued, as the actor does before it admits the next
+    /// primary update. Returns the elapsed RIB actor time in nanoseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the duration exceeds `u64` nanoseconds.
+    pub fn bench_timed_update(&mut self, update: RibUpdate) -> u64 {
+        let started = std::time::Instant::now();
+        self.handle_update(update);
+        while self.process_next_route_chunk() {}
+        u64::try_from(started.elapsed().as_nanos()).expect("duration fits u64")
+    }
+
+    /// Expire `peer`'s Graceful Restart timer through the production sweep,
+    /// which promotes its stale routes to the LLGR phase when LLGR applies.
+    pub fn bench_expire_gr_timer(&mut self, peer: PeerId) {
+        self.sweep_gr_stale(peer);
+    }
+
+    /// `[unicast, labeled, VPN]` paths stored in `peer`'s Adj-RIB-In.
+    #[must_use]
+    pub fn bench_stored_paths(&self, peer: PeerId) -> [usize; 3] {
+        self.ribs
+            .get(&peer)
+            .map_or([0; 3], |rib| [rib.len(), rib.labeled_len(), rib.vpn_len()])
+    }
+
+    /// Add-Path ID of the selected unicast best for `prefix`.
+    #[must_use]
+    pub fn bench_best_unicast_path_id(&self, prefix: Prefix) -> Option<u32> {
+        self.loc_rib.get(&prefix).map(|route| route.path_id)
+    }
+
+    /// Add-Path ID of the selected labeled-unicast best for `prefix`.
+    #[must_use]
+    pub fn bench_best_labeled_path_id(&self, prefix: Prefix) -> Option<u32> {
+        self.loc_rib.get_labeled(&prefix).map(|route| route.path_id)
+    }
+
+    /// Add-Path ID of the selected VPN best for `key`.
+    #[must_use]
+    pub fn bench_best_vpn_path_id(&self, key: &rustbgpd_wire::VpnRouteKey) -> Option<u32> {
+        self.loc_rib.get_vpn(key).map(|route| route.path_id)
+    }
 }
 
 #[cfg(test)]

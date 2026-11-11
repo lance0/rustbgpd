@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 57adef822e30afa83db8621f151ef804562e9c5d656997305596bae96c83cc87 # shrinks to ops = [Receive { peer: 0, vpn: false, announce: [(1, 0, 0)], withdraw: [] }, Receive { peer: 0, vpn: false, announce: [(1, 1, 1)], withdraw: [] }]

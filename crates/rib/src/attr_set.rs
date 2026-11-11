@@ -5,8 +5,9 @@
 //! walked the attribute list about a dozen times. [`AttrSet`] computes those
 //! values once, when the set is built, and interning shares one set (and so
 //! one summary) across every route that carries the same attributes.
-//! Other route families share this container and use its cached LLGR tier;
-//! their remaining selection accessors still read the attribute list.
+//! The VPN and labeled-unicast comparisons read the summary as well. The
+//! remaining route families share this container and use its cached LLGR
+//! tier; their other selection accessors still read the attribute list.
 //!
 //! The summary cannot go stale: the attribute list is private, reads go
 //! through `Deref`, and the only mutation path, [`AttrSet::edit`], rebuilds

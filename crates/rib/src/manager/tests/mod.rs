@@ -1675,6 +1675,7 @@ mod actor_turn;
 mod attr_intern;
 mod bgpls;
 mod bmp;
+mod bounded_selection;
 mod conditional_advertisement;
 mod conditional_advertisement_export;
 mod dataplane_paging;
