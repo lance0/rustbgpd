@@ -655,19 +655,25 @@ impl PeerManager {
                 .copied()
                 .unwrap_or(0);
         for _ in 0..ready {
-            let notification =
-                if let Some(notification) = self.take_deferred_session_notification(peer) {
-                    notification
-                } else if let Ok(notification) = self.session_notify_rx.try_recv() {
-                    let owner = self.peer_key_for_session(session_notification_id(&notification));
-                    if owner.as_ref() != Some(peer) {
-                        self.defer_session_notification(owner, notification);
-                        continue;
-                    }
-                    notification
-                } else {
-                    break;
-                };
+            // The count is checked first: the scan is O(deferred), and other
+            // peers' notices deferred below must not be rescanned each turn.
+            let deferred = self
+                .deferred_session_notification_counts
+                .contains_key(peer)
+                .then(|| self.take_deferred_session_notification(peer))
+                .flatten();
+            let notification = if let Some(notification) = deferred {
+                notification
+            } else if let Ok(notification) = self.session_notify_rx.try_recv() {
+                let owner = self.peer_key_for_session(session_notification_id(&notification));
+                if owner.as_ref() != Some(peer) {
+                    self.defer_session_notification(owner, notification);
+                    continue;
+                }
+                notification
+            } else {
+                break;
+            };
             self.drain_ready_session_lifecycle_notifications();
             self.handle_one_session_notification(notification, retirements)
                 .await;
