@@ -446,6 +446,13 @@ pub struct SessionNotificationReceiver {
 }
 
 impl SessionNotificationReceiver {
+    /// Snapshot the number of notices already queued for one finite drain.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn ready_count(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Receive one notification, releasing its reservation only after dequeue.
     pub async fn recv(&mut self) -> Option<SessionNotification> {
         self.inner.recv().await.map(dequeued)
@@ -1585,6 +1592,15 @@ impl PeerHandle {
         let _ = self.task.await;
     }
 
+    /// Abort and join before reading the actor's final RIB registration owner.
+    /// An actor that never registered may still own its predecessor's retention.
+    #[doc(hidden)]
+    pub async fn abort_and_rib_registration_owner(self, session_id: u64) -> Option<u64> {
+        self.task.abort();
+        let _ = self.task.await;
+        self.established.rib_registration_owner(session_id)
+    }
+
     async fn send_simple_command_timeout(
         &self,
         command: PeerCommand,
@@ -2242,10 +2258,41 @@ impl PeerHandle {
     /// deadline expires, or [`PeerShutdownError::Join`] if the task joined with
     /// an error before the deadline.
     pub async fn shutdown_timeout(
-        mut self,
+        self,
         deadline: Duration,
     ) -> Result<Result<(), TransportError>, PeerShutdownError> {
         let deadline_at = tokio::time::Instant::now() + deadline;
+        self.shutdown_at(deadline_at, deadline).await
+    }
+
+    /// Stop and join under an existing round deadline, aborting and joining
+    /// even when the previous phase consumed the entire window.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same outcomes as [`Self::shutdown_timeout`].
+    #[doc(hidden)]
+    pub async fn shutdown_until(
+        self,
+        deadline_at: tokio::time::Instant,
+    ) -> Result<Result<(), TransportError>, PeerShutdownError> {
+        let deadline = deadline_at.saturating_duration_since(tokio::time::Instant::now());
+        self.shutdown_at(deadline_at, deadline).await
+    }
+
+    async fn shutdown_at(
+        mut self,
+        deadline_at: tokio::time::Instant,
+        deadline: Duration,
+    ) -> Result<Result<(), TransportError>, PeerShutdownError> {
+        if deadline.is_zero() {
+            self.task.abort();
+            let _ = self.task.await;
+            return Err(PeerShutdownError::TimedOut {
+                operation: "shutdown",
+                deadline,
+            });
+        }
         if tokio::time::timeout_at(deadline_at, self.commands.send(PeerCommand::Shutdown))
             .await
             .is_err()
@@ -2415,11 +2462,76 @@ impl PeerHandle {
         operation: &'static str,
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
+        Self::conditional_shutdown_until(
+            self.commands.clone(),
+            command,
+            operation,
+            tokio::time::Instant::now() + deadline,
+            deadline,
+        )
+        .await
+    }
+
+    /// Owned command sender for a conditional retirement inside a shared round.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same outcomes as [`Self::shutdown_unless_established_timeout`].
+    #[doc(hidden)]
+    pub async fn shutdown_unless_established_until(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline_at: tokio::time::Instant,
+    ) -> Result<bool, PeerCommandError> {
+        Self::conditional_shutdown_until(
+            commands,
+            |reply, ticket| PeerCommand::ShutdownUnlessEstablished { reply, ticket },
+            "shutdown_unless_established",
+            deadline_at,
+            deadline_at.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await
+    }
+
+    /// Owned command sender for a handshake-preserving retirement in a round.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same outcomes as [`Self::shutdown_unless_connected_timeout`].
+    #[doc(hidden)]
+    pub async fn shutdown_unless_connected_until(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline_at: tokio::time::Instant,
+    ) -> Result<bool, PeerCommandError> {
+        Self::conditional_shutdown_until(
+            commands,
+            |reply, ticket| PeerCommand::ShutdownUnlessConnected { reply, ticket },
+            "shutdown_unless_connected",
+            deadline_at,
+            deadline_at.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await
+    }
+
+    async fn conditional_shutdown_until(
+        commands: mpsc::Sender<PeerCommand>,
+        command: impl FnOnce(
+            oneshot::Sender<Result<bool, PeerCommandError>>,
+            CommandTicket,
+        ) -> PeerCommand,
+        operation: &'static str,
+        deadline_at: tokio::time::Instant,
+        deadline: Duration,
+    ) -> Result<bool, PeerCommandError> {
+        if deadline.is_zero() {
+            return Err(PeerCommandError::TimedOut {
+                operation,
+                deadline,
+            });
+        }
         let ticket = CommandTicket::default();
         let (reply, mut shut_down) = oneshot::channel();
         let command = command(reply, ticket.clone());
-        let commands = self.commands.clone();
-        let outcome = tokio::time::timeout(deadline, async {
+        let outcome = tokio::time::timeout_at(deadline_at, async {
             commands
                 .send(command)
                 .await
@@ -2650,7 +2762,19 @@ impl PeerHandle {
         commands: mpsc::Sender<PeerCommand>,
         deadline: Duration,
     ) -> StateQueryOutcome {
-        let queried = tokio::time::timeout(deadline, async move {
+        Self::query_state_outcome_until(commands, tokio::time::Instant::now() + deadline).await
+    }
+
+    /// Read a captured session within the remaining part of a shared round.
+    #[doc(hidden)]
+    pub async fn query_state_outcome_until(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline_at: tokio::time::Instant,
+    ) -> StateQueryOutcome {
+        if deadline_at <= tokio::time::Instant::now() {
+            return StateQueryOutcome::TimedOut;
+        }
+        let queried = tokio::time::timeout_at(deadline_at, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
             if commands
                 .send(PeerCommand::QueryState { reply: reply_tx })
@@ -3202,6 +3326,48 @@ mod tests {
     use std::future::{Future, poll_fn};
     use std::sync::Barrier;
     use std::task::Poll;
+
+    #[tokio::test]
+    async fn abort_reads_the_final_rib_owner_after_publication_settles() {
+        struct PublishOnCancel(RibRegistrationState);
+        impl Drop for PublishOnCancel {
+            fn drop(&mut self) {
+                self.0.0.registered.store(true, Ordering::Release);
+            }
+        }
+        let publication = EstablishedPublication {
+            registration: RibRegistrationState::new(Some(41)),
+            ..EstablishedPublication::default()
+        };
+        let registered = publication.registration.clone();
+        let (entered, ready) = oneshot::channel();
+        let (commands, receiver) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let _receiver = receiver;
+            let _publication = PublishOnCancel(registered);
+            entered.send(()).unwrap();
+            std::future::pending::<Result<(), TransportError>>().await
+        });
+        let mut handle = PeerHandle::from_parts(commands, task);
+        handle.established = publication;
+        ready.await.unwrap();
+        assert_eq!(handle.rib_registration_owner(42), Some(41));
+        // The guard establishes the final publication during cancellation,
+        // after any premature snapshot but before abort/join returns.
+        assert_eq!(handle.abort_and_rib_registration_owner(42).await, Some(42));
+    }
+
+    #[tokio::test]
+    async fn abort_keeps_an_unregistered_actors_inherited_rib_owner() {
+        let (commands, receiver) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let _receiver = receiver;
+            std::future::pending::<Result<(), TransportError>>().await
+        });
+        let mut handle = PeerHandle::from_parts(commands, task);
+        handle.established.registration = RibRegistrationState::new(Some(41));
+        assert_eq!(handle.abort_and_rib_registration_owner(42).await, Some(41));
+    }
 
     #[tokio::test]
     async fn peer_shutdown_error_preserves_join_source() {

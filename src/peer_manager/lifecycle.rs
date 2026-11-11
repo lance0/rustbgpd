@@ -210,6 +210,61 @@ pub(super) struct DetachedPeer {
     settlement: DeleteSettlement,
 }
 
+/// A detached peer whose producers have joined; only owner bookkeeping remains.
+pub(super) struct StoppedPeerDelete {
+    settlement: DeleteSettlement,
+    pending_session_id: Option<u64>,
+    primary_session_id: u64,
+    shutdown: PeerShutdownOutcome,
+}
+
+impl DetachedPeer {
+    /// The same pending/primary order, charged to one caller-owned deadline.
+    pub(super) async fn stop_until(self, deadline_at: tokio::time::Instant) -> StoppedPeerDelete {
+        let Self {
+            primary,
+            primary_session_id,
+            pending,
+            stop_reason,
+            settlement,
+        } = self;
+        let address = settlement.peer.address;
+        let pending_session_id = pending.as_ref().map(|pending| pending.session_id);
+        if let Some(pending) = pending {
+            PeerManager::shutdown_handle_until_owned(
+                address,
+                "delete pending inbound",
+                pending.handle,
+                deadline_at,
+            )
+            .await;
+        }
+        if stop_reason.is_some() && deadline_at > tokio::time::Instant::now() {
+            let commands = primary.commands_sender();
+            let _ = tokio::time::timeout_at(
+                deadline_at,
+                commands.send(PeerCommand::Stop {
+                    reason: stop_reason,
+                }),
+            )
+            .await;
+        }
+        let shutdown = PeerManager::shutdown_handle_until_owned(
+            address,
+            "delete primary",
+            primary,
+            deadline_at,
+        )
+        .await;
+        StoppedPeerDelete {
+            settlement,
+            pending_session_id,
+            primary_session_id,
+            shutdown,
+        }
+    }
+}
+
 /// A validated delete ([`PeerManager::prepare_delete`]); the peer and its
 /// sessions are untouched.
 pub(super) struct PreparedDelete {
@@ -666,11 +721,10 @@ impl PeerManager {
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
-        self.deferred_rib
-            .drive_while(Self::shutdown_handle_bounded_owned(
-                address, context, handle,
-            ))
-            .await
+        self.await_session_sweep(Self::shutdown_handle_bounded_owned(
+            address, context, handle,
+        ))
+        .await
     }
 
     pub(super) async fn shutdown_handle_bounded_owned(
@@ -678,10 +732,22 @@ impl PeerManager {
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
-        match handle
-            .shutdown_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-            .await
-        {
+        Self::shutdown_handle_until_owned(
+            address,
+            context,
+            handle,
+            tokio::time::Instant::now() + PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(super) async fn shutdown_handle_until_owned(
+        address: std::net::IpAddr,
+        context: &'static str,
+        handle: PeerHandle,
+        deadline_at: tokio::time::Instant,
+    ) -> PeerShutdownOutcome {
+        match handle.shutdown_until(deadline_at).await {
             Ok(Ok(())) => PeerShutdownOutcome::Joined,
             Ok(Err(e)) => {
                 warn!(peer = %address, %context, error = %e, "peer shutdown returned transport error");
@@ -2583,6 +2649,19 @@ impl PeerManager {
             removed.push(self.settle_peer_delete(settlement, shutdown));
         }
         removed
+    }
+
+    pub(super) async fn finish_stopped_peer_delete(&mut self, stopped: StoppedPeerDelete) {
+        Box::pin(self.drain_ready_session_notifications(Some(&stopped.settlement.peer))).await;
+        for session_id in stopped
+            .pending_session_id
+            .into_iter()
+            .chain([stopped.primary_session_id])
+        {
+            self.retiring_sessions.remove(&session_id);
+            self.unregister_session(session_id);
+        }
+        self.settle_peer_delete(stopped.settlement, stopped.shutdown);
     }
 
     fn settle_peer_delete(

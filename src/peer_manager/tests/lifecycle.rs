@@ -1130,6 +1130,12 @@ async fn a_direct_round_trip_behind_a_deferred_deletion_completes_once_the_rib_r
                     "QueryLocRibCount"
                 }
                 RibUpdate::PeerDown { .. } => "PeerDown",
+                // Deferred behind the deletion, the session end is marked late.
+                RibUpdate::LateSessionEnd(end)
+                    if matches!(*end, RibUpdate::PeerDown { session_id: 7, .. }) =>
+                {
+                    "PeerDown"
+                }
                 RibUpdate::PeerDeleted { .. } => "PeerDeleted",
                 RibUpdate::ReleasePeer { .. } => "ReleasePeer",
                 _ => "other",
@@ -1141,22 +1147,60 @@ async fn a_direct_round_trip_behind_a_deferred_deletion_completes_once_the_rib_r
         }
         admitted
     });
-    mgr.dampening_retirement_barrier(&retiring, &[7])
+    // The production fence: queued without waiting, then acknowledged under
+    // the readiness wait that also sends what is deferred ahead of it.
+    let acknowledged = mgr
+        .dampening_retirement_barrier(&retiring, [(7, None)])
+        .expect("the RIB is running");
+    tokio::time::timeout(RIB_REPLY_TIMEOUT, mgr.await_session_sweep(acknowledged))
         .await
-        .expect("the barrier completes once the RIB resumes");
+        .expect("the barrier completes once the RIB resumes")
+        .expect("the RIB acknowledges the barrier");
     mgr.flush_deferred_rib_updates(OperatorReadAdmission::Served)
         .await
         .unwrap();
-    // The filler, then the deletion that held the first freed slot, ahead of
-    // the barrier. The deletion's release queued for a slot after the
-    // barrier's first send did, and the two interleave in that order.
-    let mut admitted = joined(rib).await;
-    assert_eq!(admitted[..2], ["ReleasePeer", "PeerDeleted"]);
-    admitted[2..].sort_unstable();
+    // The filler, then the whole deferred deletion, then the barrier in its
+    // own order: one FIFO, so the acknowledgement follows everything queued
+    // before it.
     assert_eq!(
-        admitted[2..],
-        ["PeerDown", "QueryLocRibCount", "ReleasePeer"]
+        joined(rib).await,
+        [
+            "ReleasePeer",
+            "PeerDeleted",
+            "ReleasePeer",
+            "PeerDown",
+            "QueryLocRibCount"
+        ]
     );
+}
+
+/// A retired session that inherited its predecessor's RIB registration is
+/// ended twice by the barrier: a late end under its own id, which drops
+/// only the context it staged, then the predecessor's `PeerDown`, then the
+/// acknowledgement. The mailbox has room, so nothing is deferred.
+#[tokio::test]
+async fn the_barrier_ends_an_inherited_owner_and_the_sessions_own_staged_context() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    let mut mgr = test_peer_manager();
+    mgr.rib_tx = rib_tx;
+    let retiring = key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+    let _acknowledged = mgr
+        .dampening_retirement_barrier(&retiring, [(7, Some(5)), (8, Some(8)), (9, None)])
+        .expect("the RIB is running");
+    assert!(mgr.deferred_rib.queue.is_empty());
+    let mut sent = Vec::new();
+    while let Ok(update) = rib_rx.try_recv() {
+        sent.push(match update {
+            RibUpdate::LateSessionEnd(end) => match *end {
+                RibUpdate::PeerDown { session_id, .. } => format!("late {session_id}"),
+                _ => "other".to_owned(),
+            },
+            RibUpdate::PeerDown { session_id, .. } => format!("down {session_id}"),
+            RibUpdate::QueryLocRibCount { .. } => "barrier".to_owned(),
+            _ => "other".to_owned(),
+        });
+    }
+    assert_eq!(sent, ["late 7", "down 5", "down 8", "down 9", "barrier"]);
 }
 
 /// Once the RIB has exited, the deferred updates are discarded rather than

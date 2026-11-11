@@ -1510,6 +1510,10 @@ async fn inbound_during_established_dropped() {
 /// successful-accept refresh, or the ordinary `BackToIdle` removal refresh
 /// breaks the exact 0 → 1 → 0 process-global gauge sequence.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle fixture verifies the complete presence-event order and capacity gauge sequence"
+)]
 async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -1594,15 +1598,37 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
     assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
     let presence = query_session_event_history(&mgr, Some(peer_addr), BTreeSet::new(), 0).await;
+    // The handler publishes the session's queued transitions before it takes
+    // the notification, as the run loop does: the inbound session's own
+    // Idle -> Connect -> OpenSent follow the transition published above, and
+    // all of them precede the removal.
     assert_eq!(
         presence
             .iter()
-            .map(|event| event.event_type)
+            .map(|event| (event.event_type, event.old_state, event.new_state))
             .collect::<Vec<_>>(),
         vec![
-            SessionLifecycleEventType::PeerAdded,
-            SessionLifecycleEventType::StateChanged,
-            SessionLifecycleEventType::PeerRemoved,
+            (
+                SessionLifecycleEventType::PeerAdded,
+                None,
+                Some(SessionState::Idle)
+            ),
+            (
+                SessionLifecycleEventType::StateChanged,
+                Some(SessionState::Idle),
+                Some(SessionState::Connect)
+            ),
+            (
+                SessionLifecycleEventType::StateChanged,
+                Some(SessionState::Idle),
+                Some(SessionState::Connect)
+            ),
+            (
+                SessionLifecycleEventType::StateChanged,
+                Some(SessionState::Connect),
+                Some(SessionState::OpenSent)
+            ),
+            (SessionLifecycleEventType::PeerRemoved, None, None),
         ]
     );
 
@@ -4560,8 +4586,16 @@ async fn dynamic_idle_retirement_reads_registration_after_the_old_task_ends() {
         mgr
     });
     at_retirement.await.unwrap();
-    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
+    // The round now owns the session's shutdown, which waits on the full
+    // mailbox. Its `PeerUp` is admitted only here, while the task is ending:
+    // a registration read at any point before the join misses it.
     release.send(()).unwrap();
+    super::session_wait_rounds::poll_round_tasks().await;
+    assert!(
+        !retiring.is_finished(),
+        "the round is joining the session behind the full mailbox"
+    );
+    assert_eq!(residual_peer_up(&mut rib_rx, retired).await, None);
     let mut mgr = retiring.await.unwrap();
     let replacement = mgr.peers[&peer].session_id();
     assert_ne!(replacement, retired);

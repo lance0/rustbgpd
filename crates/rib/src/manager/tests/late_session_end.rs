@@ -328,6 +328,43 @@ fn late_peer_down_without_retention_drops_only_staged_context() {
     assert!(discarded(&manager, 0));
 }
 
+/// A session that inherited its predecessor's registration and never
+/// delivered its own `PeerUp` is ended by the peer manager with a late
+/// `PeerDown` under its own id. That drops what it staged and nothing
+/// else: the predecessor stays registered, or keeps the retention its
+/// restart end created.
+/// Mutation-red: a late end that ran the peer's teardown clears the
+/// registration, or the retained route.
+#[test]
+fn late_peer_down_of_an_unregistered_heir_drops_only_its_staged_context() {
+    let stage = |manager: &mut RibManager| {
+        manager.handle_update(RibUpdate::SetPeerPolicyContext {
+            peer: peer(),
+            session_id: 2,
+            peer_group: None,
+        });
+        assert_eq!(manager.pending_peer_policy_context.len(), 1);
+    };
+
+    let mut registered = test_manager();
+    peer_up(&mut registered, 1);
+    receive_route(&mut registered);
+    stage(&mut registered);
+    late_down(&mut registered, 2);
+    assert!(registered.pending_peer_policy_context.is_empty());
+    assert_eq!(registered.current_session_id(peer()), Some(1));
+    assert_eq!(retention(&registered), (1, 0, false));
+
+    let mut retained = test_manager();
+    peer_up(&mut retained, 1);
+    receive_route(&mut retained);
+    restart(&mut retained, 1);
+    stage(&mut retained);
+    late_down(&mut retained, 2);
+    assert!(retained.pending_peer_policy_context.is_empty());
+    assert_eq!(retention(&retained), (1, 1, true));
+}
+
 /// Session id 0 names an emitter without identity and is never late.
 /// Mutation-red: dropping the id-0 exemption discards both ends.
 #[test]
@@ -581,4 +618,42 @@ fn release_forgets_the_superseded_session() {
     assert_eq!(manager.superseded_session.get(&peer()), Some(&1));
     manager.handle_update(RibUpdate::ReleasePeer { peer: peer() });
     assert!(manager.superseded_session.is_empty());
+}
+
+/// Notification retirement may queue an inherited owner's cleanup while its
+/// disabled replacement never registers. Only the inherited ID owns that GR.
+#[test]
+fn deferred_cleanup_of_an_unregistered_replacement_purges_its_inherited_owner() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 41);
+    receive_route(&mut manager);
+    restart(&mut manager, 41);
+    late_down(&mut manager, 42);
+    assert_eq!(
+        retention(&manager),
+        (1, 1, true),
+        "the unregistered actor owns no retention"
+    );
+    late_down(&mut manager, 41);
+    assert_eq!(
+        retention(&manager),
+        (0, 0, false),
+        "the final inherited owner must purge its retention"
+    );
+}
+
+/// A deferred manager cleanup can outlive several independently registered
+/// replacements, beyond the latest superseded-session record.
+#[test]
+fn deferred_old_owner_cleanup_preserves_gr_after_multiple_replacements() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    receive_route(&mut manager);
+    restart(&mut manager, 3);
+    assert_eq!(retention(&manager), (1, 1, true));
+    late_down(&mut manager, 1);
+    assert_eq!(retention(&manager), (1, 1, true));
+    assert!(failed_over(&manager, 0));
 }

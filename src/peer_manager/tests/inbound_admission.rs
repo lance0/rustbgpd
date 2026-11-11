@@ -1420,12 +1420,18 @@ async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
         2,
     );
 
+    let started = tokio::time::Instant::now();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id: 1,
         role: rustbgpd_transport::SessionRole::Primary,
         peer_addr,
     })
     .await;
+    assert_eq!(
+        started.elapsed(),
+        PEER_QUERY_TIMEOUT,
+        "the unanswered query costs its own short bound, and the candidate then stops at once"
+    );
 
     let managed = &mgr.peers[&key(peer_addr)];
     assert_eq!(

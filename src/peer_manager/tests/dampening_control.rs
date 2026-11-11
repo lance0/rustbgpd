@@ -224,6 +224,15 @@ pub(super) async fn capacity_blocked_admission() -> DampeningAdmission {
     fixture.admission
 }
 
+/// An unblocked admission whose owner a real RIB records wire history for,
+/// which is what makes a dynamic source's retirement wait for the barrier.
+pub(super) async fn wire_history_admission() -> DampeningAdmission {
+    let fixture = Box::pin(CapacityFixture::new()).await;
+    fixture.rib_task.abort();
+    assert!(fixture.admission.owner.records_wire_history());
+    fixture.admission
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -651,4 +660,184 @@ async fn dynamic_retirement_waits_for_queued_wire_capacity_decision() {
         }
         fixture.rib_task.abort();
     }
+}
+
+/// How the RIB lane stands when a dynamic source's sessions have joined.
+#[derive(Clone, Copy, Debug)]
+enum BarrierLane {
+    /// No room: the fence cannot be admitted until the RIB resumes.
+    Full,
+    /// Room, but an earlier update is still deferred ahead of the fence.
+    DeferredAhead,
+    /// The primary cannot take its Shutdown, so the session round's whole
+    /// window is spent before the fence is queued.
+    RoundSpent,
+}
+
+struct BarrierFixture {
+    retiring: tokio::task::JoinHandle<PeerManager>,
+    lane: mpsc::Receiver<RibUpdate>,
+    peer: PeerKey,
+    rib_task: tokio::task::JoinHandle<()>,
+}
+
+fn barrier_filler() -> RibUpdate {
+    RibUpdate::ReleasePeer {
+        peer: PeerId::UNASSIGNED,
+    }
+}
+
+/// A dynamic wire-history source whose primary reported `BackToIdle`, with
+/// the manager's RIB lane in `state`, and its retirement running.
+async fn retire_dynamic_source(state: BarrierLane) -> BarrierFixture {
+    let mut fixture = Box::pin(CapacityFixture::new()).await;
+    fixture
+        .manager
+        .peers
+        .get_mut(&fixture.peer)
+        .unwrap()
+        .is_dynamic = true;
+    fixture.manager.dynamic_peer_count = 1;
+    let (lane_tx, mut lane) = mpsc::channel(2);
+    fixture.manager.rib_tx = lane_tx.clone();
+    match state {
+        BarrierLane::Full => while lane_tx.try_send(barrier_filler()).is_ok() {},
+        BarrierLane::DeferredAhead => {
+            while lane_tx.try_send(barrier_filler()).is_ok() {}
+            fixture
+                .manager
+                .defer_rib_update(None, barrier_filler())
+                .unwrap();
+            while lane.try_recv().is_ok() {}
+            assert_eq!(fixture.manager.deferred_rib.queue.len(), 1);
+            assert_eq!(lane_tx.capacity(), 2, "the lane itself has room");
+        }
+        BarrierLane::RoundSpent => {
+            fixture
+                .replace_idle(super::command_fan_out::wedged_session())
+                .await;
+        }
+    }
+    // Only the manager's own waits move the clock from here on.
+    tokio::time::pause();
+    let peer = fixture.peer.clone();
+    let address = peer.address;
+    let mut manager = fixture.manager;
+    let retiring = tokio::spawn(async move {
+        manager
+            .handle_session_notification(SessionNotification::BackToIdle {
+                peer_addr: address,
+                session_id: 1,
+                role: rustbgpd_transport::SessionRole::Primary,
+            })
+            .await;
+        manager
+    });
+    BarrierFixture {
+        retiring,
+        lane,
+        peer,
+        rib_task: fixture.rib_task,
+    }
+}
+
+/// The lane's next updates up to the fence acknowledgement, by kind, with a
+/// deferred session end reported as the `PeerDown` it carries.
+async fn receive_through_barrier(
+    lane: &mut mpsc::Receiver<RibUpdate>,
+) -> (Vec<&'static str>, oneshot::Sender<usize>) {
+    let mut kinds = Vec::new();
+    loop {
+        match lane.recv().await.expect("the manager keeps its RIB lane") {
+            RibUpdate::QueryLocRibCount { reply } => return (kinds, reply),
+            RibUpdate::PeerDown { session_id: 1, .. } => kinds.push("PeerDown"),
+            RibUpdate::LateSessionEnd(end)
+                if matches!(*end, RibUpdate::PeerDown { session_id: 1, .. }) =>
+            {
+                kinds.push("PeerDown");
+            }
+            RibUpdate::ReleasePeer { .. } => kinds.push("filler"),
+            _ => panic!("unexpected update on the retirement lane"),
+        }
+    }
+}
+
+/// A full mailbox, updates deferred ahead, or a session round that used its
+/// whole window must not turn the retirement fence into a fail-stop: it is
+/// queued behind what is already owed to the RIB, keeps its order (every
+/// joined session's `PeerDown`, then the acknowledgement), and the dynamic
+/// source is removed once the RIB answers, however long past the 500 ms
+/// session round that is within the 5 s RIB bound.
+async fn barrier_is_deferred_not_failed(state: BarrierLane) {
+    let mut fixture = retire_dynamic_source(state).await;
+    // The RIB resumes two seconds later: past the session round, inside
+    // the fence's own bound.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !fixture.retiring.is_finished(),
+        "{state:?}: the retirement waits for its fence"
+    );
+    let (kinds, acknowledge) = receive_through_barrier(&mut fixture.lane).await;
+    let fence_from = kinds
+        .iter()
+        .position(|kind| *kind == "PeerDown")
+        .unwrap_or_else(|| panic!("{state:?}: the joined session's PeerDown precedes the fence"));
+    assert_eq!(
+        kinds[fence_from..],
+        ["PeerDown"],
+        "{state:?}: nothing separates the session end from its acknowledgement"
+    );
+    assert!(
+        kinds[..fence_from].iter().all(|kind| *kind == "filler"),
+        "{state:?}: earlier updates keep their place ahead of the fence"
+    );
+    acknowledge.send(0).unwrap();
+    let manager = fixture.retiring.await.unwrap();
+    assert!(
+        !manager.dampening_control_failed,
+        "{state:?}: a busy RIB must not terminate the peer manager"
+    );
+    assert!(
+        !manager.peers.contains_key(&fixture.peer),
+        "{state:?}: the acknowledged fence found no block, so the source is removed"
+    );
+    assert_eq!(manager.dynamic_peer_count, 0);
+    assert!(manager.deferred_rib.queue.is_empty());
+    fixture.rib_task.abort();
+}
+
+#[tokio::test]
+async fn dynamic_retirement_barrier_waits_out_a_full_rib_mailbox() {
+    barrier_is_deferred_not_failed(BarrierLane::Full).await;
+}
+
+#[tokio::test]
+async fn dynamic_retirement_barrier_queues_behind_deferred_rib_updates() {
+    barrier_is_deferred_not_failed(BarrierLane::DeferredAhead).await;
+}
+
+#[tokio::test]
+async fn dynamic_retirement_barrier_outlives_a_spent_session_round() {
+    barrier_is_deferred_not_failed(BarrierLane::RoundSpent).await;
+}
+
+/// The fence is still bounded: a RIB that admits it and never answers within
+/// `RIB_REPLY_TIMEOUT` leaves the retirement unacknowledged, which retains
+/// the disabled recovery target and stops the peer manager, as before.
+#[tokio::test]
+async fn dynamic_retirement_barrier_unanswered_past_its_bound_still_fail_stops() {
+    let mut fixture = retire_dynamic_source(BarrierLane::Full).await;
+    let started = tokio::time::Instant::now();
+    let (_, held_reply) = receive_through_barrier(&mut fixture.lane).await;
+    let manager = fixture.retiring.await.unwrap();
+    let waited = started.elapsed();
+    assert!(
+        waited >= RIB_REPLY_TIMEOUT && waited < RIB_REPLY_TIMEOUT + Duration::from_millis(2),
+        "the fence waits out its own bound, no longer: {waited:?}"
+    );
+    assert!(manager.dampening_control_failed);
+    assert!(!manager.peers[&fixture.peer].enabled);
+    assert_eq!(manager.dynamic_peer_count, 1);
+    drop(held_reply);
+    fixture.rib_task.abort();
 }
