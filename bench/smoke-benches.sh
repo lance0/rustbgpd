@@ -10,7 +10,8 @@
 # every criterion benchmark body exactly once with no measurement, which is
 # the cheapest thing that actually catches it. The two paging receipt harnesses
 # are custom CLIs, so they use bounded multi-page fixtures below instead; the
-# End-of-RIB harness runs its bounded self-test.
+# End-of-RIB harness runs its bounded self-test, and the Add-Path rescan
+# harness runs every cell once.
 #
 # This is a smoke check, not a measurement. It reports pass/fail only; any
 # timing it happens to produce is meaningless and is not reported.
@@ -20,6 +21,10 @@
 # custom harnesses with separate CI smoke steps are excluded by package/target
 # key; renaming one drops its exclusion and this script then fails loudly
 # instead of skipping it silently.
+#
+# `--shard 1|2` runs one half of the targets so CI can split the step across
+# two runners; `--list` prints the selected targets instead of running them.
+# Together the two shards cover exactly the unsharded list.
 
 set -euo pipefail
 
@@ -27,6 +32,12 @@ cd "$(dirname "$0")/.."
 
 locked_args=()
 fail_fast=0
+shard=
+list=0
+usage() {
+  echo "usage: $0 [--locked] [--fail-fast] [--shard 1|2] [--list]" >&2
+  exit 2
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --locked)
@@ -35,16 +46,25 @@ while [ "$#" -gt 0 ]; do
     --fail-fast)
       fail_fast=1
       ;;
+    --shard)
+      shift
+      case "${1:-}" in
+        1 | 2) shard=$1 ;;
+        *) usage ;;
+      esac
+      ;;
+    --list)
+      list=1
+      ;;
     *)
-      echo "usage: $0 [--locked] [--fail-fast]" >&2
-      exit 2
+      usage
       ;;
   esac
   shift
 done
 
 # Standalone measurement harnesses have their own CLIs rather than criterion.
-# They accept Cargo's libtest-compatible `--bench` marker; three have bounded
+# They accept Cargo's libtest-compatible `--bench` marker; four have bounded
 # invocations in this script:
 #
 #   route_paging         CSV receipt harness; one complete traversal per
@@ -54,6 +74,10 @@ done
 #                        per process, driven by prefix/path/index-mode flags.
 #   gr_end_of_rib        JSON-line receipt harness; its --self-test runs every
 #                        mode at 2,000 IPv4 / 400 IPv6 routes.
+#   addpath_selection_rescan
+#                        JSON-line receipt harness; its default 5 warm-up and
+#                        50 timed repetitions per cell took 4-18 minutes in an
+#                        unoptimized build, so it runs each cell once.
 #
 # The remaining four are excluded here because CI executes their native smoke
 # contracts separately:
@@ -71,6 +95,14 @@ EXCLUDED=(
   rustbgpd-api/vpn_query_timing
   rustbgpd-api/vpn_query_allocation
   rustbgpd-rib/selection_deferral_release
+)
+
+# Shard 1 holds the two slowest targets, which share the RIB
+# `bench-internals` build; shard 2 holds everything else. A renamed entry here
+# fails the run rather than silently moving its target to shard 2.
+SHARD1=(
+  rustbgpd-rib/addpath_selection_rescan
+  rustbgpd-rib/rib_ops
 )
 
 mapfile -t targets < <(
@@ -91,6 +123,7 @@ if [ "${#targets[@]}" -eq 0 ]; then
 fi
 
 status=0
+shard1_seen=0
 for target in "${targets[@]}"; do
   read -r package name features <<<"$target"
   key="$package/$name"
@@ -103,7 +136,23 @@ for target in "${targets[@]}"; do
     fi
   done
   if [ -n "$skip" ]; then
-    echo "skip  $package/$name (not a criterion harness)"
+    [ "$list" -eq 1 ] || echo "skip  $package/$name (not a criterion harness)"
+    continue
+  fi
+
+  target_shard=2
+  for heavy in "${SHARD1[@]}"; do
+    if [ "$key" = "$heavy" ]; then
+      target_shard=1
+      shard1_seen=$((shard1_seen + 1))
+      break
+    fi
+  done
+  if [ -n "$shard" ] && [ "$shard" != "$target_shard" ]; then
+    continue
+  fi
+  if [ "$list" -eq 1 ]; then
+    echo "$key"
     continue
   fi
 
@@ -130,6 +179,11 @@ for target in "${targets[@]}"; do
     rustbgpd-rib/gr_end_of_rib)
       bench_args=(-- --self-test)
       ;;
+    rustbgpd-rib/addpath_selection_rescan)
+      # Every cell at every stored size, once; the harness still asserts
+      # that all of them ran.
+      bench_args=(-- --reps 1 --warmup 0)
+      ;;
   esac
 
   echo "smoke $package/$name ${features:+[$features]}"
@@ -141,5 +195,10 @@ for target in "${targets[@]}"; do
     status=1
   fi
 done
+
+if [ "$shard1_seen" -ne "${#SHARD1[@]}" ]; then
+  echo "::error::SHARD1 names a target that is not smoked: ${SHARD1[*]}" >&2
+  exit 1
+fi
 
 exit "$status"

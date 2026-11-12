@@ -430,12 +430,18 @@ jobs:
             docs/perf/test-event-history-host-fence.sh \
             docs/perf/test-event-history-naming.sh
 
-  # The bench smoke runs beside `core` rather than inside it: the steps are
-  # the former `core` steps, unchanged, on their own runner.
+  # The bench smoke runs beside `core` rather than inside it, split across two
+  # runners because one runner took 24-30 minutes against this timeout. Shard 1
+  # runs the two slowest bench targets; shard 2 runs every other target plus
+  # the two dedicated harness smokes, each exactly once.
   bench_smoke:
-    name: bench smoke
+    name: bench smoke (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -444,9 +450,20 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
+      # Both shards share one key; shard 2 builds the wider target set, so it saves.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 2 }}
+      # A target in neither shard, or in both, would go unsmoked or run twice.
+      - name: Check bench smoke shards partition the targets
+        if: matrix.shard == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          all=$(bash bench/smoke-benches.sh --locked --list | sort)
+          one=$(bash bench/smoke-benches.sh --locked --list --shard 1)
+          two=$(bash bench/smoke-benches.sh --locked --list --shard 2)
+          diff <(printf '%s\n' "$all") <(printf '%s\n%s\n' "$one" "$two" | sort)
       # `core` checks that the bench targets compile, not that they run.
       # A fixture the codec later made illegal (RFC 9774 AS_SET in the wire
       # `rich` AS_PATH) compiled clean and panicked on first iteration, so two
@@ -454,14 +471,16 @@ jobs:
       # test --bench` runs every Criterion body once; bounded native CLI
       # fixtures exercise both paging receipt harnesses. Smoke only — no timings.
       - name: Smoke benchmark targets without dedicated checks
-        run: bash bench/smoke-benches.sh --locked
+        run: bash bench/smoke-benches.sh --locked --shard "${{ matrix.shard }}"
       - name: Smoke selection-deferral release receipt
+        if: matrix.shard == 2
         run: cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test
       # LAN-572 keeps the real MRT snapshot encoder benchmark usable in both
       # deliberately incompatible builds: bare-jemalloc timing, and opt-in
       # allocation/growth diagnostics.  `--smoke` bounds both executions for
       # the PR critical path while retaining the harness's path assertions.
       - name: Smoke MRT snapshot allocation benchmark modes
+        if: matrix.shard == 2
         run: |
           cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
           cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
@@ -720,6 +739,7 @@ jobs:
     timeout-minutes: 5
     if: ${{ always() }}
     needs: [core, bench_smoke, core_tests, scale_receipts]
+    # A matrix job's result is `success` only when every shard succeeded.
     env:
       CORE_RESULT: ${{ needs.core.result }}
       BENCH_SMOKE_RESULT: ${{ needs.bench_smoke.result }}

@@ -67,9 +67,13 @@ SCALE_COMMANDS = (
     "cargo test --locked --test reloadstall_scenario_emitted_check",
     "cargo build --locked -p reloadstall",
 )
-# Moved out of `core` unchanged; each runs once, in bench_smoke.
+# Moved out of `core`; each runs once, in bench_smoke. The script splits its
+# targets across both matrix shards, the partition check proves the split, and
+# the dedicated harness smokes run in shard 2 only.
+BENCH_SMOKE_SHARDED = 'bash bench/smoke-benches.sh --locked --shard "${{ matrix.shard }}"'
+BENCH_SMOKE_PARTITION = """diff <(printf '%s\\n' "$all") <(printf '%s\\n%s\\n' "$one" "$two" | sort)"""
 BENCH_SMOKE_COMMANDS = (
-    "bash bench/smoke-benches.sh --locked",
+    BENCH_SMOKE_SHARDED,
     "cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test",
     "cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke",
     "cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke",
@@ -430,9 +434,18 @@ def check(root: Path) -> list[str]:
         errors.append("core must run standalone RIB Clippy exactly once without feature flags")
 
     bench_smoke = jobs.get("bench_smoke", "")
-    for command in BENCH_SMOKE_COMMANDS:
+    for command in (*BENCH_SMOKE_COMMANDS, BENCH_SMOKE_PARTITION):
         if text.count(command) != 1 or command not in bench_smoke:
             errors.append(f"{command} must exist exactly once in bench_smoke")
+    if "        shard: [1, 2]\n" not in bench_smoke or "      fail-fast: false\n" not in bench_smoke:
+        errors.append("bench_smoke must run both shards on separate matrix runners without canceling either")
+    smoke_steps = re.split(r"(?m)^ {6}- ", bench_smoke)[1:]
+    for command in BENCH_SMOKE_COMMANDS:
+        expected = [] if command == BENCH_SMOKE_SHARDED else ["matrix.shard == 2"]
+        guards = [re.findall(r"(?m)^ {8}if: (.*)$", step) for step in smoke_steps if command in step]
+        if guards != [expected]:
+            where = "in shard 2 only" if expected else "in every shard"
+            errors.append(f"{command} must run {where}")
 
     core_tests = jobs.get("core_tests", "")
     for command in CORE_TESTS_COMMANDS:
