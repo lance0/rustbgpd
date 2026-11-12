@@ -1397,7 +1397,7 @@ fn query_rule(
 ) -> Result<RouteExportPage, RouteExportPageError> {
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryLocalFlowSpecExport {
-        key: key.clone(),
+        keys: vec![Some(key.clone())],
         managed: named,
         resume,
         page_size,

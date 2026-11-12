@@ -3439,12 +3439,14 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     },
-    /// [`Self::QueryLocalRouteExport`] for the one locally injected
-    /// `FlowSpec` rule `key`, under the same walk, paging and version
-    /// contract.
+    /// [`Self::QueryLocalRouteExport`] for locally injected `FlowSpec`
+    /// rules, under the same walk, paging and version contract; the caller
+    /// bounds `keys` the same way.
     QueryLocalFlowSpecExport {
-        /// The local rule's key.
-        key: crate::route::FlowSpecKey,
+        /// The local rules' keys, in walk order. `None` holds the place of
+        /// a key the caller could not parse: it lists like a key with no
+        /// local rule.
+        keys: Vec<Option<crate::route::FlowSpecKey>>,
         /// Managed peers, listed as not Established unless registered.
         managed: Option<Vec<ExportDestination>>,
         /// Resume here, provided the walk's state still matches the version

@@ -128,6 +128,36 @@ impl InjectionService {
         .await
     }
 
+    /// [`Self::export_walk_page`] over local `FlowSpec` rule keys, under the
+    /// token `binding`; a `None` key holds the place of one that did not
+    /// parse.
+    async fn flowspec_export_walk_page(
+        &self,
+        kind: &str,
+        binding: u64,
+        keys: Vec<Option<rustbgpd_rib::FlowSpecKey>>,
+        include_configured: bool,
+        page_size: u32,
+        page_token: &str,
+    ) -> Result<(RouteExportPage, String), Status> {
+        let key_count = keys.len();
+        self.export_walk_page_for(
+            kind,
+            (binding, key_count),
+            include_configured,
+            page_size,
+            page_token,
+            |managed, resume, page_size, reply| RibUpdate::QueryLocalFlowSpecExport {
+                keys,
+                managed,
+                resume,
+                page_size,
+                reply,
+            },
+        )
+        .await
+    }
+
     /// [`Self::export_walk_page`] for any walk the RIB answers with a
     /// [`RouteExportPage`]: `walk` is the token binding and key count, and
     /// `query` builds the RIB request.
@@ -169,8 +199,9 @@ impl InjectionService {
         .await?
         .map_err(|RouteExportPageError::Invalidated| {
             Status::aborted(
-                "a local route, the Established or managed peer set or their export policy \
-                 changed during pagination; restart with an empty page_token",
+                "a listed local route or FlowSpec rule, the Established or managed peer set \
+                 or their export policy changed during pagination; restart with an empty \
+                 page_token",
             )
         })?;
         let next_page_token = page.next.as_ref().map_or_else(String::new, |cursor| {
@@ -545,10 +576,32 @@ const SINGLE_EXPORT_WALK: &str = "pe2";
 const BATCH_EXPORT_WALK: &str = "pb1";
 /// Token kind of a `ListFlowSpecExportDispositions` walk.
 const FLOWSPEC_EXPORT_WALK: &str = "pf1";
+/// Token kind of a `BatchListFlowSpecExportDispositions` walk.
+const BATCH_FLOWSPEC_EXPORT_WALK: &str = "fb1";
+
+/// A batch export walk names 1 to [`LOCAL_ROUTE_EXPORT_MAX_KEYS`] keys.
+fn check_export_batch_len(len: usize) -> Result<(), Status> {
+    if len == 0 || len > LOCAL_ROUTE_EXPORT_MAX_KEYS {
+        return Err(Status::invalid_argument(format!(
+            "keys must name 1 to {LOCAL_ROUTE_EXPORT_MAX_KEYS} route keys, got {len}"
+        )));
+    }
+    Ok(())
+}
+
+/// A `FlowSpec` key as error messages name it.
+fn flowspec_key_text(key: &rustbgpd_rib::FlowSpecKey) -> String {
+    format!(
+        "family {:?}, RD {}, {}",
+        key.family(),
+        key.rd.map_or_else(|| "none".to_owned(), format_rd),
+        key.rule
+    )
+}
 
 /// What a walk's token is bound to besides its kind: the key list, in
 /// order, and whether managed peers are listed.
-fn export_walk_binding(keys: &[(Prefix, u32)], include_configured: bool) -> u64 {
+fn export_walk_binding<K: std::hash::Hash>(keys: &[K], include_configured: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (keys, include_configured).hash(&mut hasher);
@@ -1603,12 +1656,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         request: Request<proto::BatchListPathExportDispositionsRequest>,
     ) -> Result<Response<proto::BatchListPathExportDispositionsResponse>, Status> {
         let req = request.into_inner();
-        if req.keys.is_empty() || req.keys.len() > LOCAL_ROUTE_EXPORT_MAX_KEYS {
-            return Err(Status::invalid_argument(format!(
-                "keys must name 1 to {LOCAL_ROUTE_EXPORT_MAX_KEYS} route keys, got {}",
-                req.keys.len()
-            )));
-        }
+        check_export_batch_len(req.keys.len())?;
         let mut seen = std::collections::HashSet::with_capacity(req.keys.len());
         let mut keys = Vec::with_capacity(req.keys.len());
         for (index, key) in req.keys.iter().enumerate() {
@@ -1662,32 +1710,15 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     ) -> Result<Response<proto::ListPathExportDispositionsResponse>, Status> {
         let req = request.into_inner();
         let key = parse_flowspec_key(req.afi_safi, &req.rd, &req.components)?;
-        let binding = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (&key, req.include_configured).hash(&mut hasher);
-            hasher.finish()
-        };
-        let rule_text = format!(
-            "family {:?}, RD {}, {}",
-            key.family(),
-            key.rd.map_or_else(|| "none".to_owned(), format_rd),
-            key.rule
-        );
+        let rule_text = flowspec_key_text(&key);
         let (page, next_page_token) = self
-            .export_walk_page_for(
+            .flowspec_export_walk_page(
                 FLOWSPEC_EXPORT_WALK,
-                (binding, 1),
+                export_walk_binding(std::slice::from_ref(&key), req.include_configured),
+                vec![Some(key)],
                 req.include_configured,
                 req.page_size,
                 &req.page_token,
-                |managed, resume, page_size, reply| RibUpdate::QueryLocalFlowSpecExport {
-                    key,
-                    managed,
-                    resume,
-                    page_size,
-                    reply,
-                },
             )
             .await?;
         // As for ListPathExportDispositions: a resumed walk whose rule is
@@ -1706,6 +1737,73 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 .collect(),
             next_page_token,
         }))
+    }
+
+    async fn batch_list_flow_spec_export_dispositions(
+        &self,
+        request: Request<proto::BatchListFlowSpecExportDispositionsRequest>,
+    ) -> Result<Response<proto::BatchListFlowSpecExportDispositionsResponse>, Status> {
+        let req = request.into_inner();
+        check_export_batch_len(req.keys.len())?;
+        // A key that does not parse keeps its place with an error instead of
+        // failing the batch; only parsed keys can be duplicates.
+        let mut seen = std::collections::HashSet::with_capacity(req.keys.len());
+        let mut keys = Vec::with_capacity(req.keys.len());
+        let mut errors = Vec::with_capacity(req.keys.len());
+        for (index, key) in req.keys.iter().enumerate() {
+            match parse_flowspec_key(key.afi_safi, &key.rd, &key.components) {
+                Ok(parsed) => {
+                    if !seen.insert(parsed.clone()) {
+                        return Err(Status::invalid_argument(format!(
+                            "keys[{index}] names FlowSpec key {} again",
+                            flowspec_key_text(&parsed)
+                        )));
+                    }
+                    keys.push(Some(parsed));
+                    errors.push(None);
+                }
+                Err(error) => {
+                    keys.push(None);
+                    errors.push(Some(proto::FlowSpecKeyError {
+                        code: "invalid_key".to_owned(),
+                        message: format!("keys[{index}]: {}", error.message()),
+                    }));
+                }
+            }
+        }
+        // Bound to the keys as sent, so a token cannot resume a walk whose
+        // malformed keys differ.
+        let encoded: Vec<_> = req.keys.iter().map(prost::Message::encode_to_vec).collect();
+        let (page, next_page_token) = self
+            .flowspec_export_walk_page(
+                BATCH_FLOWSPEC_EXPORT_WALK,
+                export_walk_binding(&encoded, req.include_configured),
+                keys,
+                req.include_configured,
+                req.page_size,
+                &req.page_token,
+            )
+            .await?;
+        let rules = page
+            .routes
+            .into_iter()
+            .map(|rule| proto::FlowSpecExportDispositions {
+                key: req.keys.get(rule.key).cloned(),
+                found: rule.found,
+                peers: rule
+                    .peers
+                    .into_iter()
+                    .map(export_disposition_to_proto)
+                    .collect(),
+                error: errors.get(rule.key).cloned().flatten(),
+            })
+            .collect();
+        Ok(Response::new(
+            proto::BatchListFlowSpecExportDispositionsResponse {
+                rules,
+                next_page_token,
+            },
+        ))
     }
 
     async fn list_leased_keys(
@@ -3445,6 +3543,437 @@ mod tests {
 
         drop(svc);
         drop(rib_tx);
+        manager_task.await.unwrap();
+    }
+
+    /// `FlowSpec` batch requests that never reach the RIB: an empty or
+    /// oversized key list and a parsed key named twice are
+    /// `INVALID_ARGUMENT` naming the problem. Exactly the limit reaches the
+    /// RIB: the same components globally and under two RDs are three keys,
+    /// and two identical malformed keys are not duplicates but hold their
+    /// places for per-key errors.
+    #[tokio::test]
+    async fn batch_flowspec_export_dispositions_validate_keys_before_the_rib() {
+        // A closed RIB channel: a request that reached it would fail as
+        // UNAVAILABLE instead.
+        let svc = InjectionService::new(
+            mpsc::channel(1).0,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
+        let key =
+            |afi_safi: proto::AddressFamily, rd: &str, source: String| proto::LeasedFlowSpecKey {
+                afi_safi: afi_safi as i32,
+                components: vec![proto::FlowSpecComponent {
+                    r#type: 2,
+                    prefix: source,
+                    ..Default::default()
+                }],
+                rd: rd.into(),
+            };
+        let ipv4 = |index: usize| {
+            key(
+                proto::AddressFamily::Ipv4Flowspec,
+                "",
+                format!("10.{}.{}.1/32", index / 256, index % 256),
+            )
+        };
+        let vpn = |rd: &str| {
+            key(
+                proto::AddressFamily::L3vpnIpv4Flowspec,
+                rd,
+                "10.0.0.1/32".into(),
+            )
+        };
+        for (keys, expected) in [
+            (vec![], "1 to 1000"),
+            (
+                (0..=LOCAL_ROUTE_EXPORT_MAX_KEYS).map(ipv4).collect(),
+                "1 to 1000",
+            ),
+            (
+                vec![ipv4(0), ipv4(1), ipv4(0)],
+                "keys[2] names FlowSpec key",
+            ),
+            (
+                vec![vpn("65000:1"), vpn("65000:1")],
+                "keys[1] names FlowSpec key",
+            ),
+        ] {
+            let error = svc
+                .batch_list_flow_spec_export_dispositions(Request::new(
+                    proto::BatchListFlowSpecExportDispositionsRequest {
+                        keys,
+                        ..Default::default()
+                    },
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{expected}");
+            assert!(error.message().contains(expected), "{}", error.message());
+        }
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = InjectionService::new(
+            tx,
+            AuthTier::SensitiveRead,
+            Arc::new(InjectionLeases::new()),
+        );
+        // ipv4(0) has the VPN keys' components: the same components in global
+        // scope and under two RDs are three keys, not duplicates. A VPN key
+        // without an RD is malformed; named twice, it is still no duplicate.
+        let mut at_limit: Vec<_> = (0..LOCAL_ROUTE_EXPORT_MAX_KEYS - 4).map(ipv4).collect();
+        assert_eq!(at_limit[0].components, vpn("65000:1").components);
+        at_limit.extend([vpn("65000:1"), vpn("65000:2"), vpn(""), vpn("")]);
+        let call = tokio::spawn(async move {
+            svc.batch_list_flow_spec_export_dispositions(Request::new(
+                proto::BatchListFlowSpecExportDispositionsRequest {
+                    keys: at_limit,
+                    ..Default::default()
+                },
+            ))
+            .await
+        });
+        let Some(RibUpdate::QueryLocalFlowSpecExport { keys, .. }) = rx.recv().await else {
+            panic!("expected QueryLocalFlowSpecExport");
+        };
+        assert_eq!(keys.len(), LOCAL_ROUTE_EXPORT_MAX_KEYS);
+        assert_eq!(
+            keys.iter().filter(|key| key.is_none()).count(),
+            2,
+            "only the malformed keys hold an empty place"
+        );
+        drop(rx);
+        assert!(call.await.unwrap().is_err());
+    }
+
+    /// The `FlowSpec` batch walk against a real RIB: global, destination-less
+    /// and VPN keys in request order, absent keys as `found = false`
+    /// (including the same components under another RD), malformed keys as
+    /// row-less entries with a per-key error at page boundaries, the same rows
+    /// whole or across pages, a token bound to its RPC and key list, and
+    /// `ABORTED` when an absent key's rule appears or a later key's rule is
+    /// deleted between pages.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one RIB and roster drive the listing, paging and mid-walk change"
+    )]
+    async fn batch_flowspec_export_dispositions_against_a_real_rib() {
+        // Each rule as (key, found, error, rows as (peer, disposition, reason)).
+        type Listed = Vec<(
+            proto::LeasedFlowSpecKey,
+            bool,
+            Option<proto::FlowSpecKeyError>,
+            Vec<(String, i32, String)>,
+        )>;
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let mut roster = crate::import_roster::ImportRosterPublisher::new();
+        publish_managed(&mut roster, 3);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AuthTier::OperatorOnly,
+            Arc::new(InjectionLeases::new()),
+        )
+        .with_peer_roster(roster.reader());
+        let mut outbound = Vec::new();
+        for (octet, families) in [
+            (
+                1,
+                vec![
+                    (Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec),
+                    (Afi::Ipv4, rustbgpd_wire::Safi::FlowSpecVpn),
+                ],
+            ),
+            (2, vec![(Afi::Ipv4, rustbgpd_wire::Safi::Unicast)]),
+        ] {
+            let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)));
+            let (outbound_tx, outbound_rx) = mpsc::channel(64);
+            outbound.push(outbound_rx);
+            rib_tx
+                .send(RibUpdate::SetPeerExportEncoder {
+                    peer,
+                    session_id: 0,
+                    encoder: Arc::new(AcceptAllEncoder),
+                })
+                .await
+                .unwrap();
+            rib_tx
+                .send(RibUpdate::PeerUp {
+                    supersedes: None,
+                    peer,
+                    session_id: 0,
+                    peer_asn: 65_010,
+                    peer_router_id: Ipv4Addr::UNSPECIFIED,
+                    outbound_tx,
+                    export_policy: None,
+                    sendable_families: families,
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    add_path_send_families: vec![],
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: vec![],
+                    negotiated_llgr_families: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        let prefix = |kind: u32, prefix: &str| proto::FlowSpecComponent {
+            r#type: kind,
+            prefix: prefix.into(),
+            ..Default::default()
+        };
+        let key = |afi_safi: proto::AddressFamily, rd: &str, components| proto::LeasedFlowSpecKey {
+            afi_safi: afi_safi as i32,
+            components,
+            rd: rd.into(),
+        };
+        let ipv4 = proto::AddressFamily::Ipv4Flowspec;
+        let vpn = proto::AddressFamily::L3vpnIpv4Flowspec;
+        let destination = key(ipv4, "", vec![prefix(1, "192.0.2.0/24")]);
+        // Source host and protocol only: no destination component.
+        let source_only = key(
+            ipv4,
+            "",
+            vec![
+                prefix(2, "198.51.100.7/32"),
+                proto::FlowSpecComponent {
+                    r#type: 3,
+                    value: "=6".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        let absent = key(ipv4, "", vec![prefix(1, "192.0.2.128/25")]);
+        let scoped = key(vpn, "65000:1", vec![prefix(1, "192.0.2.0/24")]);
+        let other_rd = key(vpn, "65000:2", vec![prefix(1, "192.0.2.0/24")]);
+        for rule in [&destination, &source_only, &scoped] {
+            svc.add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: rule.afi_safi,
+                components: rule.components.clone(),
+                rd: rule.rd.clone(),
+                route_targets: if rule.rd.is_empty() {
+                    vec![]
+                } else {
+                    vec!["65000:1".into()]
+                },
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        }
+        // A VPN key without an RD, named twice, and a global key with an RD.
+        let no_rd = key(vpn, "", vec![prefix(1, "192.0.2.0/24")]);
+        let global_rd = key(ipv4, "65000:1", vec![prefix(1, "192.0.2.0/24")]);
+        let keys = vec![
+            destination,
+            no_rd.clone(),
+            source_only.clone(),
+            absent.clone(),
+            scoped,
+            other_rd,
+            no_rd,
+            global_rd,
+        ];
+        let invalid = |message: &str| {
+            Some(proto::FlowSpecKeyError {
+                code: "invalid_key".into(),
+                message: message.into(),
+            })
+        };
+        let no_rd_error = |index: usize| {
+            invalid(&format!(
+                "keys[{index}]: invalid RD: expected RD in form `<asn|ipv4>:<assigned>`, \
+                 missing `:`"
+            ))
+        };
+        let errors = [
+            None,
+            no_rd_error(1),
+            None,
+            None,
+            None,
+            None,
+            no_rd_error(6),
+            invalid("keys[7]: afi_safi must be a FlowSpec family; only VPN FlowSpec accepts an RD"),
+        ];
+        let list = |keys: Vec<proto::LeasedFlowSpecKey>, page_size, token: &str| {
+            svc.batch_list_flow_spec_export_dispositions(Request::new(
+                proto::BatchListFlowSpecExportDispositionsRequest {
+                    keys,
+                    page_size,
+                    page_token: token.into(),
+                    include_configured: true,
+                },
+            ))
+        };
+        let summary = |response: proto::BatchListFlowSpecExportDispositionsResponse| -> Listed {
+            response
+                .rules
+                .into_iter()
+                .map(|rule| {
+                    (
+                        rule.key.unwrap(),
+                        rule.found,
+                        rule.error,
+                        rule.peers
+                            .into_iter()
+                            .map(|row| (row.peer_address, row.disposition, row.reason))
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        let rows = vec![
+            (
+                "10.0.0.1".to_string(),
+                proto::PathExportDisposition::Committed as i32,
+                String::new(),
+            ),
+            (
+                "10.0.0.2".to_string(),
+                proto::PathExportDisposition::Withheld as i32,
+                "family_not_negotiated".to_string(),
+            ),
+            (
+                "10.0.0.3".to_string(),
+                proto::PathExportDisposition::NotEstablished as i32,
+                "not_established".to_string(),
+            ),
+        ];
+
+        // One page: every key in request order, absent and malformed keys
+        // without rows, and only malformed keys with an error.
+        let whole = list(keys.clone(), 0, "").await.unwrap().into_inner();
+        assert_eq!(whole.next_page_token, "");
+        let whole = summary(whole);
+        assert_eq!(
+            whole,
+            keys.iter()
+                .zip([true, false, true, false, true, false, false, false])
+                .zip(errors)
+                .map(|((key, found), error)| (
+                    key.clone(),
+                    found,
+                    error,
+                    if found { rows.clone() } else { vec![] }
+                ))
+                .collect::<Listed>()
+        );
+
+        // Two entries per page: 3 + 1 + 3 + 1 + 3 + 1 + 1 + 1 entries take
+        // seven pages. The first malformed key ends page 2 and the second
+        // starts page 7, and a key split across pages continues where it
+        // stopped.
+        let mut paged: Listed = Vec::new();
+        let mut token = String::new();
+        let mut page_count = 0;
+        loop {
+            let page = list(keys.clone(), 2, &token).await.unwrap().into_inner();
+            page_count += 1;
+            token.clone_from(&page.next_page_token);
+            let page = summary(page);
+            assert!(
+                page.iter()
+                    .map(|(_, _, _, rows)| rows.len().max(1))
+                    .sum::<usize>()
+                    <= 2,
+                "{page:?}"
+            );
+            for (key, found, error, rows) in page {
+                match paged.last_mut() {
+                    Some(previous) if previous.0 == key => previous.3.extend(rows),
+                    _ => paged.push((key, found, error, rows)),
+                }
+            }
+            if token.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(page_count, 7);
+        assert_eq!(paged, whole);
+
+        // The token is bound to the key list and to this RPC.
+        let first = list(keys.clone(), 2, "").await.unwrap().into_inner();
+        let reordered: Vec<_> = keys.iter().rev().cloned().collect();
+        let other_list = list(reordered, 2, &first.next_page_token)
+            .await
+            .unwrap_err();
+        assert_eq!(other_list.code(), tonic::Code::InvalidArgument);
+        let single = svc
+            .list_flow_spec_export_dispositions(Request::new(
+                proto::ListFlowSpecExportDispositionsRequest {
+                    afi_safi: keys[0].afi_safi,
+                    components: keys[0].components.clone(),
+                    page_size: 1,
+                    include_configured: true,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let foreign = list(keys[..1].to_vec(), 1, &single.next_page_token)
+            .await
+            .unwrap_err();
+        assert_eq!(foreign.code(), tonic::Code::InvalidArgument);
+
+        // A rule appearing for an absent key between pages also aborts the
+        // resumed walk; removing it again restores the first page's state.
+        svc.add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+            afi_safi: absent.afi_safi,
+            components: absent.components.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        let appeared = list(keys.clone(), 2, &first.next_page_token)
+            .await
+            .unwrap_err();
+        assert_eq!(appeared.code(), tonic::Code::Aborted);
+        svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: absent.afi_safi,
+            components: absent.components.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        list(keys.clone(), 2, &first.next_page_token).await.unwrap();
+
+        // Deleting the destination-less rule, which the walk has not
+        // reached yet, aborts the resumed walk; a restart lists it absent.
+        svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: source_only.afi_safi,
+            components: source_only.components.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        let deleted = list(keys.clone(), 2, &first.next_page_token)
+            .await
+            .unwrap_err();
+        assert_eq!(deleted.code(), tonic::Code::Aborted);
+        let restarted = list(keys, 0, "").await.unwrap().into_inner();
+        assert_eq!(
+            restarted
+                .rules
+                .iter()
+                .map(|rule| rule.found)
+                .collect::<Vec<_>>(),
+            [true, false, false, false, true, false, false, false]
+        );
+
+        drop((svc, rib_tx, outbound, roster));
         manager_task.await.unwrap();
     }
 

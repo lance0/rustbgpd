@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors, interface-only bindings and dynamic-range sessions |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`, `RenewGuardedLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases, guarded FlowSpec mutations and a controller replay-complete signal |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions`, `BatchListFlowSpecExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`, `RenewGuardedLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases, guarded FlowSpec mutations and a controller replay-complete signal |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -274,7 +274,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`, `RenewGuardedLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions`, `BatchListFlowSpecExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`, `RenewGuardedLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3365,6 +3365,7 @@ export policy).
 | `ListPathExportDispositions` | Per-peer export disposition of one injected unicast route; see [export read-back](#export-read-back) |
 | `BatchListPathExportDispositions` | The same for up to 1000 injected unicast route keys per paged walk; see [batch read-back](#batch-read-back) |
 | `ListFlowSpecExportDispositions` | The same for one injected FlowSpec rule; see [FlowSpec read-back](#flowspec-read-back) |
+| `BatchListFlowSpecExportDispositions` | The same for up to 1000 injected FlowSpec rule keys per paged walk; see [FlowSpec batch read-back](#flowspec-batch-read-back) |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
 | `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
@@ -3833,6 +3834,65 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
        "components": [{"type": 1, "prefix": "192.0.2.0/24"}],
        "include_configured": true}' \
   localhost:50051 rustbgpd.v1.InjectionService/ListFlowSpecExportDispositions
+```
+
+##### FlowSpec batch read-back
+
+`BatchListFlowSpecExportDispositions` is
+[`BatchListPathExportDispositions`](#batch-read-back) for FlowSpec rules,
+such as every FlowSpec key `ListLeasedKeys` lists for an owner. `keys` takes
+`LeasedFlowSpecKey` values, the same `(afi_safi, rd, components)` keys
+`ListFlowSpecExportDispositions` takes, and one walk may mix global and VPN
+families and RDs. Each response lists `rules` in request order; each entry
+echoes the key as requested, with its rows as
+`ListFlowSpecExportDispositions` lists them. This diagnostic RPC is outside
+v1. Daemons that predate it return `UNIMPLEMENTED`.
+
+The contract is that of the unicast batch, except for malformed keys:
+
+- A key with no local rule is listed with `found = false` and no rows; the
+  call does not fail with `NOT_FOUND`.
+- A malformed key does not fail the call either. A key that
+  `ListFlowSpecExportDispositions` would refuse with `INVALID_ARGUMENT`, such
+  as a non-FlowSpec family, a VPN key without an RD, a global key with one,
+  or invalid or out-of-order components, keeps its place as one entry with
+  `found = false`, no rows and `error` set: `code` is `invalid_key` and
+  `message` begins with `keys[i]:`. The unicast batch still fails the call on
+  a malformed key.
+- A request names 1 to 1000 keys. An empty list, more than 1000 keys, or a
+  key named twice returns `INVALID_ARGUMENT` naming the offending index
+  (`keys[i]`) before any rule is read. Two parsed keys are the same when they
+  name the same family, RD and components. Malformed keys are never
+  duplicates, even of each other: each is reported at its own index.
+- `page_size` counts entries: each peer row is one, and so is a key listed
+  with no rows, including a malformed key. A key whose rows do not fit
+  continues at the start of the next page.
+- Every page re-reads the rule of each named key. A resumed page returns
+  `ABORTED` when any key's rule content (its path attributes), or whether it
+  has a rule, differs from the first page, or on the peer, policy and
+  managed-set changes `ListPathExportDispositions` checks. A malformed key
+  never has a rule, so it never aborts a walk.
+- The `next_page_token` is bound to the keys exactly as sent, in order,
+  `include_configured` and the daemon process. A token from another key list
+  or from another export-disposition RPC returns `INVALID_ARGUMENT`.
+
+Each page reads all its keys in one RIB turn, so the rows on one page
+describe one RIB state. Across pages, the `ABORTED` check above keeps every
+key's rule and the peer and policy inputs as they were on the first page.
+Loc-RIB selection, which decides `not_selected` when a received rule with the
+same key wins, and outbound delivery progress are read live on each page and
+are not fenced, so a later page can reflect a change to them.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"keys": [
+         {"afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+          "components": [{"type": 1, "prefix": "192.0.2.0/24"}]},
+         {"afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+          "components": [{"type": 2, "prefix": "198.51.100.7/32"},
+                         {"type": 3, "value": "=6"}]}],
+       "include_configured": true}' \
+  localhost:50051 rustbgpd.v1.InjectionService/BatchListFlowSpecExportDispositions
 ```
 
 #### Leased injection
@@ -4372,7 +4432,8 @@ Families `ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC` (13) and
 `ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC` (14) originate IPv4 and IPv6 VPN FlowSpec
 with explicit RD identity and Route Target attributes. The existing plain,
 leased and guarded add/delete RPCs, `ListFlowSpecRoutes`, `ListLeasedKeys`
-and `ListFlowSpecExportDispositions` retain that scope. These additions are
+`ListFlowSpecExportDispositions` and `BatchListFlowSpecExportDispositions`
+retain that scope. These additions are
 outside v1; the global controller contract above is unchanged.
 [ADR-0146](../adr/0146-vpn-flowspec.md) records the original IPv4-only design.
 The IPv6 extension keeps that origination contract, using
