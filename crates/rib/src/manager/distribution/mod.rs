@@ -766,8 +766,13 @@ impl BestSource {
 /// The prediction uses the largest per-member cost measured so far in the
 /// walk; a member heavier than any seen yet can still overshoot, which the
 /// caller bounds by sending at most twice the previous command's applied
-/// members. The command's summary capture and policy reclamation run after
-/// the prediction and are not part of it; their cost is constant per command.
+/// members. `elapsed` starts before the summary capture, so the capture
+/// counts. Outside the prediction: the pass's shared work (the speculative
+/// capture and update-group staging before its member loop; retirement,
+/// end-of-RIB settlement and the stale-exempt flush after it), its visits to
+/// other dirty or forced peers, including earlier members still replaying,
+/// which is not constant, and the summary retirement and policy reclamation
+/// afterwards.
 pub(in crate::manager) const PACED_TURN_BUDGET: std::time::Duration =
     std::time::Duration::from_millis(250);
 

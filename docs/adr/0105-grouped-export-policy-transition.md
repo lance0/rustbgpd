@@ -150,19 +150,26 @@ qualification bars the regroup window's actor poll at 300 ms): the time so
 far, plus the pass shares the applied members still owe, plus one member's
 recompute and pass share. The estimate is the largest single-member recompute
 and the largest single member's own time in a pass measured so far in the
-walk; it never shrinks, so a light member does not lower it. A member whose
-writer was full still counts: a resynced member is often left marked dirty for
-replay, so the dirty mark cannot tell the two apart, and a low first estimate
-is bounded by the window below. The first member
-always runs; without an estimate only it runs. A member heavier than any
+walk; it never shrinks, so a light member does not lower it. The converse is
+accepted: one outlier member (its time includes any readiness drain, forced
+checkpoint or host preemption) pins the rest of the walk at one member per
+command, the convergence of the earlier one-member-per-command walk. A member
+whose writer was full still counts: a resynced member is often left marked
+dirty for replay, so the dirty mark cannot tell the two apart, and a low first
+estimate is bounded by the window below. The first member always runs;
+without an estimate only it runs. A member heavier than any
 measured yet can still overshoot, so PeerManager sends each command at most
 twice the previous command's applied members (one for the first), which bounds
 one command's overshoot and keeps the walk's setup linear in the list. The
-command's summary capture, chain retirement and policy reclamation run after
-the last prediction and are not in it; that cost is constant per command.
-Within a paced command no member takes the shared cohort transition, which is
-not budgeted. Grouping members this
-way keeps their recomputes warm and their resyncs back to back, which one
+command's clock starts before its summary capture, so the capture counts. Not
+in the prediction: the pass's shared work (the speculative capture and
+update-group staging before its member loop; retirement, EoR settlement and
+the stale-exempt flush after it), the pass's visits to other dirty or forced
+peers, including earlier members still replaying, which is not constant, and
+the summary retirement and policy reclamation after the pass. Within a paced
+command no member takes the shared cohort transition, which is not budgeted.
+Grouping members this way keeps their recomputes warm and their resyncs back
+to back, which one
 member per command did not: measured per member, the recompute ran cold on
 every turn and the resync overlapped the previous member's session encode.
 The batch and every command share the transaction's forward RIB budget; it is
@@ -176,8 +183,9 @@ skipped), or a budget that expires mid-walk restores every captured prior
 through the existing rollback batch, which stays one synchronous turn. The
 deadline is checked before a command waits for channel capacity and again once
 capacity is reserved, and the RIB skips a command whose caller has already
-dropped the reply, so an expired walk admits no further member before its
-rollback. A command naming a peer twice is rejected before any mutation. A
+dropped the reply, so an expired walk sends no further command. A command the
+RIB is already applying when its reply times out still applies; the rollback
+queued behind it in FIFO order restores the end state. A command naming a peer twice is rejected before any mutation. A
 member that left the RIB comes back as skipped; its reconnect registers the
 session's chain, which cohort setup already hot-applied. Two limits remain.
 Rollback carries every captured member, applied or not, through the
