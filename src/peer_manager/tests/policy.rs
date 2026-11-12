@@ -2625,6 +2625,59 @@ async fn conditional_reconcile_refused_before_dispatch_keeps_certainty() {
     assert!(mgr.conditional_reconcile_retry.is_some(), "retry armed");
 }
 
+/// A catalog change whose conditional install never leaves a full RIB
+/// mailbox reached nothing: nothing precedes the install, so the owned
+/// mutation is rejected with no effect instead of fenced as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn catalog_conditional_install_refused_before_dispatch_rejects_cleanly() {
+    use rustbgpd_api::peer_types::{
+        ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+    };
+
+    let mut mgr = test_peer_manager();
+    let (rib_tx, _held_rx) = mpsc::channel(1);
+    rib_tx
+        .try_send(RibUpdate::PeerDeleted {
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into()),
+            label: None,
+            keep_series: false,
+        })
+        .unwrap();
+    mgr.rib_tx = rib_tx;
+    // The RIB holds a gate the candidate no longer attaches, so the
+    // catalog change installs.
+    mgr.conditional_advertisements.attachments.insert(
+        std::net::IpAddr::from(Ipv4Addr::new(10, 0, 0, 1)).into(),
+        vec![Arc::from("backup")],
+    );
+    let installed = mgr.conditional_advertisements.clone();
+    let before = mgr.current_config.clone();
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-in".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "permit".to_string(),
+                    statements: vec![],
+                },
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        matches!(
+            &outcome,
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+                if error.to_string().contains("rib_apply_rejected")
+        ),
+        "{outcome:?}"
+    );
+    assert!(!mgr.conditional_install_uncertain);
+    assert_eq!(mgr.conditional_advertisements, installed);
+    assert_eq!(mgr.current_config, before);
+}
+
 /// A session that answers RFC 9324 re-evaluation requests with `answer` and
 /// counts every request and ROUTE-REFRESH it receives.
 fn revalidating_peer_handle(

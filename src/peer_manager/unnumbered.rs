@@ -2599,9 +2599,11 @@ impl PeerManager {
             .install_conditional_advertisements(set, &[], ConditionalReplyWait::Retrying)
             .await
         {
-            // The RIB may hold the set although its acknowledgement failed:
-            // reconcile it against the live bindings, or a binding that ends
-            // before the retry leaves the gate at an endpoint with no peer.
+            // An install that was never sent changed nothing, so the
+            // reconcile then finds nothing to change. One whose acknowledgement
+            // failed may still be held by the RIB: reconcile it against the
+            // live bindings, or a binding that ends before the retry leaves
+            // the gate at an endpoint with no peer.
             self.conditional_reconcile_pending = true;
             return Err(PeerLifecycleError::Internal(error.to_string()));
         }

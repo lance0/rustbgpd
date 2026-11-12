@@ -463,10 +463,11 @@ impl PeerManager {
         // re-observe under the ordinary debounce. A definition step 0 added
         // or changed was held rather than evaluated against the prior
         // contents, so it is evaluated now, immediately (ADR-0137 Decision
-        // 6). A request that never left the mailbox re-observed nothing, so
-        // the generation unwinds as for any other failed step. An
-        // unacknowledged request is ambiguous: the RIB may have re-observed
-        // against the candidate dataset, and no capture exists to undo it.
+        // 6). Any failure is ambiguous. An unacknowledged request may have
+        // re-observed against the candidate dataset, and no capture exists
+        // to undo it. Even a request that never left the mailbox does not
+        // prove the trackers unchanged: route churn evaluated while it
+        // waited reads the already-published candidate dataset.
         // The unwind restores a successful re-observation's capture after
         // the dataset rollback; an earlier install capture already predates
         // it.
@@ -480,12 +481,11 @@ impl PeerManager {
                 }
             }
             Err(error) => {
-                let ambiguous = matches!(error, ConditionalRequestError::Unacknowledged(_));
                 return self
                     .fail_reload_generation(
                         applied,
                         format!("conditional advertisement re-observation: {error}"),
-                        ambiguous,
+                        true,
                     )
                     .await;
             }
