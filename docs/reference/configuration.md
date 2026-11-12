@@ -4968,15 +4968,21 @@ names:
 For example: `rib.20260305.143022.123456789.mrt.gz`
 
 Dump files are created with mode 0600. A missing `output_dir`, and any
-missing parent, is created 0700. An existing `output_dir` must be owned by the
-daemon user and writable by no other user: not world-writable, even with the
-sticky bit, and group-writable only when its group is the daemon's own group.
-Retention deletes the oldest dump names in this directory, so a user who could
-add newer-named files could make it delete real dumps. Otherwise each dump
-fails with a permission error and the `mrt_*` failure metrics record it. A
-directory that group or other can read is logged as a warning and left as it
-is, so a directory you share on purpose keeps its mode. The dump files
-themselves stay 0600.
+missing parent, is created 0700. An existing `output_dir` is held to the same
+rules as [`runtime_state_dir`](#global): it must be a real directory (not a
+symlink) owned by the daemon user and not group- or world-writable, and every
+directory above it, along the configured path and its resolved form, must be
+owned by root or the daemon user and not writable by other users unless it is
+sticky, as `/tmp` is. Retention deletes the oldest dump names in this
+directory, so a user who could add files to it, or rename it and put another
+directory in its place, could make it delete other data. If a check fails, the
+dump fails with a permission error and the `mrt_*` failure metrics record it;
+the checks run before every dump, so fixing ownership or mode takes effect
+without a restart. Like the runtime-state checks, they read only the owner and
+mode bits; POSIX ACL grants are not inspected. A directory that group or other
+can read is logged as a warning, once per directory, and left as it is, so a
+directory you share on purpose keeps its mode. The dump files themselves stay
+0600.
 
 ### Retention and disk growth
 

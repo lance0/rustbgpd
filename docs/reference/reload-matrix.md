@@ -624,7 +624,7 @@ chains all add/change/remove cleanly via reload.
 |---|---|---|
 | `[rpki]` | restart-required | RPKI VRP tables + cache connections stand up once at startup. |
 | `[bmp]` | restart-required | BMP exporter binds once. |
-| `[mrt]` | restart-required | MRT writer opens its output dir at startup. |
+| `[mrt]` | restart-required | The MRT manager takes its writer settings, including `max_files`, at startup; the output directory is prepared and checked before each dump. |
 
 [ADR-0134](../adr/0134-reload-monitoring-and-validation-endpoints.md) proposes
 reload-applying these sections for subsystems already enabled at startup; until

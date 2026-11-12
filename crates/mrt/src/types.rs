@@ -1,5 +1,5 @@
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use rustbgpd_rib::update::{MrtPeerEntry, MrtSnapshotData};
 
@@ -16,4 +16,7 @@ pub struct MrtWriterConfig {
     pub file_prefix: String,
     /// Keep at most this many of this writer's dumps; `None` keeps all.
     pub max_files: Option<NonZeroU32>,
+    /// Vets the directories above `output_dir` before each dump; an error
+    /// fails the dump. The daemon supplies its runtime-state ancestor rule.
+    pub ancestor_check: Option<fn(&Path) -> std::io::Result<()>>,
 }

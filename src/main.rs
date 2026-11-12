@@ -460,7 +460,12 @@ impl PinnedRuntimeStateDirectory {
                 metadata.mode() & 0o7777
             ));
         }
-        verify_runtime_state_ancestors(path, geteuid().as_raw(), nix::unistd::getegid().as_raw())?;
+        verify_runtime_state_ancestors(
+            "runtime-state directory",
+            path,
+            geteuid().as_raw(),
+            nix::unistd::getegid().as_raw(),
+        )?;
         let real_path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
         let resolved = std::fs::metadata(&real_path).map_err(|error| error.to_string())?;
         if (metadata.dev(), metadata.ino()) != (resolved.dev(), resolved.ino()) {
@@ -540,6 +545,7 @@ fn open_state_child_directory(
 /// does). The daemon's own group is trusted as it is for credential files, so
 /// a `umask 002` user-private group stays usable.
 fn verify_runtime_state_ancestors(
+    role: &str,
     path: &Path,
     daemon_user: u32,
     daemon_group: u32,
@@ -551,12 +557,8 @@ fn verify_runtime_state_ancestors(
             .map_err(|error| format!("failed to resolve the current directory: {error}"))?
             .join(path)
     };
-    let canonical = std::fs::canonicalize(&absolute).map_err(|error| {
-        format!(
-            "failed to resolve runtime-state directory {}: {error}",
-            path.display()
-        )
-    })?;
+    let canonical = std::fs::canonicalize(&absolute)
+        .map_err(|error| format!("failed to resolve {role} {}: {error}", path.display()))?;
     // `ancestors()` of the directory itself start with the directory; skip
     // it, as `prepare` already holds it to the stricter owner-only rule.
     for ancestor in absolute
@@ -566,7 +568,7 @@ fn verify_runtime_state_ancestors(
     {
         let metadata = std::fs::metadata(ancestor).map_err(|error| {
             format!(
-                "failed to inspect {} above runtime-state directory {}: {error}",
+                "failed to inspect {} above {role} {}: {error}",
                 ancestor.display(),
                 path.display()
             )
@@ -578,7 +580,7 @@ fn verify_runtime_state_ancestors(
             && mode & 0o1000 == 0;
         if foreign_owner || shared_writable {
             return Err(format!(
-                "runtime-state directory {} is reachable through {} (uid={}, mode={:o}), which a \
+                "{role} {} is reachable through {} (uid={}, mode={:o}), which a \
                  user other than root or the daemon user could replace; it must be owned by root \
                  or the daemon user and not writable by others unless sticky",
                 path.display(),
@@ -589,6 +591,19 @@ fn verify_runtime_state_ancestors(
         }
     }
     Ok(())
+}
+
+/// Hold the MRT output directory's ancestors to the runtime-state rule, so
+/// no user other than root or the daemon user can swap the directory that
+/// retention deletes from.
+fn verify_mrt_output_dir_ancestors(path: &Path) -> std::io::Result<()> {
+    verify_runtime_state_ancestors(
+        "MRT output_dir",
+        path,
+        nix::unistd::geteuid().as_raw(),
+        nix::unistd::getegid().as_raw(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
 }
 
 fn stream_plan_runtime_state_authority(
@@ -5689,6 +5704,7 @@ async fn run<T>(
                 file_prefix: mrt_config.file_prefix.clone(),
                 // Validation rejects 0, so unset is the only `None`.
                 max_files: mrt_config.max_files.and_then(std::num::NonZeroU32::new),
+                ancestor_check: Some(verify_mrt_output_dir_ancestors),
             };
             let (trigger_tx, trigger_rx) = mpsc::channel(16);
             let mgr = rustbgpd_mrt::MrtManager::new(
@@ -12206,6 +12222,36 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         let direct = base.path().join("direct");
         private(&direct);
         PinnedRuntimeStateDirectory::prepare(&direct).unwrap();
+    }
+
+    /// Load-bearing: the MRT writer refuses an output directory that a user
+    /// other than root or the daemon user could rename and replace, such as
+    /// one under a non-sticky world-writable parent, because retention would
+    /// then delete from whatever directory took its place.
+    #[test]
+    fn mrt_output_dir_with_a_replaceable_ancestor_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let shared = base.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let output_dir = shared.join("mrt");
+        let config = rustbgpd_mrt::MrtWriterConfig {
+            output_dir: output_dir.clone(),
+            dump_interval: 3600,
+            compress: false,
+            file_prefix: "rib".to_string(),
+            max_files: std::num::NonZeroU32::new(1),
+            ancestor_check: Some(verify_mrt_output_dir_ancestors),
+        };
+        let error = rustbgpd_mrt::writer::write_dump(&config, b"refused").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("reachable through"), "{error}");
+        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 0);
+
+        // The same directory is accepted once only its owner can replace it.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).unwrap();
+        rustbgpd_mrt::writer::write_dump(&config, b"accepted").unwrap();
+        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 1);
     }
 
     /// Load-bearing: a trailing `/` or `/.` must not let a symlinked

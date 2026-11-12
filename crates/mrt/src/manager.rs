@@ -246,6 +246,7 @@ mod tests {
 
     use super::*;
     use crate::types::MrtPeerEntry;
+    use crate::writer::private_tempdir;
 
     /// Read one exported sample (gauge or counter) by family name and an
     /// optional label match; 0 when the family or series is absent.
@@ -286,6 +287,7 @@ mod tests {
             compress: false,
             file_prefix: "rib".to_string(),
             max_files: None,
+            ancestor_check: None,
         }
     }
 
@@ -311,13 +313,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn manager_shuts_down_on_trigger_close() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let config = MrtWriterConfig {
             output_dir: dir.path().to_path_buf(),
             dump_interval: 86400, // long interval, won't fire
             compress: false,
             file_prefix: "rib".to_string(),
             max_files: None,
+            ancestor_check: None,
         };
 
         let (rib_tx, _rib_rx) = mpsc::channel(16);
@@ -341,13 +344,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn on_demand_trigger_produces_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let config = MrtWriterConfig {
             output_dir: dir.path().to_path_buf(),
             dump_interval: 86400,
             compress: false,
             file_prefix: "rib".to_string(),
             max_files: None,
+            ancestor_check: None,
         };
 
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
@@ -426,13 +430,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn canceled_trigger_skips_dump_before_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let config = MrtWriterConfig {
             output_dir: dir.path().to_path_buf(),
             dump_interval: 86400,
             compress: false,
             file_prefix: "rib".to_string(),
             max_files: None,
+            ancestor_check: None,
         };
 
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
@@ -486,7 +491,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn impossible_output_path_fails_before_rib_snapshot_query() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let output_file = dir.path().join("not-a-directory");
         std::fs::write(&output_file, b"occupied").unwrap();
 
@@ -534,7 +539,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn cancellation_while_awaiting_rib_drops_reply_without_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let output_dir = dir.path().join("lazy-output");
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (trigger_tx, trigger_rx) = mpsc::channel(16);
@@ -594,7 +599,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn cancellation_while_queueing_on_full_rib_channel_exits_without_dump() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let output_dir = dir.path().join("lazy-output");
         let (rib_tx, rib_rx) = mpsc::channel(1);
         let (filler_reply, _filler_receiver) = oneshot::channel();
