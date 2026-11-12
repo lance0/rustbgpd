@@ -808,6 +808,8 @@ def analyze_results(output):
     # A failed cell may be incomplete, so its evidence stays unvalidated.
     failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"], "evidence": "unvalidated"}
                 for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
+    # Validated cells whose observer log ended in a cut-off line.
+    torn_tails = []
 
     def validate(path, row):
         leg, clients = path.parent, row["clients"]
@@ -828,8 +830,10 @@ def analyze_results(output):
         cgroup = json.loads((leg / "cgroup.json").read_text())
         Q.require(row["cgroup"] == cgroup, "cgroup receipt differs from raw observation")
         Q.check_cgroup(cgroup)
-        observed = [json.loads(line.removeprefix("evpn_qualification ")) for line in
-                    (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_qualification ")]
+        log = (leg / "observer.log").read_text()
+        observed, torn = Q.observer_records(log)
+        if torn:
+            torn_tails.append(leg.name)
         for observation in observed:
             roster(observation, row["arm"], clients)
         for key in ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_recovery_previous", "mass_recovery",
@@ -856,8 +860,7 @@ def analyze_results(output):
         controls = [json.loads(line.removeprefix("evpn_control ")) for line in
                     (leg / "driver.log").read_text().splitlines() if line.startswith("evpn_control ")]
         protocol_overlap(row, events, controls)
-        barriers = [json.loads(line.removeprefix("evpn_input_barrier ")) for line in
-                    (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_input_barrier ")]
+        barriers, _ = Q.observer_records(log, "evpn_input_barrier ")
         Q.require(input_applied(barriers, clients, 3), "missing actor-applied input barriers")
         Q.require(row.get("mass_dirty_close") in observed
                   and closes_mass_dirty(row["mass_dirty_close"], barriers, clients, resumed),
@@ -882,11 +885,15 @@ def analyze_results(output):
                 validate(path, row)
             except Q.AcceptanceFailure as error:
                 missed = missed or error
+    # Any later failure, of a bar or a whole cell, keeps the cut-off tails
+    # in the summary that analyze() completes from this one.
+    summary_path = output / "recovery-summary.json"
+    Q.write_json(summary_path, {**json.loads(summary_path.read_text()), "observer_torn_tails": torn_tails})
     if failures:
         Q.write_json(output / "recovery-summary.json", {
             "status": "FAIL", "correctness_only": correctness, "scope": SCOPE,
             "production_activation_qualified": False, "terminal_only_qualified": False,
-            "cells": len(rows), "medians": {}, "failed_cells": failures})
+            "cells": len(rows), "medians": {}, "failed_cells": failures, "observer_torn_tails": torn_tails})
         Q.accept(False, "recorded cell acceptance failures; see failed_cells")
     if missed:
         raise missed
@@ -898,7 +905,7 @@ def analyze_results(output):
     median_timings = {} if correctness else median_report(rows)
     summary = {"status": "PASS", "correctness_only": correctness, "scope": SCOPE,
                "production_activation_qualified": False, "terminal_only_qualified": False,
-               "cells": len(rows), "medians": median_timings,
+               "cells": len(rows), "medians": median_timings, "observer_torn_tails": torn_tails,
                "recovery_witness": Q.RECOVERY_BARS["recovery_witness"],
                "recovery": [{"cell": path.parent.name, "arm": row["arm"],
                              "mass_dirty_actor": row["mass_dirty_actor"],

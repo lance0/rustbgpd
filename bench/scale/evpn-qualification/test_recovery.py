@@ -855,6 +855,42 @@ class RecoveryTests(unittest.TestCase):
                     R.analyze(root)
                 self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "FAIL")
 
+    def test_analyze_ends_the_observer_log_at_a_cut_off_final_line_and_rejects_one_in_the_middle(self):
+        # The final line of a real private-arm observer log: the daemon exited
+        # partway through writing this teardown sample.
+        torn = ('evpn_qualification {"live_provenance_slots":0,"provenance_slot_capacity":0,"elapsed_us":17000231,'
+                '"sample_slot":340,"wall_us":1794469460656626,"members":0,"owned_groups":0,"owned_members":0,'
+                '"owned_routes":0,"private_routes":0,"dirty":0,"dirty_high_water":0,"retained":192,"peak":192,'
+                '"peer_budget":23068672,"daemon_budget":268435456,"pending_resets":0,"completion_receipts":0,'
+                '"marker_debt":0,"retained_recovery":0,"refresh_pending":0,"eor_pending":0,'
+                '"protocol_obligations":0,"owing":0,"recovery_pending":')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = self.analysis_fixture(root)
+            path = root / "recovery-00-candidate/observer.log"
+            complete = path.read_text()
+            with patch.object(R, "check_wire", return_value=report):
+                R.analyze(root)
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["observer_torn_tails"], [])
+                path.write_text(complete + torn)
+                R.analyze(root)
+                summary = json.loads((root / "recovery-summary.json").read_text())
+                self.assertEqual((summary["status"], summary["observer_torn_tails"]), ("PASS", ["recovery-00-candidate"]))
+                # The same cut-off line anywhere but the end is malformed evidence.
+                lines = complete.splitlines(keepends=True)
+                path.write_text("".join(lines[:1]) + torn + "\n" + "".join(lines[1:]))
+                with self.assertRaises(json.JSONDecodeError):
+                    R.analyze(root)
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+                # A bar miss still reports the cut-off tail in its FAIL summary.
+                bad = witness("candidate", 3, 10_000)
+                bad.update(owned_groups=2, peak=int(bad["daemon_budget"] * .9))
+                path.write_text(complete + "evpn_qualification " + json.dumps(bad) + "\n" + torn)
+                with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
+                    R.analyze(root)
+                summary = json.loads((root / "recovery-summary.json").read_text())
+                self.assertEqual((summary["status"], summary.get("observer_torn_tails")), ("FAIL", ["recovery-00-candidate"]))
+
     def test_roster_validates_types_ranges_and_source_before_bars(self):
         def private_owned(row):
             row["peers"][0][1] = 1

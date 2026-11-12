@@ -171,7 +171,11 @@ functional exercise takes both scrapes and reports no value.
 
 The observer captures timestamps before building each receipt and emits at most
 once per anchored 50,000 µs slot, skipping missed slots without catch-up or
-interpolation. Both online and final checks require the witness row and its
+interpolation. Each record is written to stderr as one complete line. If the
+daemon exits partway through a write anyway, the analyzers treat only an
+unterminated final line as the end of the log and list that cell under
+`observer_torn_tails` in the summary; any other malformed line fails the
+analysis. Both online and final checks require the witness row and its
 predecessor to be adjacent raw records in adjacent slots, with an actual timestamp
 gap greater than zero and at most 50,000 µs, and that one-slot window to lie wholly
 between the pause acknowledgement and the resume command; there is no extra
