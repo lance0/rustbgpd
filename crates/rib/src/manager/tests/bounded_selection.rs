@@ -530,6 +530,30 @@ fn non_best_change_index_lookups_per_update() {
     assert_eq!(non_best_change_index_lookups(), [(2, 2), (1, 1)]);
 }
 
+/// An `SRv6` Prefix-SID whose SID structure is ineligible keeps a VPN path out
+/// of selection: a challenger that would win on `LOCAL_PREF` leaves the
+/// stored best selected. Labeled unicast has no eligibility filter.
+#[test]
+fn an_ineligible_vpn_challenger_does_not_displace_the_stored_best() {
+    let mut manager = manager();
+    receive_vpn(&mut manager, 0, vec![vpn_route(0, 0, 1, 0)], vec![]);
+    let mut challenger = vpn_route(1, 0, 7, 1);
+    AttrSet::edit(&mut challenger.attributes, |attrs| {
+        attrs.push(crate::srv6::tests::service_attribute(
+            5,
+            "2001:db8:111:1::".parse().unwrap(),
+            19,
+            Some([255; 6]),
+        ));
+    });
+    assert!(!crate::srv6::vpn_eligible(&challenger));
+    receive_vpn(&mut manager, 1, vec![challenger], vec![]);
+    let key = vpn_route(0, 0, 0, 0).nlri.key();
+    let best = manager.loc_rib.get_vpn(&key).unwrap();
+    assert_eq!((best.peer, best.path_id), (peer_v4(source(0)), 1));
+    check_bests(&manager, 0);
+}
+
 /// Two live handles on one endpoint share a selection rank, so identical
 /// paths from both compare equal. The stored best stays selected.
 #[test]

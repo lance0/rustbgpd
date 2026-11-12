@@ -736,6 +736,7 @@ impl LocRib {
                         || old.next_hop != new_best.next_hop
                         || old.link_local_next_hop != new_best.link_local_next_hop
                         || old.next_hop_scope != new_best.next_hop_scope
+                        || old.origin_type != new_best.origin_type
                         || old.peer_router_id != new_best.peer_router_id
                         || old.nlri != new_best.nlri
                         || old.attributes != new_best.attributes
@@ -750,11 +751,13 @@ impl LocRib {
     }
 
     /// Selection for a key whose stored best an UPDATE left in place: only
-    /// `challengers`, the paths the UPDATE changed, can displace it. The
-    /// comparator is a strict total order and the stored best was the
-    /// minimum of the other paths, so a challenger replaces it only when
-    /// strictly better and a tie keeps it. Returns whether the selection
-    /// changed.
+    /// `challengers`, the paths the UPDATE changed, can displace it, since
+    /// the stored best was the minimum of the other paths. A challenger
+    /// replaces it only when strictly better. A tie keeps the stored best:
+    /// `PeerId::cmp_resolved` gives two live handles on one endpoint (a
+    /// superseded and a new session) the same rank, so identical paths from
+    /// both compare equal, where a full rescan would take `HashMap`
+    /// iteration order. Returns whether the selection changed.
     ///
     /// The stored copy stands in for the Adj-RIB-In copy: every writer that
     /// changes a stored path in place or removes it recomputes its key in
@@ -866,6 +869,7 @@ impl LocRib {
                         || old.next_hop != new_best.next_hop
                         || old.link_local_next_hop != new_best.link_local_next_hop
                         || old.next_hop_scope != new_best.next_hop_scope
+                        || old.origin_type != new_best.origin_type
                         || old.peer_router_id != new_best.peer_router_id
                         || old.nlri != new_best.nlri
                         || old.attributes != new_best.attributes

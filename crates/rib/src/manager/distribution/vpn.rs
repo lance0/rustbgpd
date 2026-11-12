@@ -794,9 +794,12 @@ impl RibManager {
     /// and only that caller passes it: nothing but that peer's entries for
     /// the affected path IDs changed. A key whose stored best is not among
     /// them is then selected from those entries and the stored best alone;
-    /// the comparator is a total order, so no untouched path can win. Every
-    /// other caller passes `None` and each key is selected from all of its
-    /// stored paths.
+    /// no untouched path can win, since the stored best was the minimum of
+    /// them. A challenger that ties the stored best leaves it selected:
+    /// `PeerId::cmp_resolved` ranks two live handles on one endpoint (a
+    /// superseded and a new session) equally, where a full rescan would take
+    /// `HashMap` iteration order. Every other caller passes `None` and each
+    /// key is selected from all of its stored paths.
     #[expect(
         clippy::too_many_lines,
         reason = "VPN recompute keeps the candidate choice, loc-rib selection and the Loc-RIB tap together"
