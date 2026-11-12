@@ -503,6 +503,8 @@ fn insert_test_managed_peer_for_key(
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn,
                 description: "test".to_string(),
                 peer_group: None,
@@ -868,6 +870,8 @@ fn insert_test_scoped_managed_peer(
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: interface.to_string(),
                 peer_group: None,
@@ -1417,6 +1421,8 @@ fn insert_test_dynamic_managed_peer(
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65030,
                 description: format!("dynamic:{range_peer_group}"),
                 peer_group: Some(range_peer_group.to_string()),

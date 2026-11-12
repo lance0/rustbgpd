@@ -146,6 +146,8 @@ impl PeerManager {
                 ManagedPeerState {
                     admin_down: None,
                     policy_known_down: false,
+                    import_install_unknown: false,
+                    export_install_unknown: false,
                     remote_asn,
                     description: resolved.label,
                     peer_group: resolved.peer_group,
