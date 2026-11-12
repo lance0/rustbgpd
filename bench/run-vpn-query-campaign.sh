@@ -57,23 +57,26 @@ toolchain=$(rustc --version --verbose | tr '\n' ';')
 
 target_dir="$output/target"
 export CARGO_TARGET_DIR=$target_dir
-cargo build --locked --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
-    --bench vpn_query_timing --features bench-internals
-cargo build --locked --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
-    --bench vpn_query_allocation --features bench-internals,vpn-query-allocation
-
-find_binary() {
-    local name=$1
-    mapfile -t matches < <(find "$target_dir/release/deps" -maxdepth 1 -type f \
-        -perm -0100 -name "$name-*" | sort)
-    ((${#matches[@]} == 1)) || {
-        printf 'expected one %s binary, found %s\n' "$name" "${#matches[@]}" >&2
-        return 1
-    }
-    printf '%s\n' "${matches[0]}"
+# Build one bench and print the executable Cargo reports; its directory under
+# the target dir is not stable across Cargo versions.
+build_bench() {
+    local name=$1 features=$2
+    cargo build --locked --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
+        --bench "$name" --features "$features" --message-format=json-render-diagnostics |
+        python3 -c '
+import json, sys
+name = sys.argv[1]
+paths = {m["executable"] for m in map(json.loads, sys.stdin)
+         if m.get("reason") == "compiler-artifact" and m.get("executable")
+         and m["target"]["name"] == name}
+if len(paths) != 1:
+    sys.exit(f"expected one {name} binary, found {len(paths)}")
+print(*paths)' "$name"
 }
-cp "$(find_binary vpn_query_timing)" "$output/bin/vpn_query_timing"
-cp "$(find_binary vpn_query_allocation)" "$output/bin/vpn_query_allocation"
+timing_bin=$(build_bench vpn_query_timing bench-internals)
+allocation_bin=$(build_bench vpn_query_allocation bench-internals,vpn-query-allocation)
+cp "$timing_bin" "$output/bin/vpn_query_timing"
+cp "$allocation_bin" "$output/bin/vpn_query_allocation"
 timing_hash=$(sha256sum "$output/bin/vpn_query_timing" | awk '{print $1}')
 allocation_hash=$(sha256sum "$output/bin/vpn_query_allocation" | awk '{print $1}')
 

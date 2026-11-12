@@ -2083,11 +2083,8 @@ async fn run(
     checks.eq("wire.stub_decode_errors", decode_errors, 0);
 
     let mut per_peer = BTreeMap::new();
-    for i in 0..PEERS {
-        per_peer.insert(
-            peer_addr(i).to_string(),
-            format!("{:?}", ctx.obs[i].identity()),
-        );
+    for (i, obs) in ctx.obs[..PEERS].iter().enumerate() {
+        per_peer.insert(peer_addr(i).to_string(), format!("{:?}", obs.identity()));
     }
     for (peer, state) in &per_peer {
         println!("WIRE {peer} {state}");
