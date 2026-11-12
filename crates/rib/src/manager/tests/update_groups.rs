@@ -11756,8 +11756,10 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
             .iter()
             .map(|r| r.kind)
             .collect::<Vec<_>>(),
+        // The detached owners: Adj-RIB-Out retirement, then the group leave.
         [
             super::super::ReadinessOwnerKind::PeerTeardown,
+            super::super::ReadinessOwnerKind::Replacement,
             super::super::ReadinessOwnerKind::Replacement,
         ],
         "changing-count teardown ends before detached retirement begins"
