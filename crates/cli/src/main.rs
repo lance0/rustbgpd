@@ -234,6 +234,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     config abort         0 aborted / 1 error\n  \
     config rollback      0 committed or noop / 1 error / 3 rejected\n  \
     config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
+    reload               0 complete / 1 error or timeout / 2 known partial / 3 rejected or failed\n  \
     doctor               0 no red checks (warnings allowed) / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below a threshold\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
@@ -333,6 +334,26 @@ enum Command {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+
+    /// Reload the config file (SIGHUP) and wait for the reload's outcome
+    ///
+    /// Sends SIGHUP to the daemon behind the local Unix socket, then waits
+    /// for a reload that read the config file after the signal to settle and
+    /// prints its receipt, as `config last-reload` does. A signal that
+    /// arrives during another reload is served by one follow-up reload,
+    /// which counts as this command's reload. Needs the daemon's local Unix
+    /// socket and permission to signal its process (its user or root).
+    #[command(after_help = "Exit codes:\n  \
+        0  complete (including a reload with no changes)\n  \
+        1  error (no local socket, signal refused, connection failure, or timeout)\n  \
+        2  known_partial (some reload operations applied, others did not)\n  \
+        3  rejected_no_effect or task_failed")]
+    Reload {
+        /// Seconds to wait for the reload to settle (1-3600)
+        #[arg(long, value_name = "SECONDS", default_value_t = 600,
+            value_parser = clap::value_parser!(u64).range(1..=3600))]
+        timeout: u64,
     },
 
     /// Manage BGP neighbors
@@ -3433,6 +3454,7 @@ const ROOT_HELP_GROUPS: &[(&str, &[&str])] = &[
         "Configuration",
         &[
             "config",
+            "reload",
             "peer-group",
             "dynamic-neighbor",
             "fib-table",
@@ -4350,6 +4372,7 @@ fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
         | Command::Flowspec { .. }
         | Command::Evpn { .. }
         | Command::Health { .. }
+        | Command::Reload { .. }
         | Command::Shutdown { .. }
         | Command::Gshut { .. }
         | Command::NeighborSet { .. }
@@ -5889,6 +5912,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             commands::control::shutdown(connection, reason, json).await
         }
         Command::MrtDump => commands::control::mrt_dump(connection, json).await,
+        Command::Reload { timeout } => {
+            let result =
+                commands::config::reload(connection, std::time::Duration::from_secs(timeout), json)
+                    .await;
+            std::process::exit(flush_stdout_result(&mut std::io::stdout(), result)?);
+        }
         Command::Gshut {
             neighbor, clear, ..
         } => commands::neighbor::set_graceful_shutdown(connection, neighbor, !clear, json).await,

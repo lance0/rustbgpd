@@ -6637,17 +6637,8 @@ local_vtep_ip = "10.0.0.1"
                 .await
             });
             held_rx.await.unwrap();
-            crate::publish_last_sighup(
-                &state,
-                rustbgpd_api::proto::SighupReloadRecord {
-                    outcome: "ignored_in_flight".to_string(),
-                    ..Default::default()
-                },
-            );
-            assert_eq!(
-                read_last_sighup_via_rpc(&state).await.unwrap().outcome,
-                "ignored_in_flight"
-            );
+            // A held reload publishes nothing; the read is still served.
+            assert_eq!(read_last_sighup_via_rpc(&state).await, None);
             release_tx.send(()).unwrap();
             let authority = reload
                 .await
@@ -10958,8 +10949,8 @@ tcp_ao = [
         assert_eq!(
             outcomes,
             std::collections::BTreeSet::from([
+                "coalesced",
                 "complete",
-                "ignored_in_flight",
                 "known_partial",
                 "rejected_no_effect",
                 "task_failed",

@@ -82,6 +82,9 @@ _rbgp() {
             rbgp,policy)
                 cmd="rbgp__subcmd__policy"
                 ;;
+            rbgp,reload)
+                cmd="rbgp__subcmd__reload"
+                ;;
             rbgp,rib)
                 cmd="rbgp__subcmd__rib"
                 ;;
@@ -630,6 +633,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help,policy)
                 cmd="rbgp__subcmd__help__subcmd__policy"
+                ;;
+            rbgp__subcmd__help,reload)
+                cmd="rbgp__subcmd__help__subcmd__reload"
                 ;;
             rbgp__subcmd__help,rib)
                 cmd="rbgp__subcmd__help__subcmd__rib"
@@ -1472,7 +1478,7 @@ _rbgp() {
 
     case "${cmd}" in
         rbgp)
-            opts="-s -j -h -V --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --json-lines --no-color --pager --help --version global config neighbor summary bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help"
+            opts="-s -j -h -V --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --json-lines --no-color --pager --help --version global config reload neighbor summary bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7182,7 +7188,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help)
-            opts="global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help"
+            opts="global config reload neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8822,6 +8828,20 @@ _rbgp() {
         rbgp__subcmd__help__subcmd__policy__subcmd__test)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__reload)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -12270,6 +12290,56 @@ _rbgp() {
                     return 0
                     ;;
                 --show-rejected)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-server-name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__reload)
+            opts="-s -j -h --timeout --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

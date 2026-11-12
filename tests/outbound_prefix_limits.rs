@@ -778,8 +778,8 @@ where
 
 /// Poll the SIGHUP outcome counter until `outcome` reads `want`. SIGHUP is
 /// fire-and-forget, and a signal that lands while another reload owns the
-/// lane is dropped as `ignored_in_flight`, so a phase must see its own reload
-/// settle before it asserts what that reload did or did not change.
+/// lane is served by a later follow-up reload, so a phase must see its own
+/// reload settle before it asserts what that reload did or did not change.
 async fn wait_reload_outcome(
     metrics: SocketAddr,
     outcome: &str,

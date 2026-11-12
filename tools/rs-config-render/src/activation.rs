@@ -773,8 +773,10 @@ mod unix {
     /// The daemon's reload ledger from `rbgp metrics`: process identity, every
     /// `bgp_sighup_reload_outcomes_total` row, and whether any runtime-config
     /// settlement owner is registered. The daemon records each observed SIGHUP
-    /// exactly once (a terminal outcome or `ignored_in_flight`; a fenced reload
-    /// stays registered), and reads the candidate files only while registered.
+    /// exactly once (a terminal outcome, or `coalesced` when it arrives during
+    /// another reload, whose one follow-up reload then records its own; a
+    /// fenced reload stays registered), and reads the candidate files only
+    /// while registered.
     struct Reloads {
         process_start: f64,
         outcomes: BTreeMap<String, u64>,

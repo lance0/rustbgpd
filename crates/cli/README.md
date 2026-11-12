@@ -107,6 +107,13 @@ policies, neighbor sets, chains, peer groups and FIB tables. On expiry the
 command exits 1 with an outcome-unknown error that names a command to verify
 with. The daemon may still apply the change, so the CLI never retries it.
 
+`reload` sends SIGHUP to the daemon behind the local Unix socket (it needs
+permission to signal that process) and polls `GetLastSighupReload` until a
+reload that started after its signal has settled. A signal that lands during
+another reload is served by one follow-up reload, which counts. It waits
+`--timeout` seconds (600 by default) and exits 1 on expiry; the reload may
+still be running, so read `rbgp config last-reload` before sending another.
+
 `mrt-dump` waits up to 31 minutes and also exits 1 on expiry, but its
 outcome differs. The daemon treats the dropped request as a cancellation
 until the dump's RIB snapshot arrives. A dump still queued or waiting for
@@ -159,6 +166,7 @@ rbgp config abort deploy-123
 rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON; bounded to 384 MiB)
 rbgp config history                         # list retained config-history rows, newest first
 rbgp config last-reload                     # latest SIGHUP outcome, effect receipt and convergence (applied/converging/converged)
+rbgp reload [--timeout 600]                 # SIGHUP the local daemon, wait for that reload; exit 0 complete / 2 known_partial / 3 rejected or failed
 rbgp config rollback <n>                    # roll back to an eligible history row (1 = previous applied config; metadata-only rows for oversized configs are not eligible)
 
 # Translate a BIRD 2/3 / FRR / GoBGP config (local, no daemon; policy is
@@ -876,7 +884,7 @@ the existing curated projection. RPC failures produce no document; commands with
 detailed exit codes still print their result when that contract calls for one.
 
 Version 1 supports `global`, `neighbor`, `bfd`, `rpki`, `rib`, `topology`, `orr`,
-`flowspec`, `evpn`, `health`, `shutdown`, `gshut`, `neighbor-set`, `peer-group`,
+`flowspec`, `evpn`, `health`, `reload`, `shutdown`, `gshut`, `neighbor-set`, `peer-group`,
 `dynamic-neighbor`, and `fib-table`, including their actions. It also supports
 `config` except `diff`/`import`, and `policy` except `check`/`fmt`.
 Other commands reject `--json-version` before connection or side effects.

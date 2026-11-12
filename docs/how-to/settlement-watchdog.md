@@ -510,9 +510,10 @@ SIGHUP reload is a first-class watchdog owner (`kind=sighup`,
 detached), with a few semantics of its own:
 
 - **One reload at a time.** A SIGHUP arriving while a reload is in
-  flight is logged (`SIGHUP received while previous reload still in
-  flight; ignoring`) and dropped — re-send it after the current one
-  settles. SIGHUP has no pre-ownership timeout: it waits for the
+  flight is coalesced: it is counted as `coalesced`, and once the current
+  reload settles exactly one follow-up reload re-reads the config file,
+  however many signals arrived. Shutdown discards a pending follow-up.
+  SIGHUP has no pre-ownership timeout: it waits for the
   coordinator, so a long-running owned transaction delays it.
 - **Preflight rejections stay cheap.** A pending commit-confirm, a
   parse or dataset load failure, an outbound prefix-limit preflight

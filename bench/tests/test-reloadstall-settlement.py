@@ -114,7 +114,7 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                             barrier_seen = BARRIER in engine_log.read_text()
                             outcomes = dict(complete=0, known_partial=0,
                                             rejected_no_effect=int(barrier_seen),
-                                            ignored_in_flight=0, task_failed=0)
+                                            coalesced=0, task_failed=0)
                             body = "".join(
                                 f'bgp_sighup_reload_outcomes_total{{outcome="{key}"}} {value}\n'
                                 for key, value in outcomes.items()).encode()

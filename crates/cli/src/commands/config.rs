@@ -683,6 +683,119 @@ pub async fn last_reload(connection: Connection, json: bool) -> Result<(), CliEr
     Ok(())
 }
 
+/// `rbgp reload` exit codes after parsing; 1 stays the generic error.
+pub const RELOAD_EXIT_KNOWN_PARTIAL: i32 = 2;
+pub const RELOAD_EXIT_REJECTED: i32 = 3;
+const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// `CLOCK_MONOTONIC` in microseconds; the daemon stamps each reload's start
+/// with the same clock (`started_monotonic_micros`).
+fn monotonic_micros() -> Result<u64, CliError> {
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .map_err(|error| CliError::Io(error.into()))?;
+    Ok(u64::try_from(now.tv_sec())
+        .unwrap_or(0)
+        .saturating_mul(1_000_000)
+        .saturating_add(u64::try_from(now.tv_nsec() / 1_000).unwrap_or(0)))
+}
+
+/// The exit code for a settled reload record.
+pub fn reload_exit_code(record: &SighupReloadRecord) -> i32 {
+    match record.outcome.as_str() {
+        "complete" => 0,
+        "known_partial" => RELOAD_EXIT_KNOWN_PARTIAL,
+        _ => RELOAD_EXIT_REJECTED,
+    }
+}
+
+/// Whether `record` is a reload that started at or after `sent_at`, so it read
+/// the config file after the signal was sent. A signal that arrives during
+/// another reload is served by one follow-up reload, which also qualifies.
+fn reload_settled_since(response: &GetLastSighupReloadResponse, sent_at: u64) -> bool {
+    response
+        .record
+        .as_ref()
+        .is_some_and(|record| record.started_monotonic_micros >= sent_at)
+}
+
+/// Send SIGHUP to the daemon behind the local Unix socket and wait until a
+/// reload that read the config after the signal has settled.
+pub async fn reload(
+    connection: Connection,
+    timeout: Duration,
+    json: bool,
+) -> Result<i32, CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let baseline = read_rpc(
+        "GetLastSighupReload",
+        client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+    )
+    .await?
+    .into_inner();
+    if baseline
+        .record
+        .as_ref()
+        .is_some_and(|record| record.started_monotonic_micros == 0)
+    {
+        return Err(CliError::Argument(
+            "this daemon does not report reload start times, so rbgp reload cannot tell its \
+             reload apart; send SIGHUP and read rbgp config last-reload instead"
+                .into(),
+        ));
+    }
+    let Some(process) = connection.local_process() else {
+        return Err(CliError::Argument(
+            "rbgp reload signals the daemon process and needs its local Unix socket; for another \
+             endpoint, send SIGHUP on the daemon host and read rbgp config last-reload"
+                .into(),
+        ));
+    };
+    let pid = i32::try_from(process.pid)
+        .map_err(|_| CliError::Argument(format!("daemon pid {} is out of range", process.pid)))?;
+    let sent_at = monotonic_micros()?;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGHUP,
+    )
+    .map_err(|error| {
+        CliError::Argument(format!(
+            "cannot send SIGHUP to rustbgpd pid {pid}: {error}\n  \
+                 hint: run rbgp reload as the daemon's user or root"
+        ))
+    })?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let response = loop {
+        let response = read_rpc(
+            "GetLastSighupReload",
+            client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+        )
+        .await?
+        .into_inner();
+        if reload_settled_since(&response, sent_at) {
+            break response;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CliError::Rpc(format!(
+                "SIGHUP sent to rustbgpd pid {pid}, but no reload settled within {}s; it may \
+                 still be running: check rbgp config last-reload",
+                timeout.as_secs()
+            )));
+        }
+        tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
+    };
+    let code = response.record.as_ref().map_or(1, reload_exit_code);
+    if json {
+        print_json(last_reload_response_to_json(&response))?;
+    } else {
+        output::print_text(&last_reload_human(
+            response.record.as_ref(),
+            response.convergence.as_ref(),
+        ))?;
+    }
+    Ok(code)
+}
+
 fn last_reload_response_to_json(response: &GetLastSighupReloadResponse) -> serde_json::Value {
     serde_json::json!({
         "record": response.record.as_ref().map(last_reload_to_json),
@@ -1398,6 +1511,40 @@ mod tests {
     use tonic::codegen::tokio_stream::StreamExt as _;
 
     #[test]
+    fn reload_waits_for_a_record_started_at_or_after_the_signal() {
+        let response = |started| GetLastSighupReloadResponse {
+            record: Some(SighupReloadRecord {
+                outcome: "complete".to_string(),
+                started_monotonic_micros: started,
+                ..Default::default()
+            }),
+            convergence: None,
+        };
+        assert!(!reload_settled_since(
+            &GetLastSighupReloadResponse::default(),
+            10
+        ));
+        assert!(!reload_settled_since(&response(9), 10));
+        assert!(reload_settled_since(&response(10), 10));
+        assert!(reload_settled_since(&response(11), 10));
+    }
+
+    #[test]
+    fn reload_exit_codes_follow_the_settled_outcome() {
+        let code = |outcome: &str| {
+            reload_exit_code(&SighupReloadRecord {
+                outcome: outcome.to_string(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(code("complete"), 0);
+        assert_eq!(code("known_partial"), RELOAD_EXIT_KNOWN_PARTIAL);
+        assert_eq!(code("rejected_no_effect"), RELOAD_EXIT_REJECTED);
+        assert_eq!(code("task_failed"), RELOAD_EXIT_REJECTED);
+        assert_eq!(code("unknown_future_outcome"), RELOAD_EXIT_REJECTED);
+    }
+
+    #[test]
     fn last_reload_json_projects_complete_record() {
         let record = SighupReloadRecord {
             started_unix_millis: 1_700_000_000_001,
@@ -1419,6 +1566,7 @@ mod tests {
                 target: "192.0.2.1".to_string(),
             }],
             unapplied_omitted: 0,
+            started_monotonic_micros: 7,
         };
         assert_eq!(
             last_reload_to_json(&record),

@@ -715,9 +715,31 @@ noop from a commit.
 ## Configuration reload (SIGHUP)
 
 ```bash
-sudo systemctl reload rustbgpd
-# or: kill -HUP $(pidof rustbgpd)
+sudo rbgp reload               # signal, wait, print the receipt; exit status is the outcome
+sudo systemctl reload rustbgpd # or: kill -HUP $(pidof rustbgpd); returns at once
 ```
+
+`systemctl reload` and `kill -HUP` return as soon as the signal is sent, so
+they cannot report whether the new config applied. `rbgp reload` sends SIGHUP
+to the daemon behind its local Unix socket, waits for a reload that read the
+config file after that signal to settle, prints the same receipt as
+`rbgp config last-reload` (`--json` for automation), and exits 0 for
+`complete` (including no changes), 2 for `known_partial`, 3 for
+`rejected_no_effect` or `task_failed`, and 1 when it cannot signal the
+daemon, loses the connection, or reaches `--timeout` (600 seconds by default)
+first. It needs the local socket and permission to signal the daemon's process
+(its user or root); against a TCP endpoint it refuses and points to
+`rbgp config last-reload`. It matches its reload by the daemon's
+`CLOCK_MONOTONIC` start stamp, so concurrent reload senders cannot make it
+return another reload's result.
+
+One reload runs at a time. A SIGHUP that arrives while a reload is running
+is coalesced: it sets one pending follow-up, and further signals fold into
+it. When the running reload settles, whatever its outcome, exactly one
+follow-up reload re-reads the config file, so an edit written after the
+running reload read the file is still applied, and a rejected reload's
+candidate can be fixed and picked up by the follow-up. Coordinated shutdown
+discards a pending follow-up instead of starting it and logs a warning.
 
 What happens:
 
@@ -939,9 +961,12 @@ the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits
 error text. `rbgp config last-reload` (`--json` for automation) reports the
 latest process-local SIGHUP outcome, its closed reason code and failing bucket,
 and a sanitized target. The read-only outside-v1 `GetLastSighupReload` RPC
-retains one record in memory; restart clears it. An `ignored_in_flight`
-signal appears immediately, then the active reload's settled result replaces
-it. `rbgp doctor` warns when the latest outcome is `rejected_no_effect`,
+retains one record in memory; restart clears it. Only a settled reload
+publishes a record, and each settled reload replaces the previous one; a
+coalesced signal publishes none of its own. The record's
+`started_monotonic_micros` is the daemon host's `CLOCK_MONOTONIC` when that
+reload started, which `rbgp reload` compares with its own reading taken
+before it signals. `rbgp doctor` warns when the latest outcome is `rejected_no_effect`,
 `known_partial`, or `task_failed`. A preflight rejection has no selected route.
 For `known_partial`, applied identities come from acknowledged reload operations,
 and unapplied identities are planned operations that failed or were not reached.
@@ -985,8 +1010,9 @@ preinitializes five bounded outcomes: `complete` includes a clean no-op;
 receipt; `rejected_no_effect` means it rejected before any runtime effect or
 the generation route restored the prior generation after a later failure (a
 replaced session may already have reset once);
-`ignored_in_flight` counts each concurrent signal dropped while another reload
-owns the lane; and `task_failed` means the retained Tokio task itself failed.
+`coalesced` counts each signal received while another reload owns the lane,
+which one follow-up reload serves and records under its own outcome (three
+signals during one reload count `coalesced` 3 and run one follow-up); and `task_failed` means the retained Tokio task itself failed.
 Recovery-fenced ownership deliberately has no outcome row because it remains
 parked. Diagnose that state with `bgp_runtime_config_settlement_active`,
 `bgp_runtime_config_settlement_elapsed_seconds`,

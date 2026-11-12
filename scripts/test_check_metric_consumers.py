@@ -644,10 +644,10 @@ groups:
         self.assertEqual(
             self.vocabularies[("bgp_sighup_reload_outcomes_total", "outcome")],
             {
+                "coalesced",
                 "complete",
                 "known_partial",
                 "rejected_no_effect",
-                "ignored_in_flight",
                 "task_failed",
             },
         )

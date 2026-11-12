@@ -6300,7 +6300,10 @@ credential, listener, session, or catalog effect. `rustbgpd --diff` and
 `rbgp config diff` print that route as `SIGHUP reload route`; the
 [reload matrix](reload-matrix.md#sighup-reload-routes) has the full table and
 the [operations guide](operations.md#configuration-reload-sighup) the
-settlement detail. After a signal, `rbgp config last-reload` shows the latest
+settlement detail. `rbgp reload` sends the signal and waits for that reload's
+outcome, exiting non-zero unless it is `complete`; a signal received during
+another reload is served by one follow-up reload. After a signal,
+`rbgp config last-reload` shows the latest
 recorded outcome, route, and bounded applied/unapplied effect receipt, and
 for a complete reload how many peers still have a RIB outbound resync
 pending (`converging`), that none does (`converged`), or `applied` when the

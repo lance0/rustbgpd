@@ -716,11 +716,16 @@ rustbgpd --check /etc/rustbgpd/config.toml
 # `rbgp config diff`)
 rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
 
-# Apply via SIGHUP
-systemctl reload rustbgpd
-# …or
-kill -HUP $(pidof rustbgpd)
+# Apply via SIGHUP and wait for the outcome (exit status 0 only for complete)
+rbgp reload
+# …or signal without waiting, then read the receipt
+systemctl reload rustbgpd   # or: kill -HUP $(pidof rustbgpd)
+rbgp config last-reload
 ```
+
+A SIGHUP that arrives while a reload is running is coalesced into one
+follow-up reload that re-reads the file after the running reload settles; see
+[Configuration reload](operations.md#configuration-reload-sighup).
 
 `rustbgpd --diff` calls into the same `ConfigDiff` machinery and route
 classifier the reload path uses. Previews evaluate configuration and bindings,

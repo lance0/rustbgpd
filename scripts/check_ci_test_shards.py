@@ -73,6 +73,7 @@ SHARDS = {
                 "rs_config_render_rpki_invalid_export",
                 "runtime_config_persistence_failstop",
                 "runtime_config_settlement_matrix",
+                "sighup_reload_coalescing",
                 "starter_configs_check_strict",
             )
         ),
