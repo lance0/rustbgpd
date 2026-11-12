@@ -7,6 +7,9 @@
   destinations are now applied a few per RIB command within the same 250 ms
   turn budget as EVPN peers, so UPDATEs from other peers, operator queries and
   timers run between those commands. Shared unicast cohorts are unchanged.
+  The cohort's two-minute reload budget now covers the per-command overhead
+  and the RIB work interleaved between commands, so under heavy churn a
+  cohort near that budget can roll back where one long turn committed.
   **Operator-visible:** for such reloads the `authoritative_batch_phase` log
   now counts those peers in `deferred_members` instead of `fallback_members`,
   classifies the batch `paced`, and logs each paced command as `paced_apply`.

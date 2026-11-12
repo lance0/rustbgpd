@@ -18884,6 +18884,21 @@ fn mixed_family_fleet(
     private: (Afi, Safi),
     unicast_only: u8,
 ) -> MixedFamilyFleet {
+    mixed_family_fleet_sending(
+        initial,
+        private,
+        unicast_only,
+        &[(Afi::Ipv4, Safi::Unicast)],
+    )
+}
+
+/// [`mixed_family_fleet`] whose members all send the `unicast` families.
+fn mixed_family_fleet_sending(
+    initial: &PolicyChain,
+    private: (Afi, Safi),
+    unicast_only: u8,
+    unicast: &[(Afi, Safi)],
+) -> MixedFamilyFleet {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
@@ -18906,7 +18921,7 @@ fn mixed_family_fleet(
                 reuses: Arc::clone(&reuses),
             }),
         });
-        let mut sendable_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        let mut sendable_families = unicast.to_vec();
         if index < MIXED_MEMBERS {
             sendable_families.push(private);
         }
@@ -19164,27 +19179,32 @@ fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
     assert_eq!(stats.batched_authoritative_fallback_members, 0);
 }
 
-/// Mixed members (IPv4 unicast plus `private`) of one group move to a chain
-/// that adds a community, beside a unicast-only member on the shared path
-/// where the group key allows one. Each mixed member is handed back to the
-/// paced walk, and every family it sends ends re-exported under the new
-/// chain: none is lost, and none keeps the old chain's rows.
-fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi)) {
+/// Mixed members (the `unicast` families plus `private`) of one group move
+/// to a chain that adds a community, beside a unicast-only member on the
+/// shared path where the group key allows one. Each mixed member is handed
+/// back to the paced walk, and every family it sends ends re-exported under
+/// the new chain: none is lost, and none keeps the old chain's rows.
+fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi), unicast: &[(Afi, Safi)]) {
     const OLD: u32 = 0xFDE8_0001;
     const NEW: u32 = 0xFDE8_0002;
     // VPN joins the group key, so a unicast-only member would not share the
     // mixed members' group.
     let unicast_only = u8::from(private.1 != Safi::MplsVpn);
-    let mut fleet = mixed_family_fleet(&community_chain(OLD), private, unicast_only);
+    let mut fleet =
+        mixed_family_fleet_sending(&community_chain(OLD), private, unicast_only, unicast);
     let members = fleet.members.clone();
     let deferred = apply_paced_batch(&mut fleet.manager, &members, &community_chain(NEW));
     assert_eq!(
         deferred,
         members[..MIXED_MEMBERS].to_vec(),
-        "{private:?}: every mixed member is paced, in caller order"
+        "{private:?} with {unicast:?}: every mixed member is paced, in caller order"
     );
     drain_route_chunks(&mut fleet.manager);
-    fleet.manager.resync_dirty_peers_bounded();
+    // The walk's own commands deliver every family; no repair is left owed.
+    assert!(
+        fleet.manager.dirty_peers.is_empty(),
+        "{private:?} with {unicast:?}: members left dirty after the walk"
+    );
     for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
         let peer = fleet.members[index];
         // Per family, its one row's last event: the announced communities,
@@ -19231,11 +19251,13 @@ fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi)) {
         };
         for family in families {
             match last.get(family) {
-                None => panic!("{private:?} {peer}: {family} row not re-exported"),
-                Some(None) => panic!("{private:?} {peer}: {family} row ends withdrawn"),
+                None => panic!("{private:?} with {unicast:?} {peer}: {family} row not re-exported"),
+                Some(None) => {
+                    panic!("{private:?} with {unicast:?} {peer}: {family} row ends withdrawn")
+                }
                 Some(Some(communities)) => assert!(
                     communities.contains(&NEW) && !communities.contains(&OLD),
-                    "{private:?} {peer}: {family} row ends under the old chain: {communities:?}"
+                    "{private:?} with {unicast:?} {peer}: {family} row ends under the old chain: {communities:?}"
                 ),
             }
         }
@@ -19251,7 +19273,14 @@ fn batched_authoritative_cohort_reexports_every_family_of_mixed_members() {
         (Afi::Ipv4, Safi::FlowSpec),
         (Afi::BgpLs, Safi::BgpLs),
     ] {
-        assert_batched_cohort_reexports_every_family(private);
+        // IPv6 unicast beside IPv4 must not admit a mixed member to the
+        // shared unicast path either.
+        for unicast in [
+            &[(Afi::Ipv4, Safi::Unicast)][..],
+            &[(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        ] {
+            assert_batched_cohort_reexports_every_family(private, unicast);
+        }
     }
 }
 

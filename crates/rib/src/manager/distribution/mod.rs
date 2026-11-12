@@ -6135,6 +6135,9 @@ impl RibManager {
                 })
                 .collect::<Vec<_>>();
             manager.apply_export_policy_replacements_synchronously(execution)?;
+            // A walk that failed before a refused cohort's first mover joined
+            // leaves that cohort's destination memberless.
+            manager.discard_refused_cohort_destinations();
             Ok(receipts)
         })
     }
@@ -6189,8 +6192,24 @@ impl RibManager {
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerId>, RibCommandError> {
+        self.discard_refused_cohort_destinations();
         self.apply_export_policy_replacements(replacements, ResidualMode::DeferSenders)
             .map(|outcome| outcome.deferred)
+    }
+
+    /// Discard every recorded refused-cohort destination that no member
+    /// joined, unless a destination prestage now owns that group.
+    fn discard_refused_cohort_destinations(&mut self) {
+        for gid in std::mem::take(&mut self.refused_cohort_destinations) {
+            let prestaged = self.prepared_destination == Some(gid)
+                || self
+                    .pending_destination_prestage
+                    .as_ref()
+                    .is_some_and(|prestage| prestage.destination == gid);
+            if !prestaged {
+                let _ = self.discard_uncommitted_policy_transition_group(gid);
+            }
+        }
     }
 
     /// One command of the paced walk: the batch body for the members that fit
@@ -6608,6 +6627,15 @@ impl RibManager {
                 n_shared_members += members.len();
                 n_destination_groups += 1;
             } else {
+                // A refusal after the destination build leaves the group for
+                // the movers; deferred, they join it only in a later command.
+                let memberless = self
+                    .group_ribs
+                    .get(&destination)
+                    .is_some_and(|group| group.members.is_empty());
+                if memberless && matches!(mode, ResidualMode::DeferSenders) {
+                    self.refused_cohort_destinations.push(destination);
+                }
                 residual.extend(members);
             }
         }

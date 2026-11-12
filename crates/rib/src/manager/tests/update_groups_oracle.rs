@@ -1861,6 +1861,10 @@ impl Oracle {
 
     /// The peer manager's authoritative cohort apply: the batch, then the
     /// paced commands over every member it hands back, until none remain.
+    /// Each command offers every remaining member, not the peer manager's
+    /// doubling window; a command applies a caller-order prefix of what it
+    /// is offered, so the members applied, and the end state, do not depend
+    /// on the window.
     async fn replace_policies_authoritatively(&mut self, policies: &[(Ipv4Addr, PolicyChain)]) {
         let replacements = |peers: &[PeerId]| -> Vec<crate::update::PeerExportPolicyReplacement> {
             peers

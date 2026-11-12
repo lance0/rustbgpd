@@ -209,9 +209,15 @@ order, for the paced walk above; a member that sends no family has nothing to
 resync and is still applied inline. As before, the negotiated families
 decide, not current rows. The walk's turn budget, window, deadlines, commit
 points and rollback are unchanged, and the walk now carries more members
-under the cohort's own two-minute budget: a cohort fallback that fitted that
-budget as one long turn pays the paced walk's per-command overhead instead.
-The first limit above (rollback is one turn over the whole list) remains, and
+under the cohort's own two-minute budget. That one deadline covers the batch,
+the walk's per-command overhead and every other RIB unit that runs between
+its commands (queued UPDATEs, route chunks, timers), which the former single
+turn kept waiting instead. A cohort fallback that fitted the budget as one
+long turn can therefore run out of it under load and roll back, and that
+rollback pays the one-turn restore below. A destination the batch built for
+a shared cohort it then refused is adopted by the walk's first mover; the
+rollback restore, and the next forward batch, discard it if no member
+joined. The first limit above (rollback is one turn over the whole list) remains, and
 so does the remainder's one-member-per-command walk under its own budget.
 
 ## Context

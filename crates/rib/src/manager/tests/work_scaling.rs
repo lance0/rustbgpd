@@ -784,7 +784,11 @@ fn residual_cohort_reload(size: usize, arm: ResidualArm) -> Work {
         longest = longest.max(command[ALL]);
         pending = outcome.unwrap().pending;
     }
-    manager.resync_dirty_peers_bounded();
+    // The walk's own commands deliver every row; no repair is left owed.
+    assert!(
+        manager.dirty_peers.is_empty(),
+        "{arm:?} size {size}: members left dirty after the walk"
+    );
     // Pin the wire: every member ends with every row under its new chain.
     assert_eq!(
         tagged_per_member(&mut receivers, |index| arm.tag(NEW, index)),
@@ -816,6 +820,124 @@ fn residual_cohort_reload_longest_command_is_flat_in_moved_members() {
              {LARGE} moved members at {RESIDUAL_ROWS} rows; one turn carries more than one \
              member's move\nall arms (small, large): {counts:?}",
         );
+    }
+}
+
+/// Update-group tables no member belongs to.
+fn memberless_groups(manager: &RibManager) -> usize {
+    manager
+        .group_ribs
+        .values()
+        .filter(|group| group.members.is_empty())
+        .count()
+}
+
+/// A shared cohort the forward batch refuses after building its destination
+/// (an action-only next-hop change refuses the shared inventory) hands its
+/// members to the paced walk. If the walk fails before any member joins, the
+/// restore must discard that destination; if the walk completes, the members
+/// join it. Either way no memberless group survives, as on the inline path.
+#[test]
+fn refused_cohort_destination_never_outlives_the_walk_memberless() {
+    const OLD: u32 = 0xFC00_0001;
+    const SIZE: usize = 4;
+    let arm = ResidualArm::MixedDestinations;
+    let old = super::update_groups::community_chain(OLD);
+    let mut next = old.clone();
+    next.policies[0].policy.entries[0]
+        .modifications
+        .set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    let all: Vec<PeerId> = (0..SIZE).map(member).collect();
+    let replacements = |chain: &rustbgpd_policy::PolicyChain, peers: &[PeerId]| {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(chain.clone()),
+            })
+            .collect::<Vec<_>>()
+    };
+    for walk_completes in [false, true] {
+        let (_tx, mut manager) = manager();
+        manager.paced_elapsed_for_test = Some(Duration::ZERO);
+        let _receivers: Vec<_> = (0..SIZE)
+            .map(|index| {
+                let (outbound_tx, receiver) = mpsc::channel(4096);
+                let mut up = test_peer_up(member(index), 1, outbound_tx);
+                if let RibUpdate::PeerUp {
+                    export_policy,
+                    peer_asn,
+                    sendable_families,
+                    ..
+                } = &mut up
+                {
+                    *export_policy = Some(old.clone());
+                    *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                    *sendable_families = arm.families();
+                }
+                manager.handle_update(up);
+                receiver
+            })
+            .collect();
+        arm.seed(&mut manager);
+        let source = manager.grouped_member_of(all[0]).unwrap();
+        assert_eq!(memberless_groups(&manager), 0, "setup");
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(&next, &all),
+            reply,
+        });
+        let mut pending = response.try_recv().unwrap().unwrap();
+        assert_eq!(pending, all, "the refused cohort is handed back whole");
+        let receipt = manager.authoritative_transition_receipts.last().unwrap();
+        assert_eq!(
+            (receipt.destination_builds, receipt.shared_members),
+            (1, 0),
+            "the cohort built its destination and was refused"
+        );
+        assert_eq!(memberless_groups(&manager), 1, "the built destination");
+        if walk_completes {
+            while !pending.is_empty() {
+                let (reply, mut response) = oneshot::channel();
+                manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+                    replacements: replacements(&next, &pending),
+                    cost: Some(TWO_PER_COMMAND),
+                    reply,
+                });
+                pending = response.try_recv().unwrap().unwrap().pending;
+            }
+            let destination = manager.grouped_member_of(all[0]).unwrap();
+            assert_ne!(destination, source);
+            assert!(
+                all.iter()
+                    .all(|peer| manager.grouped_member_of(*peer) == Some(destination)),
+                "every mover joined the destination"
+            );
+        } else {
+            // The walk fails before its first command: the peer manager
+            // restores every prior.
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements: replacements(&old, &all),
+                reply,
+            });
+            response.try_recv().unwrap().unwrap();
+            assert!(
+                all.iter()
+                    .all(|peer| manager.grouped_member_of(*peer) == Some(source)),
+                "every member is back in its source group"
+            );
+        }
+        drain_route_chunks(&mut manager);
+        assert_eq!(
+            memberless_groups(&manager),
+            0,
+            "walk_completes={walk_completes}: a memberless destination survived"
+        );
+        // Later churn stages no orphan.
+        manager.handle_update(routes_from(external(), 0, 9, 4));
+        drain_route_chunks(&mut manager);
+        assert_eq!(memberless_groups(&manager), 0, "after churn");
     }
 }
 
