@@ -762,16 +762,20 @@ impl BestSource {
 }
 
 /// The longest turn a paced export-policy command aims for. The EVPN reload
-/// qualification bars the regroup window's `actor_poll` maximum at 300 ms;
-/// this leaves room for one member slower than the estimate.
+/// qualification bars the regroup window's `actor_poll` maximum at 300 ms.
+/// The prediction uses the largest per-member cost measured so far in the
+/// walk; a member heavier than any seen yet can still overshoot, which the
+/// caller bounds by sending at most twice the previous command's applied
+/// members. The command's summary capture and policy reclamation run after
+/// the prediction and are not part of it; their cost is constant per command.
 pub(in crate::manager) const PACED_TURN_BUDGET: std::time::Duration =
     std::time::Duration::from_millis(250);
 
 /// Whether a paced command starts another member. The first always runs.
 /// `elapsed` covers the command so far, but not the pass its `applied`
 /// members still owe, so the prediction adds their pass shares and the next
-/// member's whole cost. Without an estimate (the walk's first command) only
-/// the first member runs, and its observed cost becomes the estimate.
+/// member's whole cost. Without an estimate (no member measured yet) only the
+/// first member runs, and its measured cost becomes the estimate.
 pub(in crate::manager) fn paced_admits_next(
     elapsed: std::time::Duration,
     applied: usize,
@@ -802,7 +806,10 @@ enum ResidualMode {
     DeferEvpn,
     /// Apply residual members in caller order while the turn budget allows
     /// (one command of the paced walk); hand back the rest.
-    Paced(Option<PacedMemberCost>),
+    Paced {
+        cost: Option<PacedMemberCost>,
+        started: std::time::Instant,
+    },
 }
 
 /// What the residual loop did, for the paced walk's reply.
@@ -810,12 +817,15 @@ enum ResidualMode {
 struct ResidualOutcome {
     /// Members handed back, in caller order.
     deferred: Vec<PeerId>,
+    /// Members no longer registered, in caller order.
+    skipped: Vec<PeerId>,
     /// Residual members applied in this call.
     applied: usize,
     /// Slowest single-member recompute.
     recompute_max: std::time::Duration,
-    /// The call's distribution pass.
-    pass: std::time::Duration,
+    /// Slowest applied member's own time in the pass; `None` when the pass
+    /// measured none of them.
+    pass_max: Option<std::time::Duration>,
 }
 
 impl RibManager {
@@ -6174,21 +6184,48 @@ impl RibManager {
         replacements: Vec<PeerExportPolicyReplacement>,
         cost: Option<PacedMemberCost>,
     ) -> Result<PacedApplyOutcome, RibCommandError> {
-        let outcome =
-            self.apply_export_policy_replacements(replacements, ResidualMode::Paced(cost))?;
-        let incoming = cost.unwrap_or_default();
-        let pass_share = u32::try_from(outcome.applied)
-            .ok()
-            .filter(|applied| *applied > 0)
-            .map_or(std::time::Duration::ZERO, |applied| outcome.pass / applied);
+        let started = std::time::Instant::now();
+        let outcome = self.apply_export_policy_replacements(
+            replacements,
+            ResidualMode::Paced { cost, started },
+        )?;
+        // The estimate only grows: a light member (a full writer, a mostly
+        // split-horizon table) never lowers it.
+        let measured = outcome.pass_max.map(|pass_share| PacedMemberCost {
+            recompute: outcome.recompute_max,
+            pass_share,
+        });
+        let cost = match (cost, measured) {
+            (Some(known), Some(measured)) => Some(PacedMemberCost {
+                recompute: known.recompute.max(measured.recompute),
+                pass_share: known.pass_share.max(measured.pass_share),
+            }),
+            (known, measured) => known.or(measured),
+        };
         Ok(PacedApplyOutcome {
             pending: outcome.deferred,
+            skipped: outcome.skipped,
             applied: outcome.applied,
-            cost: PacedMemberCost {
-                recompute: incoming.recompute.max(outcome.recompute_max),
-                pass_share: incoming.pass_share.max(pass_share),
-            },
+            cost,
         })
+    }
+
+    pub(super) fn handle_apply_paced_export_policies(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+        cost: Option<PacedMemberCost>,
+        reply: tokio::sync::oneshot::Sender<Result<PacedApplyOutcome, RibCommandError>>,
+    ) {
+        // A caller whose deadline lapsed has already queued its rollback
+        // behind this command; applying it would only cost a turn.
+        if reply.is_closed() {
+            info!(
+                replacements = replacements.len(),
+                "skipping abandoned paced export-policy command: caller dropped the reply"
+            );
+            return;
+        }
+        let _ = reply.send(self.apply_paced_export_policies(replacements, cost));
     }
 
     fn apply_export_policy_replacements(
@@ -6293,7 +6330,6 @@ impl RibManager {
         mode: ResidualMode,
         receipt: &mut AuthoritativeTransitionReceipt,
     ) -> Result<ResidualOutcome, RibCommandError> {
-        let command_started = std::time::Instant::now();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -6325,6 +6361,14 @@ impl RibManager {
             .filter(|replacement| !seen.insert(replacement.peer))
             .count();
         super::retire_hash_set(&mut seen, &mut || checkpoint());
+        if receipt.duplicate_peers != 0 && matches!(mode, ResidualMode::Paced { .. }) {
+            receipt.failure_stage = "precondition";
+            super::retire_vec(&mut replacements, &mut || checkpoint());
+            self.replacement_checkpoint(true);
+            return Err(RibCommandError::internal(
+                "internal RIB sequencing error: duplicate peer in a paced export-policy command",
+            ));
+        }
         if receipt.duplicate_peers != 0 {
             receipt.precondition_us =
                 u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -6365,6 +6409,7 @@ impl RibManager {
         let phase = std::time::Instant::now();
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
         let mut n_skipped_unregistered = 0_usize;
+        let mut skipped = Vec::new();
         for replacement in replacements {
             checkpoint();
             if self.outbound_peers.contains_key(&replacement.peer) {
@@ -6375,6 +6420,7 @@ impl RibManager {
                     "authoritative export-policy batch skipped a peer no longer registered in the RIB; a reconnect will install the desired policy"
                 );
                 n_skipped_unregistered += 1;
+                skipped.push(replacement.peer);
             }
         }
         // Previous memberships, captured before any mutation.
@@ -6523,6 +6569,12 @@ impl RibManager {
         let mut n_destination_groups = 0_usize;
         for (source, destination, members) in cohorts {
             checkpoint();
+            // A paced command budgets every member and applies them in caller
+            // order, so none takes the unbudgeted shared transition.
+            if matches!(mode, ResidualMode::Paced { .. }) {
+                residual.extend(members);
+                continue;
+            }
             // The shared delta re-exports unicast only; a mover with any
             // other sendable family or private-family row takes the
             // per-member path, which re-exports every family.
@@ -6544,7 +6596,7 @@ impl RibManager {
         let n_residual_members = residual.len();
         // A paced command stops at a caller-order boundary: what it applies
         // is a prefix of its list, and the rest comes back in order.
-        if matches!(mode, ResidualMode::Paced(_)) {
+        if matches!(mode, ResidualMode::Paced { .. }) {
             let order: HashMap<PeerId, usize> = present
                 .iter()
                 .inspect(|_| checkpoint())
@@ -6562,9 +6614,10 @@ impl RibManager {
         let (mut applied, mut recompute_max, mut over_budget) =
             (0_usize, std::time::Duration::ZERO, false);
         let mut estimate = match mode {
-            ResidualMode::Paced(cost) => cost,
+            ResidualMode::Paced { cost, .. } => cost,
             _ => None,
         };
+        let mut applied_peers = Vec::new();
         let phase = std::time::Instant::now();
         let mut evpn_feeds = HashMap::new();
         for peer in residual {
@@ -6572,9 +6625,14 @@ impl RibManager {
             let hand_back = match mode {
                 ResidualMode::All => false,
                 ResidualMode::DeferEvpn => self.carries_evpn_outbound_state(peer),
-                ResidualMode::Paced(_) => {
-                    over_budget = over_budget
-                        || !paced_admits_next(command_started.elapsed(), applied, estimate);
+                ResidualMode::Paced { started, .. } => {
+                    #[cfg(test)]
+                    let elapsed = self
+                        .paced_elapsed_for_test
+                        .unwrap_or_else(|| started.elapsed());
+                    #[cfg(not(test))]
+                    let elapsed = started.elapsed();
+                    over_budget = over_budget || !paced_admits_next(elapsed, applied, estimate);
                     over_budget
                 }
             };
@@ -6602,6 +6660,7 @@ impl RibManager {
                 evpn_feeds.insert(peer, feed);
             }
             applied += 1;
+            applied_peers.push(peer);
             let took = member_started.elapsed();
             recompute_max = recompute_max.max(took);
             // A later member in this turn is judged on the slowest recompute
@@ -6614,7 +6673,8 @@ impl RibManager {
             u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         // A paced command's members are its unit of work, not a fallback:
         // they log as `applied_members` so a reader can tell the paths apart.
-        let (n_fallback_members, n_applied_members) = if matches!(mode, ResidualMode::Paced(_)) {
+        let (n_fallback_members, n_applied_members) = if matches!(mode, ResidualMode::Paced { .. })
+        {
             (0, applied)
         } else {
             (n_residual_members - deferred.len(), 0)
@@ -6634,9 +6694,15 @@ impl RibManager {
         // owns the global retry opportunity, exactly like the single-peer
         // seam's per-call pass.
         let phase = std::time::Instant::now();
+        // A paced command measures its applied members' own time in the pass.
+        if matches!(mode, ResidualMode::Paced { .. }) {
+            self.paced_member_costs =
+                Some(applied_peers.iter().map(|&peer| (peer, None)).collect());
+        }
         self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
-        let pass = phase.elapsed();
-        receipt.distribution_us = u64::try_from(pass.as_micros()).unwrap_or(u64::MAX);
+        let member_costs = self.paced_member_costs.take();
+        receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let pass_max = member_costs.and_then(|costs| costs.into_values().flatten().max());
         receipt.distribution_passes = 1;
         receipt.shared_cohorts = n_destination_groups;
         receipt.shared_members = n_shared_members;
@@ -6646,7 +6712,7 @@ impl RibManager {
         receipt.outcome = "committed";
         // `paced`: nothing ran on the per-member path, but members were
         // handed back for their own commands.
-        receipt.classification = if matches!(mode, ResidualMode::Paced(_)) {
+        receipt.classification = if matches!(mode, ResidualMode::Paced { .. }) {
             "paced_apply"
         } else if n_fallback_members > 0 {
             "fallback"
@@ -6693,9 +6759,10 @@ impl RibManager {
                 .map(|replacement| replacement.peer)
                 .filter(|peer| deferred.contains(peer))
                 .collect(),
+            skipped,
             applied,
             recompute_max,
-            pass,
+            pass_max,
         })
     }
 
@@ -9235,6 +9302,11 @@ impl RibManager {
         self.finish_readiness_owner(prep_installed);
         let distribute_peers = || {
             for peer in peers {
+                let paced_member_started = self
+                    .paced_member_costs
+                    .as_ref()
+                    .is_some_and(|costs| costs.contains_key(&peer))
+                    .then(std::time::Instant::now);
                 // Replay members and members with rejection-inventory work own
                 // independent readiness episodes; an existing outer owner's
                 // identity and age are retained.
@@ -11583,6 +11655,14 @@ impl RibManager {
                     self.replacement_checkpoint(true);
                 }
                 self.finish_readiness_owner(installed);
+                if let (Some(started), Some(slot)) = (
+                    paced_member_started,
+                    self.paced_member_costs
+                        .as_mut()
+                        .and_then(|costs| costs.get_mut(&peer)),
+                ) {
+                    *slot = Some(started.elapsed());
+                }
             }
         };
         if fanout_handoff {

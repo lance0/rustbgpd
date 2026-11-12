@@ -1282,6 +1282,14 @@ pub struct RibManager {
     evpn_table_stamp: u64,
     /// Fairness position for marker-only completion retries on the resync timer.
     evpn_marker_cursor: Option<PeerId>,
+    /// Set only for the distribution pass of one paced export-policy command:
+    /// keyed by the command's applied members, each one's own time in that
+    /// pass once measured, read back by the command.
+    paced_member_costs: Option<HashMap<PeerId, Option<std::time::Duration>>>,
+    /// Tests fix the paced budget clock so members per command do not depend
+    /// on host load.
+    #[cfg(test)]
+    paced_elapsed_for_test: Option<std::time::Duration>,
     /// Closed-cohort wire-oracle preparation only. Never configured by the daemon.
     #[cfg(feature = "bench-internals")]
     bench_evpn_group_ownership: bool,
@@ -2964,6 +2972,9 @@ impl RibManager {
             evpn_recovery_reset: None,
             evpn_table_stamp: 0,
             evpn_marker_cursor: None,
+            paced_member_costs: None,
+            #[cfg(test)]
+            paced_elapsed_for_test: None,
             #[cfg(feature = "bench-internals")]
             bench_evpn_group_ownership: false,
             #[cfg(test)]
@@ -5428,9 +5439,7 @@ impl RibManager {
                 replacements,
                 cost,
                 reply,
-            } => {
-                let _ = reply.send(self.apply_paced_export_policies(replacements, cost));
-            }
+            } => self.handle_apply_paced_export_policies(replacements, cost, reply),
             RibUpdate::RestorePeerExportPoliciesAuthoritatively {
                 replacements,
                 reply,

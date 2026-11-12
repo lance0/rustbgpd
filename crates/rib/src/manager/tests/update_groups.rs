@@ -18904,8 +18904,9 @@ fn apply_paced_batch(
             .deferred_members,
         deferred.len()
     );
-    let (mut pending, mut cost) = (deferred.clone(), None);
+    let (mut pending, mut cost, mut window) = (deferred.clone(), None, 1_usize);
     while !pending.is_empty() {
+        let rest = pending.split_off(window.min(pending.len()));
         let (reply, mut response) = oneshot::channel();
         manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
             replacements: batch_replacements(&pending, policy),
@@ -18914,8 +18915,9 @@ fn apply_paced_batch(
         });
         let outcome = response.try_recv().unwrap().unwrap();
         assert!(outcome.applied >= 1);
-        pending = outcome.pending;
-        cost = Some(outcome.cost);
+        window = (2 * outcome.applied).max(1);
+        pending = outcome.pending.into_iter().chain(rest).collect();
+        cost = outcome.cost;
     }
     deferred
 }

@@ -1084,8 +1084,9 @@ fn answer_rib(
         } => {
             let _ = reply.send(Ok(rustbgpd_rib::PacedApplyOutcome {
                 pending: Vec::new(),
+                skipped: Vec::new(),
                 applied: replacements.len(),
-                cost: rustbgpd_rib::PacedMemberCost::default(),
+                cost: Some(rustbgpd_rib::PacedMemberCost::default()),
             }));
         }
         RibUpdate::ReplacePeerExportPolicy { reply, .. }
@@ -2385,6 +2386,12 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
         "try_send never waits: a full mailbox defers the update, which the run loop sends as a \
          select branch beside the readiness lane, or the next flush sends under \
          await_with_readiness",
+    ),
+    (
+        "policy.rs::admit_rib_command_before",
+        1,
+        "returns the admission to its caller: the paced walk awaits it inside the step it runs \
+         under await_with_readiness, bounded by the walk's forward deadline",
     ),
     (
         "notifications.rs::defer_retired_session_down",

@@ -2,9 +2,9 @@
 
 - An export-policy reload that moves many EVPN peers no longer resyncs all of
   them in one RIB turn. Peers whose sessions send EVPN are applied a few per
-  RIB command, as many as fit a 250 ms turn budget, so UPDATEs from other
-  peers, operator queries and timers run between those commands instead of
-  waiting for the whole cohort.
+  RIB command, as many as are predicted to fit a 250 ms turn budget, so
+  UPDATEs from other peers, operator queries and timers run between those
+  commands instead of waiting for the whole cohort.
   Unicast cohorts are unchanged. The reload still replies once every peer is
   applied and enqueued, and a failure part-way restores every peer's prior
   policy. The `authoritative_batch_phase` log adds `deferred_members`, its

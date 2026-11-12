@@ -1064,15 +1064,15 @@ pub struct PeerExportPolicyReplacement {
     pub export_policy: Option<PolicyChain>,
 }
 
-/// The slowest per-member cost a paced export-policy walk has observed so
-/// far: its recompute, and its share of the shared distribution pass. The
-/// walk carries it from one [`RibUpdate::ApplyPacedExportPolicies`] reply
-/// into the next command.
+/// The largest per-member cost a paced export-policy walk has measured so
+/// far: a member's recompute, and that member's own time in the shared
+/// distribution pass. The walk carries it from one
+/// [`RibUpdate::ApplyPacedExportPolicies`] reply into the next command.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PacedMemberCost {
     /// Slowest single-member recompute.
     pub recompute: std::time::Duration,
-    /// Slowest per-member share of a command's distribution pass.
+    /// Slowest single member's own time in a command's distribution pass.
     pub pass_share: std::time::Duration,
 }
 
@@ -1081,10 +1081,15 @@ pub struct PacedMemberCost {
 pub struct PacedApplyOutcome {
     /// Members left unapplied, in caller order; the caller sends them next.
     pub pending: Vec<PeerId>,
-    /// Members this command applied (unregistered peers count as skipped).
+    /// Members no longer registered, in caller order: neither applied nor
+    /// pending (a reconnect installs the session's accepted chain).
+    pub skipped: Vec<PeerId>,
+    /// Members this command applied: every sent member that is neither
+    /// pending nor skipped, all before the first pending one.
     pub applied: usize,
-    /// The walk's cost estimate, updated with this command's observations.
-    pub cost: PacedMemberCost,
+    /// The walk's cost estimate, updated with this command's measurements;
+    /// `None` until a pass has measured an applied member.
+    pub cost: Option<PacedMemberCost>,
 }
 
 /// Ordered acknowledgement for one member of an exact rollback-only export
@@ -3836,11 +3841,12 @@ pub enum RibUpdate {
     },
     /// Apply members the authoritative batch handed back, in caller order,
     /// through the batch's per-member body and one shared distribution pass,
-    /// for as many members as fit the paced turn budget. The first member
-    /// always runs. Members not reached keep their installed chain and come
-    /// back in `pending`; the caller sends them in the next command with the
-    /// returned cost. Unregistered peers are skipped, as the per-peer
-    /// replacement skips them.
+    /// for as many members as are predicted to fit the paced turn budget. The
+    /// first member always runs. Members not reached keep their installed
+    /// chain and come back in `pending`; the caller sends them in the next
+    /// command with the returned cost. Unregistered peers come back in
+    /// `skipped`. Duplicate peers reject the command before any mutation. A
+    /// command whose caller already dropped the reply is skipped whole.
     ApplyPacedExportPolicies {
         /// Remaining members in caller transaction order.
         replacements: Vec<PeerExportPolicyReplacement>,

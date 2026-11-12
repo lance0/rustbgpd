@@ -123,21 +123,25 @@ impl Fleet {
         response.try_recv().unwrap().unwrap()
     }
 
-    /// The peer manager's walk over `pending`, one paced command at a time;
-    /// `between` runs after each command. A fixed `cost` replaces the
-    /// estimate each reply carries, so the members per command are
-    /// controlled rather than timed. Returns each command's applied count.
+    /// The peer manager's walk over `pending`: each command offers a window
+    /// of at most twice the previous command's applied members; `between`
+    /// runs after each command with the members it applied. A fixed `cost`
+    /// replaces the estimate each reply carries, and the fleet's budget clock
+    /// is fixed, so members per command do not depend on host load. Returns
+    /// each command's applied count.
     pub(super) fn walk(
         &mut self,
         mut pending: Vec<PeerId>,
         cost: Option<PacedMemberCost>,
         mut between: impl FnMut(&mut Self, &[PeerId]),
     ) -> Vec<usize> {
-        let mut estimate = cost;
+        let (mut estimate, mut window) = (cost, 1_usize);
         let mut applied = Vec::new();
         while !pending.is_empty() {
+            let rest = pending.split_off(window.min(pending.len()));
             let outcome = self.paced(&pending, estimate);
             assert!(outcome.applied >= 1, "every command makes progress");
+            assert_eq!(outcome.skipped, Vec::<PeerId>::new());
             let done = pending.len() - outcome.pending.len();
             assert_eq!(
                 pending[done..],
@@ -146,8 +150,9 @@ impl Fleet {
             );
             between(self, &pending[..done]);
             applied.push(outcome.applied);
-            pending = outcome.pending;
-            estimate = cost.or(Some(outcome.cost));
+            window = (2 * outcome.applied).max(1);
+            pending = outcome.pending.into_iter().chain(rest).collect();
+            estimate = cost.or(outcome.cost);
         }
         applied
     }
@@ -187,6 +192,7 @@ pub(super) fn evpn_fleet(members: usize, rows: u32, owned: bool) -> Fleet {
         BgpMetrics::new(),
     );
     manager.flush_poll_budget = Duration::MAX;
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
     let members: Vec<_> = (0..members).map(member).collect();
     let mut outputs: Vec<_> = members
         .iter()
@@ -348,20 +354,21 @@ fn paced_reload_matches_the_per_peer_reference_with_route_chunks_between_steps()
             .map(|peer| paced.manager.export_chains.get(peer).cloned())
             .collect();
         assert_eq!(after, before, "owned={owned}: deferred chains untouched");
-        // Two members per command, then a source route chunk. A chunk
-        // follows every command: before the first member joins it, the owned
-        // arm's hand-prepared destination is memberless and not maintained,
-        // which production never leaves behind.
+        // At most two members per command (windows 1, 2, 4), then a source
+        // route chunk. A chunk follows every command: before the first member
+        // joins it, the owned arm's hand-prepared destination is memberless
+        // and not maintained, which production never leaves behind.
         let mut round = 0;
         let per_command = paced.walk(deferred, Some(TWO_PER_COMMAND), |fleet, _| {
             fleet.churn(round);
             round += 1;
         });
-        assert_eq!(per_command, [2, 2], "owned={owned}");
+        assert_eq!(per_command, [1, 2, 1], "owned={owned}");
 
         let mut reference = evpn_fleet(4, 6, owned);
-        for (round, pair) in (0..).zip(reference.members.clone().chunks(2)) {
-            for &peer in pair {
+        let members = reference.members.clone();
+        for (round, group) in (0..).zip([&members[..1], &members[1..3], &members[3..]]) {
+            for &peer in group {
                 reference.step(peer).unwrap();
             }
             reference.churn(round);
@@ -373,7 +380,7 @@ fn paced_reload_matches_the_per_peer_reference_with_route_chunks_between_steps()
             .manager
             .apply_export_policy_replacements_synchronously(replacements)
             .unwrap();
-        for round in 0..2 {
+        for round in 0..3 {
             whole.churn(round);
         }
 
@@ -408,7 +415,7 @@ fn paced_reload_matches_the_per_peer_reference_with_route_chunks_between_steps()
             assert_eq!(
                 final_rows.len(),
                 6,
-                "owned={owned}: 6 + 4 announced - 4 withdrawn"
+                "owned={owned}: each chunk announces one row and withdraws one"
             );
             assert!(
                 final_rows
@@ -437,10 +444,14 @@ fn deferred_member_that_flaps_mid_walk_is_skipped_or_converges_to_the_new_chain(
         peer: gone,
         session_id: 7,
     });
-    // A peer that left the RIB is skipped, not returned: the per-peer
-    // replacement answers `NotFound` and the walk moves on.
+    // A peer that left the RIB comes back in `skipped`, neither applied nor
+    // pending (the per-peer replacement answers `NotFound`).
     let outcome = fleet.paced(&[gone], None);
-    assert_eq!((outcome.applied, outcome.pending), (0, vec![]));
+    assert_eq!(
+        (outcome.applied, outcome.pending, outcome.skipped),
+        (0, vec![], vec![gone]),
+        "the departed peer is reported skipped"
+    );
     assert!(matches!(
         fleet.step(gone),
         Err(RibCommandError::NotFound(_))
@@ -640,9 +651,39 @@ fn paced_budget_admits_exactly_while_the_predicted_turn_fits() {
 #[test]
 fn paced_command_applies_the_admitted_prefix_through_one_pass() {
     let mut fleet = evpn_fleet(6, 4, false);
+    // An installed chain per member, so a member left pending can be checked
+    // for its exact installed instance (its term-hit counters), not equality.
+    let initial = community_chain(0xFC00_0002);
+    for peer in fleet.members.clone() {
+        let (reply, mut response) = oneshot::channel();
+        fleet
+            .manager
+            .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                peer,
+                export_policy: Some(initial.clone()),
+                reply,
+            });
+        response.try_recv().unwrap().unwrap();
+    }
+    let counters = |fleet: &Fleet, peer: &PeerId| {
+        Arc::clone(
+            fleet
+                .manager
+                .export_chains
+                .get(peer)
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .hit_counters(),
+        )
+    };
+    let installed: HashMap<PeerId, _> = fleet
+        .members
+        .iter()
+        .map(|peer| (*peer, counters(&fleet, peer)))
+        .collect();
     let mut pending = fleet.batch();
     assert_eq!(pending, fleet.members);
-    let old = fleet.manager.export_chains.get(&pending[0]).cloned();
     for (cost, expected) in [
         (None, 1),
         (Some(TWO_PER_COMMAND), 2),
@@ -669,10 +710,9 @@ fn paced_command_applies_the_admitted_prefix_through_one_pass() {
             );
         }
         for peer in &outcome.pending {
-            assert_eq!(
-                fleet.manager.export_chains.get(peer),
-                old.as_ref(),
-                "{peer}: untouched"
+            assert!(
+                Arc::ptr_eq(&counters(&fleet, peer), &installed[peer]),
+                "{peer}: the installed chain instance, untouched"
             );
         }
         let receipt = fleet
@@ -690,10 +730,11 @@ fn paced_command_applies_the_admitted_prefix_through_one_pass() {
             ("paced_apply", expected, outcome.pending.len(), 0),
             "{cost:?}: paced members are not the fallback"
         );
-        // The reply's estimate is the slowest seen, this command's included.
+        // The reply's estimate never shrinks below what came in.
+        let reply = outcome.cost.expect("a resynced member gives an estimate");
         let incoming = cost.unwrap_or_default();
-        assert!(outcome.cost.recompute >= incoming.recompute);
-        assert!(outcome.cost.pass_share >= incoming.pass_share);
+        assert!(reply.recompute >= incoming.recompute);
+        assert!(reply.pass_share >= incoming.pass_share);
         pending = outcome.pending;
     }
     assert_eq!(pending, Vec::<PeerId>::new());
@@ -755,7 +796,7 @@ fn paced_walk_split_mid_list_commits_every_member_once_and_in_order() {
             );
         }
     });
-    assert_eq!(per_command, [2, 2, 1]);
+    assert_eq!(per_command, [1, 2, 2]);
     assert_eq!(committed, order, "each member once, in caller order");
     let applied: usize = fleet.manager.authoritative_transition_receipts[receipts..]
         .iter()
@@ -771,4 +812,103 @@ fn paced_walk_split_mid_list_commits_every_member_once_and_in_order() {
                 .all(|route| route.communities().contains(&TAGGED))
         );
     }
+}
+
+/// A pending member that re-registered as unicast-only would qualify for the
+/// shared cohort transition; a paced command still applies it through the
+/// budgeted per-member body, in caller order.
+#[test]
+fn paced_command_bypasses_the_shared_cohort_path() {
+    let mut fleet = evpn_fleet(3, 4, false);
+    let deferred = fleet.batch();
+    let unicast = deferred[1];
+    let index = fleet
+        .members
+        .iter()
+        .position(|peer| *peer == unicast)
+        .unwrap();
+    fleet.manager.handle_update(RibUpdate::PeerDown {
+        peer: unicast,
+        session_id: 7,
+    });
+    fleet.outputs[index] = peer_up(
+        &mut fleet.manager,
+        unicast,
+        8,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        None,
+    );
+    let source = fleet.manager.grouped_member_of(unicast);
+    assert!(source.is_some());
+    let outcome = fleet.paced(&deferred, Some(ONE_PER_COMMAND));
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(outcome.pending, deferred[1..]);
+    assert_eq!(
+        fleet.manager.export_chains.get(&unicast),
+        Some(&None),
+        "the unicast-only member waits for its turn"
+    );
+    assert_eq!(fleet.manager.grouped_member_of(unicast), source);
+    let outcome = fleet.paced(&outcome.pending, Some(ONE_PER_COMMAND));
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(
+        fleet.manager.export_chains.get(&unicast),
+        Some(&Some(fleet.next.clone()))
+    );
+}
+
+/// A duplicate peer rejects the whole paced command before any mutation, so
+/// the walk rolls back instead of applying it unbudgeted.
+#[test]
+fn paced_command_rejects_duplicates_before_mutation() {
+    let mut fleet = evpn_fleet(2, 4, false);
+    let deferred = fleet.batch();
+    let before = fleet.manager.export_chains.get(&deferred[0]).cloned();
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ApplyPacedExportPolicies {
+            replacements: [deferred[0], deferred[0]]
+                .iter()
+                .map(|&peer| PeerExportPolicyReplacement {
+                    peer,
+                    export_policy: Some(fleet.next.clone()),
+                })
+                .collect(),
+            cost: None,
+            reply,
+        });
+    assert!(matches!(
+        response.try_recv().unwrap(),
+        Err(RibCommandError::Internal(_))
+    ));
+    assert_eq!(
+        fleet.manager.export_chains.get(&deferred[0]).cloned(),
+        before
+    );
+}
+
+/// A paced command whose caller has already gone (its deadline lapsed and
+/// the rollback is queued behind) is skipped whole.
+#[test]
+fn paced_command_with_a_dropped_reply_is_skipped() {
+    let mut fleet = evpn_fleet(2, 4, false);
+    let deferred = fleet.batch();
+    let before = fleet.manager.export_chains.get(&deferred[0]).cloned();
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    fleet
+        .manager
+        .handle_update(RibUpdate::ApplyPacedExportPolicies {
+            replacements: vec![PeerExportPolicyReplacement {
+                peer: deferred[0],
+                export_policy: Some(fleet.next.clone()),
+            }],
+            cost: None,
+            reply,
+        });
+    assert_eq!(
+        fleet.manager.export_chains.get(&deferred[0]).cloned(),
+        before
+    );
 }
