@@ -838,11 +838,7 @@ impl PeerManager {
             };
             retain_installed_policy(managed.import_policy.as_ref(), &mut chains.import);
             retain_installed_policy(managed.export_policy.as_ref(), &mut chains.export);
-            if managed.import_policy == chains.import
-                && managed.export_policy == chains.export
-                && !managed.pending_refresh
-                && !managed.pending_export_apply
-            {
+            if managed.policy_settled(chains.import.as_ref(), chains.export.as_ref()) {
                 continue;
             }
             resolved.policy_targets.push(ResolvedPeerPolicy {

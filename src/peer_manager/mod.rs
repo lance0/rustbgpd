@@ -774,6 +774,18 @@ struct ManagedPeerState {
     advertise_graceful_shutdown: bool,
 }
 
+impl ManagedPeerState {
+    /// Whether this peer already runs `import`/`export` with no follow-up
+    /// owed. A reload generation and an honor-knob re-drive retarget exactly
+    /// the peers for which this is false.
+    fn policy_settled(&self, import: Option<&PolicyChain>, export: Option<&PolicyChain>) -> bool {
+        self.import_policy.as_ref() == import
+            && self.export_policy.as_ref() == export
+            && !self.pending_refresh
+            && !self.pending_export_apply
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MaxPrefixLatch {
     error: String,

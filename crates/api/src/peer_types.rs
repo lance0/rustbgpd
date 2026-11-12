@@ -1531,7 +1531,9 @@ pub enum PeerManagerCommand {
         reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Hot-apply `[global] honor_graceful_shutdown` by recomputing
-    /// effective runtime policies for EBGP peers.
+    /// effective runtime policies for EBGP peers. When the knob already has
+    /// this value, retarget only the EBGP peers still behind the snapshot
+    /// (a SIGHUP re-drive of an earlier partial fan-out).
     SetHonorGracefulShutdown {
         /// Whether RFC 8326 receiver behavior is enabled.
         enabled: bool,
@@ -1539,7 +1541,8 @@ pub enum PeerManagerCommand {
         reply: oneshot::Sender<Result<(), HonorKnobPartial>>,
     },
     /// Hot-apply `[global] honor_blackhole` by recomputing effective runtime
-    /// policies for EBGP peers.
+    /// policies for EBGP peers. When the knob already has this value,
+    /// retarget only the EBGP peers still behind the snapshot.
     SetHonorBlackhole {
         /// Whether RFC 7999 receiver scoping behavior is enabled.
         enabled: bool,

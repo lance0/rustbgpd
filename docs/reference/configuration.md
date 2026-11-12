@@ -390,9 +390,9 @@ session wedged, etc.). The value reported by `rustbgpd --diff` and
 running.
 A peer left behind (its update or owed Route Refresh failed) does not abort
 the reload; the SIGHUP receipt (`rbgp config last-reload`) reports
-`known_partial` and names the peer until the next reload replaces it. A no-op
-SIGHUP does not retry the peer. A later generation-route reload, a per-peer
-policy apply that reaches it, re-setting the knob, or a restart does; see
+`known_partial` and names the peer until the next reload replaces it. The
+next SIGHUP retries the peer, even with the file unchanged. A generation-route
+reload, a per-peer policy apply that reaches it, re-setting the knob, or a restart does; see
 [Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply) for
 the exact triggers and limits.
 A SIGHUP that changes this field together with static-neighbor, peer-group,
@@ -510,7 +510,8 @@ failure signal.
 SIGHUP hot-applies this field with the same best-effort partial-apply
 semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
 for EBGP peers and advances the live snapshot; a left-behind peer is named
-in a `known_partial` receipt and retried by the triggers in
+in a `known_partial` receipt and retried by the next SIGHUP and the other
+triggers in
 [Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply). As with
 `honor_graceful_shutdown`, combining the change with static-neighbor,
 peer-group, policy, or dataset changes in one SIGHUP is rejected before any

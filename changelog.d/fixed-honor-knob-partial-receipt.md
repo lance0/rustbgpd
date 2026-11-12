@@ -9,7 +9,6 @@
   and `GetLastSighupReload` name each such peer under the
   `honor_graceful_shutdown.apply` or `honor_blackhole.apply` bucket, and
   `rbgp doctor` warns on the partial reload. The knob is still installed
-  and the rest of the reload still applies. A no-op SIGHUP does not retry
-  those peers; see
-  [Honor-knob partial apply](../docs/reference/reload-matrix.md#honor-knob-partial-apply)
-  for the triggers that do.
+  and the rest of the reload still applies. The next SIGHUP retries those
+  peers; see
+  [Honor-knob partial apply](../docs/reference/reload-matrix.md#honor-knob-partial-apply).

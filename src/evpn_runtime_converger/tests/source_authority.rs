@@ -107,6 +107,7 @@ async fn evpn_source_authority_follows_generation_bridge_adoption() {
             SighupReloadPlan {
                 baseline_runtime: old.config(),
                 desired,
+                honor_redrive: crate::reload::HonorRedrive::default(),
             },
             old.global.telemetry.grpc_tcp.as_ref(),
             old.global.telemetry.grpc_uds.as_ref(),

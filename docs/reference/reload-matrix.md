@@ -533,12 +533,24 @@ target counts as applied. Each left-behind peer is a failure and an
 unapplied identity named by its peer key, under the bucket
 `honor_graceful_shutdown.apply` or `honor_blackhole.apply`. Unlike other
 sequential-route failures, the reload continues with its remaining steps.
-The receipt describes only the latest SIGHUP: any later reload, including a
-no-op SIGHUP, replaces it and clears the `rbgp doctor` warning while a
-left-behind peer may still be behind. The per-peer `WARN` log lines remain.
+The receipt describes only the latest SIGHUP. The per-peer `WARN` log lines
+remain.
 
-Nothing retries a left-behind peer on a timer, and a no-op SIGHUP does not
-touch it. These retarget it:
+Nothing retries a left-behind peer on a timer. The next SIGHUP does, even with
+the file unchanged, so the operator action is to fix the cause and send
+SIGHUP again (or run `rbgp reload`). After a `known_partial` honor step, each
+later sequential-route SIGHUP, including the follow-up reload for a SIGHUP
+coalesced during another reload, runs that step again with the unchanged knob
+value. The re-drive retargets only the EBGP peers whose installed chains
+differ from the running config or that still owe a Route Refresh or export
+apply; every other peer gets no session command. The step is then receipted
+applied once those peers acknowledge, or `known_partial` again, naming each
+peer still behind. A peer deleted in the meantime is no longer retried. A
+reload rejected before any effect, or one that stops before its honor step,
+leaves the retry owed for the next SIGHUP; a `complete` receipt clears it.
+The retry is held in daemon memory, and a restart reapplies every peer anyway.
+
+These also retarget a left-behind peer:
 
 - The next reload that takes the **generation** route. That needs a
   generation-class change (static or interface-only `[[neighbors]]`,
