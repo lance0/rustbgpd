@@ -92,7 +92,9 @@ pub(super) enum DeferredStop {
 }
 
 impl DeferredStop {
-    fn label(&self) -> &'static str {
+    // Not `label`: the v1 stable-surface checker traces every `.label()`
+    // caller as a pinned metric label source and fails closed on others.
+    fn reason(&self) -> &'static str {
         match self {
             Self::Close => "close",
             Self::QueueFull => "queue_full",
@@ -899,7 +901,7 @@ impl PeerSession {
                 // included, falls back to its own encoding.
                 debug!(
                     peer = %self.peer_label,
-                    reason = stop.label(),
+                    reason = stop.reason(),
                     "shared encode stopped for a session command"
                 );
                 return None;
