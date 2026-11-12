@@ -56,7 +56,7 @@ are `sensitive_read`; `Set` is `operator_only`.
 | RPC | Status |
 |-----|--------|
 | `Capabilities` | Returns gNMI version `0.10.0`, the OpenConfig modules backing the supported paths, and `JSON` / `JSON_IETF` encodings. |
-| `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. |
+| `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. A request carries at most 16 paths, as `Subscribe` does; more return `INVALID_ARGUMENT`. Paths that select the same data, after joining the prefix, return one notification. A request whose paths would render more than 65,536 leaf updates returns `RESOURCE_EXHAUSTED` before rendering; a full-state all-neighbors path costs ten updates per neighbor, so one such path serves up to 6,553 neighbors. Rendering runs off the async workers, at most four `Get`s at once per listener; further `Get`s wait for a slot. |
 | `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
 | `Set` | Operator-only. Supports the static-neighbor, peer-group, and dynamic-neighbor-prefix config subsets below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
 

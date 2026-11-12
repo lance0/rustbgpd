@@ -919,11 +919,18 @@ impl RouteFilters {
             })
         };
 
-        let large_communities = req
+        // Sorted and deduplicated, so a route's match costs a binary search
+        // per route community rather than a scan of every filter term.
+        let mut communities = req.community_filter.clone();
+        communities.sort_unstable();
+        communities.dedup();
+        let mut large_communities: Vec<_> = req
             .large_community_filter
             .iter()
             .filter_map(|value| parse_canonical_large_community(value))
             .collect();
+        large_communities.sort_unstable_by_key(large_community_key);
+        large_communities.dedup();
 
         let rpki_validation = match proto::RouteOriginValidation::try_from(req.rpki_validation) {
             Ok(proto::RouteOriginValidation::Unspecified) => None,
@@ -955,7 +962,7 @@ impl RouteFilters {
             prefix,
             longer: req.longer_prefixes,
             origin_asn: req.origin_asn,
-            communities: req.community_filter.clone(),
+            communities,
             large_community_filter_active: !req.large_community_filter.is_empty(),
             large_communities,
             rpki_validation,
@@ -1031,20 +1038,21 @@ impl RouteFilters {
             }
 
             if !self.communities.is_empty()
-                && !self
+                && !attrs
                     .communities
                     .iter()
-                    .any(|c| attrs.communities.contains(c))
+                    .any(|c| self.communities.binary_search(c).is_ok())
             {
                 return false;
             }
 
             if self.large_community_filter_active
                 && (self.large_communities.is_empty()
-                    || !self
-                        .large_communities
-                        .iter()
-                        .any(|lc| attrs.large_communities.contains(lc)))
+                    || !attrs.large_communities.iter().any(|lc| {
+                        self.large_communities
+                            .binary_search_by_key(&large_community_key(lc), large_community_key)
+                            .is_ok()
+                    }))
             {
                 return false;
             }
@@ -1052,6 +1060,14 @@ impl RouteFilters {
 
         true
     }
+}
+
+fn large_community_key(community: &LargeCommunity) -> (u32, u32, u32) {
+    (
+        community.global_admin,
+        community.local_data1,
+        community.local_data2,
+    )
 }
 
 fn parse_canonical_large_community(value: &str) -> Option<LargeCommunity> {
@@ -11201,6 +11217,48 @@ mod tests {
             as_path_contains: None,
         };
         assert!(!wrong_community.matches(&route));
+    }
+
+    #[test]
+    fn route_filters_canonicalize_repeated_community_terms() {
+        let large = |global_admin, local_data1, local_data2| LargeCommunity {
+            global_admin,
+            local_data1,
+            local_data2,
+        };
+        let request = proto::ListRoutesRequest {
+            community_filter: vec![300, 100, 200, 100, 300],
+            large_community_filter: vec![
+                "65001:9:9".to_string(),
+                "65001:1:1".to_string(),
+                "65001:9:9".to_string(),
+            ],
+            ..list_routes_request()
+        };
+        let filters = RouteFilters::from_request(&request).unwrap();
+        assert_eq!(filters.communities, vec![100, 200, 300]);
+        assert_eq!(
+            filters.large_communities,
+            vec![large(65001, 1, 1), large(65001, 9, 9)]
+        );
+
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let both = test_route(
+            prefix,
+            vec![
+                PathAttribute::Communities(vec![7, 300]),
+                PathAttribute::LargeCommunities(vec![large(65001, 9, 9)]),
+            ],
+        );
+        assert!(filters.matches(&both));
+        let neither = test_route(
+            prefix,
+            vec![
+                PathAttribute::Communities(vec![7]),
+                PathAttribute::LargeCommunities(vec![large(65001, 9, 9)]),
+            ],
+        );
+        assert!(!filters.matches(&neither));
     }
 
     #[test]

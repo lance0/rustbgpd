@@ -440,6 +440,11 @@ paths return `UNIMPLEMENTED` instead of bypassing the transaction model. See
 [gnmi.md](gnmi.md) for the full `ON_CHANGE` v1 scope (initial sync,
 reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 
+`Get` and `Subscribe` accept at most 16 paths per request (`INVALID_ARGUMENT`
+beyond). A `Get` whose paths would render more than 65,536 leaf updates
+returns `RESOURCE_EXHAUSTED` before rendering; see
+[gnmi.md](gnmi.md#supported-rpcs) for how paths are counted.
+
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.
 

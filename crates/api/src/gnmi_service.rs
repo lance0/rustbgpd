@@ -41,6 +41,18 @@ const MAX_PERIODIC_INTERVAL: Duration = Duration::from_hours(1);
 /// bounds the paths within a single request; this bounds how many open streams the
 /// target will service at once so a flood of collectors cannot exhaust resources.
 const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
+/// Paths one `Get` may carry, matching Subscribe's [`MAX_SUBSCRIPTIONS`].
+/// Each all-neighbors path renders every neighbor, so the path count
+/// multiplies the response.
+const MAX_GET_PATHS: usize = MAX_SUBSCRIPTIONS;
+/// Leaf updates one `Get` may render. A full-state all-neighbors path costs
+/// ten updates per neighbor, so this serves a whole roster of 6,553 neighbors
+/// in one request; a larger request is refused before any rendering.
+const MAX_GET_UPDATES: usize = 65_536;
+/// `Get` renders running at once on the blocking pool. Further `Get`s wait
+/// for a slot before taking a peer snapshot, which bounds the memory held by
+/// concurrent renders to this many [`MAX_GET_UPDATES`] responses.
+const GET_RENDER_SLOTS: usize = 4;
 
 /// Preserve a periodic path's monotonic phase while skipping every deadline
 /// that passed during delayed work. The remainder avoids an unbounded catch-up
@@ -150,6 +162,8 @@ pub struct GnmiService {
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
     /// of each open stream.
     subscribe_slots: Arc<tokio::sync::Semaphore>,
+    /// Bounds concurrent `Get` renders (see [`GET_RENDER_SLOTS`]).
+    get_render_slots: Arc<tokio::sync::Semaphore>,
     /// Subscribes to the peer manager's live session-event broadcast for
     /// `Subscribe ON_CHANGE`.
     session_events: SessionEventsFn,
@@ -249,6 +263,7 @@ impl GnmiService {
             }),
             initial_roster_gate: None,
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
+            get_render_slots: Arc::new(tokio::sync::Semaphore::new(GET_RENDER_SLOTS)),
             session_events: Arc::new(|| {
                 Box::pin(async {
                     Err(Status::unavailable(
@@ -280,14 +295,21 @@ impl GnmiService {
 
         // Parse every requested path before touching any snapshot so a malformed
         // or unsupported path fails fast without a peer-manager round-trip.
-        let queries = request
-            .path
-            .iter()
-            .map(|path| {
-                let full_path = combine_paths(request.prefix.as_ref(), path)?;
-                parse_supported_path(&full_path)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Paths that select the same data render once.
+        let mut queries = Vec::with_capacity(request.path.len());
+        for path in &request.path {
+            let query = parse_supported_path(&combine_paths(request.prefix.as_ref(), path)?)?;
+            if !queries.contains(&query) {
+                queries.push(query);
+            }
+        }
+
+        // Wait for a render slot before the snapshot, so queued Gets hold no
+        // roster copy.
+        let permit = Arc::clone(&self.get_render_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| Status::unavailable("gNMI Get render slots closed"))?;
 
         // Snapshot before ListPeers: registration may finish during that read.
         let initial_roster_pending = self
@@ -306,28 +328,48 @@ impl GnmiService {
             None
         };
 
-        let mut notifications = Vec::with_capacity(queries.len());
-        for query in &queries {
-            let updates = self
-                .render_query(query, peers.as_deref(), encoding)
-                .map_err(|status| {
-                    if initial_roster_pending
-                        && matches!(query, SupportedPath::Neighbor { .. })
-                        && status.code() == tonic::Code::NotFound
-                    {
-                        Status::unavailable("initial configured-peer roster not installed")
-                    } else {
-                        status
-                    }
-                })?;
-            notifications.push(gnmi::Notification {
-                timestamp: now_nanos(),
-                prefix: None,
-                update: updates,
-                delete: Vec::new(),
-                atomic: false,
-            });
+        let planned = queries
+            .iter()
+            .map(|query| query.max_updates(peers.as_ref().map_or(0, Vec::len)))
+            .fold(0_usize, usize::saturating_add);
+        if planned > MAX_GET_UPDATES {
+            return Err(Status::resource_exhausted(format!(
+                "gNMI Get would render {planned} updates, over the limit of \
+                 {MAX_GET_UPDATES}; request fewer paths or specific neighbors"
+            )));
         }
+
+        // Up to MAX_GET_UPDATES leaves: render on the blocking pool so a large
+        // roster never holds an async worker.
+        let service = self.clone();
+        let notifications = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut notifications = Vec::with_capacity(queries.len());
+            for query in &queries {
+                let updates = service
+                    .render_query(query, peers.as_deref(), encoding)
+                    .map_err(|status| {
+                        if initial_roster_pending
+                            && matches!(query, SupportedPath::Neighbor { .. })
+                            && status.code() == tonic::Code::NotFound
+                        {
+                            Status::unavailable("initial configured-peer roster not installed")
+                        } else {
+                            status
+                        }
+                    })?;
+                notifications.push(gnmi::Notification {
+                    timestamp: now_nanos(),
+                    prefix: None,
+                    update: updates,
+                    delete: Vec::new(),
+                    atomic: false,
+                });
+            }
+            Ok::<_, Status>(notifications)
+        })
+        .await
+        .map_err(|error| Status::internal(format!("gNMI Get render failed: {error}")))??;
 
         Ok(gnmi::GetResponse {
             notification: notifications,
@@ -1153,6 +1195,16 @@ impl SupportedPath {
             SupportedPath::Neighbor { .. } | SupportedPath::AllNeighbors { .. }
         )
     }
+
+    /// Upper bound on the updates this path renders against `peers` neighbors.
+    fn max_updates(&self, peers: usize) -> usize {
+        match self {
+            SupportedPath::Global { leaf: Some(_) } => 1,
+            SupportedPath::Global { leaf: None } => 2,
+            SupportedPath::Neighbor { select, .. } => select.leaves().len(),
+            SupportedPath::AllNeighbors { select } => peers.saturating_mul(select.leaves().len()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1184,6 +1236,11 @@ fn validate_get_request(request: &gnmi::GetRequest) -> Result<(), Status> {
         return Err(Status::invalid_argument(
             "gNMI Get requires at least one path",
         ));
+    }
+    if request.path.len() > MAX_GET_PATHS {
+        return Err(Status::invalid_argument(format!(
+            "gNMI Get supports at most {MAX_GET_PATHS} paths",
+        )));
     }
     let data_type = gnmi::get_request::DataType::try_from(request.r#type).map_err(|_| {
         Status::invalid_argument(format!("unknown gNMI Get data type {}", request.r#type))
@@ -3737,6 +3794,78 @@ mod tests {
         service.get(request).await.unwrap();
         // Two neighbor paths, but the peer snapshot is fetched exactly once.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// An all-neighbors prefix plus many empty paths: each path would render
+    /// the whole roster.
+    fn empty_paths_under_all_neighbors(count: usize) -> Request<gnmi::GetRequest> {
+        Request::new(gnmi::GetRequest {
+            prefix: Some(mounted_path(&[pe("bgp"), pe("neighbors")])),
+            path: vec![gnmi::Path::default(); count],
+            r#type: gnmi::get_request::DataType::State as i32,
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            use_models: Vec::new(),
+            extension: Vec::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn get_path_count_is_bounded_before_the_peer_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(vec![test_peer("203.0.113.2".parse().unwrap())]) }
+        });
+
+        let error = service
+            .get(empty_paths_under_all_neighbors(MAX_GET_PATHS + 1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(error.message(), "gNMI Get supports at most 16 paths");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // At the bound the identical combined paths render once.
+        let response = service
+            .get(empty_paths_under_all_neighbors(MAX_GET_PATHS))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.notification.len(), 1);
+        assert_eq!(response.notification[0].update.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn get_rendered_update_count_is_bounded() {
+        // A full-state neighbor renders ten leaves, so 6,553 neighbors fit
+        // MAX_GET_UPDATES and one more does not.
+        let roster = |count: u32| -> Vec<PeerInfo> {
+            (0..count)
+                .map(|index| test_peer(IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + index))))
+                .collect()
+        };
+        let all_neighbors = || get_request(mounted_path(&[pe("bgp"), pe("neighbors")]));
+
+        let response = test_service(roster(6_553))
+            .get(all_neighbors())
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.notification[0].update.len(), 65_530);
+
+        let error = test_service(roster(6_554))
+            .get(all_neighbors())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            error.message(),
+            "gNMI Get would render 65540 updates, over the limit of 65536; \
+             request fewer paths or specific neighbors"
+        );
     }
 
     #[tokio::test]
