@@ -730,8 +730,37 @@ fn reload_settled_since(
     }
 }
 
-fn daemon_restarted() -> CliError {
-    CliError::Rpc("the daemon restarted while waiting; reload outcome unknown".into())
+/// The daemon behind the socket must still be the process that was signalled.
+/// A reconnect to a new process replaces the transport's identity, and a dead
+/// process has none; neither a new daemon's record nor a broken transport says
+/// anything about the reload this command's signal started.
+fn same_daemon(connection: &Connection, process: LocalProcess) -> Result<(), CliError> {
+    match connection.local_process() {
+        Some(current) if current == process => Ok(()),
+        Some(_) => Err(CliError::Rpc(
+            "the daemon restarted while waiting; reload outcome unknown".into(),
+        )),
+        None => Err(CliError::Rpc(
+            "the daemon exited while waiting; reload outcome unknown".into(),
+        )),
+    }
+}
+
+/// `--timeout` expired. Whether SIGHUP went out decides what the operator
+/// can conclude.
+pub fn reload_timeout_error(timeout: Duration, signalled: bool) -> CliError {
+    CliError::Rpc(if signalled {
+        format!(
+            "SIGHUP was sent but no reload settled within {}s; the reload may still be \
+             running: check rbgp config last-reload",
+            timeout.as_secs()
+        )
+    } else {
+        format!(
+            "timed out after {}s before SIGHUP was sent; nothing was signalled",
+            timeout.as_secs()
+        )
+    })
 }
 
 fn signal_error(pid: u32, error: impl std::fmt::Display) -> CliError {
@@ -753,14 +782,13 @@ fn signal_reload(connection: &Connection, process: LocalProcess) -> Result<(), C
         .ok_or_else(|| signal_error(process.pid, "pid out of range"))?;
     match pidfd_open(pid, PidfdFlags::empty()) {
         Ok(pidfd) => {
-            if connection.local_process() != Some(process) {
-                return Err(daemon_restarted());
-            }
+            same_daemon(connection, process)?;
             pidfd_send_signal(&pidfd, Signal::HUP).map_err(|e| signal_error(process.pid, e))
         }
-        // Kernels before 5.3 have no pidfd_open: signal by PID after the same
-        // identity check, which leaves the short PID-reuse window open.
-        Err(rustix::io::Errno::NOSYS) => kill_reload(connection, process),
+        // Kernels before 5.3 have no pidfd_open, and older container seccomp
+        // profiles answer unknown syscalls with EPERM: signal by PID after the
+        // same identity check, which leaves the short PID-reuse window open.
+        Err(rustix::io::Errno::NOSYS | rustix::io::Errno::PERM) => kill_reload(connection, process),
         Err(error) => Err(signal_error(process.pid, error)),
     }
 }
@@ -771,9 +799,7 @@ fn signal_reload(connection: &Connection, process: LocalProcess) -> Result<(), C
 }
 
 fn kill_reload(connection: &Connection, process: LocalProcess) -> Result<(), CliError> {
-    if connection.local_process() != Some(process) {
-        return Err(daemon_restarted());
-    }
+    same_daemon(connection, process)?;
     let pid =
         i32::try_from(process.pid).map_err(|_| signal_error(process.pid, "pid out of range"))?;
     nix::sys::signal::kill(
@@ -784,22 +810,19 @@ fn kill_reload(connection: &Connection, process: LocalProcess) -> Result<(), Cli
 }
 
 /// Send SIGHUP to the daemon behind the local Unix socket and wait until a
-/// reload that read the config after the signal has settled. `timeout`
-/// bounds the whole command, RPCs included.
+/// reload that read the config after the signal has settled. `deadline`
+/// bounds the whole command, connection setup and RPCs included; `timeout`
+/// is the `--timeout` it was derived from, for the message.
 pub async fn reload(
     connection: Connection,
+    deadline: tokio::time::Instant,
     timeout: Duration,
     json: bool,
 ) -> Result<i32, CliError> {
-    let response = tokio::time::timeout(timeout, wait_for_reload(&connection))
+    let signalled = std::cell::Cell::new(false);
+    let response = tokio::time::timeout_at(deadline, wait_for_reload(&connection, &signalled))
         .await
-        .map_err(|_| {
-            CliError::Rpc(format!(
-                "no reload settled within {}s; if SIGHUP was sent the reload may still be \
-                 running: check rbgp config last-reload",
-                timeout.as_secs()
-            ))
-        })??;
+        .map_err(|_| reload_timeout_error(timeout, signalled.get()))??;
     let code = response.record.as_ref().map_or(1, reload_exit_code);
     if json {
         print_json(last_reload_response_to_json(&response))?;
@@ -812,7 +835,10 @@ pub async fn reload(
     Ok(code)
 }
 
-async fn wait_for_reload(connection: &Connection) -> Result<GetLastSighupReloadResponse, CliError> {
+async fn wait_for_reload(
+    connection: &Connection,
+    signalled: &std::cell::Cell<bool>,
+) -> Result<GetLastSighupReloadResponse, CliError> {
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let baseline = read_rpc(
@@ -831,6 +857,7 @@ async fn wait_for_reload(connection: &Connection) -> Result<GetLastSighupReloadR
     };
     let sent_at = monotonic_micros()?;
     signal_reload(connection, process)?;
+    signalled.set(true);
     loop {
         tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
         let response = read_rpc(
@@ -838,12 +865,7 @@ async fn wait_for_reload(connection: &Connection) -> Result<GetLastSighupReloadR
             client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
         )
         .await;
-        // A reconnect replaces the transport's identity, and a dead process
-        // has none; either way, neither a new daemon's record nor a broken
-        // transport says anything about the reload this signal started.
-        if connection.local_process() != Some(process) {
-            return Err(daemon_restarted());
-        }
+        same_daemon(connection, process)?;
         let response = response?.into_inner();
         if reload_settled_since(&response, sent_at)? {
             return Ok(response);
@@ -1590,9 +1612,14 @@ mod tests {
     async fn reload_refuses_a_tcp_endpoint_before_signalling() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
-        let error = reload(connection, Duration::from_secs(5), true)
-            .await
-            .unwrap_err();
+        let error = reload(
+            connection,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(5),
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("needs its local Unix socket"),
             "{error}"
@@ -1608,9 +1635,14 @@ mod tests {
                 ..Default::default()
             });
         let connection = connect(&server.addr, None).await.unwrap();
-        let error = reload(connection, Duration::from_secs(5), true)
-            .await
-            .unwrap_err();
+        let error = reload(
+            connection,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(5),
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1628,11 +1660,18 @@ mod tests {
             .store(true, Ordering::SeqCst);
         let connection = connect(&server.addr, None).await.unwrap();
         let started = std::time::Instant::now();
-        let error = reload(connection, Duration::from_secs(1), true)
-            .await
-            .unwrap_err();
+        let error = reload(
+            connection,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(
-            error.to_string().contains("no reload settled within 1s"),
+            error
+                .to_string()
+                .contains("timed out after 1s before SIGHUP was sent"),
             "{error}"
         );
         assert!(

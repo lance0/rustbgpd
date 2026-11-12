@@ -360,7 +360,7 @@ esac
 ;;
 (reload)
 _arguments "${_arguments_options[@]}" : \
-'--timeout=[Seconds the whole command may take, RPCs included (1-3600)]:SECONDS:_default' \
+'--timeout=[Seconds the whole command may take, connecting included (1-3600)]:SECONDS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

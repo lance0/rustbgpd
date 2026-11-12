@@ -111,11 +111,11 @@ with. The daemon may still apply the change, so the CLI never retries it.
 pidfd (it needs permission to signal that process) and polls
 `GetLastSighupReload` every 500 ms until a reload that started after its
 signal has settled. A signal that lands during another reload is served by one
-follow-up reload, which counts. If the daemon behind the socket changes while
-it waits, it exits 1 with the outcome unknown. `--timeout` (600 seconds by
-default) bounds the whole command, RPCs included, and exits 1 on expiry; the
-reload may still be running, so read `rbgp config last-reload` before sending
-another.
+follow-up reload, which counts. If the daemon behind the socket exits or
+restarts while it waits, it exits 1 with the outcome unknown. `--timeout` (600
+seconds by default) bounds the whole command, connection setup included, and
+exits 1 on expiry, saying whether SIGHUP was sent; if it was, the reload may
+still be running, so read `rbgp config last-reload` before sending another.
 
 `mrt-dump` waits up to 31 minutes and also exits 1 on expiry, but its
 outcome differs. The daemon treats the dropped request as a cancellation

@@ -463,16 +463,28 @@ fn exercise(first_valid: bool, extra: u64, via_rbgp: bool) {
 }
 
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build SIGHUP test holds"
+)]
 fn sighup_during_a_reload_runs_one_follow_up_that_reads_the_later_edit() {
     exercise(true, 1, false);
 }
 
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build SIGHUP test holds"
+)]
 fn several_sighups_during_one_reload_fold_into_one_follow_up() {
     exercise(true, 3, false);
 }
 
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build SIGHUP test holds"
+)]
 fn follow_up_runs_after_a_rejected_reload_and_rbgp_reload_waits_for_it() {
     exercise(false, 1, true);
 }
@@ -480,6 +492,10 @@ fn follow_up_runs_after_a_rejected_reload_and_rbgp_reload_waits_for_it() {
 /// The turn after a settlement has both a due follow-up and a pending
 /// shutdown request; shutdown must win every time.
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build SIGHUP test holds"
+)]
 fn shutdown_drops_a_pending_follow_up_instead_of_starting_it() {
     for _ in 0..4 {
         let mut fixture = Fixture::start(true);
@@ -503,6 +519,86 @@ fn shutdown_drops_a_pending_follow_up_instead_of_starting_it() {
         assert_eq!(fixture.daemon.log_count(FOLLOW_UP_STARTED), 0);
         fixture.daemon.assert_no_further_reload();
     }
+}
+
+/// A signal queued while the loop handles a settlement is already served by
+/// the follow-up that starts next, which reads the file after it; it must not
+/// count as coalesced or schedule a second follow-up.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build SIGHUP test holds"
+)]
+fn a_signal_queued_before_a_follow_up_starts_is_served_by_it() {
+    let mut fixture = Fixture::start(true);
+    fixture.daemon.signal(Signal::SIGHUP);
+    let mut reload_one = fixture.daemon.wait_for_hold(Hold::Read);
+    fixture.daemon.signal(Signal::SIGHUP);
+    wait_for_outcome_count(&mut fixture.daemon, fixture.metrics, "coalesced", 1);
+    reload_one.write_all(&[1]).expect("release reload 1");
+    let mut settled = fixture.daemon.wait_for_hold(Hold::Settled);
+    fixture.daemon.signal(Signal::SIGHUP);
+    // The loop is parked in the settlement arm, so nothing observable marks
+    // the signal's arrival; give the runtime's signal driver time to queue it.
+    thread::sleep(Duration::from_millis(300));
+    settled
+        .write_all(&[1])
+        .expect("release reload 1 settlement");
+
+    fixture
+        .daemon
+        .wait_for_hold(Hold::Read)
+        .write_all(&[1])
+        .expect("release follow-up reload");
+    let mut follow_up_settled = fixture.daemon.wait_for_hold(Hold::Settled);
+    assert_eq!(reload_outcome_count(fixture.metrics, "coalesced"), 1);
+    assert_eq!(reload_outcome_count(fixture.metrics, "complete"), 2);
+    request_shutdown(&fixture.grpc_addr);
+    follow_up_settled
+        .write_all(&[1])
+        .expect("release follow-up settlement");
+    let status = fixture.daemon.wait_for_exit();
+    assert!(status.success(), "{status}\n{}", fixture.daemon.log());
+    assert_eq!(fixture.daemon.log_count(FOLLOW_UP_STARTED), 1);
+    assert_eq!(fixture.daemon.log_count(FOLLOW_UP_DROPPED), 0);
+    fixture.daemon.assert_no_further_reload();
+}
+
+/// `--timeout` also bounds connection setup. A loopback listener with a full
+/// accept queue never completes another TCP handshake.
+#[test]
+fn rbgp_reload_timeout_bounds_the_connect() {
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, bind, getsockname, listen, socket,
+    };
+    use std::os::fd::AsRawFd as _;
+    let listener = socket(
+        AddressFamily::Inet,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .expect("create listener");
+    bind(listener.as_raw_fd(), &SockaddrIn::new(127, 0, 0, 1, 0)).expect("bind listener");
+    listen(&listener, Backlog::new(0).unwrap()).expect("listen");
+    let port = getsockname::<SockaddrIn>(listener.as_raw_fd())
+        .expect("listener address")
+        .port();
+    let _queued = TcpStream::connect(("127.0.0.1", port)).expect("fill the accept queue");
+
+    let started = Instant::now();
+    let output = rbgp(
+        &format!("http://127.0.0.1:{port}"),
+        &["reload", "--timeout", "1"],
+    );
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("timed out after 1s before SIGHUP was sent"),
+        "stderr:\n{stderr}"
+    );
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
 }
 
 #[test]
@@ -533,6 +629,10 @@ fn rbgp_reload_exit_code_follows_the_settled_outcome() {
 /// A restarted daemon's reload record says nothing about the reload the
 /// command's signal started, even when it began after the signal.
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build SIGHUP test holds"
+)]
 fn rbgp_reload_reports_a_daemon_restart_instead_of_its_record() {
     let mut fixture = Fixture::start(true);
     let waiter = rbgp_command(&fixture.grpc_addr, &["--json", "reload", "--timeout", "60"])
@@ -562,8 +662,11 @@ fn rbgp_reload_reports_a_daemon_restart_instead_of_its_record() {
     let output = waiter.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    // Which one depends on whether rbgp's next read reconnected to the new
+    // daemon or first saw the old transport fail.
     assert!(
-        stderr.contains("the daemon restarted while waiting; reload outcome unknown"),
+        stderr.contains("the daemon restarted while waiting; reload outcome unknown")
+            || stderr.contains("the daemon exited while waiting; reload outcome unknown"),
         "stderr:\n{stderr}"
     );
     assert!(output.stdout.is_empty());

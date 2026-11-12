@@ -727,7 +727,8 @@ config file after that signal to settle, prints the same receipt as
 `complete` (including no changes), 2 for `known_partial`, 3 for
 `rejected_no_effect` or `task_failed`, and 1 when it cannot signal the
 daemon, sees the daemon restart while it waits, or reaches `--timeout` (600
-seconds by default, bounding the whole command) first. It needs the local
+seconds by default, bounding the whole command from connecting on; the error
+says whether SIGHUP was sent) first. It needs the local
 socket and permission to signal the daemon's process (its user or root), which
 it signals through a pidfd so a reused PID is never hit; against a TCP endpoint
 it refuses and points to `rbgp config last-reload`. It returns the first
