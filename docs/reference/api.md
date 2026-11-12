@@ -4092,6 +4092,13 @@ their API shape only.
 | `DeleteGuardedFlowSpec(rule key, owner, revision)` | Removes the rule only at its revision: `DELETED`, or `NOT_PRESENT` for an absent rule. Needs no window |
 | `RenewGuardedLease(owner, generation, lease_seconds, window)` | Sets the deadline to exactly `min(now + lease_seconds, window expiry)`, which may shorten it |
 
+A guarded `rule` is an `AddFlowSpecRequest` and accepts the same component
+grammar, actions, communities and VPN scope as `AddFlowSpec`. A rule needs no
+destination component: for example, a source host with protocol, source ports
+and TCP flags, a typed `redirect_ip` and a standard community. Export policy
+evaluates such a rule without a prefix, so a prefix term does not match it;
+match its communities instead.
+
 A window's expiry is therefore not the rule's withdrawal deadline. The
 owner's lease never outlives the latest-expiring window it used, and no
 window lives more than 120 s after it was issued. Read the lease deadline back
