@@ -872,12 +872,13 @@ This coverage does not widen the [stable surface](../../docs/reference/stability
 or the EVPN and Linux dataplane support boundaries.
 
 For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
-supported command). The result is `{"format":"rbgp-json","format_version":"1.1","data":...}`.
+supported command). The result is `{"format":"rbgp-json","format_version":"1.2","data":...}`.
 `data` contains the existing command result unchanged, including an empty `[]`,
 optional fields and bounded-list metadata. Ordinary `-j` keeps its current shape.
 The version describes the CLI JSON representation, not the daemon version.
 Version 1.1 adds inbound `path_id` to advertised-explain ORR candidates, so
 multiple paths from the same peer and next hop remain distinguishable.
+Version 1.2 adds `daemon_version`, the running daemon's version, to `health`.
 
 Consumers should check the format and major version and ignore unknown fields.
 Additive fields increment the minor version; removing or renaming fields, changing

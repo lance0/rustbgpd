@@ -1562,7 +1562,7 @@ fn write_json_document<W: Write + ?Sized, T: Serialize>(
             writer,
             &Document {
                 format: "rbgp-json",
-                format_version: "1.1",
+                format_version: "1.2",
                 data: value,
             },
         )
@@ -1663,7 +1663,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|contract| contract["id"] == "rbgp-json/1.1")
+            .find(|contract| contract["id"] == "rbgp-json/1.2")
             .unwrap();
         for payload in [
             serde_json::json!([]),
@@ -1679,11 +1679,11 @@ mod tests {
             let mut bytes = Vec::new();
             write_json_document(&mut bytes, &payload, true).unwrap();
             let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_json_shape(&document, contract, "rbgp-json/1.1");
+            assert_json_shape(&document, contract, "rbgp-json/1.2");
             assert_eq!(
                 document,
                 serde_json::json!({
-                    "format": "rbgp-json", "format_version": "1.1", "data": payload
+                    "format": "rbgp-json", "format_version": "1.2", "data": payload
                 })
             );
         }
