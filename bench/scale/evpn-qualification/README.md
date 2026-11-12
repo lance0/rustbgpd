@@ -175,8 +175,10 @@ hold that regroup's `actor_poll` maximum and `route_chunk` bucket increases,
 the increase of `bgp_rib_policy_transition_total` by outcome, and every
 `authoritative_batch_phase` log event between the signal and the closing scrape
 (input, shared and fallback members, fallback regroup, distribution and total
-microseconds, and `deferred_members` where the daemon logs it; it is null for
-a daemon that does not). A primary-lane probe runs through the same window: client 0,
+microseconds, and `deferred_members` and `applied_members` where the daemon
+logs them; they are null for a daemon that does not). A paced reload logs one
+`classification="paced"` batch, then one `paced_apply` line per paced command
+with the members it applied. A primary-lane probe runs through the same window: client 0,
 whose policy never changes, announces one Type 5 route from the unused half of
 its pool; the driver records when client 1, also unmoved, holds it, withdraws
 it, waits until no receiver holds it, and repeats until one cycle after the

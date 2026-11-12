@@ -281,6 +281,11 @@ class RecoveryTests(unittest.TestCase):
         paced = json.loads(batch_event(100))
         paced["fields"]["deferred_members"] = 148
         self.assertEqual(R.batch_phases(json.dumps(paced), 50, 150)[0]["deferred_members"], 148)
+        self.assertIsNone(R.batch_phases(json.dumps(paced), 50, 150)[0]["applied_members"])
+        paced["fields"].update(classification="paced_apply", applied_members=3, fallback_members=0)
+        row = R.batch_phases(json.dumps(paced), 50, 150)[0]
+        self.assertEqual((row["classification"], row["applied_members"], row["fallback_members"]),
+                         ("paced_apply", 3, 0))
         paced["fields"]["deferred_members"] = "148"
         with self.assertRaises(ValueError):
             R.batch_phases(json.dumps(paced), 50, 150)

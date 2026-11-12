@@ -134,9 +134,10 @@ def mass_dirty_actor(start, end):
 TRANSITION = re.compile(r'bgp_rib_policy_transition_total\{outcome="(?P<outcome>[a-z_]+)"\} (?P<value>\S+)')
 BATCH_FIELDS = ("input_peers", "present_peers", "shared_members", "fallback_members",
                 "fallback_regroup_us", "distribution_us", "total_us")
-# Logged only by daemons that hand EVPN senders back from the batch, so a
-# parent without it records None; it is never required.
-OPTIONAL_BATCH_FIELDS = ("deferred_members",)
+# Logged only by daemons that hand EVPN senders back from the batch and
+# apply them in paced commands, so a parent without them records None; they
+# are never required.
+OPTIONAL_BATCH_FIELDS = ("deferred_members", "applied_members")
 
 
 def probe_keys(routes):
