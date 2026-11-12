@@ -120,6 +120,8 @@ impl PeerSession {
         let admission = tokio::time::timeout_at(deadline, admission);
         tokio::pin!(admission);
         let mut commands_open = true;
+        // Snapshots earlier owned work queued behind this replay are due now.
+        self.serve_deferred_reads();
         loop {
             if self.deferred_commands_stop().is_some() {
                 return Err(PeerCommandError::ReplayUnavailable(

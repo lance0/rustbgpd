@@ -24,6 +24,63 @@ async fn replay_live_rib_admission_serves_bounded_reads() {
     exercise_live_replay_admission(ReplayAdmissionWait::Rib).await;
 }
 
+/// A replay that earlier owned work queued ahead of a snapshot hands that
+/// snapshot over at once when its own admission wait begins, rather than
+/// after admission or the replay window.
+#[tokio::test(start_paused = true)]
+async fn deferred_replay_answers_a_snapshot_queued_behind_it() {
+    let (mut session, mut rib_rx, mut old_bmp_rx) =
+        make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    read_single_bgp_message(&mut server).await;
+    read_single_bgp_message(&mut server).await;
+    while rib_rx.try_recv().is_ok() {}
+    while old_bmp_rx.try_recv().is_ok() {}
+    let (_commands, receiver) = mpsc::channel(8);
+    session.commands = receiver;
+    let (bmp_tx, _bmp_rx) = mpsc::channel(1);
+    session.bmp_tx = Some(bmp_tx.clone());
+    bmp_tx
+        .try_send(BmpEvent::RouteMonitoring {
+            peer_info: session.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(b"held admission"),
+        })
+        .unwrap();
+    // As a shared encode leaves them: the replay, then a live snapshot.
+    let (reply, mut replay_response) = oneshot::channel();
+    session.handle_read_during_wait(PeerCommand::ReplayOutbound { reply });
+    let (reply, state) = oneshot::channel();
+    session.handle_read_during_wait(PeerCommand::QueryState { reply });
+    assert_eq!(session.deferred_commands.len(), 2, "the snapshot is queued");
+    let started = tokio::time::Instant::now();
+    let state = {
+        let actor = session.run();
+        tokio::pin!(actor);
+        let state = tokio::select! {
+            state = state => state.unwrap(),
+            stopped = &mut actor => panic!("actor stopped before the snapshot: {stopped:?}"),
+        };
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::ZERO,
+            "the snapshot did not wait for the replay window"
+        );
+        assert!(
+            matches!(
+                replay_response.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the replay still waits for admission"
+        );
+        state
+    };
+    assert_eq!(state.fsm_state, SessionState::Established);
+    session.writer_join.take().unwrap().abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
     use std::future::{Future, poll_fn};
