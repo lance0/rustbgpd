@@ -88,6 +88,19 @@ routes in the shared import policy for every route-server member. It does not
 start a cache or inject VRP updates. It is incompatible with iBGP-RR mode,
 which has no import policy.
 
+Heterogeneous export extension: `GEN_EXPORT_PAIRS=G` (mixed mode only,
+1 <= G <= changed_peers) splits the changed peers into G contiguous groups
+(quotient/remainder: the first `changed_peers % G` groups get one extra peer).
+Group 0 keeps the global `member-out`; group k >= 1 gets a per-neighbor
+`member-out-k` chain that adds the generation community plus the constant
+`65401:k`, so every group is a distinct export-policy pair for the daemon's
+cohort selection. The daemon batches only the largest group (group 0,
+`ceil(changed_peers / G)` peers, when that is at least 2) and applies every
+other changed peer one at a time: G=7 at 700 changed gives cohort 100 and
+remainder 600; G=changed_peers gives cohort 0 and remainder changed_peers.
+Pairs with the harness's `RELOADSTALL_EXPORT_PAIRS=G`. G=1 or absent emits
+the historical files byte-for-byte.
+
 Converged-rejoin extension: `GEN_CONVERGED_REJOIN=1` explicitly enables IPv4
 GR helper retention with a 180-second disconnected window and 360-second
 post-reconnect EoR window, matching `--converged-rejoin`. This is a harness
@@ -161,6 +174,18 @@ if rpki_cache is not None:
     except ValueError:
         sys.exit("GEN_RPKI_CACHE must be numeric IPv4 address:port or "
                  "[IPv6 address]:port with port in 1..=65535")
+export_pairs = int(os.environ.get("GEN_EXPORT_PAIRS", "1"))
+if export_pairs != 1 and not (mixed_export_only and ibgp_rr_asn is None
+                              and 1 <= export_pairs <= changed_peers):
+    sys.exit(f"GEN_EXPORT_PAIRS requires mixed mode (changed_peers given, no GEN_IBGP_RR_ASN) "
+             f"and 1..={changed_peers}, got {export_pairs}")
+# Changed peer i -> export pair: contiguous quotient/remainder groups.
+pair_quotient, pair_extra = divmod(changed_peers, export_pairs)
+pair_of = [k for k in range(export_pairs) for _ in range(pair_quotient + (k < pair_extra))]
+# The daemon batches only the largest group (group 0, which also holds the
+# lowest peer keys and so wins ties) and only when it has at least 2 peers.
+export_cohort = len([k for k in pair_of if k == 0])
+export_cohort = export_cohort if export_cohort >= 2 else 0
 out.mkdir(parents=True, exist_ok=True)
 rundir = out.resolve()
 
@@ -231,7 +256,15 @@ for fname, reject_prefix, community in GENERATIONS:
 # announced 20.0.0.0-26.x base table), so the import chain is content-real:
 # reinstalled per peer, Route Refreshes fire, and routes re-enter the new chain.
 # member-out tags every advertised route with the generation community."""
-    stable_policy = """
+    pair_policies = "".join(
+        f"""
+policy member-out-{k} {{
+    term tag {{ add community {community}; add community 65401:{k}; accept }}
+}}
+"""
+        for k in range(1, export_pairs)
+    )
+    stable_policy = pair_policies + """
 
 policy stable-out {
     term tag { add community 65400:9000; accept }
@@ -346,6 +379,8 @@ for i in range(n_peers):
         neighbor.append(f"max_prefix_restart_seconds = {trip_restart_seconds}")
     if i >= changed_peers:
         neighbor.append('export_policy_chain = ["stable-out"]')
+    elif pair_of[i] > 0:
+        neighbor.append(f'export_policy_chain = ["member-out-{pair_of[i]}"]')
     config += neighbor + [""]
 (out / "config.toml").write_text("\n".join(config))
 if evpn:
@@ -372,6 +407,11 @@ filter_note = (
     if filter_count > 0
     else ""
 )
+if export_pairs > 1:
+    filter_note += (
+        f", export_pairs={export_pairs}(cohort={export_cohort}, "
+        f"remainder={changed_peers - export_cohort})"
+    )
 print(
     f"wrote {rundir}/config.toml ({n_peers} neighbors), member.rpol, "
     f"gen-a.rpol, gen-b.rpol; listen_port={port}, changed_peers={changed_peers}, "

@@ -220,5 +220,53 @@ class EvpnScenarioTests(unittest.TestCase):
                     self.assertFalse(out.exists())
 
 
+class ExportPairsScenarioTests(unittest.TestCase):
+    def generate(self, directory: Path, changed: int | None, pairs: str | None):
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GEN_")}
+        if pairs is not None:
+            env["GEN_EXPORT_PAIRS"] = pairs
+        args = [sys.executable, str(GENERATOR), "8", str(directory), "1790"]
+        if changed is not None:
+            args.append(str(changed))
+        return subprocess.run(args, env=env, capture_output=True, text=True, check=False)
+
+    def test_one_pair_is_byte_identical_to_absent(self):
+        with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
+            outputs = []
+            out = Path(tmp) / "scenario"
+            for pairs in [None, "1"]:
+                result = self.generate(out, 7, pairs)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs.append({path.name: path.read_bytes() for path in out.iterdir()})
+            self.assertEqual(outputs[0], outputs[1])
+
+    def test_pairs_split_changed_peers_into_distinct_contiguous_chains(self):
+        with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
+            out = Path(tmp) / "scenario"
+            result = self.generate(out, 7, "3")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("export_pairs=3(cohort=3, remainder=4)", result.stdout)
+            neighbors = tomllib.loads((out / "config.toml").read_text())["neighbors"]
+            chains = [neighbor.get("export_policy_chain") for neighbor in neighbors]
+            self.assertEqual(chains, [None, None, None, ["member-out-1"], ["member-out-1"],
+                                      ["member-out-2"], ["member-out-2"], ["stable-out"]])
+            for generation, community in [("gen-a.rpol", "65400:1000"), ("gen-b.rpol", "65400:2000")]:
+                policy = (out / generation).read_text()
+                for pair in (1, 2):
+                    self.assertIn(f"policy member-out-{pair} {{\n    term tag {{ add community "
+                                  f"{community}; add community 65401:{pair}; accept }}", policy)
+                self.assertNotIn("member-out-3", policy)
+
+    def test_pairs_reject_invalid_and_non_mixed_shapes(self):
+        with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
+            for index, (changed, pairs) in enumerate([(None, "2"), (7, "0"), (7, "8")]):
+                with self.subTest(changed=changed, pairs=pairs):
+                    out = Path(tmp) / str(index)
+                    result = self.generate(out, changed, pairs)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("GEN_EXPORT_PAIRS", result.stderr)
+                    self.assertFalse(out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
