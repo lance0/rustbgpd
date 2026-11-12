@@ -358,6 +358,24 @@ esac
     ;;
 esac
 ;;
+(reload)
+_arguments "${_arguments_options[@]}" : \
+'--timeout=[Seconds the whole command may take, connecting included (1-3600)]:SECONDS:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (neighbor)
 _arguments "${_arguments_options[@]}" : \
 '(--wide)--compare=[Compare this peer'\''s live update-group membership with another configured peer without exposing internal group identifiers]:NEIGHBOR:_default' \
@@ -4832,6 +4850,10 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(reload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (neighbor)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__help__subcmd__neighbor_commands" \
@@ -5630,6 +5652,7 @@ _rbgp_commands() {
     local commands; commands=(
 'global:Show daemon global configuration' \
 'config:Plan, apply, confirm, roll back, and inspect runtime configuration' \
+'reload:Reload the config file (SIGHUP) and wait for the reload'\''s outcome' \
 'neighbor:Manage BGP neighbors' \
 'summary:Manage BGP neighbors' \
 'bfd:Inspect single-hop and multihop BFD sessions' \
@@ -6679,6 +6702,7 @@ _rbgp__subcmd__help_commands() {
     local commands; commands=(
 'global:Show daemon global configuration' \
 'config:Plan, apply, confirm, roll back, and inspect runtime configuration' \
+'reload:Reload the config file (SIGHUP) and wait for the reload'\''s outcome' \
 'neighbor:Manage BGP neighbors' \
 'bfd:Inspect single-hop and multihop BFD sessions' \
 'rpki:Inspect RPKI caches and validate origins or AS paths' \
@@ -7403,6 +7427,11 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__stats_commands() {
 _rbgp__subcmd__help__subcmd__policy__subcmd__test_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help policy test commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__reload_commands] )) ||
+_rbgp__subcmd__help__subcmd__reload_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help reload commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib_commands() {
@@ -8140,6 +8169,11 @@ _rbgp__subcmd__policy__subcmd__stats_commands() {
 _rbgp__subcmd__policy__subcmd__test_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy test commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__reload_commands] )) ||
+_rbgp__subcmd__reload_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp reload commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib_commands] )) ||
 _rbgp__subcmd__rib_commands() {

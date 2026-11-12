@@ -370,13 +370,16 @@ const PEER_MANAGER_OPERATOR_QUERY_SEAMS: [&str; 5] = [
     "rollback",
 ];
 
-/// Closed outcome vocabulary for retained and dropped SIGHUP reload work.
+/// Closed outcome vocabulary for settled SIGHUP reloads and for signals
+/// coalesced into a follow-up reload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SighupReloadOutcome {
     Complete,
     KnownPartial,
     RejectedNoEffect,
-    IgnoredInFlight,
+    /// A signal received while another reload owned the lane. It is served
+    /// by one follow-up reload, whose own outcome is counted separately.
+    Coalesced,
     TaskFailed,
 }
 
@@ -385,7 +388,7 @@ impl SighupReloadOutcome {
         Self::Complete,
         Self::KnownPartial,
         Self::RejectedNoEffect,
-        Self::IgnoredInFlight,
+        Self::Coalesced,
         Self::TaskFailed,
     ];
 
@@ -395,7 +398,7 @@ impl SighupReloadOutcome {
             Self::Complete => "complete",
             Self::KnownPartial => "known_partial",
             Self::RejectedNoEffect => "rejected_no_effect",
-            Self::IgnoredInFlight => "ignored_in_flight",
+            Self::Coalesced => "coalesced",
             Self::TaskFailed => "task_failed",
         }
     }
@@ -1556,7 +1559,7 @@ impl BgpMetrics {
         let sighup_reload_outcomes = IntCounterVec::new(
             Opts::new(
                 "bgp_sighup_reload_outcomes_total",
-                "SIGHUP reload signals and retained tasks by bounded terminal outcome.",
+                "SIGHUP reload tasks by bounded terminal outcome, plus signals coalesced into a follow-up reload (outcome coalesced).",
             ),
             &["outcome"],
         )

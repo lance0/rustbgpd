@@ -536,7 +536,10 @@ Notes on the sandbox:
   EVPN [core-isolation hold](../reference/configuration.md#evpn_core_isolation)
   left down, needs `CAP_NET_ADMIN` only when there is something to release,
   and exits 0 when there is nothing to release.
-- `ExecReload=kill -HUP` is the supported reload path. See the
+- `ExecReload=kill -HUP` is the supported reload path. `systemctl reload`
+  returns once the signal is sent; automation that needs the outcome runs
+  `rbgp reload`, which sends the same signal, waits for the reload to settle
+  and exits non-zero unless it completed. See the
   [reload matrix](../reference/reload-matrix.md) for which fields hot-apply vs.
   need a restart.
 - `Type=notify` is load-bearing. The daemon sends `READY=1` only after every

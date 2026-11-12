@@ -513,7 +513,9 @@ message SighupReloadEffect {
 message SighupReloadRecord {
   uint64 started_unix_millis = 1;
   uint64 finished_unix_millis = 2;
-  // complete, rejected_no_effect, known_partial, task_failed, ignored_in_flight.
+  // complete, rejected_no_effect, known_partial, task_failed. A SIGHUP
+  // received during a reload publishes no record: one follow-up reload
+  // serves it and publishes its own.
   string outcome = 3;
   // generation or sequential; empty if the reload stopped before classification.
   string route = 4;
@@ -526,6 +528,11 @@ message SighupReloadRecord {
   uint64 unapplied_count = 11;
   repeated SighupReloadEffect unapplied = 12;
   uint64 unapplied_omitted = 13;
+  // Daemon host CLOCK_MONOTONIC, in microseconds, when this reload started;
+  // it read the config file after this instant. A local client that reads
+  // the same clock before signalling knows its reload has settled once a
+  // record starts at or after that reading. Meaningless on another host.
+  uint64 started_monotonic_micros = 14;
 }
 
 // RIB-side outbound convergence of the export view the latest SIGHUP

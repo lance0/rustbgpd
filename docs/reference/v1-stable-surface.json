@@ -401,7 +401,7 @@
       {"name": "bgp_session_down_total", "type": "counter", "labels": ["interface", "peer", "reason"], "meaning": "Established active-primary sessions that ended, by bounded teardown reason."},
       {"name": "bgp_session_established_total", "type": "counter", "labels": ["peer"], "meaning": "Times a session reached Established."},
       {"name": "bgp_session_flaps_total", "type": "counter", "labels": ["peer"], "meaning": "Transitions out of Established."},
-      {"name": "bgp_sighup_reload_outcomes_total", "type": "counter", "labels": ["outcome"], "meaning": "SIGHUP reload signals and retained tasks by bounded terminal outcome."}
+      {"name": "bgp_sighup_reload_outcomes_total", "type": "counter", "labels": ["outcome"], "meaning": "SIGHUP reload tasks by bounded terminal outcome, plus signals coalesced into a follow-up reload (outcome coalesced)."}
     ],
     "scoped_rr_only_series": [
       {"name": "bgp_as_path_loop_detected_total", "type": "counter", "labels": ["peer"], "meaning": "Announced NLRI of any family, EVPN included, rejected by AS_PATH loop detection; not EVPN-specific."},

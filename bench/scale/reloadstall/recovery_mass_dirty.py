@@ -53,7 +53,7 @@ DATASET_COHORTS = ("dataset-delta", "dataset-full")
 DATASET_STRIDE = 100
 DATASET_FIXTURE_INPUTS = ("config.toml", "member.rpol", "generation-base.list", "generation-swapped.list")
 DATASET_FULL_FIXTURE_INPUTS = (*DATASET_FIXTURE_INPUTS, "fullpass-base.list", "fullpass-swapped.list")
-RELOAD_OUTCOMES = ("complete", "ignored_in_flight", "known_partial", "rejected_no_effect", "task_failed")
+RELOAD_OUTCOMES = ("coalesced", "complete", "known_partial", "rejected_no_effect", "task_failed")
 REEVALUATION_MESSAGE = "dataset export re-evaluation complete"
 DATASET_BARS = {
     "fail_stop": "the daemon runs through both reloads; any exit, including fail-stop exit 70, is FAIL",

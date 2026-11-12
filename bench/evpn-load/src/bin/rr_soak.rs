@@ -64,7 +64,7 @@ const RELOAD_OUTCOMES: [&str; 5] = [
     "complete",
     "known_partial",
     "rejected_no_effect",
-    "ignored_in_flight",
+    "coalesced",
     "task_failed",
 ];
 

@@ -4443,9 +4443,47 @@ fn sighup_reload_metric_outcome(
     }
 }
 
-fn record_sighup_ignored_in_flight(metrics: &BgpMetrics) {
-    metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight);
+fn record_sighup_coalesced(metrics: &BgpMetrics) {
+    metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::Coalesced);
 }
+
+/// `CLOCK_MONOTONIC` in microseconds, the clock `rbgp reload` reads before it
+/// signals the daemon: a reload whose start is at or after that instant read
+/// the config file after the signal was sent.
+fn sighup_monotonic_micros() -> u64 {
+    nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).map_or(0, |now| {
+        u64::try_from(now.tv_sec())
+            .unwrap_or(0)
+            .saturating_mul(1_000_000)
+            .saturating_add(u64::try_from(now.tv_nsec() / 1_000).unwrap_or(0))
+    })
+}
+
+/// Debug-build test seams: `RUSTBGPD_TEST_SIGHUP_READ_HOLD` parks every SIGHUP
+/// reload after its config-file read, and `RUSTBGPD_TEST_SIGHUP_SETTLED_HOLD`
+/// parks the signal loop right after it handles a reload's settlement, each
+/// until the test peer at that Unix socket path sends one byte.
+#[cfg(debug_assertions)]
+async fn sighup_test_hold(variable: &str) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let Some(path) = std::env::var_os(variable) else {
+        return;
+    };
+    let mut stream = tokio::net::UnixStream::connect(path)
+        .await
+        .expect("connect SIGHUP read test hold");
+    stream
+        .write_all(&[1])
+        .await
+        .expect("report SIGHUP config read");
+    stream
+        .read_exact(&mut [0])
+        .await
+        .expect("await SIGHUP read release");
+}
+
+#[cfg(not(debug_assertions))]
+async fn sighup_test_hold(_variable: &str) {}
 
 fn settle_sighup_credential_reload(
     trace: &SighupReloadTraceHandle,
@@ -4628,6 +4666,8 @@ fn last_sighup_record(
             .map(sighup_effect_proto)
             .collect(),
         unapplied_omitted: unapplied_count.saturating_sub(LAST_SIGHUP_EFFECT_LIMIT as u64),
+        // The run loop stamps the reload's monotonic start when it publishes.
+        started_monotonic_micros: 0,
     }
 }
 
@@ -7241,12 +7281,16 @@ async fn run<T>(
     // reloads would race on `peer_mgr_tx` ordering (interleaved
     // SetPolicy / ReconcilePeers commands) and double-fire the
     // post-reload sync. A SIGHUP that arrives while a reload is still
-    // running is logged and dropped — the operator-facing back-pressure
-    // surface.
+    // running sets one pending bit (later ones fold into it); once the
+    // active reload settles, whatever its outcome, exactly one follow-up
+    // reload re-reads the file. The active reload may have read the file
+    // before the operator's later edit, so dropping the signal could lose it.
     let mut reload_in_flight: Option<
         tokio::task::JoinHandle<Result<SighupAuthority, SighupReloadError>>,
     > = None;
-    let mut active_sighup_started = None;
+    let mut sighup_follow_up_pending = false;
+    // Wall-clock and CLOCK_MONOTONIC start of the active reload.
+    let mut active_sighup_started: Option<(SystemTime, u64)> = None;
     let mut active_sighup_trace: Option<SighupReloadTraceHandle> = None;
     // Set only by the peer-manager supervision arm, which consumes the
     // JoinHandle; the coordinated teardown below must not join it twice.
@@ -7260,11 +7304,21 @@ async fn run<T>(
     // completed JoinHandle again during coordinated teardown would panic.
     let mut grpc_exited = false;
     let mut dampening_control_exited = false;
+    let mut rpc_shutdown_closed = false;
     loop {
         if initial_peer_boot_failed {
             break;
         }
+        // Copied out so the SIGHUP arm's future does not borrow the handle
+        // the settlement arm polls.
+        let sighup_follow_up_due = sighup_follow_up_pending && reload_in_flight.is_none();
+        // Biased: shutdown requests are polled first, so a turn where one is
+        // ready never starts a follow-up reload instead. No arm stays ready
+        // across turns without breaking the loop (a closed shutdown channel
+        // disables its arm), and the SIGHUP arm comes last, so none can
+        // starve the arms polled after it.
         tokio::select! {
+            biased;
             _ = sigint.recv() => {
                 info!("received SIGINT");
                 break;
@@ -7273,8 +7327,10 @@ async fn run<T>(
                 info!("received SIGTERM");
                 break;
             }
-            changed = rpc_shutdown_rx.changed() => {
-                if changed.is_err() || !*rpc_shutdown_rx.borrow() {
+            changed = rpc_shutdown_rx.changed(), if !rpc_shutdown_closed => {
+                // The gRPC server owns the sender; its own arm reports an exit.
+                rpc_shutdown_closed = changed.is_err();
+                if rpc_shutdown_closed || !*rpc_shutdown_rx.borrow() {
                     continue;
                 }
                 info!("shutdown initiated via gRPC");
@@ -7383,27 +7439,80 @@ async fn run<T>(
                 component_failed = true;
                 break;
             }
-            _ = sighup.recv() => {
-                let received_at = SystemTime::now();
+            // Only polled when a reload is in flight. Standard tokio
+            // idiom: `std::future::pending().await` parks the arm
+            // forever in the no-handle case so `select!` ignores it.
+            // The `take()` drops the borrow before we touch
+            // `reload_in_flight` again in the body, sidestepping the
+            // borrow-across-await complaint.
+            outcome = async {
+                match reload_in_flight.as_mut() {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                reload_in_flight = None;
+                metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
+                if let (Some((started, started_monotonic)), Some(trace)) =
+                    (active_sighup_started.take(), active_sighup_trace.take())
+                {
+                    let trace = trace.lock().expect("SIGHUP trace poisoned").clone();
+                    publish_last_sighup(
+                        &last_sighup_reload,
+                        rustbgpd_api::proto::SighupReloadRecord {
+                            started_monotonic_micros: started_monotonic,
+                            ..last_sighup_record(started, &outcome, &trace)
+                        },
+                    );
+                }
+                match outcome {
+                    Ok(Ok(authority)) => {
+                        match &authority.completion {
+                            reload::SighupCompletion::Complete => {}
+                            reload::SighupCompletion::KnownPartial { failures } => warn!(
+                                failures = failures.len(),
+                                "SIGHUP settled with an authoritative partial runtime receipt"
+                            ),
+                        }
+                        config = authority.runtime;
+                    }
+                    Ok(Err(error)) => error!(error = %error, "SIGHUP reload rejected without runtime effect"),
+                    Err(e) => error!(error = %e, "reload task panicked"),
+                }
+                sighup_test_hold("RUSTBGPD_TEST_SIGHUP_SETTLED_HOLD").await;
+            }
+            // A pending follow-up starts on the first turn after the active
+            // reload settles, without waiting for another signal. Shutdown
+            // breaks out of this loop before admission closes, and its arms
+            // win a turn they share with this one, so it never starts one
+            // during shutdown.
+            () = async {
+                if !sighup_follow_up_due {
+                    sighup.recv().await;
+                }
+            } => {
                 if reload_in_flight.is_some() {
-                    record_sighup_ignored_in_flight(&metrics);
-                    let timestamp = sighup_unix_millis(received_at);
-                    publish_last_sighup(&last_sighup_reload, rustbgpd_api::proto::SighupReloadRecord {
-                        started_unix_millis: timestamp,
-                        finished_unix_millis: timestamp,
-                        outcome: SighupReloadMetricOutcome::IgnoredInFlight.as_str().to_string(),
-                        reason_code: "reload_in_flight".to_string(),
-                        failure_bucket: "reload.admission".to_string(),
-                        failure_target: "[config]".to_string(),
-                        ..Default::default()
-                    });
-                    warn!("SIGHUP received while previous reload still in flight; ignoring");
+                    record_sighup_coalesced(&metrics);
+                    if std::mem::replace(&mut sighup_follow_up_pending, true) {
+                        info!("SIGHUP received during a reload; a follow-up reload is already pending");
+                    } else {
+                        info!("SIGHUP received during a reload; one follow-up reload will re-read the config after it settles");
+                    }
                     continue;
                 }
-                active_sighup_started = Some(received_at);
+                if std::mem::take(&mut sighup_follow_up_pending) {
+                    info!("starting the follow-up reload for SIGHUP received during the previous reload");
+                } else {
+                    info!("SIGHUP received, reloading configuration");
+                }
+                // A signal already queued is served by this reload, which reads
+                // the file after it; left queued, it would count as coalesced
+                // and start a redundant follow-up.
+                let mut queued = std::task::Context::from_waker(std::task::Waker::noop());
+                while let std::task::Poll::Ready(Some(())) = sighup.poll_recv(&mut queued) {}
+                active_sighup_started = Some((SystemTime::now(), sighup_monotonic_micros()));
                 let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
                 active_sighup_trace = Some(Arc::clone(&trace));
-                info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
                 let live_tcp = live_grpc_tcp.clone();
                 let live_uds = live_grpc_uds.clone();
@@ -7473,11 +7582,13 @@ async fn run<T>(
                     // though the operator's file still holds it. A candidate
                     // that will not parse is left for the reload itself to
                     // report.
-                    let desired = match AcceptedConfigSnapshot::load_for_reload(
+                    let desired = AcceptedConfigSnapshot::load_for_reload(
                         Path::new(&path),
                         &prior_accepted,
                         &live_bindings,
-                    ) {
+                    );
+                    sighup_test_hold("RUSTBGPD_TEST_SIGHUP_READ_HOLD").await;
+                    let desired = match desired {
                         Ok(snapshot) => Arc::new(snapshot),
                         Err(diagnostic) => {
                             return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
@@ -7603,47 +7714,14 @@ async fn run<T>(
                     ).await
                 }));
             }
-            // Only polled when a reload is in flight. Standard tokio
-            // idiom: `std::future::pending().await` parks the arm
-            // forever in the no-handle case so `select!` ignores it.
-            // The `take()` drops the borrow before we touch
-            // `reload_in_flight` again in the body, sidestepping the
-            // borrow-across-await complaint.
-            outcome = async {
-                match reload_in_flight.as_mut() {
-                    Some(handle) => handle.await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                reload_in_flight = None;
-                metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
-                if let (Some(started), Some(trace)) =
-                    (active_sighup_started.take(), active_sighup_trace.take())
-                {
-                    let trace = trace.lock().expect("SIGHUP trace poisoned").clone();
-                    publish_last_sighup(
-                        &last_sighup_reload,
-                        last_sighup_record(started, &outcome, &trace),
-                    );
-                }
-                match outcome {
-                    Ok(Ok(authority)) => {
-                        match &authority.completion {
-                            reload::SighupCompletion::Complete => {}
-                            reload::SighupCompletion::KnownPartial { failures } => warn!(
-                                failures = failures.len(),
-                                "SIGHUP settled with an authoritative partial runtime receipt"
-                            ),
-                        }
-                        config = authority.runtime;
-                    }
-                    Ok(Err(error)) => error!(error = %error, "SIGHUP reload rejected without runtime effect"),
-                    Err(e) => error!(error = %e, "reload task panicked"),
-                }
-            }
         }
     }
 
+    if sighup_follow_up_pending {
+        warn!(
+            "shutdown dropped the pending follow-up SIGHUP reload; the config file was not re-read"
+        );
+    }
     // Coordinated shutdown closes admission first, then drains both logical
     // watchdog registrations and the acquire-to-registration physical gap.
     daemon_gate.begin_shutdown();
@@ -7684,13 +7762,16 @@ async fn run<T>(
     match runtime_config_drain.reload {
         Some(ShutdownWait::Completed(outcome)) => {
             metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
-            if let (Some(started), Some(trace)) =
+            if let (Some((started, started_monotonic)), Some(trace)) =
                 (active_sighup_started.take(), active_sighup_trace.take())
             {
                 let trace = trace.lock().expect("SIGHUP trace poisoned").clone();
                 publish_last_sighup(
                     &last_sighup_reload,
-                    last_sighup_record(started, &outcome, &trace),
+                    rustbgpd_api::proto::SighupReloadRecord {
+                        started_monotonic_micros: started_monotonic,
+                        ..last_sighup_record(started, &outcome, &trace)
+                    },
                 );
             }
             match outcome {
@@ -9280,7 +9361,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_sighup_result_replaces_interim_ignored_signal() {
+    fn settled_sighup_result_replaces_previous_record() {
         let state: LastSighupReloadState = Arc::new(Mutex::new(None));
         publish_last_sighup(
             &state,
@@ -9297,13 +9378,6 @@ mod tests {
             },
         );
         assert_eq!(state.lock().unwrap().as_ref().unwrap().outcome, "complete");
-        publish_last_sighup(
-            &state,
-            rustbgpd_api::proto::SighupReloadRecord {
-                outcome: "ignored_in_flight".to_string(),
-                ..Default::default()
-            },
-        );
         publish_last_sighup(
             &state,
             rustbgpd_api::proto::SighupReloadRecord {
@@ -10228,9 +10302,9 @@ mod tests {
     }
 
     #[test]
-    fn sighup_ignored_in_flight_records_one_bounded_row() {
+    fn sighup_coalesced_records_one_bounded_row() {
         let metrics = BgpMetrics::new();
-        record_sighup_ignored_in_flight(&metrics);
+        record_sighup_coalesced(&metrics);
 
         let family = metrics
             .registry()
@@ -10247,11 +10321,7 @@ mod tests {
                 .expect("outcome label")
                 .value();
             assert!(outcomes.insert(outcome), "duplicate {outcome} row");
-            let expected = if outcome == "ignored_in_flight" {
-                1.0
-            } else {
-                0.0
-            };
+            let expected = if outcome == "coalesced" { 1.0 } else { 0.0 };
             assert!(
                 (metric.get_counter().get_value() - expected).abs() < f64::EPSILON,
                 "unexpected {outcome} SIGHUP outcome count"
@@ -10260,8 +10330,8 @@ mod tests {
         assert_eq!(
             outcomes,
             BTreeSet::from([
+                "coalesced",
                 "complete",
-                "ignored_in_flight",
                 "known_partial",
                 "rejected_no_effect",
                 "task_failed",

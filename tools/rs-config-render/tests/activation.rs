@@ -20,8 +20,8 @@ const SECRET: &str = "activation-secret-must-not-escape";
 const METRICS: &str = "# TYPE process_start_time_seconds gauge
 process_start_time_seconds 1700000000
 # TYPE bgp_sighup_reload_outcomes_total counter
+bgp_sighup_reload_outcomes_total{outcome=\"coalesced\"} 0
 bgp_sighup_reload_outcomes_total{outcome=\"complete\"} 3
-bgp_sighup_reload_outcomes_total{outcome=\"ignored_in_flight\"} 0
 bgp_sighup_reload_outcomes_total{outcome=\"known_partial\"} 0
 bgp_sighup_reload_outcomes_total{outcome=\"rejected_no_effect\"} 0
 bgp_sighup_reload_outcomes_total{outcome=\"task_failed\"} 0
@@ -206,7 +206,7 @@ case "$(cat "$root/activation-mode")" in
     count() {{ edit "s/outcome=\"$1\"}} 0/outcome=\"$1\"}} 1/"; }}
     case "$(cat "$root/activation-mode")" in
       no-effect-rejected|repoint-*) count rejected_no_effect ;;
-      no-effect-ignored) count rejected_no_effect; count ignored_in_flight ;;
+      no-effect-coalesced) count rejected_no_effect; count coalesced ;;
       no-effect-restarted)
         count rejected_no_effect
         edit 's/^process_start_time_seconds .*/process_start_time_seconds 1700000100/' ;;
@@ -587,7 +587,7 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
     // Besides a failed, hung, or never-settling command, a daemon that kept
     // its prior runtime is still ambiguous without its own terminal
     // no-effect outcome for exactly the one observed reload: no outcome yet,
-    // a dropped in-flight signal, a restarted process, a registered
+    // a signal coalesced into a follow-up reload, a restarted process, a registered
     // settlement owner, an unreadable ledger, a partial apply, or a daemon
     // that went away.
     for mode_name in [
@@ -595,7 +595,7 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
         "hang-once",
         "reject-current",
         "no-effect-silent",
-        "no-effect-ignored",
+        "no-effect-coalesced",
         "no-effect-restarted",
         "no-effect-settling",
         "no-effect-no-metrics",
@@ -800,7 +800,7 @@ fn recover_rollback_reports_a_reload_not_applied_as_nothing_changed() {
             "rs-config-render: recover rollback: rollback target was not applied, but restoring current could not be re-proven; inspect with status\n",
         ),
         ("no-effect-silent", 5, true, NOT_SETTLED),
-        ("no-effect-ignored", 5, true, NOT_SETTLED),
+        ("no-effect-coalesced", 5, true, NOT_SETTLED),
         ("no-effect-restarted", 5, true, NOT_SETTLED),
         ("no-effect-settling", 5, true, NOT_SETTLED),
         ("no-effect-no-metrics", 5, true, NOT_SETTLED),

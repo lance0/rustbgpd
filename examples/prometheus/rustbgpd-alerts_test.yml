@@ -185,7 +185,7 @@ tests:
         values: "7x22"
       - series: 'bgp_sighup_reload_outcomes_total{outcome="rejected_no_effect", instance="edge5:9179"}'
         values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_sighup_reload_outcomes_total{outcome="ignored_in_flight", instance="edge6:9179"}'
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="coalesced", instance="edge6:9179"}'
         values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
       - eval_time: 2m

@@ -428,7 +428,7 @@ Native SIGHUP reloads also require a terminal daemon success from
 `bgp_sighup_reload_outcomes_total`. Receiver delivery alone can precede a
 failed apply acknowledgement and rollback. The driver snapshots the counters
 before staging and timing each signal, then checks them while waiting for
-receiver completion. A rejected, partial, ignored, or failed outcome aborts
+receiver completion. A rejected, partial, coalesced, or failed outcome aborts
 that reload before its CSV row and before the next A/B policy copy. Missing,
 decreasing, duplicate, or malformed evidence also fails closed.
 

@@ -15,6 +15,10 @@ TimeoutStartSec=10min
 # refuses to start otherwise, so the stop hook below always reads the
 # directory the daemon wrote.
 ExecStart=/usr/local/bin/rustbgpd --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml
+# `systemctl reload` returns once SIGHUP is sent, not when the reload has
+# settled. Automation that needs the outcome runs `rbgp reload` instead: it
+# sends the same signal, waits for the reload, and exits non-zero unless it
+# completed. A SIGHUP during a running reload is served by one follow-up reload.
 ExecReload=/bin/kill -HUP $MAINPID
 # EVPN core-isolation hold: after any exit, raise the CE-facing links the
 # daemon took down. Reads only the ownership receipt, never the config; exits
