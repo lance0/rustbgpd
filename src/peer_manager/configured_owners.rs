@@ -230,29 +230,39 @@ impl PeerManager {
     }
 
     /// Owns its sender so a caller can serve readiness while it is parked.
+    ///
+    /// With `bound`, admission and the acknowledgement share one deadline.
+    /// `None` waits for both, for a publication whose settlement owner bounds
+    /// the operation: Publish follows a committed reload, so no failure of it
+    /// is a clean refusal, and a dequeued publication cannot be cancelled. A
+    /// timer could only turn a busy but live RIB into a fence.
     async fn send_configured_owners(
         rib_tx: mpsc::Sender<RibUpdate>,
         receipt: PublicationReceipt,
         owners: Vec<Arc<DampeningOwner>>,
+        bound: Option<std::time::Duration>,
     ) -> Result<(), PublicationError> {
         let (reply, response) = oneshot::channel();
-        let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
-        tokio::time::timeout_at(
-            deadline,
-            rib_tx.send(RibUpdate::PublishDampeningOwners {
-                publication: receipt.0,
-                owners,
-                reply,
-            }),
-        )
-        .await
-        .map_err(|_| {
-            PublicationError::RibNotAccepted("RIB owner publication queue timed out".into())
-        })?
+        let deadline = bound.map(|bound| tokio::time::Instant::now() + bound);
+        let send = rib_tx.send(RibUpdate::PublishDampeningOwners {
+            publication: receipt.0,
+            owners,
+            reply,
+        });
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, send).await.map_err(|_| {
+                PublicationError::RibNotAccepted("RIB owner publication queue timed out".into())
+            })?,
+            None => send.await,
+        }
         .map_err(|error| PublicationError::RibNotAccepted(error.to_string()))?;
-        tokio::time::timeout_at(deadline, response)
-            .await
-            .map_err(|_| PublicationError::RibAcknowledgementLost)?
+        let reply = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, response)
+                .await
+                .map_err(|_| PublicationError::RibAcknowledgementLost)?,
+            None => response.await,
+        };
+        reply
             .map_err(|_| PublicationError::RibAcknowledgementLost)?
             .map_err(|error| PublicationError::RibRejected(error.to_string()))
     }
@@ -269,6 +279,8 @@ impl PeerManager {
                 .values()
                 .map(|entry| Arc::clone(&entry.owner))
                 .collect(),
+            // Startup has no settlement owner, and the RIB has no backlog yet.
+            Some(RIB_REPLY_TIMEOUT),
         )
         .await
     }
@@ -300,12 +312,16 @@ impl PeerManager {
                         next.values()
                             .map(|entry| Arc::clone(&entry.owner))
                             .collect(),
+                        // Every Publish runs under the settlement owner that
+                        // dispatched it, which bounds both halves of the wait.
+                        None,
                     );
                     // SIGHUP settlement runs this after a reload completes,
                     // when the RIB's primary queue can hold seconds of
-                    // post-commit export work. The configuration is already
-                    // committed and reads never touch the owner catalogue, so
-                    // serve them too.
+                    // post-commit export work, so neither admission nor the
+                    // acknowledgement has a deadline of its own. The
+                    // configuration is already committed and reads never
+                    // touch the owner catalogue, so serve them too.
                     self.await_with_readiness(send, OperatorReadAdmission::Served)
                         .await?;
                 }

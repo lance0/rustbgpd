@@ -964,6 +964,45 @@ class RecoveryTests(unittest.TestCase):
                             self.assertLessEqual(wire_check.call_count, 1)
                     self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], verdict)
 
+    def test_only_the_candidate_must_hold_a_refresh_obligation_through_the_overlap(self):
+        # At 150 peers the private control answers the paused refresh at once:
+        # owing peers and no refresh/EoR obligation in any snapshot.
+        for arm, mode, verdict in (("candidate", "no-obligation", "FAIL"), ("private", "no-obligation", "PASS"),
+                                   ("candidate", "one-row", "FAIL"), ("private", "no-recovery-work", "FAIL")):
+            with self.subTest(arm=arm, mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = self.analysis_fixture(root)
+                leg = next(root.glob(f"recovery-*-{arm}"))
+                row = json.loads((leg / "result.json").read_text())
+                names = ("protocol_obligation_during_churn",) if mode == "one-row" else (
+                    "protocol_obligation_before_churn", "protocol_obligation_during_churn",
+                    "protocol_obligation_after_churn")
+                replaced = {}
+                for name in names:
+                    original = copy.deepcopy(row[name])
+                    row[name]["refresh_pending"] = row[name]["protocol_obligations"] = 0
+                    for peer in row[name]["peers"]: peer[8] = False
+                    if mode == "no-recovery-work":
+                        row[name]["recovery_pending"] = row[name]["owing"] = 0
+                        for peer in row[name]["peers"]: peer[10] = False
+                    replaced[json.dumps(original, sort_keys=True)] = row[name]
+                lines = []
+                for line in (leg / "observer.log").read_text().splitlines():
+                    if line.startswith("evpn_qualification "):
+                        key = json.dumps(json.loads(line.removeprefix("evpn_qualification ")), sort_keys=True)
+                        line = "evpn_qualification " + json.dumps(replaced.pop(key)) if key in replaced else line
+                    lines.append(line)
+                self.assertEqual(replaced, {})
+                (leg / "observer.log").write_text("".join(line + "\n" for line in lines))
+                Q.write_json(leg / "result.json", row)
+                with patch.object(R, "check_wire", return_value=report):
+                    if verdict == "PASS":
+                        R.analyze(root)
+                    else:
+                        with self.assertRaises(Q.AcceptanceFailure):
+                            R.analyze(root)
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], verdict)
+
     def test_recovery_median_ratio_is_reported_but_only_regroup_gates(self):
         def rows(candidate, private):
             return [{"arm": arm, "regroup-a-seconds": 1., "regroup-b-seconds": 1., "recovery-seconds": value}
