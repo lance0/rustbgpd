@@ -59,9 +59,9 @@
 //!   Inside an interval the subject's values are a
 //!   subsequence of the reference's and match its state at the interval's
 //!   close; outside every interval they match exactly. A key a graceful end
-//!   carried into the session with a different value has no common starting
-//!   point; P1-P3 still apply
-//!   to it.
+//!   carried into the session with a different value, or the same paths
+//!   under different path IDs, has no common starting point; P1-P3 still
+//!   apply to it.
 //! - P5, bounded retention: the peak queued envelopes per receiver stay
 //!   within [`retention_bound`]. Peak queued rows are recorded too, so a
 //!   later bound can pin them.
@@ -976,8 +976,8 @@ struct Harness {
     snapshots: Vec<Vec<(u64, Table)>>,
     /// Subject dirty after each operation.
     dirty: Vec<[bool; PEERS]>,
-    /// Subject (peer, session, prefix) a graceful end carried in with a
-    /// path set different from the reference's.
+    /// Subject (peer, session, prefix) a graceful end carried in with rows
+    /// (paths or their path IDs) different from the reference's.
     carried: BTreeSet<(usize, u64, Nlri)>,
     peak_envelopes: [usize; PEERS],
     /// Subject queue depth after the previous operation.
@@ -1043,19 +1043,24 @@ impl Harness {
             arm.wire[peer].start_session(session_id, config.enhanced, retain);
         }
         // Compared after retention: a stale route from an earlier graceful
-        // end is gone by now.
+        // end is gone by now. Rows are compared with their path IDs: the
+        // arms can hold equal paths under different IDs (Add-Path keys
+        // follow each session's wire history), and a new-session
+        // announcement replaces a retained stale path only on the same ID
+        // (RFC 7911 §3); any other stale row stays until the EoR (RFC 4724
+        // §4.2), so the arms' sequences diverge until then.
         let carried = retain.then(|| {
-            let reference = path_sets(&self.arms[REFERENCE].wire[peer].held, None);
-            let subject = path_sets(&self.arms[SUBJECT].wire[peer].held, None);
+            let reference = &self.arms[REFERENCE].wire[peer].held;
+            let subject = &self.arms[SUBJECT].wire[peer].held;
             reference
                 .iter()
-                .filter(|(prefix, values)| subject.get(*prefix) != Some(*values))
+                .filter(|(key, value)| subject.get(*key) != Some(*value))
                 .chain(
                     subject
                         .iter()
-                        .filter(|(prefix, values)| reference.get(*prefix) != Some(*values)),
+                        .filter(|(key, value)| reference.get(*key) != Some(*value)),
                 )
-                .map(|(prefix, _)| prefix.clone())
+                .map(|(key, _)| nlri(key))
                 .collect::<Vec<_>>()
         });
         for carried in carried.into_iter().flatten() {
@@ -1522,9 +1527,10 @@ impl Harness {
         for peer in 0..PEERS {
             let reference = &self.arms[REFERENCE].wire[peer];
             let subject = &self.arms[SUBJECT].wire[peer];
-            // A prefix a graceful end carried in with different stale paths
-            // (the subject lost queued envelopes at the end) converges only
-            // at the family's End-of-RIB on the new session.
+            // A prefix a graceful end carried in with different stale rows
+            // (the subject lost queued envelopes at the end, or keyed equal
+            // paths differently) converges only at the family's End-of-RIB
+            // on the new session.
             let settled = |sets: PathSets| -> PathSets {
                 sets.into_iter()
                     .filter(|(prefix, _)| {
@@ -2583,6 +2589,51 @@ fn discarded_orf_eor_preserves_the_clean_event_boundary() {
     .expect("a discarded EoR at op 5 cannot excuse a missing clean event at op 4");
     assert!(reason.starts_with("P4: peer 2 session 2"), "{reason}");
     assert!(reason.contains("outside any deferral"), "{reason}");
+}
+
+/// Minimized by the oracle. Peer 2 is a GR Add-Path receiver (send 2) with
+/// a two-envelope channel. Its full channel misses peer 0's path (key 2 in
+/// the reference) and the withdrawal of peer 3's path (key 1), so the dirty
+/// resync puts peer 0's path on the freed key 1 in place. After the graceful
+/// restart both arms announce it on key 1: it replaces the subject's stale
+/// row, while the reference's stale key-2 row stays until the `EoR`. Both
+/// wires are valid (RFC 7911 path IDs are opaque, RFC 4724 §4.2), so the
+/// prefix counts as carried and P4 skips it; P1-P3 still apply.
+#[test]
+fn gr_retained_paths_on_different_path_ids_are_carried() {
+    let mut config = livelock_config();
+    config[2] = PeerConfig {
+        capacity: 2,
+        add_path: 2,
+        gr: true,
+        ..config[2]
+    };
+    let announce = |src| Op::Announce {
+        src,
+        family: Fam::V4,
+        index: 2,
+        variant: 0,
+    };
+    let ops = [
+        announce(3),
+        announce(0),
+        Op::Flap { peer: 3 },
+        Op::Drain { peer: 2, k: None },
+        Op::Tick,
+        Op::Drain { peer: 2, k: None },
+        Op::GrRestart { peer: 2 },
+    ];
+    assert_clean(&config, &ops);
+    let reason = run_seeded(config, &ops, |harness| {
+        let prefix = (V4, v4_prefix(2).to_string());
+        assert!(harness.carried.contains(&(2, 2, prefix.clone())));
+        harness.arms[SUBJECT].wire[2]
+            .held
+            .retain(|key, _| nlri(key) != prefix);
+    })
+    .err()
+    .expect("P1 must still check a carried prefix once its EoR arrived");
+    assert!(reason.starts_with("P1: peer 2"), "{reason}");
 }
 
 fn stale_marker_wire(enhanced: bool) -> (Wire, [Key; 3]) {
