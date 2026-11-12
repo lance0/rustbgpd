@@ -657,13 +657,15 @@ impl ActorWindow {
 
     /// This reload's `reloadstall_actor_csv` row, the first time only, plus a
     /// daemon-log read error (the row then reports the phase as absent).
-    async fn take_row(&mut self) -> (Option<String>, Option<String>) {
+    /// `attempts` bounds the wait for a lagging phase line: a failed reload
+    /// (a rejected policy parse never writes one) reads the log once.
+    async fn take_row(&mut self, attempts: u32) -> (Option<String>, Option<String>) {
         if self.reported {
             return (None, None);
         }
         self.reported = true;
         let (phase, error) = match &self.daemon_log {
-            Some((path, offset)) => match read_phase_fields(path, *offset).await {
+            Some((path, offset)) => match read_phase_fields(path, *offset, attempts).await {
                 Ok(phase) => (phase, None),
                 Err(error) => (PhaseFields::default(), Some(error)),
             },
@@ -676,9 +678,10 @@ impl ActorWindow {
 
 /// Rows a reload prints before any failure exit after its trigger: its actor
 /// row (unless already printed) and the run max so far, so a failing sweep
-/// point never loses its turn max. A daemon-log error is already a failure.
+/// point never loses its turn max. A daemon-log error is already a failure,
+/// and the log is read once, without waiting for a phase line.
 async fn actor_failure_rows(window: &mut ActorWindow, run_max_us: Option<u64>) -> Vec<String> {
-    let (row, _) = window.take_row().await;
+    let (row, _) = window.take_row(1).await;
     row.into_iter()
         .chain([format!(
             "reloadstall_actor_run_csv,{},{}",
@@ -688,13 +691,37 @@ async fn actor_failure_rows(window: &mut ActorWindow, run_max_us: Option<u64>) -
         .collect()
 }
 
-/// Exit 1 after printing [`actor_failure_rows`]. Without a window (a command
-/// reload or no metrics address) there is no scrape data to report.
-async fn exit_after_actor_rows(window: Option<&mut ActorWindow>, run_max_us: Option<u64>) -> ! {
-    if let Some(window) = window {
-        for row in actor_failure_rows(window, run_max_us).await {
-            println!("{row}");
-        }
+/// A post-trigger failure's output in print order: the actor and run rows
+/// (none without a window: a command reload or no metrics address), then the
+/// marker. The soak runner stops the harness on `FAIL: reload`, so the rows
+/// must already be written when the marker appears.
+async fn failure_report(
+    window: Option<&mut ActorWindow>,
+    run_max_us: Option<u64>,
+    marker: Option<String>,
+) -> (Vec<String>, Option<String>) {
+    let rows = match window {
+        Some(window) => actor_failure_rows(window, run_max_us).await,
+        None => Vec::new(),
+    };
+    (rows, marker)
+}
+
+/// Print [`failure_report`] (rows on stdout, flushed, then the marker on
+/// stderr) and exit 1.
+async fn exit_after_actor_rows(
+    window: Option<&mut ActorWindow>,
+    run_max_us: Option<u64>,
+    marker: Option<String>,
+) -> ! {
+    use std::io::Write;
+    let (rows, marker) = failure_report(window, run_max_us, marker).await;
+    for row in rows {
+        println!("{row}");
+    }
+    let _ = std::io::stdout().flush();
+    if let Some(marker) = marker {
+        eprintln!("{marker}");
     }
     std::process::exit(1)
 }
@@ -765,9 +792,9 @@ fn json_raw_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// length at the pre-trigger bracket, after staging). The phase line is
 /// written before the SIGHUP outcome counter moves; a buffered writer may
 /// still lag, so retry briefly.
-async fn read_phase_fields(path: &Path, offset: u64) -> Result<PhaseFields, String> {
+async fn read_phase_fields(path: &Path, offset: u64, attempts: u32) -> Result<PhaseFields, String> {
     use std::io::{Read, Seek, SeekFrom};
-    for _ in 0..20 {
+    for attempt in 1..=attempts {
         let mut tail = Vec::new();
         std::fs::File::open(path)
             .and_then(|mut file| {
@@ -776,7 +803,7 @@ async fn read_phase_fields(path: &Path, offset: u64) -> Result<PhaseFields, Stri
             })
             .map_err(|error| format!("RELOADSTALL_DAEMON_LOG {}: {error}", path.display()))?;
         let fields = phase_fields(&String::from_utf8_lossy(&tail));
-        if fields.lines > 0 {
+        if fields.lines > 0 || attempt == attempts {
             return Ok(fields);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5311,11 +5338,13 @@ fn main() {
                 println!("reload {r} SIGHUP wall_us={} policy={next}", wall_us());
                 let kill_rc = unsafe { libc::kill(pid, libc::SIGHUP) };
                 if kill_rc != 0 {
-                    eprintln!(
-                        "reload {r} failed to deliver SIGHUP: {}",
-                        std::io::Error::last_os_error()
-                    );
-                    exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                    let error = std::io::Error::last_os_error();
+                    exit_after_actor_rows(
+                        actor_window.as_mut(),
+                        run_actor_max_us,
+                        Some(format!("reload {r} failed to deliver SIGHUP: {error}")),
+                    )
+                    .await;
                 }
             }
             // Completion is intentionally scoped to observers whose effective
@@ -5352,8 +5381,12 @@ fn main() {
                     let sample = match fetch_settlement_sample(reload_metrics_addr.unwrap()).await {
                         Ok(sample) => sample,
                         Err(error) => {
-                            eprintln!("FAIL: reload {r} {error}");
-                            exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await
+                            exit_after_actor_rows(
+                                actor_window.as_mut(),
+                                run_actor_max_us,
+                                Some(format!("FAIL: reload {r} {error}")),
+                            )
+                            .await
                         }
                     };
                     let after = sample.0;
@@ -5362,8 +5395,14 @@ fn main() {
                     if let Err(error) = settled {
                         // The failed reload's actor row carries its outcome
                         // (a rollback is `rejected_no_effect`).
-                        eprintln!("FAIL: reload {r} {error}; see daemon log for rejection details");
-                        exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await
+                        exit_after_actor_rows(
+                            actor_window.as_mut(),
+                            run_actor_max_us,
+                            Some(format!(
+                                "FAIL: reload {r} {error}; see daemon log for rejection details"
+                            )),
+                        )
+                        .await
                     }
                     applied = settled.unwrap();
                     if applied {
@@ -5404,8 +5443,12 @@ fn main() {
                     last_progress = Instant::now();
                 } else if last_progress.elapsed() > window {
                     if done && !applied {
-                        eprintln!("FAIL: reload {r} receiver delivery completed but daemon SIGHUP settlement is missing");
-                        exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                        exit_after_actor_rows(
+                            actor_window.as_mut(),
+                            run_actor_max_us,
+                            Some(format!("FAIL: reload {r} receiver delivery completed but daemon SIGHUP settlement is missing")),
+                        )
+                        .await;
                     }
                     println!(
                         "reload {r} STALLED: no re-advertisement progress for {}s",
@@ -5441,7 +5484,9 @@ fn main() {
                             );
                         }
                     }
-                    exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                    // The STALLED line and diagnostics above are not `FAIL:`
+                    // markers, so the runner has not stopped the harness yet.
+                    exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us, None).await;
                 }
             }
             let reload_end_us = (0..changed_peers as usize)
@@ -5455,16 +5500,24 @@ fn main() {
                 match fetch_settlement_sample(reload_metrics_addr.unwrap()).await {
                     Ok(sample) => window.record(sample),
                     Err(error) => {
-                        eprintln!("FAIL: reload {r} {error}");
-                        exit_after_actor_rows(Some(window), run_actor_max_us).await
+                        exit_after_actor_rows(
+                            Some(window),
+                            run_actor_max_us,
+                            Some(format!("FAIL: reload {r} {error}")),
+                        )
+                        .await
                     }
                 }
-                let (row, log_error) = window.take_row().await;
+                let (row, log_error) = window.take_row(20).await;
                 println!("{}", row.expect("the window reports once, here"));
                 run_actor_max_us = run_actor_max_us.max(window.max_us);
                 if let Some(error) = log_error {
-                    eprintln!("FAIL: reload {r} {error}");
-                    exit_after_actor_rows(Some(window), run_actor_max_us).await;
+                    exit_after_actor_rows(
+                        Some(window),
+                        run_actor_max_us,
+                        Some(format!("FAIL: reload {r} {error}")),
+                    )
+                    .await;
                 }
             }
             if dualstack() {
@@ -5495,11 +5548,15 @@ fn main() {
                     last_stable = stable_marker_peers;
                     stable_progress = Instant::now();
                 } else if stable_progress.elapsed() > STALL_WINDOW {
-                    eprintln!(
-                        "reload {r} STALLED: no post-completion stable-marker progress for {}s: {stable_marker_peers}/{expected_stable}",
-                        STALL_WINDOW.as_secs()
-                    );
-                    exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                    exit_after_actor_rows(
+                        actor_window.as_mut(),
+                        run_actor_max_us,
+                        Some(format!(
+                            "reload {r} STALLED: no post-completion stable-marker progress for {}s: {stable_marker_peers}/{expected_stable}",
+                            STALL_WINDOW.as_secs()
+                        )),
+                    )
+                    .await;
                 }
                 stable_ticks += 1;
                 if stable_ticks.is_multiple_of(20) {
@@ -5551,8 +5608,12 @@ fn main() {
                         .count();
                     println!("reload {r} stopped_readers_activated {activated}/{paced_readers}");
                     if activated != paced_readers {
-                        eprintln!("FAIL: reload {r} a stopped reader saw no current-generation UPDATE");
-                        exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                        exit_after_actor_rows(
+                            actor_window.as_mut(),
+                            run_actor_max_us,
+                            Some(format!("FAIL: reload {r} a stopped reader saw no current-generation UPDATE")),
+                        )
+                        .await;
                     }
                 }
                 stats_line(&format!("reload {r} healthy_completion_s"),
@@ -5622,17 +5683,25 @@ fn main() {
                 || up != n_peers as usize
                 || parse_errors != 0
             {
-                eprintln!(
-                    "FAIL: reload {r} integrity check failed: stable_marker_peers={stable_marker_peers}/{expected_stable}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
-                );
-                exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                exit_after_actor_rows(
+                    actor_window.as_mut(),
+                    run_actor_max_us,
+                    Some(format!(
+                        "FAIL: reload {r} integrity check failed: stable_marker_peers={stable_marker_peers}/{expected_stable}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+                    )),
+                )
+                .await;
             }
             if filtered_leaked != 0 || bystander_withdrawn != 0 || stable_withdrawn != 0 {
-                eprintln!(
-                    "FAIL: reload {r} policy-change integrity failed: filtered_leaked={filtered_leaked}, \
-                     bystander_withdrawn={bystander_withdrawn}, stable_withdrawn={stable_withdrawn}"
-                );
-                exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us).await;
+                exit_after_actor_rows(
+                    actor_window.as_mut(),
+                    run_actor_max_us,
+                    Some(format!(
+                        "FAIL: reload {r} policy-change integrity failed: filtered_leaked={filtered_leaked}, \
+                         bystander_withdrawn={bystander_withdrawn}, stable_withdrawn={stable_withdrawn}"
+                    )),
+                )
+                .await;
             }
             println!(
                 "reloadstall_csv,{r},{n_peers},{changed_peers},{},{total_all},\
@@ -6834,7 +6903,7 @@ mod tests {
         let offset = daemon_log_len(&log);
         std::fs::write(&log, format!("{}{}", line(77), line(3))).unwrap();
         let mut window = ActorWindow::new(1, [0; 5], None, None, Some((log.clone(), offset)));
-        let (row, error) = window.take_row().await;
+        let (row, error) = window.take_row(20).await;
         std::fs::remove_file(&log).unwrap();
         assert_eq!(error, None);
         assert!(row.unwrap().contains(",1,committed,3,"));
@@ -6858,16 +6927,59 @@ mod tests {
             exits, 1,
             "a post-trigger failure exits without the actor rows"
         );
-        // A watchdog stall before settlement: the row reports the outcome
-        // pending, and the run max includes this window.
-        let mut window = ActorWindow::new(4, [7, 0, 0, 0, 0], Some(10), Some(20), None);
+        // A rejected reload before settlement whose daemon log has no phase
+        // line (a rejected policy parse writes none): the rows come first,
+        // then the marker, and the log is read once without waiting for it.
+        let log = evidence_test_dir("failure-no-phase");
+        std::fs::write(
+            &log,
+            "{\"fields\":{\"message\":\"policy parse rejected\"}}\n",
+        )
+        .unwrap();
+        let mut window = ActorWindow::new(
+            4,
+            [7, 0, 0, 0, 0],
+            Some(10),
+            Some(20),
+            Some((log.clone(), 0)),
+        );
         window.record(([7, 0, 0, 0, 0], Some(55_000)));
+        let started = Instant::now();
+        let report = failure_report(
+            Some(&mut window),
+            Some(40_000),
+            Some("FAIL: reload 4 rejected".to_owned()),
+        )
+        .await;
+        let waited = started.elapsed();
+        std::fs::remove_file(&log).unwrap();
+        assert!(
+            waited < Duration::from_millis(500),
+            "waited {waited:?} for a phase line"
+        );
         assert_eq!(
-            actor_failure_rows(&mut window, Some(40_000)).await,
-            [
-                "reloadstall_actor_csv,4,pending,1,10,20,55000,0,absent,absent,absent,absent,absent",
-                "reloadstall_actor_run_csv,4,55000",
-            ]
+            report,
+            (
+                vec![
+                    "reloadstall_actor_csv,4,pending,1,10,20,55000,0,absent,absent,absent,absent,absent"
+                        .to_owned(),
+                    "reloadstall_actor_run_csv,4,55000".to_owned(),
+                ],
+                Some("FAIL: reload 4 rejected".to_owned())
+            )
+        );
+        // The exit helper writes and flushes the rows before the marker.
+        let source = include_str!("main.rs");
+        let helper = source
+            .find(&["async fn exit_after_", "actor_rows("].concat())
+            .unwrap();
+        let body = &source[helper..helper + source[helper..].find("\n}\n").unwrap()];
+        let rows = body.find("println!(\"{row}\")").unwrap();
+        let flush = body.find("stdout().flush()").unwrap();
+        let marker = body.find("eprintln!(\"{marker}\")").unwrap();
+        assert!(
+            rows < flush && flush < marker,
+            "marker printed before the rows"
         );
         // After the reload's row was printed (a later integrity failure),
         // only the run row is repeated.

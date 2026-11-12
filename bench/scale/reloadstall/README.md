@@ -874,10 +874,16 @@ Each `/metrics` render resets `bgp_rib_actor_slice_max_microseconds`, so the
 harness records `{stage="actor_poll"}` from every scrape it makes: the
 outcome baseline before staging, one scrape just before the SIGHUP, each
 one-second settlement check, and one closing scrape at receiver completion.
-The scrape before the SIGHUP resets the gauge, so work during staging (for
-example a stage command that waits for a previous roster to settle) stays out
-of the reload window. Another `/metrics` reader during the
-reload also resets the gauge and hides part of the window from these records.
+The scrape before the SIGHUP resets the gauge, so polls that finish during
+staging (for example while a stage command waits for a previous roster to
+settle) stay out of the reload window. The daemon publishes each poll's
+duration when the poll returns, so the window edges are poll-completion
+boundaries, not strict bounds on when the work ran. A poll that started during
+staging and returns after the pre-trigger scrape counts in full toward the
+reload, and a poll that returns after the closing scrape is missing from that
+reload's max (it lands in the next `pre_stage` value). Another `/metrics`
+reader during the reload also resets the gauge and hides part of the window
+from these records.
 
 - `reloadstall_actor_scrape_csv,reload,seq,window,since_trigger_ms,actor_poll_max_us`:
   one row per scrape. `window` is `pre_stage` (the outcome baseline, covering
@@ -891,7 +897,8 @@ reload also resets the gauge and hides part of the window from these records.
   (`complete`, `rejected_no_effect` for a rolled-back reload, or `pending`
   when the reload failed before it settled). Every failure exit after the
   trigger (a non-complete outcome, a failed scrape, a delivery watchdog stall,
-  or an integrity check) prints this row and the run row before the run fails
+  or an integrity check) prints this row and the run row, flushed, before its
+  `FAIL:` line (the soak runner stops the harness on that line), then fails
   as before. Command reloads have no metrics window. `actor_poll_pre_us`
   and `actor_poll_stage_us` are the two bracket values; `actor_poll_max_us` is
   the max over the reload window only. The `phase_*` and target columns come from
