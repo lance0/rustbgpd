@@ -1763,12 +1763,14 @@ impl AdjRibIn {
     // --- FlowSpec methods ---
 
     /// Insert or replace a `FlowSpec` route.
-    pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
+    ///
+    /// Returns `true` if an existing route at the same key was replaced.
+    pub fn insert_flowspec(&mut self, route: FlowSpecRoute) -> bool {
         if !self.flowspec_llgr_stale_local_tags.is_empty() {
             self.flowspec_llgr_stale_local_tags.remove(&route.key());
         }
         self.flowspec_add_path_seen |= route.path_id != 0;
-        self.flowspec_routes.insert(route.key(), route);
+        self.flowspec_routes.insert(route.key(), route).is_some()
     }
 
     /// Withdraw a `FlowSpec` route by family-complete key.
@@ -3732,8 +3734,12 @@ impl AdjRibIn {
     }
 
     /// Clear the LLGR-stale flag on `FlowSpec` routes matching the given family.
-    pub fn clear_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) {
-        self.clear_llgr_stale_flowspec_with_checkpoint(family, &mut || {});
+    pub fn clear_llgr_stale_flowspec(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) {
+        self.clear_llgr_stale_flowspec_with_checkpoint(family, attr_intern, &mut || {});
     }
 
     /// [`Self::clear_llgr_stale_flowspec`] checkpointing every visited
@@ -3741,6 +3747,7 @@ impl AdjRibIn {
     pub(crate) fn clear_llgr_stale_flowspec_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
         checkpoint: &mut impl FnMut(),
     ) {
         if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
@@ -3758,7 +3765,7 @@ impl AdjRibIn {
                     }
                 }
             });
-        self.clear_local_llgr_stale_flowspec_community(&clear_local_llgr, checkpoint);
+        self.clear_local_llgr_stale_flowspec_community(&clear_local_llgr, attr_intern, checkpoint);
         retire_llgr_keys(clear_local_llgr, checkpoint);
     }
 
@@ -3781,12 +3788,15 @@ impl AdjRibIn {
     fn clear_local_llgr_stale_flowspec_community(
         &mut self,
         keys: &[FlowSpecRouteKey],
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
         checkpoint: &mut impl FnMut(),
     ) {
         for key in keys {
             checkpoint();
             self.flowspec_routes.update(key, |route| {
                 AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
+                // Rules that shared one set before the edit share it again.
+                attr_intern.intern(&mut route.attributes);
             });
             self.flowspec_llgr_stale_local_tags.remove(key);
         }
@@ -5755,7 +5765,10 @@ mod tests {
             |a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE))
         ));
 
-        rib.clear_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        rib.clear_llgr_stale_flowspec(
+            (Afi::Ipv4, Safi::FlowSpec),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
         let route = rib.iter_flowspec().next().unwrap();
         assert!(!route.is_llgr_stale);
         assert!(!route.attributes.iter().any(
@@ -5795,6 +5808,18 @@ mod tests {
         assert!(
             rib.iter_flowspec()
                 .all(|route| Arc::ptr_eq(&route.attributes, &first))
+        );
+        // Every rule is tagged as locally marked, so End-of-RIB strips the
+        // community from each of them, and they stay on one set.
+        assert_eq!(rib.flowspec_llgr_stale_local_tags.len(), 4);
+        drop(first);
+        rib.clear_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec), &mut intern);
+        assert!(rib.flowspec_llgr_stale_local_tags.is_empty());
+        let first = Arc::clone(&rib.iter_flowspec().next().unwrap().attributes);
+        assert_eq!(*first, vec![PathAttribute::Communities(vec![1, 2, 3])]);
+        assert!(
+            rib.iter_flowspec()
+                .all(|route| !route.is_llgr_stale && Arc::ptr_eq(&route.attributes, &first))
         );
     }
 
@@ -8380,7 +8405,7 @@ mod tests {
                 Op::ClearLlgr(f) => {
                     let family = family_at(f);
                     rib.clear_llgr_stale(family);
-                    rib.clear_llgr_stale_flowspec(family);
+                    rib.clear_llgr_stale_flowspec(family, intern);
                     rib.clear_llgr_stale_evpn(family);
                     rib.clear_llgr_stale_vpn(family);
                     rib.clear_llgr_stale_labeled(family);

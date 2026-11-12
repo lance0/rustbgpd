@@ -1531,3 +1531,82 @@ async fn flowspec_import_modifications_apply_per_rule() {
         );
     }
 }
+
+/// More distinct import outcomes in one UPDATE than the memo's fixed slots
+/// still share one set per outcome: the rules past the slots that receive
+/// the same modification share one allocation instead of one copy each.
+#[tokio::test]
+async fn import_outcomes_past_the_memo_slots_share_one_set_per_outcome() {
+    const DISTINCT: u16 = 9;
+    const RULES: usize = 200;
+    const BROAD: u32 = 0xFDE9_FFFF; // 65001:65535
+    let (mut session, mut rib_rx) = flowspec_test_session();
+    // Rules 0..9 (10.0/16 .. 10.8/16) each take their own community, which
+    // fills the memo's slots and overflows by one. Every later rule takes the
+    // broad statement's single community.
+    let mut entries: Vec<PolicyStatement> = (0..DISTINCT)
+        .map(|index| {
+            let mut statement = retention_statement(
+                Some(Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(10, u8::try_from(index).unwrap(), 0, 0),
+                    16,
+                ))),
+                PolicyAction::Permit,
+            );
+            statement.modifications.communities_add = vec![0xFDE9_0000 | u32::from(index)];
+            statement
+        })
+        .collect();
+    let mut broad = retention_statement(
+        Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        PolicyAction::Permit,
+    );
+    broad.ge = Some(16);
+    broad.le = Some(16);
+    broad.modifications.communities_add = vec![BROAD];
+    entries.push(broad);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries,
+        default_action: PolicyAction::Permit,
+    }])));
+    session
+        .process_update(flowspec_update_with(RULES, 64))
+        .await;
+    let RibUpdate::RoutesReceived {
+        flowspec_announced, ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_announced.len(), RULES);
+    let distinct: std::collections::HashSet<_> = flowspec_announced
+        .iter()
+        .map(|route| Arc::as_ptr(&route.attributes))
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        usize::from(DISTINCT) + 1,
+        "one attribute set per distinct import outcome"
+    );
+    let broad_set = &flowspec_announced
+        .iter()
+        .find(|route| route.rule == flowspec_dest_rule(usize::from(DISTINCT)))
+        .unwrap()
+        .attributes;
+    for (index, route) in flowspec_announced.iter().enumerate() {
+        let communities = route
+            .attributes
+            .iter()
+            .find_map(PathAttribute::communities)
+            .unwrap();
+        if index < usize::from(DISTINCT) {
+            assert_eq!(
+                communities.last(),
+                Some(&(0xFDE9_0000 | u32::try_from(index).unwrap()))
+            );
+        } else {
+            assert_eq!(communities.last(), Some(&BROAD));
+            assert!(Arc::ptr_eq(&route.attributes, broad_set));
+        }
+    }
+}

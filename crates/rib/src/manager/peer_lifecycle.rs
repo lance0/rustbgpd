@@ -3648,6 +3648,7 @@ impl RibManager {
                 &target_peer_label,
                 &mut fs_announce,
                 &mut fs_withdraw,
+                &mut export_memo,
                 &mut checkpoint,
             );
             fs_announce.retain(|route| {

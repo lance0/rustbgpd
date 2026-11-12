@@ -3169,10 +3169,12 @@ apply. See [ADR-0035](../adr/0035-flowspec.md).
 
 Received FlowSpec rules are unbounded unless the neighbor sets
 `max_prefixes_ipv4_flowspec` or `max_prefixes_ipv6_flowspec`; set them for a
-FlowSpec peer that is not fully trusted. The bounds count rules, not bytes. The
-rules of one UPDATE share a single copy of its path attributes, so each rule
-retains at most one UPDATE's attributes (under 64 KiB with Extended Messages),
-and the rule bound therefore also caps that peer's retained FlowSpec memory.
+FlowSpec peer that is not fully trusted. The bounds count rules, not bytes.
+Each rule refers to at most one UPDATE's path attributes (under 64 KiB with
+Extended Messages, plus what import or export policy adds), and rules with
+equal attributes share one copy. The rule bound therefore also limits the
+attribute memory that peer's rules can hold in the Adj-RIB-In, the Loc-RIB and
+each neighbor's Adj-RIB-Out.
 
 ### Per-neighbor policy
 

@@ -2049,3 +2049,127 @@ fn flowspec_selection_reads_the_full_scan_candidates_vpn() {
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), false);
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), true);
 }
+
+/// `count` destination-less rules (protocols 0..count) from `source`, all
+/// carrying one shared attribute set.
+fn shared_flowspec_rules(source: Ipv4Addr, count: u8, attrs: &Arc<AttrSet>) -> Vec<FlowSpecRoute> {
+    (0..count)
+        .map(|protocol| {
+            let mut route = make_destless_flowspec_route(Afi::Ipv4, source, protocol);
+            route.attributes = Arc::clone(attrs);
+            route
+        })
+        .collect()
+}
+
+fn receive_flowspec(manager: &mut RibManager, source: PeerId, routes: Vec<FlowSpecRoute>) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: routes,
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+/// Export policy that modifies every rule toward several peers keeps one
+/// modified attribute set for rules that shared a source set, across rules
+/// and across peers, instead of one copy per (rule, peer).
+#[test]
+fn flowspec_export_modification_shares_one_set_across_rules_and_peers() {
+    const ADDED: u32 = 0xFDE9_0063; // 65001:99
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let targets = [2, 3].map(|octet| peer_v4(Ipv4Addr::new(10, 0, 0, octet)));
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source), 0);
+    let mut outbound = Vec::new();
+    for target in targets {
+        let (out_tx, out_rx) = mpsc::channel(64);
+        outbound.push(out_rx);
+        manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: target,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(rustbgpd_policy::PolicyChain::new(vec![
+                rustbgpd_policy::Policy {
+                    entries: vec![rustbgpd_policy::PolicyStatement {
+                        match_community: vec![],
+                        ..flowspec_policy_statement(
+                            0,
+                            rustbgpd_policy::RouteModifications {
+                                communities_add: vec![ADDED],
+                                ..Default::default()
+                            },
+                        )
+                    }],
+                    default_action: rustbgpd_policy::PolicyAction::Permit,
+                },
+            ])),
+            sendable_families: ipv4_flowspec_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+    }
+    let shared = AttrSet::new(vec![PathAttribute::Communities(vec![1, 2, 3])]);
+    receive_flowspec(
+        &mut manager,
+        peer_v4(source),
+        shared_flowspec_rules(source, 16, &shared),
+    );
+
+    let exported: Vec<&Arc<AttrSet>> = targets
+        .iter()
+        .flat_map(|target| manager.adj_ribs_out[target].iter_flowspec())
+        .map(|route| &route.attributes)
+        .collect();
+    assert_eq!(exported.len(), 32);
+    assert!(
+        exported[0]
+            .iter()
+            .find_map(PathAttribute::communities)
+            .is_some_and(|values| values.contains(&ADDED))
+    );
+    assert!(!Arc::ptr_eq(exported[0], &shared));
+    assert!(
+        exported.iter().all(|set| Arc::ptr_eq(set, exported[0])),
+        "one modified set across every rule and peer"
+    );
+}
+
+/// Equal attribute sets from separate UPDATEs share one allocation in the
+/// Adj-RIB-In through the global intern table, as the other families do.
+#[test]
+fn received_flowspec_attributes_are_interned_across_updates() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source), 0);
+    let attrs = vec![PathAttribute::Communities(vec![1, 2, 3])];
+    let first = shared_flowspec_rules(source, 2, &AttrSet::new(attrs.clone()));
+    let mut second = shared_flowspec_rules(source, 4, &AttrSet::new(attrs));
+    second.drain(..2);
+    receive_flowspec(&mut manager, peer_v4(source), first);
+    receive_flowspec(&mut manager, peer_v4(source), second);
+    let stored: Vec<&Arc<AttrSet>> = manager.ribs[&peer_v4(source)]
+        .iter_flowspec()
+        .map(|route| &route.attributes)
+        .collect();
+    assert_eq!(stored.len(), 4);
+    assert!(stored.iter().all(|set| Arc::ptr_eq(set, stored[0])));
+}

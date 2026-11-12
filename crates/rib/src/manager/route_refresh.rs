@@ -365,7 +365,11 @@ impl RibManager {
                 let mut swept =
                     rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut sweep);
                 super::retire_vec(&mut swept, &mut sweep);
-                rib.clear_llgr_stale_flowspec_with_checkpoint(family, &mut sweep);
+                rib.clear_llgr_stale_flowspec_with_checkpoint(
+                    family,
+                    &mut self.attr_intern,
+                    &mut sweep,
+                );
             }
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
@@ -1333,6 +1337,7 @@ impl RibManager {
                     &target_peer_label,
                     &mut fs_announce,
                     &mut fs_withdraw,
+                    &mut super::distribution::ExportMemo::default(),
                     &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     },
