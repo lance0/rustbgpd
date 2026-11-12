@@ -192,8 +192,14 @@ The fixed sequence drains each source's writes and
 waits 50 ms before issuing the next source's updates in both arms. Driver-side
 timestamps bound the sequence; Python's later acknowledgement time is not its
 completion timestamp. The pacing gaps do not prove a continuous socket write
-in flight. Missing protocol obligation fails the exercise; no synthetic hold or RTC state
-is inserted. Every writer acknowledgement follows the socket write, not queue
+in flight. A missing protocol obligation fails the candidate; no synthetic hold or RTC state
+is inserted. The private control need not hold one: its per-peer row credit is
+a share of the daemon's, so at 150 peers the credit is spent before the paused
+writer channel fills. The peers owe keys, but each refresh, a whole-table
+operation admitted against channel room rather than credit, is answered at once
+and absorbs them. The private overlap is checked on the wire (refresh EoR,
+final bytes, paired parity), and the control must still show recovery work
+before the sequence. Every writer acknowledgement follows the socket write, not queue
 admission. Socket writes alone are not an applied-input barrier: each source
 also sends an ordered EVPN EoR after the burst. An identical private observer
 in both exports logs it after the real RIB handler. Every source must reach
@@ -245,5 +251,5 @@ activation remain separate gates. Missing raw evidence, an unobserved phase or
 a failed bar cannot be replaced by component tests or a passing memory result.
 Terminal-only complete-feed marker retention and repeated complete-feed
 producer cost remain unqualified. The recovery summary always records
-`terminal_only_qualified: false`; common protocol-obligation coverage does not
+`terminal_only_qualified: false`; candidate protocol-obligation coverage does not
 replace those gates.
