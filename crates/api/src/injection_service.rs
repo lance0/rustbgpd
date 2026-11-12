@@ -7789,6 +7789,299 @@ mod tests {
         rig.stop().await;
     }
 
+    /// An export policy that denies every IPv4 destination prefix, then
+    /// permits only routes carrying `community`. A `FlowSpec` rule without
+    /// a destination component has no prefix, so only the community decides.
+    fn permit_community_chain(community: u32) -> rustbgpd_policy::PolicyChain {
+        use rustbgpd_policy::{CommunityMatch, Policy, PolicyAction, PolicyStatement};
+        let statement = |prefix, le, action, match_community| PolicyStatement {
+            prefix,
+            ge: None,
+            le,
+            action,
+            match_community,
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications::default(),
+        };
+        rustbgpd_policy::PolicyChain::new(vec![Policy {
+            entries: vec![
+                statement(
+                    Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
+                    Some(32),
+                    PolicyAction::Deny,
+                    vec![],
+                ),
+                statement(
+                    None,
+                    None,
+                    PolicyAction::Permit,
+                    vec![CommunityMatch::Standard { value: community }],
+                ),
+            ],
+            default_action: PolicyAction::Deny,
+        }])
+    }
+
+    /// A guarded return-leg rule without a destination component: a source
+    /// host, protocol 6, source ports, TCP flags SYN+ACK, a typed
+    /// redirect-to-IP and a standard community. It is admitted, renewed and
+    /// read back exactly; it is exported only to the peer whose export
+    /// policy permits its community; and its delete is fenced by its
+    /// admission revision.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one guarded rule's admission, renewal, read-back, export and delete"
+    )]
+    async fn guarded_destinationless_return_leg_rule_qualifies() {
+        // 65000:100 and 65000:999.
+        const TAG: u32 = 0xfde8_0064;
+        const OTHER_TAG: u32 = 0xfde8_03e7;
+        let rig = GuardedRig::start();
+        // 10.0.0.1 exports only TAG and 10.0.0.2 only OTHER_TAG.
+        let mut outbound = Vec::new();
+        for (octet, community) in [(1, TAG), (2, OTHER_TAG)] {
+            let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)));
+            let (outbound_tx, outbound_rx) = mpsc::channel(64);
+            outbound.push(outbound_rx);
+            rig.rib_tx
+                .send(RibUpdate::SetPeerExportEncoder {
+                    peer,
+                    session_id: 0,
+                    encoder: Arc::new(AcceptAllEncoder),
+                })
+                .await
+                .unwrap();
+            rig.rib_tx
+                .send(RibUpdate::PeerUp {
+                    supersedes: None,
+                    peer,
+                    session_id: 0,
+                    peer_asn: 65_010,
+                    peer_router_id: Ipv4Addr::UNSPECIFIED,
+                    outbound_tx,
+                    export_policy: Some(permit_community_chain(community)),
+                    sendable_families: vec![(Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec)],
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    add_path_send_families: vec![],
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: vec![],
+                    negotiated_llgr_families: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        let component = |kind: u32, prefix: &str, value: &str| proto::FlowSpecComponent {
+            r#type: kind,
+            prefix: prefix.into(),
+            value: value.into(),
+            offset: 0,
+        };
+        // Components in the form read-back renders them, so equality is exact.
+        let rule = proto::AddFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components: vec![
+                component(2, "198.51.100.7/32", ""),
+                component(3, "", "==6"),
+                component(6, "", "==80, ==443"),
+                component(9, "", "0x0012/match"),
+            ],
+            actions: vec![proto::FlowSpecAction {
+                action: Some(proto::flow_spec_action::Action::RedirectIp(
+                    proto::FlowSpecRedirectIp {
+                        address: "192.0.2.10".into(),
+                        copy: false,
+                    },
+                )),
+            }],
+            communities: vec![TAG],
+            ..Default::default()
+        };
+        let window = rig.window("ctl").await;
+        let add = |revision| {
+            rig.svc
+                .add_guarded_flow_spec(Request::new(proto::AddGuardedFlowSpecRequest {
+                    rule: Some(rule.clone()),
+                    lease: Some(proto::InjectionLease {
+                        owner: "ctl".into(),
+                        lease_seconds: 60,
+                    }),
+                    window: Some(window),
+                    revision,
+                }))
+        };
+        let added = add(1).await.unwrap().into_inner();
+        assert_eq!(
+            added.result.unwrap().outcome(),
+            proto::FlowSpecInjectOutcome::Created
+        );
+        let generation = added.generation.unwrap();
+        // The same admission again at its revision changes nothing.
+        assert_eq!(
+            add(1).await.unwrap().into_inner().result.unwrap().outcome(),
+            proto::FlowSpecInjectOutcome::Unchanged
+        );
+        let renewed = rig
+            .svc
+            .renew_guarded_lease(Request::new(proto::RenewGuardedLeaseRequest {
+                owner: "ctl".into(),
+                generation: Some(generation),
+                lease_seconds: 90,
+                window: Some(window),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(renewed.generation, Some(generation));
+        assert!(
+            renewed.lease_remaining_ms > 60_000 && renewed.lease_remaining_ms <= 90_000,
+            "{renewed:?}"
+        );
+
+        // Read-back preserves the components, community and redirect
+        // exactly, under the guarded owner and revision.
+        let local = || async {
+            use proto::rib_service_server::RibService as _;
+            rig.rib
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    received_peer_address: "0.0.0.0".into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .received_routes
+                .into_iter()
+                .filter_map(|row| row.route)
+                .collect::<Vec<_>>()
+        };
+        let routes = local().await;
+        assert_eq!(routes.len(), 1);
+        let route = &routes[0];
+        assert_eq!(route.components, rule.components);
+        assert_eq!(route.communities, rule.communities);
+        assert_eq!(route.actions, rule.actions);
+        assert_eq!(
+            (route.injection_owner.as_str(), route.admission_revision),
+            ("guarded:ctl", Some(1))
+        );
+        // The guarded owner's key listing echoes the same key for a delete.
+        let keys = rig
+            .svc
+            .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "guarded:ctl".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .keys;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0].key,
+            Some(proto::leased_key::Key::FlowSpec(proto::LeasedFlowSpecKey {
+                afi_safi: rule.afi_safi,
+                components: rule.components.clone(),
+                rd: String::new(),
+            }))
+        );
+        assert_eq!(keys[0].admission_revision, Some(1));
+
+        // Export policy reads the community of a rule without a destination
+        // prefix: committed to the peer that permits it, withheld from the
+        // other.
+        let export = rig
+            .svc
+            .list_flow_spec_export_dispositions(Request::new(
+                proto::ListFlowSpecExportDispositionsRequest {
+                    afi_safi: rule.afi_safi,
+                    components: rule.components.clone(),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(export.next_page_token, "");
+        assert_eq!(
+            export
+                .peers
+                .iter()
+                .map(|row| (
+                    row.peer_address.as_str(),
+                    row.disposition,
+                    row.reason.as_str(),
+                    row.explain_code.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "10.0.0.1",
+                    proto::PathExportDisposition::Committed as i32,
+                    "",
+                    ""
+                ),
+                (
+                    "10.0.0.2",
+                    proto::PathExportDisposition::Withheld as i32,
+                    "export_policy",
+                    "policy_denied"
+                ),
+            ]
+        );
+
+        // The delete is fenced by the admission revision.
+        let delete = |revision| {
+            rig.svc
+                .delete_guarded_flow_spec(Request::new(proto::DeleteGuardedFlowSpecRequest {
+                    rd: String::new(),
+                    afi_safi: rule.afi_safi,
+                    components: rule.components.clone(),
+                    owner: "ctl".into(),
+                    revision,
+                }))
+        };
+        let stale = delete(2).await.unwrap_err();
+        assert_eq!(lease_conflict_reason(&stale), "REVISION_MISMATCH");
+        assert_eq!(local().await.len(), 1, "a refused delete keeps the rule");
+        assert_eq!(
+            delete(1).await.unwrap().into_inner().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+        assert_eq!(local().await.len(), 0);
+        let gone = rig
+            .svc
+            .list_flow_spec_export_dispositions(Request::new(
+                proto::ListFlowSpecExportDispositionsRequest {
+                    afi_safi: rule.afi_safi,
+                    components: rule.components.clone(),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(gone.code(), tonic::Code::NotFound);
+        drop(outbound);
+        rig.stop().await;
+    }
+
     /// A daemon built before the guarded methods refuses each of them
     /// without changing anything. Its generated router has no entry for
     /// them, so it dispatches each as an unknown method. This in-process
