@@ -1174,9 +1174,9 @@ impl RibManager {
         swapping: &[String],
     ) -> ConditionalAdvertisementCapture {
         // A changed attachment regroups its peers, which can retire a group
-        // table or build one from the whole Loc-RIB; the restore below takes
-        // the same owner.
-        self.with_replacement_readiness(|manager| {
+        // table or build one from the whole Loc-RIB, so the install takes the
+        // readiness lane (with the executor handoff).
+        self.with_ingest_readiness(|manager| {
             let prior_attachments = manager.conditional_advertisements.attachments.clone();
             let prior_definitions = manager.conditional_definition_contents();
             let (capture, transitions) =

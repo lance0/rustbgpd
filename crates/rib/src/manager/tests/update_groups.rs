@@ -11760,7 +11760,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         [
             super::super::ReadinessOwnerKind::PeerTeardown,
             super::super::ReadinessOwnerKind::Replacement,
-            super::super::ReadinessOwnerKind::Replacement,
+            super::super::ReadinessOwnerKind::Ingest,
         ],
         "changing-count teardown ends before detached retirement begins"
     );
@@ -19221,6 +19221,7 @@ fn lone_member_leaves_group(
     let gid = manager.grouped_member_of(peer).unwrap();
     assert_eq!(manager.group_ribs[&gid].members.len(), 1);
     assert_eq!(manager.group_ribs[&gid].table.len(), routes);
+    manager.replacement_readiness_receipts.clear();
     let answered =
         super::ingest_readiness::count_answered_readiness(&mut manager, readiness_tx, |manager| {
             work(manager, peer);
@@ -19228,6 +19229,15 @@ fn lone_member_leaves_group(
     assert!(
         !manager.group_ribs.contains_key(&gid),
         "the last member's group table is retired"
+    );
+    // No policy transition is pending, so the group's owner is the ingest
+    // one, never the replacement fence.
+    assert_eq!(
+        manager
+            .replacement_readiness_receipts
+            .last()
+            .map(|receipt| receipt.kind),
+        Some(super::super::ReadinessOwnerKind::Ingest)
     );
     answered
 }
