@@ -9,5 +9,9 @@
 - Stop a full BMP event queue from delaying a session close. A session
   leaving Established (Stop, BFD-down, hold-timer expiry, or a transport
   loss) no longer waits for queue room to report its Peer Down. The Peer Down
-  is still delivered once the queue drains, after the peer's earlier Route
-  Monitoring messages and before its next Peer Up.
+  is sent once the queue drains: after the session's earlier Route Monitoring
+  messages, and before its next Peer Up. The session task still ends only
+  after the Peer Down is queued, so a replacement session and daemon shutdown
+  keep the previous order. If the session is aborted first, or its shutdown
+  budget runs out, the Peer Down is abandoned and counted in
+  `bmp_source_drops_total{reason="channel_full"}`.

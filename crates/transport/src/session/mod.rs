@@ -484,7 +484,8 @@ pub(crate) struct PeerSession {
     /// not be emitted yet (BMP channel still full).
     bmp_repair_timer: Option<Pin<Box<Sleep>>>,
     /// A Peer Down that found the BMP channel full, handed to a task that
-    /// awaits room so the close does not. The next Peer Up waits for it.
+    /// awaits room so the close does not. The next Peer Up and the end of
+    /// the session task wait for it; dropping the session aborts it.
     bmp_peer_down_handoff: Option<JoinHandle<()>>,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
     /// `None` when RPKI not configured or in tests.
@@ -1135,6 +1136,7 @@ struct AcceptedTransport {
 /// turn and the held messages with the RIB actor they were bound for.
 impl Drop for PeerSession {
     fn drop(&mut self) {
+        self.abandon_bmp_peer_down();
         if !std::thread::panicking() && tokio::runtime::Handle::try_current().is_ok() {
             self.hand_off_retirement();
             self.hand_off_rib_backlog();
@@ -2758,9 +2760,7 @@ impl PeerSession {
             self.hand_off_peer_down(tx, event);
             return;
         }
-        if let Some(handoff) = self.bmp_peer_down_handoff.take() {
-            let _ = handoff.await;
-        }
+        self.settle_bmp_peer_down().await;
         if tx.send(event).await.is_err() {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, "channel_closed");
@@ -2773,7 +2773,10 @@ impl PeerSession {
     /// manager never delays the BGP close. RFC 7854 order holds: every
     /// event this session emitted earlier is already in the channel, it
     /// emits nothing more until its next `PeerUp`, and that `PeerUp` waits
-    /// for this task.
+    /// for this task. The session task also waits for it before it ends
+    /// ([`Self::run`]), so a successor started after joining this session
+    /// cannot overtake it, and daemon shutdown delivers it before the BMP
+    /// manager stops.
     fn hand_off_peer_down(&mut self, tx: mpsc::Sender<BmpEvent>, event: BmpEvent) {
         let event = match tx.try_send(event) {
             Ok(()) => return,
@@ -2796,6 +2799,34 @@ impl PeerSession {
                 debug!(peer = %peer, "BMP event channel closed");
             }
         }));
+    }
+
+    /// Wait until a handed-off `PeerDown` is in the BMP channel. Cancel-safe:
+    /// the handle stays with the session until the send completes, so a
+    /// session dropped meanwhile abandons it (see the `Drop` impl).
+    async fn settle_bmp_peer_down(&mut self) {
+        if let Some(handoff) = self.bmp_peer_down_handoff.as_mut() {
+            let _ = handoff.await;
+            self.bmp_peer_down_handoff = None;
+        }
+    }
+
+    /// A session dropped while its `PeerDown` still waits for BMP room (its
+    /// task aborted, or the caller's shutdown budget ran out) abandons the
+    /// send: delivered later, it could follow a successor's `PeerUp` and
+    /// mark a live peer down. Counted as a full-channel drop.
+    fn abandon_bmp_peer_down(&mut self) {
+        if let Some(handoff) = self.bmp_peer_down_handoff.take()
+            && !handoff.is_finished()
+        {
+            handoff.abort();
+            self.metrics
+                .record_bmp_source_drop(&self.peer_label, "channel_full");
+            warn!(
+                peer = %self.peer_label,
+                "BMP Peer Down abandoned: the session ended while the BMP event channel stayed full"
+            );
+        }
     }
 
     /// Latch the divergence flag after a dropped `RouteMonitoring` and
@@ -3043,9 +3074,13 @@ impl PeerSession {
 
     /// Main event loop. Runs until Shutdown command or fatal error. The
     /// owning task drops the session next, which hands any outbound
-    /// inventory to the paced release (see the `Drop` impl).
+    /// inventory to the paced release (see the `Drop` impl). A `PeerDown`
+    /// handed off on a full BMP channel reaches the channel before this
+    /// returns, under the caller's join budget.
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
-        self.run_loop().await
+        let result = self.run_loop().await;
+        self.settle_bmp_peer_down().await;
+        result
     }
 
     #[expect(

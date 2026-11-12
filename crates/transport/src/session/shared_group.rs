@@ -738,10 +738,18 @@ impl PeerSession {
     /// Queue a command read during owned work, in arrival order, then serve
     /// what may run ahead of the run loop. A link check is judged on
     /// arrival: one with nothing to do takes no slot, and one whose link is
-    /// down counts as a close (see [`Self::deferred_commands_stop`]).
+    /// down counts as a close (see [`Self::deferred_commands_stop`]). A held
+    /// check reads the current snapshot when it runs, so a later one adds
+    /// nothing and is dropped.
     pub(super) fn handle_read_during_wait(&mut self, command: crate::PeerCommand) {
         let nothing_to_do = match command {
-            crate::PeerCommand::CheckLinks => self.check_links_effect().is_none(),
+            crate::PeerCommand::CheckLinks => {
+                self.check_links_effect().is_none()
+                    || self
+                        .deferred_commands
+                        .iter()
+                        .any(|held| matches!(held, crate::PeerCommand::CheckLinks))
+            }
             ref command => command.is_canceled_read(),
         };
         if !nothing_to_do {
