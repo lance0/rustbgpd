@@ -736,9 +736,15 @@ pub(super) fn encode_shared_evpn_slice(
 
 impl PeerSession {
     /// Queue a command read during owned work, in arrival order, then serve
-    /// what may run ahead of the run loop.
+    /// what may run ahead of the run loop. A link check is judged on
+    /// arrival: one with nothing to do takes no slot, and one whose link is
+    /// down counts as a close (see [`Self::deferred_commands_stop`]).
     pub(super) fn handle_read_during_wait(&mut self, command: crate::PeerCommand) {
-        if !command.is_canceled_read() {
+        let nothing_to_do = match command {
+            crate::PeerCommand::CheckLinks => self.check_links_effect().is_none(),
+            ref command => command.is_canceled_read(),
+        };
+        if !nothing_to_do {
             self.deferred_commands.push_back(command);
         }
         self.serve_deferred_reads();
@@ -765,14 +771,15 @@ impl PeerSession {
     }
 
     /// Whether owned work must hand its held commands to the run loop now:
-    /// one closes the session, or the queue is full and the next unread
-    /// command may be a close.
+    /// one closes the session (a link check whose link is down now
+    /// included), or the queue is full and the next unread command may be a
+    /// close. A held link check re-reads the current snapshot: no
+    /// allocation unless its link is down.
     pub(super) fn deferred_commands_stop(&self) -> Option<DeferredStop> {
-        if self
-            .deferred_commands
-            .iter()
-            .any(crate::PeerCommand::closes_session)
-        {
+        if self.deferred_commands.iter().any(|held| {
+            held.closes_session()
+                || (matches!(held, crate::PeerCommand::CheckLinks) && self.check_links_closes())
+        }) {
             Some(DeferredStop::Close)
         } else if self.deferred_commands.len() >= DEFERRED_COMMAND_LIMIT {
             Some(DeferredStop::QueueFull)

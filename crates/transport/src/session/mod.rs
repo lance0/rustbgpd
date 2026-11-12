@@ -483,6 +483,9 @@ pub(crate) struct PeerSession {
     /// Armed whenever `bmp_stream_diverged` is set and the reset could
     /// not be emitted yet (BMP channel still full).
     bmp_repair_timer: Option<Pin<Box<Sleep>>>,
+    /// A Peer Down that found the BMP channel full, handed to a task that
+    /// awaits room so the close does not. The next Peer Up waits for it.
+    bmp_peer_down_handoff: Option<JoinHandle<()>>,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
     /// `None` when RPKI not configured or in tests.
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -2505,6 +2508,7 @@ impl PeerSession {
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
+            bmp_peer_down_handoff: None,
             validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
@@ -2732,10 +2736,10 @@ impl PeerSession {
     /// Reliable BMP emission for the per-peer lifecycle events
     /// (`PeerUp`, `PeerDown`). These are the collectors' state-reset
     /// signals — losing one leaves every collector permanently wrong
-    /// about the peer — so instead of the lossy `try_send` this awaits
-    /// channel space. Bounded: the `BmpManager` loop never blocks
-    /// (sync encode + per-collector `try_send`), so the wait is at most
-    /// one channel drain, and a dead manager surfaces as an immediate
+    /// about the peer — so instead of the lossy `try_send` they wait for
+    /// channel space. A `PeerDown` never makes the closing session wait
+    /// (see [`Self::hand_off_peer_down`]); a `PeerUp` waits for any
+    /// handed-off `PeerDown`, then for room. A dead manager surfaces as a
     /// send error (counted, session unaffected).
     ///
     /// A real `PeerDown` also supersedes any pending divergence repair:
@@ -2751,12 +2755,47 @@ impl PeerSession {
             self.metrics
                 .set_bmp_stream_diverged(&self.peer_label, false);
             self.bmp_repair_timer = None;
+            self.hand_off_peer_down(tx, event);
+            return;
+        }
+        if let Some(handoff) = self.bmp_peer_down_handoff.take() {
+            let _ = handoff.await;
         }
         if tx.send(event).await.is_err() {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, "channel_closed");
             debug!(peer = %self.peer_label, "BMP event channel closed");
         }
+    }
+
+    /// Queue a `PeerDown` without waiting: now when the channel has room,
+    /// otherwise from a task that awaits room, so a slow or stalled BMP
+    /// manager never delays the BGP close. RFC 7854 order holds: every
+    /// event this session emitted earlier is already in the channel, it
+    /// emits nothing more until its next `PeerUp`, and that `PeerUp` waits
+    /// for this task.
+    fn hand_off_peer_down(&mut self, tx: mpsc::Sender<BmpEvent>, event: BmpEvent) {
+        let event = match tx.try_send(event) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_label, "channel_closed");
+                debug!(peer = %self.peer_label, "BMP event channel closed");
+                return;
+            }
+            Err(mpsc::error::TrySendError::Full(event)) => event,
+        };
+        debug!(
+            peer = %self.peer_label,
+            "BMP event channel full; Peer Down queued behind it without delaying the close"
+        );
+        let (metrics, peer) = (self.metrics.clone(), self.peer_label.clone());
+        self.bmp_peer_down_handoff = Some(tokio::spawn(async move {
+            if tx.send(event).await.is_err() {
+                metrics.record_bmp_source_drop(&peer, "channel_closed");
+                debug!(peer = %peer, "BMP event channel closed");
+            }
+        }));
     }
 
     /// Latch the divergence flag after a dropped `RouteMonitoring` and

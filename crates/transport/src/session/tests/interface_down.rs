@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 /// Interface `ifindex` with the given flags, holding each local address in
 /// 127.0.0.0/8 (so a loopback peer is "directly connected" through it).
-fn iface(ifindex: u32, admin_up: bool, lower_up: bool, locals: &[&str]) -> LinkSnapshot {
+pub(super) fn iface(ifindex: u32, admin_up: bool, lower_up: bool, locals: &[&str]) -> LinkSnapshot {
     LinkSnapshot {
         valid: true,
         links: BTreeMap::from([(
@@ -40,11 +40,11 @@ fn merge(a: LinkSnapshot, b: LinkSnapshot) -> LinkSnapshot {
     out
 }
 
-fn healthy() -> LinkSnapshot {
+pub(super) fn healthy() -> LinkSnapshot {
     iface(1, true, true, &["127.0.0.1"])
 }
 
-fn feed(initial: LinkSnapshot) -> (watch::Sender<Arc<LinkSnapshot>>, LinkStateFeed) {
+pub(super) fn feed(initial: LinkSnapshot) -> (watch::Sender<Arc<LinkSnapshot>>, LinkStateFeed) {
     let (tx, rx) = watch::channel(Arc::new(initial));
     (tx, LinkStateFeed::new(rx, true))
 }
@@ -99,7 +99,7 @@ async fn established_gr_session(
     (session, server, rib_rx, tx)
 }
 
-fn set(tx: &watch::Sender<Arc<LinkSnapshot>>, snapshot: LinkSnapshot) {
+pub(super) fn set(tx: &watch::Sender<Arc<LinkSnapshot>>, snapshot: LinkSnapshot) {
     tx.send_replace(Arc::new(snapshot));
 }
 

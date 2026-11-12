@@ -514,12 +514,11 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
             "{wait:?}: a queued mutation does not end the replay"
         );
         commands.try_send(close).unwrap();
-        // The close's reliable BMP Peer Down needs room the Bmp fixture holds.
-        let drain_bmp = async { while bmp_rx.recv().await.is_some() {} };
+        // The Bmp fixture still holds the channel full: the close's Peer Down
+        // must not wait for room.
         after_close = tokio::select! {
             result = replay_read_pair(&commands) => result,
             stopped = &mut actor => panic!("actor stopped before FIFO control: {stopped:?}"),
-            () = drain_bmp => panic!("BMP channel closed"),
         };
     }
     let elapsed = tokio::time::Instant::now() - started;
@@ -581,6 +580,94 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
         "{wait:?}: the close ends the replay with a retryable refusal"
     );
     assert!(replay_ended);
+}
+
+/// A link check read during a replay admission wait is judged on arrival.
+/// With its interface up it takes no slot, so a snapshot behind it is
+/// answered while the replay keeps waiting. With its interface down it ends
+/// the wait at once and closes the session, not after the replay window.
+#[tokio::test(start_paused = true)]
+async fn replay_admission_judges_link_checks_on_arrival() {
+    use super::interface_down::{feed, healthy, iface, set};
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    for link_down in [false, true] {
+        let (mut session, mut old_rib_rx, mut old_bmp_rx) =
+            make_test_session_with_rib_and_bmp(65001, 65002);
+        session.config.bmp_rib_out = true;
+        let (links, link_state) = feed(healthy());
+        session.config.link_state = link_state;
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        read_single_bgp_message(&mut server).await;
+        read_single_bgp_message(&mut server).await;
+        while old_rib_rx.try_recv().is_ok() {}
+        while old_bmp_rx.try_recv().is_ok() {}
+        let (commands, receiver) = mpsc::channel(8);
+        session.commands = receiver;
+        // Begin waits behind a held event on a one-slot BMP channel.
+        let (bmp_tx, _bmp_rx) = mpsc::channel(1);
+        session.bmp_tx = Some(bmp_tx.clone());
+        bmp_tx
+            .try_send(BmpEvent::RouteMonitoring {
+                peer_info: session.build_bmp_peer_info(),
+                update_pdu: Bytes::from_static(b"held admission"),
+            })
+            .unwrap();
+        let (reply, mut replay_response) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::ReplayOutbound { reply })
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let (state, outcome) = {
+            let actor = session.run();
+            tokio::pin!(actor);
+            assert!(
+                poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            assert_eq!(commands.capacity(), commands.max_capacity());
+            if link_down {
+                set(&links, iface(1, true, false, &["127.0.0.1"]));
+            }
+            commands.try_send(PeerCommand::CheckLinks).unwrap();
+            let (reply, state) = oneshot::channel();
+            commands
+                .try_send(PeerCommand::QueryState { reply })
+                .unwrap();
+            let state = tokio::select! {
+                state = state => state.unwrap(),
+                stopped = &mut actor => panic!("actor stopped: {stopped:?}"),
+            };
+            (state, replay_response.try_recv())
+        };
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::ZERO,
+            "link down {link_down}: no replay window elapsed"
+        );
+        if link_down {
+            assert_eq!(state.fsm_state, SessionState::Idle, "the check closed");
+            assert!(
+                matches!(outcome, Ok(Err(PeerCommandError::ReplayUnavailable(_)))),
+                "{outcome:?}"
+            );
+        } else {
+            assert_eq!(state.fsm_state, SessionState::Established);
+            assert!(
+                matches!(outcome, Err(oneshot::error::TryRecvError::Empty)),
+                "the replay still waits: {outcome:?}"
+            );
+            assert!(session.deferred_commands.is_empty(), "no slot taken");
+        }
+        if let Some(writer) = session.writer_join.take() {
+            writer.abort();
+            let _ = writer.await;
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

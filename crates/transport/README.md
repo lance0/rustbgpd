@@ -32,6 +32,9 @@ commands) and run, in order, once the envelope finishes, so a queued mutation
 keeps its place before later reads. An encoding member stops publishing at the
 next slice when a queued command is a Stop, BFD-down or other session close,
 or when the queue fills; the group then falls back to per-member encoding.
+A fast-external-failover link check is judged when it arrives: with the
+session's interface up it does nothing and takes no queue slot; with the
+interface down it counts as a session close.
 This does not impose a wall-clock bound on initial sorting, an individual
 encoding slice, or other session work.
 Abandoned read-only snapshots are discarded, including deferred diagnostics
@@ -98,7 +101,9 @@ before forwarding to the RIB — the FSM sees only payloadless events.
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients
 - **BMP hooks** — raw PDU capture and event emission for Peer Up,
-  Peer Down, and Route Monitoring
+  Peer Down, and Route Monitoring. A closing session never waits for BMP
+  queue room: a Peer Down that finds the queue full is delivered once it
+  drains, after the peer's earlier messages and before its next Peer Up
 - **Extended messages** (RFC 8654) — dynamic buffer sizing up to 65535 bytes
 - **Add-Path** (RFC 7911) — per-family path ID encode/decode
 - **Extended next hop** (RFC 8950) — IPv4 unicast and VPNv4 NLRI over
