@@ -1340,18 +1340,69 @@ impl GrWalk {
     }
 }
 
+/// Withdraw the unicast, VPN or labeled routes `announce_case` announced at
+/// `indexes`, through the receive path, so the family's slab keeps their
+/// vacant slots.
+fn withdraw_cases(manager: &mut RibManager, family: (Afi, Safi), indexes: std::ops::Range<u8>) {
+    if indexes.is_empty() {
+        return;
+    }
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    manager.handle_update(match family.1 {
+        Safi::MplsVpn => RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: Vec::new(),
+            withdrawn: indexes
+                .map(|index| make_vpn_rib_route(addr, index, 100, 100).key())
+                .collect(),
+        },
+        Safi::LabeledUnicast => RibUpdate::LabeledRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: Vec::new(),
+            withdrawn: indexes
+                .map(|index| make_labeled_rib_route(addr, index, 100, 100).key())
+                .collect(),
+        },
+        _ => {
+            assert_eq!(
+                family,
+                (Afi::Ipv4, Safi::Unicast),
+                "slab vacancies are unicast, VPN or labeled"
+            );
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer,
+                announced: Vec::new(),
+                withdrawn: indexes
+                    .map(|index| {
+                        (
+                            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24)),
+                            0,
+                        )
+                    })
+                    .collect(),
+                flowspec_announced: Vec::new(),
+                flowspec_withdrawn: Vec::new(),
+                evpn_announced: Vec::new(),
+                evpn_withdrawn: Vec::new(),
+                validated_with: None,
+            }
+        }
+    });
+    drain_route_chunks(manager);
+}
+
 /// Run `walk` through its actual caller over `routes` retained routes of
 /// `family` under the readiness probe, after announcing `vacated` more
 /// unicast, VPN or labeled routes and withdrawing them so the family's slab
-/// keeps vacant slots. No
-/// route is re-advertised, so every walk but GR entry removes them all.
+/// keeps vacant slots. No route is re-advertised, so every walk but GR
+/// entry removes them all.
 /// Every answered readiness count must lie between the settled and the
 /// initial Loc-RIB count, end on the settled count, and step down by one
 /// per completed unicast withdrawal.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one actual-caller fixture drives all four GR walks and pins every readiness count"
-)]
 fn run_gr_walk_case(
     family: (Afi, Safi),
     walk: GrWalk,
@@ -1365,53 +1416,7 @@ fn run_gr_walk_case(
     for index in 5..5 + vacated + routes {
         announce_case(&mut manager, family, index, false);
     }
-    let vacancies = 5..5 + vacated;
-    if vacated > 0 && family.1 == Safi::MplsVpn {
-        manager.handle_update(RibUpdate::VpnRoutesReceived {
-            session_id: 0,
-            peer,
-            announced: Vec::new(),
-            withdrawn: vacancies
-                .map(|index| make_vpn_rib_route(addr, index, 100, 100).key())
-                .collect(),
-        });
-        drain_route_chunks(&mut manager);
-    } else if vacated > 0 && family.1 == Safi::LabeledUnicast {
-        manager.handle_update(RibUpdate::LabeledRoutesReceived {
-            session_id: 0,
-            peer,
-            announced: Vec::new(),
-            withdrawn: vacancies
-                .map(|index| make_labeled_rib_route(addr, index, 100, 100).key())
-                .collect(),
-        });
-        drain_route_chunks(&mut manager);
-    } else if vacated > 0 {
-        assert_eq!(
-            family,
-            (Afi::Ipv4, Safi::Unicast),
-            "slab vacancies are unicast, VPN or labeled"
-        );
-        manager.handle_update(RibUpdate::RoutesReceived {
-            session_id: 0,
-            peer,
-            announced: Vec::new(),
-            withdrawn: (5..5 + vacated)
-                .map(|index| {
-                    (
-                        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24)),
-                        0,
-                    )
-                })
-                .collect(),
-            flowspec_announced: Vec::new(),
-            flowspec_withdrawn: Vec::new(),
-            evpn_announced: Vec::new(),
-            evpn_withdrawn: Vec::new(),
-            validated_with: None,
-        });
-        drain_route_chunks(&mut manager);
-    }
+    withdraw_cases(&mut manager, family, 5..5 + vacated);
     let gr = if walk == GrWalk::EorLlgr {
         gr_with_llgr(peer, 120, vec![family], vec![family], 3600)
     } else {
@@ -1597,6 +1602,41 @@ fn gr_walk_work_counts_grow_per_unit() {
         assert!(
             grown.is_empty() && growth.keys().any(|name| name.starts_with("gr_entry_")),
             "{family:?}: GR-entry affected sets must fill without growth: {growth:?}"
+        );
+    }
+}
+
+/// GR entry withdraws the routes of a family outside the peer's GR
+/// capability key by key, collecting them slot by slot: 240 vacant VPN or
+/// labeled slots add at least one `gr_mark` checkpoint each. The retained
+/// family holds no routes, so no stale-marking walk adds checkpoints.
+#[test]
+fn gr_entry_withdraw_of_non_gr_family_checkpoints_vacant_slots() {
+    let mark = |family: (Afi, Safi), vacated: u8| {
+        let (mut manager, _readiness_tx) = readiness_manager();
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+        manager.ribs.insert(peer, AdjRibIn::new(peer));
+        for index in 5..13 + vacated {
+            announce_case(&mut manager, family, index, false);
+        }
+        withdraw_cases(&mut manager, family, 13..13 + vacated);
+        let gr = gr_with_llgr(peer, 120, vec![(Afi::Ipv6, Safi::Unicast)], Vec::new(), 0);
+        let observed = owned_checkpoints(&mut manager, |manager| manager.handle_update(gr));
+        let rib = &manager.ribs[&peer];
+        assert_eq!(rib.vpn_len() + rib.labeled_len(), 0, "{family:?} withdrawn");
+        observed
+            .iter()
+            .filter(|(stage, _)| *stage == "gr_mark")
+            .count()
+    };
+    for family in [
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ] {
+        let (dense, sparse) = (mark(family, 0), mark(family, 240));
+        assert!(
+            sparse >= dense + 240,
+            "{family:?}: gr_mark checkpoints {dense} dense, {sparse} with 240 vacant slots"
         );
     }
 }

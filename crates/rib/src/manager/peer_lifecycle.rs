@@ -732,8 +732,9 @@ impl RibManager {
                 );
             };
             let mut affected: HashSet<Prefix> = rib
-                .iter()
+                .iter_slots()
                 .inspect(|_| checkpoint("peer_down_collect_unicast"))
+                .flatten()
                 .map(|r| r.prefix)
                 .collect();
             let count = rib.len();
@@ -753,13 +754,15 @@ impl RibManager {
                 .map(crate::route::BgpLsRibRoute::key)
                 .collect();
             let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = rib
-                .iter_vpn()
+                .iter_vpn_slots()
                 .inspect(|_| checkpoint("peer_down_collect_vpn"))
+                .flatten()
                 .map(crate::route::VpnRibRoute::key)
                 .collect();
             let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = rib
-                .iter_labeled()
+                .iter_labeled_slots()
                 .inspect(|_| checkpoint("peer_down_collect_labeled"))
+                .flatten()
                 .map(crate::route::LabeledRibRoute::key)
                 .collect();
             let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = rib
@@ -816,8 +819,23 @@ impl RibManager {
             if !rtc_affected.is_empty() {
                 manager.recompute_rtc_keys(&rtc_affected);
             }
+            // The retirement checkpoints each key; vacant slots of the
+            // unicast, VPN and labeled slabs checkpoint here.
+            let vacancy = || {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "exact_rejection_retirement",
+                    false,
+                );
+            };
             manager.retire_exact_export_rejections(
-                rib.iter()
+                rib.iter_slots()
+                    .inspect(|slot| {
+                        if slot.is_none() {
+                            vacancy();
+                        }
+                    })
+                    .flatten()
                     .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
                     .chain(
                         rib.iter_flowspec()
@@ -831,9 +849,24 @@ impl RibManager {
                         rib.iter_bgpls()
                             .map(|route| ExactExportKey::BgpLs(route.key())),
                     )
-                    .chain(rib.iter_vpn().map(|route| ExactExportKey::Vpn(route.key())))
                     .chain(
-                        rib.iter_labeled()
+                        rib.iter_vpn_slots()
+                            .inspect(|slot| {
+                                if slot.is_none() {
+                                    vacancy();
+                                }
+                            })
+                            .flatten()
+                            .map(|route| ExactExportKey::Vpn(route.key())),
+                    )
+                    .chain(
+                        rib.iter_labeled_slots()
+                            .inspect(|slot| {
+                                if slot.is_none() {
+                                    vacancy();
+                                }
+                            })
+                            .flatten()
                             .map(|route| ExactExportKey::Labeled(route.key())),
                     )
                     .chain(rib.iter_rtc().map(|route| ExactExportKey::Rtc(route.key()))),
@@ -3241,8 +3274,9 @@ impl RibManager {
                     .collect();
                 for rib in self.ribs.values() {
                     all_prefixes.extend(
-                        rib.iter()
+                        rib.iter_slots()
                             .inspect(|_| checkpoint_at("initial_inventory"))
+                            .flatten()
                             .map(|r| r.prefix),
                     );
                 }
@@ -3743,8 +3777,9 @@ impl RibManager {
         {
             for rib in self.ribs.values() {
                 all_l3vpn_keys.extend(
-                    rib.iter_vpn()
+                    rib.iter_vpn_slots()
                         .inspect(|_| checkpoint_at("initial_inventory"))
+                        .flatten()
                         .map(|route| route.nlri.key()),
                 );
             }
@@ -3807,8 +3842,9 @@ impl RibManager {
         {
             for rib in self.ribs.values() {
                 all_labeled_keys.extend(
-                    rib.iter_labeled()
+                    rib.iter_labeled_slots()
                         .inspect(|_| checkpoint_at("initial_inventory"))
+                        .flatten()
                         .map(|route| route.nlri.key()),
                 );
             }

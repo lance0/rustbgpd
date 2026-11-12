@@ -770,7 +770,7 @@ impl RibManager {
                     retire();
                     prefix_family(prefix) != (afi, safi)
                 });
-                for route in rib.iter().inspect(|_| visit()) {
+                for route in rib.iter_slots().inspect(|_| visit()).flatten() {
                     if prefix_family(&route.prefix) == (afi, safi)
                         && !route.is_stale
                         && !route.is_llgr_stale
@@ -1267,13 +1267,14 @@ impl RibManager {
             for rib in self.ribs.values() {
                 super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                 all_prefixes.extend(
-                    rib.iter()
+                    rib.iter_slots()
                         .inspect(|_| {
                             super::replacement_readiness_checkpoint(
                                 &self.replacement_readiness,
                                 false,
                             );
                         })
+                        .flatten()
                         .map(|r| r.prefix)
                         .filter(|p| prefix_family(p) == family),
                 );

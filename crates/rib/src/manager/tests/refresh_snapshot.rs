@@ -328,3 +328,54 @@ fn borr_production_writers_bound_inventory_growth() {
         previous = shape;
     }
 }
+
+/// A `BoRR` snapshot walks the unicast, VPN and labeled slabs slot by slot:
+/// every slot, vacant or live, checkpoints the `borr_snapshot` unit.
+#[test]
+fn borr_snapshot_checkpoints_vacant_slab_slots() {
+    let snapshot = |(afi, safi): (Afi, Safi), vacated: u32| {
+        let (mut manager, _readiness_tx) = super::llgr_promotion::readiness_manager();
+        let addr = Ipv4Addr::new(10, 0, 0, 1);
+        let peer = peer_v4(addr);
+        manager.handle_update(registering_peer_up(peer, 0));
+        let mut rib = AdjRibIn::new(peer);
+        for index in 0..8 + vacated {
+            insert_snapshot_routes(&mut rib, index, false, false);
+        }
+        for index in 8..8 + vacated {
+            let prefix = Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + index), 32);
+            assert!(rib.withdraw(&Prefix::V4(prefix), 0));
+            let mut vpn = make_vpn_rib_route(addr, 0, 100, 100);
+            vpn.nlri.prefix = VpnPrefix::v4(prefix.addr, prefix.len).unwrap();
+            assert!(rib.withdraw_vpn(&vpn.key()));
+            let mut labeled = make_labeled_rib_route(addr, 0, 100, 100);
+            labeled.nlri.prefix = Prefix::V4(prefix);
+            assert!(rib.withdraw_labeled(&labeled.key()));
+        }
+        manager.ribs.insert(peer, rib);
+        let observed = owned_checkpoints(&mut manager, |manager| {
+            manager.handle_update(RibUpdate::BeginRouteRefresh {
+                peer,
+                session_id: 0,
+                afi,
+                safi,
+            });
+        });
+        assert_eq!(manager.refresh_stale_counts[&(peer, afi, safi)], 8);
+        observed
+            .iter()
+            .filter(|(stage, _)| *stage == "borr_snapshot")
+            .count()
+    };
+    for family in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ] {
+        let (dense, sparse) = (snapshot(family, 0), snapshot(family, 240));
+        assert!(
+            sparse >= 8 + 240 && sparse >= dense + 240,
+            "{family:?}: borr_snapshot checkpoints {dense} dense, {sparse} over 248 slots"
+        );
+    }
+}

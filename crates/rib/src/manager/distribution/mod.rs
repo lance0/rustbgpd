@@ -9287,7 +9287,10 @@ impl RibManager {
                                 for rib in self.ribs.values() {
                                     checkpoint();
                                     all.extend(
-                                        rib.iter().inspect(|_| checkpoint()).map(|r| r.prefix),
+                                        rib.iter_slots()
+                                            .inspect(|_| checkpoint())
+                                            .flatten()
+                                            .map(|r| r.prefix),
                                     );
                                 }
                             }
@@ -9637,8 +9640,9 @@ impl RibManager {
                             for rib in self.ribs.values() {
                                 checkpoint();
                                 all.extend(
-                                    rib.iter_vpn()
+                                    rib.iter_vpn_slots()
                                         .inspect(|_| checkpoint())
+                                        .flatten()
                                         .map(|route| route.nlri.key()),
                                 );
                             }
@@ -9718,8 +9722,9 @@ impl RibManager {
                             for rib in self.ribs.values() {
                                 checkpoint();
                                 all.extend(
-                                    rib.iter_labeled()
+                                    rib.iter_labeled_slots()
                                         .inspect(|_| checkpoint())
+                                        .flatten()
                                         .map(|route| route.nlri.key()),
                                 );
                             }
