@@ -4647,8 +4647,14 @@ impl RibManager {
                         .cloned()
                         .map(ExactExportKey::BgpLs)
                         .collect::<Vec<_>>();
-                    self.handle_bgpls_routes_received(peer, announced, withdrawn);
-                    self.retire_exact_export_rejections(retired);
+                    // Selection reads every Adj-RIB-In per key, and retiring
+                    // a rejected withdrawn identity can walk every BGP-LS
+                    // table, so the turn takes the readiness lane. The owed
+                    // ORR rebuild is settled after dispatch, under its own.
+                    self.with_ingest_readiness(|manager| {
+                        manager.handle_bgpls_routes_received(peer, announced, withdrawn);
+                        manager.retire_exact_export_rejections(retired);
+                    });
                 }
             }
             RibUpdate::VpnRoutesReceived {

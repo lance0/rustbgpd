@@ -517,3 +517,47 @@ fn identical_bgpls_reannouncement_owes_no_orr_rebuild() {
         "a changed link metric must rebuild"
     );
 }
+
+/// A BGP-LS UPDATE reselects every key it carries against every
+/// Adj-RIB-In, and a withdrawal whose identity holds an exact-export
+/// rejection walks every stored BGP-LS route to confirm the identity is
+/// gone. With no ORR vantage bound there is no rebuild, yet the turn still
+/// answers a probe queued before it and one per selected key and per stored
+/// route walked.
+#[test]
+fn bgpls_update_answers_readiness_in_selection_and_rejection_retirement() {
+    let (mut manager, readiness_tx) = readiness_manager();
+    register_test_peer(&mut manager, peer_v4(FEED), 0);
+    let topology = chain_topology(FEED, 64);
+    let routes = topology.len();
+    let withdrawn_key = topology[0].key();
+    let announced = count_answered_readiness(&mut manager, readiness_tx.clone(), |manager| {
+        manager.handle_update(bgpls_update(0, topology));
+    });
+    assert_eq!(manager.loc_rib.family_lens().bgpls[0], routes);
+
+    manager
+        .peer_unexportable
+        .entry(peer_v4(CLIENT))
+        .or_default()
+        .insert(ExactExportKey::BgpLs(withdrawn_key.clone()));
+    let withdrawn = count_answered_readiness(&mut manager, readiness_tx, |manager| {
+        manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer: peer_v4(FEED),
+            announced: Vec::new(),
+            withdrawn: vec![withdrawn_key],
+        });
+    });
+    assert!(
+        manager.peer_unexportable.is_empty(),
+        "the rejection of a withdrawn identity is retired"
+    );
+    assert!(
+        answered(&announced, PRE_QUEUED) == 1
+            && answered(&announced, "selection_bgpls") >= routes
+            && answered(&withdrawn, PRE_QUEUED) == 1
+            && answered(&withdrawn, "exact_rejection_retirement") >= routes - 1,
+        "{routes} routes: announce answered {announced:?}; withdraw answered {withdrawn:?}"
+    );
+}
