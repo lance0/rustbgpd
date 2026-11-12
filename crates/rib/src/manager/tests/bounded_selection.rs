@@ -443,6 +443,59 @@ fn non_best_change_reads_do_not_grow_with_stored_paths() {
     }
 }
 
+/// Path-index lookups of one non-best change of a key holding 64 paths from
+/// one session, `[replace, withdraw]` as `(vpn, labeled)`: the storage
+/// write plus what selection reads.
+fn non_best_change_index_lookups() -> [(usize, usize); 2] {
+    let mut manager = manager();
+    let paths = || (1..=64).map(|id| (id, u8::from(id == 1)));
+    receive_vpn(
+        &mut manager,
+        0,
+        paths().map(|(id, v)| vpn_route(0, 0, id, v)).collect(),
+        vec![],
+    );
+    receive_labeled(
+        &mut manager,
+        0,
+        paths().map(|(id, v)| labeled_route(0, 0, id, v)).collect(),
+        vec![],
+    );
+    let steps: [(Vec<_>, Vec<_>, Vec<_>, Vec<_>); 2] = [
+        (
+            vec![vpn_route(0, 0, 2, 2)],
+            vec![],
+            vec![labeled_route(0, 0, 2, 2)],
+            vec![],
+        ),
+        (
+            vec![],
+            vec![vpn_route(0, 0, 3, 0).key()],
+            vec![],
+            vec![labeled_route(0, 0, 3, 0).key()],
+        ),
+    ];
+    let mut lookups = [(0, 0); 2];
+    for (step, (vpn_in, vpn_out, labeled_in, labeled_out)) in steps.into_iter().enumerate() {
+        crate::adj_rib_in::path_index_lookups::take();
+        receive_vpn(&mut manager, 0, vpn_in, vpn_out);
+        lookups[step].0 = crate::adj_rib_in::path_index_lookups::take();
+        receive_labeled(&mut manager, 0, labeled_in, labeled_out);
+        lookups[step].1 = crate::adj_rib_in::path_index_lookups::take();
+        check_bests(&manager, step);
+    }
+    lookups
+}
+
+/// A non-best replace looks up the replaced path to store it, the stored
+/// best, and the replaced path again to compare it; a non-best withdraw
+/// looks up the removed path and the stored best, and reads no withdrawn
+/// path back.
+#[test]
+fn non_best_change_index_lookups_per_update() {
+    assert_eq!(non_best_change_index_lookups(), [(3, 3), (2, 2)]);
+}
+
 /// Two live handles on one endpoint share a selection rank, so identical
 /// paths from both compare equal. The stored best stays selected.
 #[test]

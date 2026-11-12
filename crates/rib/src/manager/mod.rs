@@ -6555,6 +6555,10 @@ impl RibManager {
         let mut affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut displaced = 0usize;
+        let source = distribution::ReceiveSource {
+            peer,
+            withdraw_only: announced.is_empty(),
+        };
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
@@ -6593,7 +6597,7 @@ impl RibManager {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
         self.update_peer_refresh_metrics(peer);
-        self.recompute_and_distribute_vpn(&affected, Some(peer));
+        self.recompute_and_distribute_vpn(&affected, Some(source));
         if !affected.is_empty() {
             self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();
@@ -6624,6 +6628,10 @@ impl RibManager {
         let mut affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut displaced = 0usize;
+        let source = distribution::ReceiveSource {
+            peer,
+            withdraw_only: announced.is_empty(),
+        };
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
@@ -6662,7 +6670,7 @@ impl RibManager {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
         self.update_peer_refresh_metrics(peer);
-        self.recompute_and_distribute_labeled(&affected, Some(peer));
+        self.recompute_and_distribute_labeled(&affected, Some(source));
         if !affected.is_empty() {
             self.defer_attr_gc(displaced);
             self.sync_attr_intern_gauge();

@@ -506,6 +506,24 @@ impl<K, V> std::ops::Deref for StaleTracked<K, V> {
     }
 }
 
+/// Path-index lookups (one per `PathSlab` find, insert, removal or key walk)
+/// made on this thread, for the selection work tests.
+#[cfg(test)]
+pub(crate) mod path_index_lookups {
+    thread_local! {
+        static LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn record() {
+        LOOKUPS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The lookups since the last call.
+    pub(crate) fn take() -> usize {
+        LOOKUPS.with(|count| count.replace(0))
+    }
+}
+
 /// Add-Path route bodies of one keyed family, stored densely behind `u32`
 /// handles like the unicast `routes` slab, with an index from route identity
 /// to its `(path_id, handle)` pairs and maintained stale counts.
@@ -533,6 +551,8 @@ impl<K, R> Default for PathSlab<K, R> {
 
 impl<K: Eq + std::hash::Hash, R: RetainedRoute> PathSlab<K, R> {
     fn handle(&self, key: &K, path_id: u32) -> Option<u32> {
+        #[cfg(test)]
+        path_index_lookups::record();
         self.index.get(key)?.get(path_id)
     }
 
@@ -548,6 +568,8 @@ impl<K: Eq + std::hash::Hash, R: RetainedRoute> PathSlab<K, R> {
     /// Panics if the index references a vacant slot or the slab exhausts its
     /// `u32` handle space.
     fn insert(&mut self, key: K, path_id: u32, route: R) -> bool {
+        #[cfg(test)]
+        path_index_lookups::record();
         let ids = self.index.get_or_default(key);
         if let Some(handle) = ids.get(path_id) {
             let previous = self
@@ -572,6 +594,8 @@ impl<K: Eq + std::hash::Hash, R: RetainedRoute> PathSlab<K, R> {
         path_id: u32,
         checkpoint: &mut impl FnMut(),
     ) -> Option<R> {
+        #[cfg(test)]
+        path_index_lookups::record();
         let ids = self.index.get_mut(key)?;
         checkpoint();
         let handle = ids.remove(path_id)?;
@@ -586,6 +610,8 @@ impl<K: Eq + std::hash::Hash, R: RetainedRoute> PathSlab<K, R> {
 
     /// Every path stored for `key`, in path-ID order.
     fn iter_key(&self, key: &K) -> impl Iterator<Item = &R> + use<'_, K, R> {
+        #[cfg(test)]
+        path_index_lookups::record();
         let routes = &self.routes;
         self.index
             .get(key)

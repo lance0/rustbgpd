@@ -804,7 +804,7 @@ impl RibManager {
     pub(in crate::manager) fn recompute_and_distribute_vpn(
         &mut self,
         affected: &HashSet<VpnRibRouteKey>,
-        source: Option<PeerId>,
+        source: Option<super::ReceiveSource>,
     ) {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {
@@ -872,7 +872,7 @@ impl RibManager {
             };
             // The source's rib and the rib-resident stored best, when this
             // UPDATE left that best alone.
-            let untouched_best = source.and_then(|peer| {
+            let untouched_best = source.and_then(|super::ReceiveSource { peer, .. }| {
                 let best = self.loc_rib.get_vpn(key)?;
                 if best.peer == peer
                     && only.map_or_else(
@@ -895,7 +895,13 @@ impl RibManager {
                     );
                     touched.sort_unstable();
                 }
-                let first = touched.partition_point(|(touched_key, _)| touched_key < key);
+                // A withdraw-only UPDATE removed every path it changed:
+                // none of them is left to read.
+                let first = if source.is_some_and(|source| source.withdraw_only) {
+                    touched.len()
+                } else {
+                    touched.partition_point(|(touched_key, _)| touched_key < key)
+                };
                 // The stored best goes first: `min_by` keeps the first of
                 // equal candidates, so a tie leaves the selection alone.
                 let candidates = std::iter::once(best)

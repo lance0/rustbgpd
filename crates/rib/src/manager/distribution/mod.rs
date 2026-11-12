@@ -61,6 +61,16 @@ pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
 
+/// The session a received UPDATE came from, for the VPN and labeled
+/// receive-path selection shortcut.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::manager) struct ReceiveSource {
+    pub(in crate::manager) peer: PeerId,
+    /// The UPDATE announced nothing, so every path it changed is gone from
+    /// the source's Adj-RIB-In.
+    pub(in crate::manager) withdraw_only: bool,
+}
+
 /// Bounds on one cross-message distribution window. Each bound caps a
 /// different cost: queued input messages and ingested routes cap the ingest
 /// work (repeated churn of one prefix never grows the affected set), the
