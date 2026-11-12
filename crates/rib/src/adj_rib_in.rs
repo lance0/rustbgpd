@@ -2472,6 +2472,12 @@ impl AdjRibIn {
         self.vpn_routes.iter()
     }
 
+    /// Every allocated VPN slot, vacancies included, so a checkpointed walk
+    /// can yield between holes of a sparse table.
+    pub(crate) fn iter_vpn_slots(&self) -> impl Iterator<Item = Option<&VpnRibRoute>> {
+        self.vpn_routes.iter_slots()
+    }
+
     /// Return the number of VPN routes stored.
     #[must_use]
     pub fn vpn_len(&self) -> usize {
@@ -2827,6 +2833,12 @@ impl AdjRibIn {
     /// Iterate over all labeled routes in this Adj-RIB-In.
     pub fn iter_labeled(&self) -> impl Iterator<Item = &LabeledRibRoute> {
         self.labeled_routes.iter()
+    }
+
+    /// Every allocated labeled slot, vacancies included, so a checkpointed
+    /// walk can yield between holes of a sparse table.
+    pub(crate) fn iter_labeled_slots(&self) -> impl Iterator<Item = Option<&LabeledRibRoute>> {
+        self.labeled_routes.iter_slots()
     }
 
     /// Return the number of labeled routes stored.

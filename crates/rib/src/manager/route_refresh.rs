@@ -302,14 +302,14 @@ impl RibManager {
                 }
             }
             if safi == Safi::MplsVpn {
-                for route in rib.iter_vpn().inspect(|_| inventory()) {
+                for route in rib.iter_vpn_slots().inspect(|_| inventory()).flatten() {
                     if route.afi_safi() == family {
                         vpn_affected.insert(route.key());
                     }
                 }
             }
             if safi == Safi::LabeledUnicast {
-                for route in rib.iter_labeled().inspect(|_| inventory()) {
+                for route in rib.iter_labeled_slots().inspect(|_| inventory()).flatten() {
                     if route.afi_safi() == family {
                         labeled_affected.insert(route.key());
                     }
@@ -711,7 +711,7 @@ impl RibManager {
                     retire();
                     key.afi_safi() != (afi, safi)
                 });
-                for route in rib.iter_vpn().inspect(|_| visit()) {
+                for route in rib.iter_vpn_slots().inspect(|_| visit()).flatten() {
                     if route.afi_safi() == (afi, safi)
                         && !route.is_stale
                         && !route.is_llgr_stale
@@ -726,7 +726,7 @@ impl RibManager {
                     retire();
                     key.afi_safi() != (afi, safi)
                 });
-                for route in rib.iter_labeled().inspect(|_| visit()) {
+                for route in rib.iter_labeled_slots().inspect(|_| visit()).flatten() {
                     if route.afi_safi() == (afi, safi)
                         && !route.is_stale
                         && !route.is_llgr_stale
@@ -1516,13 +1516,14 @@ impl RibManager {
                     for rib in self.ribs.values() {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                         vpn_keys.extend(
-                            rib.iter_vpn()
+                            rib.iter_vpn_slots()
                                 .inspect(|_| {
                                     super::replacement_readiness_checkpoint(
                                         &self.replacement_readiness,
                                         false,
                                     );
                                 })
+                                .flatten()
                                 .filter(|route| route.afi_safi() == family)
                                 .map(|route| route.nlri.key()),
                         );
@@ -1599,13 +1600,14 @@ impl RibManager {
                 for rib in self.ribs.values() {
                     super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     labeled_keys.extend(
-                        rib.iter_labeled()
+                        rib.iter_labeled_slots()
                             .inspect(|_| {
                                 super::replacement_readiness_checkpoint(
                                     &self.replacement_readiness,
                                     false,
                                 );
                             })
+                            .flatten()
                             .filter(|route| route.afi_safi() == family)
                             .map(|route| route.nlri.key()),
                     );

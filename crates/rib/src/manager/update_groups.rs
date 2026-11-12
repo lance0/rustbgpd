@@ -3479,8 +3479,9 @@ impl RibManager {
             .collect();
         for rib in self.ribs.values() {
             vpn.extend(
-                rib.iter_vpn()
+                rib.iter_vpn_slots()
                     .inspect(|_| checkpoint())
+                    .flatten()
                     .map(|route| route.key().nlri_key),
             );
         }
