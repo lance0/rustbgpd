@@ -1610,3 +1610,87 @@ async fn import_outcomes_past_the_memo_slots_share_one_set_per_outcome() {
         }
     }
 }
+
+/// The next-hop alignment memo has the same fixed slots. Body IPv4 routes
+/// whose `next-hop self` rewrite leaves the received `NEXT_HOP` stale share
+/// one aligned set per (outcome, next hop) past those slots too.
+#[tokio::test]
+async fn aligned_next_hops_past_the_memo_slots_share_one_set_per_outcome() {
+    const DISTINCT: u8 = 9;
+    const ROUTES: u8 = 60;
+    const BROAD: u32 = 0xFDE9_FFFF; // 65001:65535
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let prefix = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24);
+    let next_hop_self = |statement: &mut PolicyStatement, community: u32| {
+        statement.modifications.communities_add = vec![community];
+        statement.modifications.set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    };
+    // Routes 0..9 each take their own community, filling the alignment
+    // slots and overflowing by one; every later route takes the broad term.
+    let mut entries: Vec<PolicyStatement> = (0..DISTINCT)
+        .map(|octet| {
+            let mut statement =
+                retention_statement(Some(Prefix::V4(prefix(octet))), PolicyAction::Permit);
+            next_hop_self(&mut statement, 0xFDE9_0000 | u32::from(octet));
+            statement
+        })
+        .collect();
+    let mut broad = retention_statement(
+        Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 0, 0), 16))),
+        PolicyAction::Permit,
+    );
+    broad.ge = Some(24);
+    broad.le = Some(24);
+    next_hop_self(&mut broad, BROAD);
+    entries.push(broad);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries,
+        default_action: PolicyAction::Deny,
+    }])));
+    let nlri: Vec<Ipv4NlriEntry> = (0..ROUTES)
+        .map(|octet| Ipv4NlriEntry {
+            path_id: 0,
+            prefix: prefix(octet),
+        })
+        .collect();
+    let update = UpdateMessage::build(
+        &nlri,
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), usize::from(ROUTES));
+    let local = session.config.peer.local_router_id;
+    for route in &announced {
+        assert_eq!(route.next_hop, IpAddr::V4(local));
+        assert!(
+            route
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::NextHop(hop) if *hop == local)),
+            "the stored NEXT_HOP follows the resolved next hop"
+        );
+    }
+    let distinct: std::collections::HashSet<_> = announced
+        .iter()
+        .map(|route| Arc::as_ptr(&route.attributes))
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        usize::from(DISTINCT) + 1,
+        "one aligned set per distinct import outcome"
+    );
+}

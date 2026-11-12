@@ -11694,9 +11694,10 @@ impl RibManager {
         // Shared cleanup is owned when it releases inventory: an owned pass,
         // more memoized source attribute sets than staged prefixes (several
         // candidates per prefix, as Add-Path or per-client-best export
-        // memoizes), captured admitted keys, or a peer made dirty during the
-        // pass (conditional advertisement or a failed send). One memo entry
-        // per changed prefix is ordinary pass-sized work.
+        // memoizes, or FlowSpec source sets a resync stages, which the
+        // prefix count leaves out), captured admitted keys, or a peer made
+        // dirty during the pass (conditional advertisement or a failed send).
+        // Up to one memo entry per changed prefix is ordinary pass-sized work.
         let retirement_owned = owned
             || replay_handoff
             || export_memo.len() > best_changed.len().saturating_add(all_affected.len())

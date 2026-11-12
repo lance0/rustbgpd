@@ -2050,10 +2050,14 @@ fn flowspec_selection_reads_the_full_scan_candidates_vpn() {
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), true);
 }
 
-/// `count` destination-less rules (protocols 0..count) from `source`, all
-/// carrying one shared attribute set.
-fn shared_flowspec_rules(source: Ipv4Addr, count: u8, attrs: &Arc<AttrSet>) -> Vec<FlowSpecRoute> {
-    (0..count)
+/// Destination-less rules (one per protocol in `protocols`) from `source`,
+/// all carrying one shared attribute set.
+fn shared_flowspec_rules(
+    source: Ipv4Addr,
+    protocols: std::ops::Range<u8>,
+    attrs: &Arc<AttrSet>,
+) -> Vec<FlowSpecRoute> {
+    protocols
         .map(|protocol| {
             let mut route = make_destless_flowspec_route(Afi::Ipv4, source, protocol);
             route.attributes = Arc::clone(attrs);
@@ -2077,19 +2081,20 @@ fn receive_flowspec(manager: &mut RibManager, source: PeerId, routes: Vec<FlowSp
     drain_route_chunks(manager);
 }
 
-/// Export policy that modifies every rule toward several peers keeps one
-/// modified attribute set for rules that shared a source set, across rules
-/// and across peers, instead of one copy per (rule, peer).
-#[test]
-fn flowspec_export_modification_shares_one_set_across_rules_and_peers() {
-    const ADDED: u32 = 0xFDE9_0063; // 65001:99
-    let source = Ipv4Addr::new(10, 0, 0, 1);
-    let targets = [2, 3].map(|octet| peer_v4(Ipv4Addr::new(10, 0, 0, octet)));
+const EXPORT_ADDED: u32 = 0xFDE9_0063; // 65001:99
+
+/// A manager with a registered `FlowSpec` source and `targets` whose export
+/// policy adds [`EXPORT_ADDED`] to every rule. The outbound receivers must
+/// stay alive for commits to land in the Adj-RIB-Out.
+fn flowspec_export_fixture(
+    source: PeerId,
+    targets: &[PeerId],
+) -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>) {
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    register_test_peer(&mut manager, peer_v4(source), 0);
+    register_test_peer(&mut manager, source, 0);
     let mut outbound = Vec::new();
-    for target in targets {
+    for &target in targets {
         let (out_tx, out_rx) = mpsc::channel(64);
         outbound.push(out_rx);
         manager.handle_update(RibUpdate::PeerUp {
@@ -2108,7 +2113,7 @@ fn flowspec_export_modification_shares_one_set_across_rules_and_peers() {
                         ..flowspec_policy_statement(
                             0,
                             rustbgpd_policy::RouteModifications {
-                                communities_add: vec![ADDED],
+                                communities_add: vec![EXPORT_ADDED],
                                 ..Default::default()
                             },
                         )
@@ -2126,29 +2131,93 @@ fn flowspec_export_modification_shares_one_set_across_rules_and_peers() {
             negotiated_llgr_families: vec![],
         });
     }
-    let shared = AttrSet::new(vec![PathAttribute::Communities(vec![1, 2, 3])]);
-    receive_flowspec(
-        &mut manager,
-        peer_v4(source),
-        shared_flowspec_rules(source, 16, &shared),
-    );
+    (manager, outbound)
+}
+
+/// Export policy that modifies every rule toward several peers keeps one
+/// modified attribute set per source set, shared across rules and peers,
+/// instead of one copy per (rule, peer). A second source set with the same
+/// modification gets its own modified set: the memo keys on the source.
+#[test]
+fn flowspec_export_modification_shares_one_set_across_rules_and_peers() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let targets = [2, 3].map(|octet| peer_v4(Ipv4Addr::new(10, 0, 0, octet)));
+    let (mut manager, _outbound) = flowspec_export_fixture(peer_v4(source), &targets);
+    let first = AttrSet::new(vec![PathAttribute::Communities(vec![1, 2, 3])]);
+    let second = AttrSet::new(vec![PathAttribute::Communities(vec![4, 5, 6])]);
+    let mut routes = shared_flowspec_rules(source, 0..16, &first);
+    routes.extend(shared_flowspec_rules(source, 16..24, &second));
+    receive_flowspec(&mut manager, peer_v4(source), routes);
 
     let exported: Vec<&Arc<AttrSet>> = targets
         .iter()
         .flat_map(|target| manager.adj_ribs_out[target].iter_flowspec())
         .map(|route| &route.attributes)
         .collect();
-    assert_eq!(exported.len(), 32);
-    assert!(
-        exported[0]
+    assert_eq!(exported.len(), 48);
+    let from = |marker: u32| -> Vec<&Arc<AttrSet>> {
+        exported
             .iter()
-            .find_map(PathAttribute::communities)
-            .is_some_and(|values| values.contains(&ADDED))
-    );
-    assert!(!Arc::ptr_eq(exported[0], &shared));
+            .copied()
+            .filter(|set| {
+                set.iter()
+                    .find_map(PathAttribute::communities)
+                    .is_some_and(|values| values.contains(&marker))
+            })
+            .collect()
+    };
+    let (from_first, from_second) = (from(1), from(4));
+    assert_eq!((from_first.len(), from_second.len()), (32, 16));
+    for (sets, source_set) in [(&from_first, &first), (&from_second, &second)] {
+        assert!(
+            sets[0]
+                .iter()
+                .find_map(PathAttribute::communities)
+                .is_some_and(|values| values.contains(&EXPORT_ADDED))
+        );
+        assert!(!Arc::ptr_eq(sets[0], source_set));
+        assert!(
+            sets.iter().all(|set| Arc::ptr_eq(set, sets[0])),
+            "one modified set across every rule and peer of one source set"
+        );
+    }
     assert!(
-        exported.iter().all(|set| Arc::ptr_eq(set, exported[0])),
-        "one modified set across every rule and peer"
+        !Arc::ptr_eq(from_first[0], from_second[0]),
+        "different source sets never share a modified set"
+    );
+}
+
+/// A `FlowSpec` route-refresh replay with a modifying export policy memoizes
+/// one entry per distinct source set, and retires that memo with a readiness
+/// checkpoint per entry.
+#[test]
+fn flowspec_refresh_retires_its_export_memo_per_entry() {
+    const RULES: u8 = 12;
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _outbound) = flowspec_export_fixture(peer_v4(source), &[target]);
+    let routes = (0..RULES)
+        .flat_map(|protocol| {
+            let attrs = AttrSet::new(vec![PathAttribute::Communities(vec![u32::from(protocol)])]);
+            shared_flowspec_rules(source, protocol..protocol + 1, &attrs)
+        })
+        .collect();
+    receive_flowspec(&mut manager, peer_v4(source), routes);
+
+    let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "refresh_flowspec_memo" {
+                visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }));
+    manager.send_route_refresh_response(target, Afi::Ipv4, Safi::FlowSpec);
+    manager.replacement_readiness_test_hook = None;
+    assert!(
+        visits.load(std::sync::atomic::Ordering::Relaxed) >= usize::from(RULES),
+        "every memo entry retires behind a checkpoint"
     );
 }
 
@@ -2161,9 +2230,8 @@ fn received_flowspec_attributes_are_interned_across_updates() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     register_test_peer(&mut manager, peer_v4(source), 0);
     let attrs = vec![PathAttribute::Communities(vec![1, 2, 3])];
-    let first = shared_flowspec_rules(source, 2, &AttrSet::new(attrs.clone()));
-    let mut second = shared_flowspec_rules(source, 4, &AttrSet::new(attrs));
-    second.drain(..2);
+    let first = shared_flowspec_rules(source, 0..2, &AttrSet::new(attrs.clone()));
+    let second = shared_flowspec_rules(source, 2..4, &AttrSet::new(attrs));
     receive_flowspec(&mut manager, peer_v4(source), first);
     receive_flowspec(&mut manager, peer_v4(source), second);
     let stored: Vec<&Arc<AttrSet>> = manager.ribs[&peer_v4(source)]
