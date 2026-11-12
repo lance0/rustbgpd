@@ -859,6 +859,14 @@ mixed shape has a single changed pair, so that per-peer walk stays empty.
   shape: no cohort, every changed peer in the walk. Seven pairs at 700 changed
   peers give cohort 100 and remainder 600. `G` absent or 1 emits the historical
   files byte for byte. Observers still complete on the generation marker.
+- `GEN_EXPORT_PEER_CONTEXT=1` (generator, mixed mode only) adds a first
+  `peer-gate` term to `member-out` and every `member-out-k`, in both
+  generations, that rejects routes toward peer AS 64496, which no stub uses.
+  The term reads peer context, so no changed peer is update-grouped: the
+  cohort cannot take the clean or shared transition and every member goes
+  through the authoritative batch's per-member path, the shape of an
+  ungrouped, per-client-best or private-family cohort. The wire output is
+  unchanged. Absent or 0 emits the files unchanged.
 - `RELOADSTALL_EXPORT_PAIRS=G` (harness) requires an explicit `changed_peers`
   and prints `# export_shape pairs=G changed_peers=C expected_cohort=..
   expected_remainder=..`. It only logs the expected split; set it to the

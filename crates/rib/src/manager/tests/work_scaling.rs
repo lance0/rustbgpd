@@ -507,6 +507,318 @@ fn evpn_cohort_reload_longest_command_is_flat_in_moved_members() {
     }
 }
 
+/// Members an authoritative cohort batch cannot move on its shared unicast
+/// transition, so each one's move resyncs its whole table.
+#[derive(Clone, Copy, Debug)]
+enum ResidualArm {
+    /// `VPNv4`-only members.
+    Vpn,
+    /// Labeled-unicast-only members.
+    Labeled,
+    /// `FlowSpec`-only members.
+    FlowSpec,
+    /// BGP-LS-only members.
+    BgpLs,
+    /// `VPNv4` members with per-client best: ungrouped (ADR-0126 D8).
+    PerClientBestVpn,
+    /// IPv4 unicast members whose chain reads peer context: never grouped.
+    Ungrouped,
+    /// IPv4 unicast members of one group moving to two destinations.
+    MixedDestinations,
+}
+
+impl ResidualArm {
+    const ALL: [Self; 7] = [
+        Self::Vpn,
+        Self::Labeled,
+        Self::FlowSpec,
+        Self::BgpLs,
+        Self::PerClientBestVpn,
+        Self::Ungrouped,
+        Self::MixedDestinations,
+    ];
+
+    fn families(self) -> Vec<(Afi, Safi)> {
+        match self {
+            Self::Vpn | Self::PerClientBestVpn => vec![(Afi::Ipv4, Safi::MplsVpn)],
+            Self::Labeled => vec![(Afi::Ipv4, Safi::LabeledUnicast)],
+            Self::FlowSpec => vec![(Afi::Ipv4, Safi::FlowSpec)],
+            Self::BgpLs => vec![(Afi::BgpLs, Safi::BgpLs)],
+            Self::Ungrouped | Self::MixedDestinations => vec![(Afi::Ipv4, Safi::Unicast)],
+        }
+    }
+
+    fn grouped(self) -> bool {
+        !matches!(self, Self::PerClientBestVpn | Self::Ungrouped)
+    }
+
+    /// The community member `index` is tagged with under generation `tag`:
+    /// mixed-destination members alternate between two chains.
+    fn tag(self, tag: u32, index: usize) -> u32 {
+        match self {
+            Self::MixedDestinations => tag + u32::try_from(index % 2).unwrap(),
+            _ => tag,
+        }
+    }
+
+    /// The export chain that adds `tag`; an ungrouped member's chain also
+    /// carries a peer-ASN term that matches none of them.
+    fn chain(self, tag: u32) -> rustbgpd_policy::PolicyChain {
+        let chain = super::update_groups::community_chain(tag);
+        if !matches!(self, Self::Ungrouped) {
+            return chain;
+        }
+        let tagging = chain.policies[0].policy.entries[0].clone();
+        let mut gate = tagging.clone();
+        gate.action = rustbgpd_policy::PolicyAction::Deny;
+        gate.modifications = rustbgpd_policy::RouteModifications::default();
+        gate.match_neighbor_set = Some(rustbgpd_policy::NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![65_099],
+            peer_groups: vec![],
+        });
+        rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+            entries: vec![gate, tagging],
+            default_action: rustbgpd_policy::PolicyAction::Deny,
+        }])
+    }
+
+    /// [`RESIDUAL_ROWS`] routes of the arm's family from [`external`].
+    fn seed(self, manager: &mut RibManager) {
+        let source = external();
+        let IpAddr::V4(address) = source.addr() else {
+            unreachable!("test peers are IPv4")
+        };
+        let octets = (0..RESIDUAL_ROWS).map(|index| u8::try_from(index).unwrap());
+        let update = match self {
+            Self::Vpn | Self::PerClientBestVpn => RibUpdate::VpnRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: octets
+                    .map(|octet| make_vpn_rib_route(address, octet, 100, 100))
+                    .collect(),
+                withdrawn: vec![],
+            },
+            Self::Labeled => RibUpdate::LabeledRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: octets
+                    .map(|octet| make_labeled_rib_route(address, octet, 100, 100))
+                    .collect(),
+                withdrawn: vec![],
+            },
+            Self::BgpLs => RibUpdate::BgpLsRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: octets
+                    .map(|octet| make_bgpls_route(address, octet, 100))
+                    .collect(),
+                withdrawn: vec![],
+            },
+            Self::FlowSpec => {
+                let mut update = test_routes_received(source, vec![]);
+                if let RibUpdate::RoutesReceived {
+                    flowspec_announced, ..
+                } = &mut update
+                {
+                    *flowspec_announced = octets
+                        .map(|octet| {
+                            let mut route = crate::test_support::make_flowspec_route(address);
+                            route.rule.components =
+                                vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                                    rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                                        Ipv4Addr::new(10, 9, octet, 0),
+                                        24,
+                                    )),
+                                )];
+                            route
+                        })
+                        .collect();
+                }
+                update
+            }
+            Self::Ungrouped | Self::MixedDestinations => routes_from(source, 0, 1, RESIDUAL_ROWS),
+        };
+        manager.handle_update(update);
+        drain_route_chunks(manager);
+    }
+}
+
+/// Rows of the arm's family announced to every member, fixed across sizes.
+const RESIDUAL_ROWS: usize = 256;
+
+/// The keys of `update`'s announcements, in any family, that carry `tag`.
+fn tagged_keys(update: &OutboundRouteUpdate, tag: u32) -> Vec<String> {
+    let tagged = |communities: &[u32]| communities.contains(&tag);
+    let mut keys = Vec::new();
+    keys.extend(
+        update
+            .announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.prefix)),
+    );
+    keys.extend(
+        update
+            .vpn_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.key())),
+    );
+    keys.extend(
+        update
+            .labeled_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.nlri.prefix)),
+    );
+    keys.extend(
+        update
+            .flowspec_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.key())),
+    );
+    keys.extend(
+        update
+            .bgpls_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.key())),
+    );
+    keys
+}
+
+/// Per member, the distinct keys announced with the tag `tag_of` gives it.
+fn tagged_per_member(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    tag_of: impl Fn(usize) -> u32,
+) -> Vec<usize> {
+    receivers
+        .iter_mut()
+        .enumerate()
+        .map(|(index, receiver)| {
+            let mut keys = HashSet::new();
+            while let Ok(update) = receiver.try_recv() {
+                keys.extend(tagged_keys(&update, tag_of(index)));
+            }
+            keys.len()
+        })
+        .collect()
+}
+
+/// An export-policy reload moves `size` residual members of `arm` onto a new
+/// chain, the peer manager's way: the authoritative batch, then paced
+/// commands for every member it hands back. Each command applies the members
+/// its budget admits (two here), so the longest single command must not grow
+/// with the moved members; one turn carrying the whole cohort grows members
+/// × rows.
+fn residual_cohort_reload(size: usize, arm: ResidualArm) -> Work {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let mut receivers: Vec<_> = (0..size)
+        .map(|index| {
+            let peer = member(index);
+            let (outbound_tx, receiver) = mpsc::channel(4096);
+            let mut up = test_peer_up(peer, 1, outbound_tx);
+            if let RibUpdate::PeerUp {
+                export_policy,
+                peer_asn,
+                sendable_families,
+                per_client_best,
+                ..
+            } = &mut up
+            {
+                *export_policy = Some(arm.chain(OLD));
+                *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                *sendable_families = arm.families();
+                *per_client_best = matches!(arm, ResidualArm::PerClientBestVpn);
+            }
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    let group = manager.grouped_member_of(member(0));
+    assert_eq!(group.is_some(), arm.grouped(), "{arm:?}: setup");
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; size],
+        "{arm:?} size {size}: initial tables"
+    );
+    let chains: HashMap<PeerId, rustbgpd_policy::PolicyChain> = (0..size)
+        .map(|index| (member(index), arm.chain(arm.tag(NEW, index))))
+        .collect();
+    let replacements = |peers: &[PeerId]| {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(chains[peer].clone()),
+            })
+            .collect::<Vec<_>>()
+    };
+    let all: Vec<PeerId> = (0..size).map(member).collect();
+    let mut pending = Vec::new();
+    let mut longest = checkpoints_in(|| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(&all),
+            reply,
+        });
+        pending = response.try_recv().unwrap().unwrap();
+    })[ALL];
+    while !pending.is_empty() {
+        let mut outcome = None;
+        let command = checkpoints_in(|| {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+                replacements: replacements(&pending),
+                cost: Some(TWO_PER_COMMAND),
+                reply,
+            });
+            outcome = Some(response.try_recv().unwrap().unwrap());
+        });
+        longest = longest.max(command[ALL]);
+        pending = outcome.unwrap().pending;
+    }
+    manager.resync_dirty_peers_bounded();
+    // Pin the wire: every member ends with every row under its new chain.
+    assert_eq!(
+        tagged_per_member(&mut receivers, |index| arm.tag(NEW, index)),
+        vec![RESIDUAL_ROWS; size],
+        "{arm:?} size {size}: re-exported tables"
+    );
+    Work::from([("longest command checkpoints", longest)])
+}
+
+#[test]
+fn residual_cohort_reload_longest_command_is_flat_in_moved_members() {
+    let unit = "longest command checkpoints";
+    // Every arm first, so a failure names each arm's growth.
+    let counts: Vec<(ResidualArm, usize, usize)> = ResidualArm::ALL
+        .into_iter()
+        .map(|arm| {
+            (
+                arm,
+                residual_cohort_reload(SMALL, arm)[unit],
+                residual_cohort_reload(LARGE, arm)[unit],
+            )
+        })
+        .collect();
+    for &(arm, small, large) in &counts {
+        assert!(small > 0, "{arm:?}: no work counted");
+        assert!(
+            large < small * 2,
+            "{arm:?}: the longest single RIB command grew {small} -> {large} from {SMALL} to \
+             {LARGE} moved members at {RESIDUAL_ROWS} rows; one turn carries more than one \
+             member's move\nall arms (small, large): {counts:?}",
+        );
+    }
+}
+
 #[test]
 fn inbound_update_distribution_work_is_linear() {
     assert_linear(

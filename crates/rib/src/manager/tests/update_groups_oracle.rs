@@ -1859,6 +1859,47 @@ impl Oracle {
         reply_rx.await.unwrap().unwrap();
     }
 
+    /// The peer manager's authoritative cohort apply: the batch, then the
+    /// paced commands over every member it hands back, until none remain.
+    async fn replace_policies_authoritatively(&mut self, policies: &[(Ipv4Addr, PolicyChain)]) {
+        let replacements = |peers: &[PeerId]| -> Vec<crate::update::PeerExportPolicyReplacement> {
+            peers
+                .iter()
+                .map(|peer| crate::update::PeerExportPolicyReplacement {
+                    peer: *peer,
+                    export_policy: policies
+                        .iter()
+                        .find(|(address, _)| peer_v4(*address) == *peer)
+                        .map(|(_, chain)| chain.clone()),
+                })
+                .collect()
+        };
+        let all: Vec<PeerId> = policies.iter().map(|(peer, _)| peer_v4(*peer)).collect();
+        let (reply, result) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements: replacements(&all),
+                reply,
+            })
+            .await
+            .unwrap();
+        let (mut pending, mut cost) = (result.await.unwrap().unwrap(), None);
+        while !pending.is_empty() {
+            let (reply, result) = oneshot::channel();
+            self.tx
+                .send(RibUpdate::ApplyPacedExportPolicies {
+                    replacements: replacements(&pending),
+                    cost,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let outcome = result.await.unwrap().unwrap();
+            assert!(outcome.applied >= 1, "every paced command makes progress");
+            (pending, cost) = (outcome.pending, outcome.cost);
+        }
+    }
+
     /// RFC 2918 ROUTE-REFRESH from the peer: the grouped path replays
     /// the group table, the per-peer path re-runs full staging.
     async fn route_refresh(&mut self, peer: Ipv4Addr, afi: Afi, safi: Safi) {
@@ -7299,20 +7340,10 @@ async fn oracle_pcb_rs_control_batched_transition_moves_the_fallback() {
             vec![],
         )
         .await;
-        let (reply, result) = oneshot::channel();
-        o.tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: [D, E]
-                .into_iter()
-                .map(|peer| crate::update::PeerExportPolicyReplacement {
-                    peer: peer_v4(peer),
-                    export_policy: Some(deny_community_chain(PCB_RS_MARKER)),
-                })
-                .collect(),
-            reply,
-        })
-        .await
-        .unwrap();
-        result.await.unwrap().unwrap();
+        o.replace_policies_authoritatively(
+            &[D, E].map(|peer| (peer, deny_community_chain(PCB_RS_MARKER))),
+        )
+        .await;
         o.quiesce().await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
@@ -7693,20 +7724,11 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
             value: PCB_RS_MARKER,
         }];
         deny.policies[0].policy.entries.push(marker);
-        let (reply, result) = oneshot::channel();
-        o.tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: PCB_RS_MEMBERS
-                .iter()
-                .map(|&(peer, _)| crate::update::PeerExportPolicyReplacement {
-                    peer: peer_v4(peer),
-                    export_policy: Some(deny.clone()),
-                })
-                .collect(),
-            reply,
-        })
-        .await
-        .unwrap();
-        result.await.unwrap().unwrap();
+        let policies: Vec<_> = PCB_RS_MEMBERS
+            .iter()
+            .map(|&(peer, _)| (peer, deny.clone()))
+            .collect();
+        o.replace_policies_authoritatively(&policies).await;
         o.quiesce().await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;

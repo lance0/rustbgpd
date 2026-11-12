@@ -172,8 +172,12 @@ Grouping members this way keeps their recomputes warm and their resyncs back
 to back, which one
 member per command did not: measured per member, the recompute ran cold on
 every turn and the resync overlapped the previous member's session encode.
-The batch and every command share the transaction's forward RIB budget; it is
-never renewed per command. Each command is its own commit point: between
+The batch and every command of its walk share one two-minute budget of their
+own, anchored when the batch is sent and never renewed per command. The
+authoritative remainder walk that follows has an independent two-minute
+budget, anchored at its own first RIB command, so the two forward phases are
+each bounded separately, not by one two-minute bound across both. Each
+command is its own commit point: between
 commands an `rbgp` read or a route chunk sees applied members on the new chain
 and the rest on the old one, as in the serial remainder walk. The reload
 replies, and its configuration is published, only after the last command is
@@ -193,6 +197,22 @@ non-deferring batch, so the failure path is one turn over the whole list.
 Residual members of other private families (VPN, labeled unicast, FlowSpec,
 BGP-LS), per-client-best groups, ungrouped peers and sources with mixed
 destinations still run inside the batch.
+
+**Amended:** 2026-11-12 — the forward batch paces every residual member, not
+only EVPN senders. A residual move resyncs the member's whole table in every
+family its session sends, so VPN-, labeled-, FlowSpec- and BGP-LS-only
+members, ungrouped and per-client-best members, mixed-family members and the
+movers of a source group with mixed destinations each grew the batch's one
+turn by a table. The batch now applies only its shared unicast cohorts and
+hands back every residual member whose session sends any family, in caller
+order, for the paced walk above; a member that sends no family has nothing to
+resync and is still applied inline. As before, the negotiated families
+decide, not current rows. The walk's turn budget, window, deadlines, commit
+points and rollback are unchanged, and the walk now carries more members
+under the cohort's own two-minute budget: a cohort fallback that fitted that
+budget as one long turn pays the paced walk's per-command overhead instead.
+The first limit above (rollback is one turn over the whole list) remains, and
+so does the remainder's one-member-per-command walk under its own budget.
 
 ## Context
 

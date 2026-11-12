@@ -14562,6 +14562,15 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             .unwrap();
         let (reply, response) = oneshot::channel();
         let response = Arc::new(Mutex::new(response));
+        // The forward batch hands residual members to the paced walk, so the
+        // per-member interiors run in a paced command, here one that admits
+        // every member.
+        let residual = matches!(
+            stage,
+            "fallback_baseline" | "family_commit" | "outbound_limits"
+        );
+        let (paced_reply, paced_response) = oneshot::channel();
+        let paced_response = Arc::new(Mutex::new(paced_response));
         let visits = Arc::new(AtomicUsize::new(0));
         let terminals = Arc::new(AtomicUsize::new(0));
         let pending = Mutex::new(None);
@@ -14569,19 +14578,25 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             let readiness_tx = readiness_tx.clone();
             let general_response = Arc::clone(&general_response);
             let response = Arc::clone(&response);
+            let paced_response = Arc::clone(&paced_response);
             let visits = Arc::clone(&visits);
             let terminals = Arc::clone(&terminals);
             move |observed| {
                 if observed != stage && observed != "terminal_cleanup" {
                     return;
                 }
-                assert!(
-                    matches!(
+                let acknowledged = if residual {
+                    !matches!(
+                        paced_response.lock().unwrap().try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    )
+                } else {
+                    !matches!(
                         response.lock().unwrap().try_recv(),
                         Err(oneshot::error::TryRecvError::Empty)
-                    ),
-                    "{stage}: acknowledgement preceded cleanup"
-                );
+                    )
+                };
+                assert!(!acknowledged, "{stage}: acknowledgement preceded cleanup");
                 assert!(
                     matches!(
                         general_response.lock().unwrap().try_recv(),
@@ -14620,18 +14635,28 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
                     manager.send_route_refresh_response(fleet.members[0], Afi::Ipv4, Safi::Unicast);
                 });
             reply.send(Ok(Vec::new())).unwrap();
-        } else {
-            // A pre-existing dirty member outside the replacement batch must
-            // also finish the forced repair before its command acknowledges.
+        } else if residual {
+            // A pre-existing dirty member outside the replacement command
+            // must also finish the forced repair before it acknowledges.
             let members = if stage == "family_commit" {
                 &fleet.members[..3]
             } else {
                 &fleet.members
             };
+            fleet.manager.paced_elapsed_for_test = Some(Duration::ZERO);
+            fleet
+                .manager
+                .handle_update(RibUpdate::ApplyPacedExportPolicies {
+                    replacements: batch_replacements(members, &next),
+                    cost: Some(crate::update::PacedMemberCost::default()),
+                    reply: paced_reply,
+                });
+            drop(reply);
+        } else {
             fleet
                 .manager
                 .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-                    replacements: batch_replacements(members, &next),
+                    replacements: batch_replacements(&fleet.members, &next),
                     reply,
                 });
         }
@@ -14644,7 +14669,13 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             1,
             "{stage}: nested scope finalized early"
         );
-        assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(vec![]));
+        if residual {
+            let outcome = paced_response.lock().unwrap().try_recv().unwrap().unwrap();
+            assert_eq!(outcome.pending, Vec::<PeerId>::new(), "{stage}");
+            assert_eq!(outcome.skipped, Vec::<PeerId>::new(), "{stage}");
+        } else {
+            assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(vec![]));
+        }
         assert!(fleet.manager.replacement_readiness.is_none());
         assert!(fleet.manager.pending_regroup_baseline.is_empty());
         assert!(fleet.manager.dirty_peers.is_empty());
@@ -17691,6 +17722,21 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                         reply,
                     });
                 assert_eq!(response.try_recv().unwrap(), Ok(()));
+            } else if stage == "fallback_baseline" {
+                // The forward batch hands residual members to the paced walk,
+                // so the per-member interior runs in a paced command, here
+                // one that admits every member.
+                fleet.manager.paced_elapsed_for_test = Some(Duration::ZERO);
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::ApplyPacedExportPolicies {
+                        replacements: batch_replacements(&fleet.members, &next),
+                        cost: Some(crate::update::PacedMemberCost::default()),
+                        reply,
+                    });
+                let outcome = response.try_recv().unwrap().unwrap();
+                assert_eq!(outcome.pending, Vec::<PeerId>::new());
             } else {
                 let (reply, mut response) = oneshot::channel();
                 fleet
@@ -17941,7 +17987,9 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
         "the emptied group's instance is released"
     );
 
-    // A batch replacement of every peer is one unit and one publication.
+    // A batch replacement of every peer: the batch moves the grouped cohort
+    // and hands the ungrouped member to one paced command. Each command is
+    // one unit and one publication.
     let (before_batch, prior) = published_ids(&tx, &roster).await;
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
@@ -17963,12 +18011,24 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(vec![]));
+    assert_eq!(response.await.unwrap(), Ok(vec![c]));
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ApplyPacedExportPolicies {
+        replacements: vec![crate::update::PeerExportPolicyReplacement {
+            peer: c,
+            export_policy: Some(peer_context_chain_for(65097)),
+        }],
+        cost: None,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap().unwrap().applied, 1);
     let (after_batch, batched) = published_ids(&tx, &roster).await;
     assert_eq!(
         after_batch,
-        before_batch + 1,
-        "one publication for the batch"
+        before_batch + 2,
+        "one publication for the batch and one for its paced command"
     );
     assert_eq!(batched[&a], batched[&b]);
     assert!(
@@ -18806,6 +18866,12 @@ fn seed_mixed_family_source(manager: &mut RibManager, private: Safi) {
             announced: vec![make_bgpls_route(source_addr, 7, 100)],
             withdrawn: vec![],
         }),
+        Safi::MplsVpn => manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: vec![make_vpn_rib_route(source_addr, 7, 100, 100)],
+            withdrawn: vec![],
+        }),
         _ => {}
     }
 }
@@ -19067,17 +19133,9 @@ fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
     }
     let members = fleet.members.clone();
     let deferred = apply_paced_batch(&mut fleet.manager, &members, &deny_all_chain());
-    // EVPN senders are applied one per command; other private families stay
-    // on the batch's per-member path.
-    let evpn = private.1 == Safi::Evpn;
-    assert_eq!(
-        deferred,
-        if evpn {
-            members[..MIXED_MEMBERS].to_vec()
-        } else {
-            Vec::new()
-        }
-    );
+    // Every residual member is applied by paced commands, whatever the
+    // private family; the unicast-only member stays in the batch.
+    assert_eq!(deferred, members[..MIXED_MEMBERS].to_vec());
     drain_route_chunks(&mut fleet.manager);
     for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
         let peer = fleet.members[index];
@@ -19102,11 +19160,99 @@ fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
     // The unicast-only member keeps the shared path.
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 1);
-    // EVPN senders are applied by paced commands, not the fallback.
+    // The mixed members are applied by paced commands, not the fallback.
+    assert_eq!(stats.batched_authoritative_fallback_members, 0);
+}
+
+/// Mixed members (IPv4 unicast plus `private`) of one group move to a chain
+/// that adds a community, beside a unicast-only member on the shared path
+/// where the group key allows one. Each mixed member is handed back to the
+/// paced walk, and every family it sends ends re-exported under the new
+/// chain: none is lost, and none keeps the old chain's rows.
+fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi)) {
+    const OLD: u32 = 0xFDE8_0001;
+    const NEW: u32 = 0xFDE8_0002;
+    // VPN joins the group key, so a unicast-only member would not share the
+    // mixed members' group.
+    let unicast_only = u8::from(private.1 != Safi::MplsVpn);
+    let mut fleet = mixed_family_fleet(&community_chain(OLD), private, unicast_only);
+    let members = fleet.members.clone();
+    let deferred = apply_paced_batch(&mut fleet.manager, &members, &community_chain(NEW));
     assert_eq!(
-        stats.batched_authoritative_fallback_members,
-        if evpn { 0 } else { MIXED_MEMBERS }
+        deferred,
+        members[..MIXED_MEMBERS].to_vec(),
+        "{private:?}: every mixed member is paced, in caller order"
     );
+    drain_route_chunks(&mut fleet.manager);
+    fleet.manager.resync_dirty_peers_bounded();
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let peer = fleet.members[index];
+        // Per family, its one row's last event: the announced communities,
+        // or `None` once withdrawn. An envelope withdraws before it announces.
+        let mut last: HashMap<&'static str, Option<Vec<u32>>> = HashMap::new();
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            if update.unicast_withdrawals().next().is_some() {
+                last.insert("unicast", None);
+            }
+            if !update.evpn_withdraw.is_empty()
+                || !update.vpn_withdraw.is_empty()
+                || !update.labeled_withdraw.is_empty()
+                || !update.flowspec_withdraw.is_empty()
+                || !update.bgpls_withdraw.is_empty()
+            {
+                last.insert("private", None);
+            }
+            let mut record = |family: &'static str, communities: &[u32]| {
+                last.insert(family, Some(communities.to_vec()));
+            };
+            for route in update.announce.iter() {
+                record("unicast", route.communities());
+            }
+            for route in update.evpn_announce.iter() {
+                record("private", route.communities());
+            }
+            for route in update.vpn_announce.iter() {
+                record("private", route.communities());
+            }
+            for route in &update.labeled_announce {
+                record("private", route.communities());
+            }
+            for route in &update.flowspec_announce {
+                record("private", route.communities());
+            }
+            for route in &update.bgpls_announce {
+                record("private", route.communities());
+            }
+        }
+        let families: &[&str] = if index < MIXED_MEMBERS {
+            &["unicast", "private"]
+        } else {
+            &["unicast"]
+        };
+        for family in families {
+            match last.get(family) {
+                None => panic!("{private:?} {peer}: {family} row not re-exported"),
+                Some(None) => panic!("{private:?} {peer}: {family} row ends withdrawn"),
+                Some(Some(communities)) => assert!(
+                    communities.contains(&NEW) && !communities.contains(&OLD),
+                    "{private:?} {peer}: {family} row ends under the old chain: {communities:?}"
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn batched_authoritative_cohort_reexports_every_family_of_mixed_members() {
+    for private in [
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::BgpLs, Safi::BgpLs),
+    ] {
+        assert_batched_cohort_reexports_every_family(private);
+    }
 }
 
 #[test]

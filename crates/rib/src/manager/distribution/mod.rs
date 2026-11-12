@@ -817,8 +817,9 @@ pub(in crate::manager) fn paced_admits_next(
 enum ResidualMode {
     /// Apply every residual member (rollback and direct callers).
     All,
-    /// Hand back every residual EVPN sender unapplied (the forward batch).
-    DeferEvpn,
+    /// Hand back every residual member whose session sends any family
+    /// unapplied (the forward batch).
+    DeferSenders,
     /// Apply residual members in caller order while the turn budget allows
     /// (one command of the paced walk); hand back the rest.
     Paced {
@@ -6056,7 +6057,7 @@ impl RibManager {
             });
             return;
         }
-        let _ = reply.send(self.apply_export_policy_replacements_deferring_evpn(replacements));
+        let _ = reply.send(self.apply_export_policy_replacements_deferring_residual(replacements));
     }
 
     pub(super) fn handle_restore_peer_export_policies_authoritatively(
@@ -6174,18 +6175,21 @@ impl RibManager {
 
     /// The forward authoritative batch: as
     /// [`Self::apply_export_policy_replacements_synchronously`], except that
-    /// residual members whose session sends EVPN are left unapplied, with
-    /// their installed chain untouched, and returned in caller order. Each
-    /// such move resyncs the member's whole EVPN table, so the caller applies
-    /// them through [`Self::apply_paced_export_policies`], a few per RIB
-    /// command within [`PACED_TURN_BUDGET`], and other work runs between those
-    /// commands instead of waiting behind one actor turn growing with moved
-    /// members × rows. Rollback batches stay whole.
-    pub(in crate::manager) fn apply_export_policy_replacements_deferring_evpn(
+    /// residual members whose session sends any family are left unapplied,
+    /// with their installed chain untouched, and returned in caller order.
+    /// Shared cohorts still commit here. A residual move resyncs the member's
+    /// whole table in every family it sends (EVPN, VPN, labeled unicast,
+    /// `FlowSpec`, BGP-LS, or the unicast of an ungrouped, per-client-best or
+    /// mixed-destination member), so the caller applies them through
+    /// [`Self::apply_paced_export_policies`], a few per RIB command within
+    /// [`PACED_TURN_BUDGET`], and other work runs between those commands
+    /// instead of waiting behind one actor turn growing with moved members ×
+    /// rows. Rollback batches stay whole.
+    pub(in crate::manager) fn apply_export_policy_replacements_deferring_residual(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerId>, RibCommandError> {
-        self.apply_export_policy_replacements(replacements, ResidualMode::DeferEvpn)
+        self.apply_export_policy_replacements(replacements, ResidualMode::DeferSenders)
             .map(|outcome| outcome.deferred)
     }
 
@@ -6623,7 +6627,7 @@ impl RibManager {
         // Per-member fallback: the ordinary regroup lifecycle (baseline
         // snapshot + dirty), drained by the one pass below — the exact
         // body of the single-peer seam, minus its per-call pass. A member
-        // handed back (an EVPN sender in the forward batch, or one past the
+        // handed back (any sender in the forward batch, or one past the
         // paced budget) is instead restored to its installed chain.
         let mut deferred: HashSet<PeerId> = HashSet::new();
         let (mut applied, mut recompute_max, mut over_budget) =
@@ -6639,7 +6643,7 @@ impl RibManager {
             checkpoint();
             let hand_back = match mode {
                 ResidualMode::All => false,
-                ResidualMode::DeferEvpn => self.carries_evpn_outbound_state(peer),
+                ResidualMode::DeferSenders => self.sends_any_family(peer),
                 ResidualMode::Paced { started, .. } => {
                     #[cfg(test)]
                     let elapsed = self
@@ -6781,15 +6785,14 @@ impl RibManager {
         })
     }
 
-    /// Whether moving `peer` can resync EVPN outbound state: the session
-    /// sends EVPN. Its old chain may have denied every row (no private rows,
-    /// no admitted keys) while the new one permits the whole table, so the
-    /// family, not current rows, decides. EVPN group ownership requires the
-    /// family too.
-    fn carries_evpn_outbound_state(&self, peer: PeerId) -> bool {
+    /// Whether moving `peer` can resync outbound state: its session sends
+    /// some family. Its old chain may have denied every row (no rows held)
+    /// while the new one permits the whole table, so the negotiated families,
+    /// not current rows, decide.
+    fn sends_any_family(&self, peer: PeerId) -> bool {
         self.peer_sendable_families
             .get(&peer)
-            .is_some_and(|families| families.contains(&(Afi::L2Vpn, Safi::Evpn)))
+            .is_some_and(|families| !families.is_empty())
     }
 
     /// Commit one qualifying cohort through the shared batched

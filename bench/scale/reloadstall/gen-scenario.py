@@ -101,6 +101,15 @@ remainder 600; G=changed_peers gives cohort 0 and remainder changed_peers.
 Pairs with the harness's `RELOADSTALL_EXPORT_PAIRS=G`. G=1 or absent emits
 the historical files byte-for-byte.
 
+Ungrouped export extension: `GEN_EXPORT_PEER_CONTEXT=1` (mixed mode only)
+puts a first `peer-gate` term in `member-out` and every `member-out-k`, in
+both generations, that rejects routes toward peer AS 64496, which no stub
+uses. The term reads peer context, so the daemon never update-groups a changed
+peer: the cohort cannot take the shared transitions and goes through the
+authoritative batch's per-member path, the cohort shape of ungrouped,
+per-client-best and private-family peers. Stable peers keep `stable-out` and
+stay grouped. Absent or 0 emits the files unchanged.
+
 Converged-rejoin extension: `GEN_CONVERGED_REJOIN=1` explicitly enables IPv4
 GR helper retention with a 180-second disconnected window and 360-second
 post-reconnect EoR window, matching `--converged-rejoin`. This is a harness
@@ -175,6 +184,12 @@ if rpki_cache is not None:
         sys.exit("GEN_RPKI_CACHE must be numeric IPv4 address:port or "
                  "[IPv6 address]:port with port in 1..=65535")
 export_pairs = int(os.environ.get("GEN_EXPORT_PAIRS", "1"))
+export_peer_context = os.environ.get("GEN_EXPORT_PEER_CONTEXT", "0")
+if export_peer_context not in ("0", "1"):
+    sys.exit("GEN_EXPORT_PEER_CONTEXT must be 0 or 1")
+export_peer_context = export_peer_context == "1"
+if export_peer_context and not (mixed_export_only and ibgp_rr_asn is None):
+    sys.exit("GEN_EXPORT_PEER_CONTEXT requires mixed mode (changed_peers given, no GEN_IBGP_RR_ASN)")
 if export_pairs != 1 and not (mixed_export_only and ibgp_rr_asn is None
                               and 1 <= export_pairs <= changed_peers):
     sys.exit(f"GEN_EXPORT_PAIRS requires mixed mode (changed_peers given, no GEN_IBGP_RR_ASN) "
@@ -265,6 +280,9 @@ for fname, reject_prefix, community in GENERATIONS:
     filter_term = (
         "    term drop-filtered { if route.prefix in filtered { reject } }\n" if filtering else ""
     )
+    # Reads peer context, so no changed peer is update-grouped; matches no stub.
+    if export_peer_context:
+        filter_term = "    term peer-gate { if peer.asn == 64496 { reject } }\n" + filter_term
     # Every changed pair rejects the filtered set, like member-out.
     pair_policies = "".join(
         f"""
@@ -408,6 +426,8 @@ filter_note = (
     if filter_count > 0
     else ""
 )
+if export_peer_context:
+    filter_note += ", export_peer_context(changed chains ungrouped)"
 if export_pairs > 1:
     filter_note += (
         f", export_pairs={export_pairs}(cohort={export_cohort}, "
