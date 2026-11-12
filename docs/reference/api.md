@@ -441,8 +441,9 @@ paths return `UNIMPLEMENTED` instead of bypassing the transaction model. See
 reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 
 `Get` and `Subscribe` accept at most 16 paths per request (`INVALID_ARGUMENT`
-beyond). A `Get` whose paths would render more than 65,536 leaf updates
-returns `RESOURCE_EXHAUSTED` before rendering; see
+beyond). A `Get`, or a `Subscribe` snapshot or tick, whose paths would render
+more than 65,536 leaf updates returns `RESOURCE_EXHAUSTED` before rendering; a
+stream whose roster grows past the bound ends with that status. See
 [gnmi.md](gnmi.md#supported-rpcs) for how paths are counted.
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
