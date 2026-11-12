@@ -867,17 +867,33 @@ impl PeerCommand {
         }
     }
 
-    /// Wake shared-output consumers when their deferred snapshot is abandoned.
-    /// Commands outside the snapshot allowlist remain owned until execution.
-    pub(crate) async fn read_canceled(&mut self) {
+    /// Ready once a queued snapshot's caller has gone. Commands outside the
+    /// snapshot allowlist remain owned until execution and never wake.
+    pub(crate) fn poll_read_canceled(&mut self, cx: &mut std::task::Context<'_>) -> bool {
         match self {
-            Self::QueryState { reply } => reply.closed().await,
-            Self::QueryWarmCheckpointState { reply } => reply.closed().await,
-            Self::ExplainImportPolicy { reply, .. } => reply.closed().await,
-            Self::ListRejectedRoutes { reply } => reply.closed().await,
-            Self::QueryImportPolicyTermHits { reply } => reply.closed().await,
-            _ => std::future::pending().await,
+            Self::QueryState { reply } => reply.poll_closed(cx).is_ready(),
+            Self::QueryWarmCheckpointState { reply } => reply.poll_closed(cx).is_ready(),
+            Self::ExplainImportPolicy { reply, .. } => reply.poll_closed(cx).is_ready(),
+            Self::ListRejectedRoutes { reply } => reply.poll_closed(cx).is_ready(),
+            Self::QueryImportPolicyTermHits { reply } => reply.poll_closed(cx).is_ready(),
+            _ => false,
         }
+    }
+
+    /// Commands that tear the session down or reset it. Owned output work
+    /// must not make them wait.
+    pub(crate) fn closes_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Stop { .. }
+                | Self::BfdDown
+                | Self::Shutdown
+                | Self::PurgeReset
+                | Self::AdministrativeReset { .. }
+                | Self::CollisionDump
+                | Self::ResetTcpAoAfterFailedMutation { .. }
+                | Self::ResetEvpnRecoverySession { .. }
+        )
     }
 }
 

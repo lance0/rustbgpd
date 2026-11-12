@@ -1298,7 +1298,21 @@ impl PeerSession {
                 self.rib_reserve = Some(tokio_util::sync::PollSender::new(self.rib_tx.clone()));
                 Ok(())
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.on_rib_refusal(then);
+                Err(())
+            }
+        }
+    }
+
+    /// The RIB is gone before admitting a message: undo the local state
+    /// that would otherwise lead it and fail the caller explicitly.
+    fn on_rib_refusal(&mut self, then: OnRibAdmission) {
+        if let OnRibAdmission::ExportPolicy { previous, reply } = then {
+            self.export_policy = previous;
+            let _ = reply.send(Err(crate::PeerCommandError::CommandFailed(
+                "RIB channel closed while updating export policy".to_string(),
+            )));
         }
     }
 
@@ -1306,6 +1320,9 @@ impl PeerSession {
         match then {
             OnRibAdmission::Nothing => {}
             OnRibAdmission::Acknowledge(reply) => reply(),
+            OnRibAdmission::ExportPolicy { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
             OnRibAdmission::Registered => self.established.publish_registered(),
             OnRibAdmission::BeginRefreshAccounting(afi, safi) => {
                 self.begin_refresh_accounting(afi, safi);
@@ -1316,17 +1333,8 @@ impl PeerSession {
         }
     }
 
-    /// Deliver `update` once everything held before it was admitted. For a
-    /// message whose effect the caller acknowledges to another actor, or
-    /// whose reply it awaits: channel admission, not the backlog, orders it
-    /// before that actor's next message. Waits like a blocking send.
-    pub(super) async fn send_to_rib_admitted(&mut self, update: RibUpdate) -> Result<(), ()> {
-        self.flush_rib_backlog().await;
-        self.rib_tx.send(update).await.map_err(|_| ())
-    }
-
-    /// Deliver every held message, waiting for channel capacity: before the
-    /// session task ends, and before an admission-ordered send.
+    /// Deliver every held message, waiting for channel capacity, before the
+    /// session task ends.
     pub(super) async fn flush_rib_backlog(&mut self) {
         // The head goes through the queued reservation, keeping its place
         // among waiting senders. Cancel-safe for every message: each stays
@@ -1345,7 +1353,7 @@ impl PeerSession {
             if reserved && reserve.send_item(update).is_ok() {
                 self.on_rib_admission(then);
             } else {
-                self.drop_rib_backlog();
+                self.drop_rib_backlog(then);
             }
         }
         // An unused reservation would hold capacity later sends wait for.
@@ -1413,15 +1421,18 @@ impl PeerSession {
     }
 
     /// The RIB manager is gone: like a failed blocking send, the held
-    /// messages and their local effects are abandoned.
-    fn drop_rib_backlog(&mut self) {
+    /// messages, from `head` on, and their local effects are abandoned.
+    fn drop_rib_backlog(&mut self, head: OnRibAdmission) {
         warn!(
             peer = %self.peer_label,
             held = self.rib_backlog.len() + 1,
             "RIB manager unavailable; held RIB-bound messages dropped"
         );
-        self.rib_backlog.clear();
         self.rib_reserve = None;
+        self.on_rib_refusal(head);
+        for (_, then) in std::mem::take(&mut self.rib_backlog) {
+            self.on_rib_refusal(then);
+        }
     }
 
     /// Run-loop step for a reservation: send the head of the backlog, then
@@ -1446,7 +1457,7 @@ impl PeerSession {
                 }
             };
             if sent.is_err() {
-                self.drop_rib_backlog();
+                self.drop_rib_backlog(then);
                 break;
             }
             self.on_rib_admission(then);
@@ -4281,6 +4292,12 @@ pub(super) enum OnRibAdmission {
     /// A command whose caller acts on the RIB next: reply once the RIB has
     /// admitted its message. Dropped unsent when the message is.
     Acknowledge(Box<dyn FnOnce() + Send>),
+    /// An export-policy update: acknowledged on admission. If the RIB is
+    /// gone first, the session restores `previous` and fails the command.
+    ExportPolicy {
+        previous: Option<rustbgpd_policy::PolicyChain>,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::PeerCommandError>>,
+    },
     /// The session's `PeerUp`: the RIB now knows this session.
     Registered,
     /// A peer `BoRR`: open the local refresh window when the RIB opens its own.

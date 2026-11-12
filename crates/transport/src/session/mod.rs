@@ -314,9 +314,13 @@ pub(crate) struct PeerSession {
     timers: Timers,
     metrics: BgpMetrics,
     commands: mpsc::Receiver<PeerCommand>,
-    /// First command that cannot interleave a shared envelope. Later
-    /// commands stay queued until this one runs after the envelope finishes.
-    deferred_command: Option<PeerCommand>,
+    /// Commands read during owned work (a shared encode, replay admission)
+    /// that it cannot answer inline, in arrival order. The run loop runs them
+    /// before reading the channel again. At most
+    /// [`shared_group::DEFERRED_COMMAND_LIMIT`].
+    deferred_commands: VecDeque<PeerCommand>,
+    /// Shared encodes this session abandoned for its commands, by reason.
+    shared_encode_stops: shared_group::SharedEncodeStops,
     rib_tx: mpsc::Sender<RibUpdate>,
     /// RIB-bound messages held in emission order while the RIB channel is
     /// full (ADR-0078). Non-empty means parked: later messages queue behind
@@ -2455,7 +2459,8 @@ impl PeerSession {
             timers: Timers::default(),
             metrics,
             commands,
-            deferred_command: None,
+            deferred_commands: VecDeque::new(),
+            shared_encode_stops: shared_group::SharedEncodeStops::default(),
             rib_tx,
             rib_backlog: VecDeque::new(),
             rib_reserve: None,
@@ -3013,7 +3018,7 @@ impl PeerSession {
             self.run_due_link_check().await;
             // Owned output/replay work finished before returning here. The
             // oldest command now runs or refuses without hiding its successors.
-            if let Some(command) = self.deferred_command.take() {
+            if let Some(command) = self.deferred_commands.pop_front() {
                 if self.handle_command(command).await == ControlFlow::Break(()) {
                     self.join_closed_writer().await;
                     self.flush_rib_backlog().await;

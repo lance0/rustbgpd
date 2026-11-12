@@ -79,6 +79,39 @@ use std::sync::{Arc, Mutex, Weak};
 /// Source grouping still prepares the whole inventory before the first slice.
 pub(super) const PROGRESSIVE_SLICE_ROUTES: usize = 2048;
 
+/// Commands owned work may hold for the run loop. Routine traffic during one
+/// encode (a reload mutation, link checks, validation changes, operator
+/// reads) fits, so it neither waits nor fails a group encode. A full queue
+/// ends the owned work, since an unread close may be next.
+pub(super) const DEFERRED_COMMAND_LIMIT: usize = 8;
+
+/// Why owned work must hand its deferred commands to the run loop.
+pub(super) enum DeferredStop {
+    Close,
+    QueueFull,
+}
+
+impl DeferredStop {
+    // Not `label`: the v1 stable-surface checker traces every `.label()`
+    // caller as a pinned metric label source and fails closed on others.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::QueueFull => "queue_full",
+        }
+    }
+}
+
+/// Why an elected encoder abandoned a shared encode for its commands. A test
+/// hook: production reports each stop on its `debug!` line with `reason`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SharedEncodeStops {
+    /// A held command closes the session.
+    pub(super) close: u64,
+    /// The deferred-command queue filled.
+    pub(super) queue_full: u64,
+}
+
 /// Inventory indices grouped by source peer: sources in address order,
 /// inventory order kept within each source.
 ///
@@ -702,35 +735,72 @@ pub(super) fn encode_shared_evpn_slice(
 }
 
 impl PeerSession {
-    /// Only small operator snapshots may interleave an owned wait. Discard
-    /// abandoned snapshots; preserve all other commands and their FIFO successors.
+    /// Queue a command read during owned work, in arrival order, then serve
+    /// what may run ahead of the run loop.
     pub(super) fn handle_read_during_wait(&mut self, command: crate::PeerCommand) {
-        if command.is_canceled_read() {
-            return;
+        if !command.is_canceled_read() {
+            self.deferred_commands.push_back(command);
         }
-        match command {
-            crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
-            crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
-                self.answer_import_policy_term_hits(reply);
+        self.serve_deferred_reads();
+    }
+
+    /// Discard abandoned snapshots, then answer the leading small operator
+    /// snapshots in order. The first other command, a mutation included,
+    /// stops the run, so no read passes it.
+    pub(super) fn serve_deferred_reads(&mut self) {
+        self.deferred_commands
+            .retain(|held| !held.is_canceled_read());
+        while let Some(command) = self.deferred_commands.pop_front() {
+            match command {
+                crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
+                crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
+                    self.answer_import_policy_term_hits(reply);
+                }
+                command => {
+                    self.deferred_commands.push_front(command);
+                    break;
+                }
             }
-            command => self.deferred_command = Some(command),
         }
     }
 
-    /// One command per checkpoint bounds work under a continuous read stream.
-    fn poll_shared_group_command(&mut self) {
+    /// Whether owned work must hand its held commands to the run loop now:
+    /// one closes the session, or the queue is full and the next unread
+    /// command may be a close.
+    pub(super) fn deferred_commands_stop(&self) -> Option<DeferredStop> {
         if self
-            .deferred_command
-            .as_ref()
-            .is_some_and(crate::PeerCommand::is_canceled_read)
+            .deferred_commands
+            .iter()
+            .any(crate::PeerCommand::closes_session)
         {
-            self.deferred_command = None;
+            Some(DeferredStop::Close)
+        } else if self.deferred_commands.len() >= DEFERRED_COMMAND_LIMIT {
+            Some(DeferredStop::QueueFull)
+        } else {
+            None
         }
-        if self.deferred_command.is_none()
-            && let Ok(command) = self.commands.try_recv()
-        {
+    }
+
+    /// Read what the queue has room for at each checkpoint; the limit also
+    /// bounds work under a continuous read stream. Returns why the encode
+    /// must stop so the run loop can act, if it must.
+    fn poll_shared_group_command(&mut self) -> Option<DeferredStop> {
+        self.serve_deferred_reads();
+        for _ in 0..DEFERRED_COMMAND_LIMIT {
+            if self.deferred_commands.len() >= DEFERRED_COMMAND_LIMIT {
+                break;
+            }
+            let Ok(command) = self.commands.try_recv() else {
+                break;
+            };
             self.handle_read_during_wait(command);
         }
+        let stop = self.deferred_commands_stop()?;
+        match stop {
+            DeferredStop::Close => self.shared_encode_stops.close += 1,
+            DeferredStop::QueueFull => self.shared_encode_stops.queue_full += 1,
+        }
+        Some(stop)
     }
 
     /// Elect synchronously, then publish with cooperative slice boundaries.
@@ -826,7 +896,16 @@ impl PeerSession {
         let mut sent: u64 = 0;
         let mut idx = 0;
         while idx < order.len() {
-            self.poll_shared_group_command();
+            if let Some(stop) = self.poll_shared_group_command() {
+                // The guard fails the stream: every member, this one
+                // included, falls back to its own encoding.
+                debug!(
+                    peer = %self.peer_label,
+                    reason = stop.reason(),
+                    "shared encode stopped for a session command"
+                );
+                return None;
+            }
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
             let chunks = if evpn {
                 encode_shared_evpn_slice(export, &update.evpn_announce, &order[idx..end])

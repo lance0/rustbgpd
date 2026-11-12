@@ -1079,7 +1079,7 @@ async fn administrative_closes_drain_a_queued_withdraw_before_the_cease() {
             })
             .await
             .unwrap();
-        session.deferred_command = Some(command);
+        session.deferred_commands.push_back(command);
         let session_task = tokio::spawn(async move { session.run().await });
 
         let mut wire = Vec::new();
@@ -1144,7 +1144,9 @@ async fn close_drain_shares_the_flush_budget_with_the_writer() {
         })
         .await
         .unwrap();
-    session.deferred_command = Some(PeerCommand::Stop { reason: None });
+    session
+        .deferred_commands
+        .push_back(PeerCommand::Stop { reason: None });
     let session_task = tokio::spawn(async move { session.run().await });
     // Virtual time: this wakes only once every task is idle, after the drain
     // has hit its deadline and queued the Cease. The peer reads only then.
@@ -1192,7 +1194,9 @@ async fn admission_failure_during_the_close_drain_still_hard_tears_down() {
         })
         .await
         .unwrap();
-    session.deferred_command = Some(PeerCommand::Stop { reason: None });
+    session
+        .deferred_commands
+        .push_back(PeerCommand::Stop { reason: None });
     let session_task = tokio::spawn(async move { session.run().await });
 
     let mut wire = Vec::new();

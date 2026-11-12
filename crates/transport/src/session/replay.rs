@@ -109,6 +109,8 @@ impl PeerSession {
 
     /// Keep each admission future's queue position and the operation's original
     /// deadline while serving only snapshots that cannot change replay state.
+    /// Other commands queue for the run loop. A queued close, or a full
+    /// queue, ends the wait and the replay, so a Stop is not hidden.
     async fn await_replay_admission<T>(
         &mut self,
         admission: impl std::future::Future<Output = T>,
@@ -118,7 +120,15 @@ impl PeerSession {
         let admission = tokio::time::timeout_at(deadline, admission);
         tokio::pin!(admission);
         let mut commands_open = true;
+        // Snapshots earlier owned work queued behind this replay are due now.
+        self.serve_deferred_reads();
         loop {
+            if self.deferred_commands_stop().is_some() {
+                return Err(PeerCommandError::ReplayUnavailable(
+                    "a session close or a full command queue preempted replay admission; retry"
+                        .into(),
+                ));
+            }
             tokio::select! {
                 biased;
                 () = response.closed() => return Err(PeerCommandError::ReplayUnavailable(
@@ -128,19 +138,23 @@ impl PeerSession {
                     operation: "replay_outbound",
                     deadline: REPLAY_TIMEOUT,
                 }),
-                () = async {
-                    match self.deferred_command.as_mut() {
-                        Some(command) => command.read_canceled().await,
-                        None => std::future::pending().await,
+                // A queued snapshot's caller leaving lets the reads behind it
+                // be served now rather than after admission.
+                () = std::future::poll_fn(|cx| {
+                    if self
+                        .deferred_commands
+                        .iter_mut()
+                        .any(|held| held.poll_read_canceled(cx))
+                    {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
                     }
-                } => self.deferred_command = None,
-                command = self.commands.recv(),
-                    if commands_open && self.deferred_command.is_none() => {
-                    match command {
-                        Some(command) => self.handle_read_during_wait(command),
-                        None => commands_open = false,
-                    }
-                }
+                }) => self.serve_deferred_reads(),
+                command = self.commands.recv(), if commands_open => match command {
+                    Some(command) => self.handle_read_during_wait(command),
+                    None => commands_open = false,
+                },
             }
         }
     }

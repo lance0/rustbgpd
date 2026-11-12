@@ -747,7 +747,7 @@ async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
         "the held UPDATE and one PeerDown, whatever the reset count"
     );
     assert_eq!(session.fsm.state(), SessionState::Idle);
-    assert!(session.deferred_command.is_none());
+    assert!(session.deferred_commands.is_empty());
     assert!(session.reconnect_timer.is_some());
     // The accepted resets own one restart. A later Stop cancels it, and a
     // query observes that decision before RIB admission becomes available.
@@ -947,6 +947,141 @@ async fn rib_park_refuses_mutation_and_observes_following_stop() {
 #[tokio::test]
 async fn rib_park_refuses_mutation_and_observes_following_bfd_down() {
     parked_mutation_then_close(PeerCommand::BfdDown, cease_subcode::BFD_DOWN).await;
+}
+
+/// Feed one ORF ROUTE-REFRESH to a session whose RIB channel is full.
+async fn park_on_orf(session: &mut PeerSession, when: WhenToRefresh) {
+    let mut negotiated = (**session.negotiated.as_ref().unwrap()).clone();
+    negotiated.peer_route_refresh = true;
+    negotiated.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let orf = Message::RouteRefresh(orf_rr_with_when(
+        when,
+        OrfType::AddressPrefix,
+        one_permit_entry(),
+    ));
+    session
+        .read_buf
+        .buf
+        .extend_from_slice(&rustbgpd_wire::encode_message(&orf).unwrap());
+    tokio::time::timeout(Duration::from_secs(5), session.process_read_buffer())
+        .await
+        .expect("the ORF update must not wait for RIB capacity");
+}
+
+/// RFC 5291: a held DEFER update gets no plain-refresh fallback, which would
+/// lift the initial-advertisement gate and re-advertise before the peer's
+/// own later ROUTE-REFRESH.
+#[tokio::test]
+async fn rib_park_holds_a_defer_orf_update_without_a_plain_refresh() {
+    let RibPark {
+        mut session,
+        rib_rx: _rib_rx,
+        ..
+    } = rib_park().await;
+    park_on_orf(&mut session, WhenToRefresh::Defer).await;
+    assert!(
+        matches!(
+            session
+                .rib_backlog
+                .iter()
+                .map(|(update, _)| update)
+                .collect::<Vec<_>>()[..],
+            [RibUpdate::PeerOrfUpdate {
+                when: WhenToRefresh::Defer,
+                ..
+            }]
+        ),
+        "only the DEFER update is held, with no plain refresh behind it"
+    );
+    session.writer_join.take().unwrap().abort();
+}
+
+/// An ORF ROUTE-REFRESH that meets a full mailbox is held in session order
+/// like peer input, with its plain-refresh fallback behind it, instead of
+/// waiting for capacity: a mutation and a Stop sent meanwhile are observed,
+/// and the RIB later receives every message in its original order.
+#[tokio::test]
+async fn rib_park_holds_orf_update_and_observes_following_stop() {
+    let RibPark {
+        mut session,
+        commands,
+        mut rib_rx,
+        mut server,
+        fillers,
+        ..
+    } = rib_park().await;
+    park_on_orf(&mut session, WhenToRefresh::Immediate).await;
+    assert!(
+        matches!(
+            session
+                .rib_backlog
+                .iter()
+                .map(|(update, _)| update)
+                .collect::<Vec<_>>()[..],
+            [
+                RibUpdate::PeerOrfUpdate { .. },
+                RibUpdate::RouteRefreshRequest { .. }
+            ]
+        ),
+        "the ORF update and its fallback are held in order"
+    );
+
+    let (reply, mut accepted) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::UpdateGracefulShutdown {
+            enabled: true,
+            reply,
+        })
+        .unwrap();
+    commands
+        .try_send(PeerCommand::Stop { reason: None })
+        .unwrap();
+    {
+        let run = session.run();
+        let close = async {
+            let frame = next_frame_after_handshake(&mut server).await;
+            let Some(Message::Notification(notification)) = frame else {
+                panic!("the Stop behind a held ORF update must reach the wire: {frame:?}");
+            };
+            assert_eq!(notification.code, NotificationCode::Cease);
+            assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
+        };
+        tokio::select! {
+            result = run => panic!("run() ended before the RIB drained: {result:?}"),
+            () = close => {}
+        }
+    }
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(matches!(
+        accepted.try_recv(),
+        Ok(Err(PeerCommandError::CommandFailed(_)))
+    ));
+    assert_eq!(rib_rx.len(), fillers, "the Stop did not wait for the RIB");
+
+    let drain = async {
+        for _ in 0..fillers {
+            assert_eq!(announced_v4(&rib_rx.recv().await.unwrap()), []);
+        }
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::PeerOrfUpdate { .. }
+        ));
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::RouteRefreshRequest { .. }
+        ));
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::PeerDown { .. }
+        ));
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(session.flush_rib_backlog(), drain);
+    })
+    .await
+    .expect("held messages are admitted in order before the session end");
+    assert!(rib_rx.try_recv().is_err());
 }
 
 enum ParkedRetirement {
@@ -1312,7 +1447,7 @@ async fn rib_park_delivers_the_held_update_first() {
 }
 
 /// A Shutdown that an owned wait (the shared-group encode's command poll)
-/// moved into `deferred_command` while the session is parked runs at once,
+/// moved into `deferred_commands` while the session is parked runs at once,
 /// like one taken by the command arm.
 /// Mutation-red: running deferred commands only once the backlog is empty
 /// keeps the Cease waiting for the RIB.
@@ -1331,7 +1466,7 @@ async fn rib_park_runs_a_deferred_shutdown() {
         .extend_from_slice(&encoded_announce(held()));
     session.process_read_buffer().await;
     assert_eq!(session.rib_backlog.len(), 1, "the UPDATE must be held");
-    session.deferred_command = Some(PeerCommand::Shutdown);
+    session.deferred_commands.push_back(PeerCommand::Shutdown);
     let run = session.run();
     let steps = async {
         let frame = next_frame_after_handshake(&mut server).await;
