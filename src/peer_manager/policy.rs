@@ -687,7 +687,9 @@ impl PeerManager {
             let Some(installed) = current.scopes.get(key) else {
                 continue;
             };
-            if installed.clean && prior.reachable != installed.reachable {
+            // A scope that turned clean may carry series from a chain the
+            // session held while it was unclean (an unacknowledged install).
+            if installed.clean && (!prior.clean || prior.reachable != installed.reachable) {
                 selected.insert(key.clone(), installed.reachable.clone());
             }
         }
@@ -3158,8 +3160,10 @@ impl PeerManager {
         self.peers
             .iter()
             .filter_map(|(peer_key, managed)| {
-                let depends_on_cache =
-                    managed
+                // An unknown installed chain may depend on the cache even when
+                // the recorded one does not.
+                let depends_on_cache = managed.import_install_unknown
+                    || managed
                         .import_policy
                         .as_ref()
                         .is_some_and(|chain| match dependency {
@@ -3400,8 +3404,12 @@ impl PeerManager {
             .peers
             .iter()
             .filter_map(|(peer_key, managed)| {
-                let import = references_any(&managed.import_policy);
-                let export = references_any(&managed.export_policy)
+                // An unknown installed chain may reference the dataset even
+                // when the recorded one does not.
+                let import =
+                    managed.import_install_unknown || references_any(&managed.import_policy);
+                let export = managed.export_install_unknown
+                    || references_any(&managed.export_policy)
                     || self.conditional_advertise_policy_references(peer_key, swapped);
                 (import || export).then(|| (peer_key.clone(), import, export))
             })

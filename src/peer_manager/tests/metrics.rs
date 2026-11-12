@@ -1562,6 +1562,38 @@ async fn policy_route_reaper_keeps_same_address_siblings_separate() {
     assert_eq!(counter(&eth1), None);
 }
 
+/// A session can emit series under a chain it installed after its
+/// acknowledgement timed out. When an acknowledged resend of the recorded
+/// chain settles the scope, those series are reaped even though the
+/// recorded chain did not change.
+#[tokio::test]
+async fn policy_route_reaper_reaps_a_late_installed_chain_once_settled() {
+    let mut mgr = test_peer_manager();
+    let metrics = mgr.metrics.clone();
+    let address: IpAddr = "192.0.2.31".parse().unwrap();
+    let peer = key(address);
+    insert_test_managed_peer_for_key(
+        &mut mgr,
+        &peer,
+        65002,
+        acking_policy_handle(address, SessionState::Idle),
+        false,
+    );
+    let managed = mgr.peers.get_mut(&peer).unwrap();
+    managed.import_policy = Some(named_deny_policy_chain(&[Some("recorded")]));
+    managed.import_install_unknown = true;
+    metrics.record_policy_routes(&peer.label(), "recorded", "import", "deny");
+    metrics.record_policy_routes(&peer.label(), "late", "import", "deny");
+    let prior = mgr.installed_policy_routes_reachability();
+
+    mgr.peers.get_mut(&peer).unwrap().import_install_unknown = false;
+    assert_eq!(mgr.reap_retired_policy_routes(&prior), 1);
+    let counter =
+        |policy: &str| policy_route_counter(&metrics, &peer.label(), policy, "import", "deny");
+    assert_eq!(counter("late"), None, "the late chain's series is reaped");
+    assert_eq!(counter("recorded"), Some(1.0));
+}
+
 #[tokio::test]
 async fn policy_route_reaper_heals_prior_pending_and_scopes_an_interface_move() {
     let mut mgr = test_peer_manager();

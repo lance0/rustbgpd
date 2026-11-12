@@ -6824,7 +6824,7 @@ async fn honor_fan_out_names_and_generation_heals_a_peer_owing_route_refresh() {
 /// installed. Bookkeeping keeps the prior chain, so a reload that reverts the
 /// edit compares equal; it must still resend the prior chain instead of
 /// refreshing under the chain the session actually holds.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reverting_a_timed_out_import_update_resends_the_prior_chain() {
     let prior = export_knob_group_config(1);
     let mut harness = GenerationHarness::new(&prior);
@@ -6889,7 +6889,7 @@ async fn reverting_a_timed_out_import_update_resends_the_prior_chain() {
 /// The export counterpart: the session can install a new export chain (and
 /// hand it to the RIB) after its acknowledgement timed out, so a reverting
 /// apply must resend the prior export chain to the session.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reverting_a_timed_out_export_update_resends_the_prior_chain() {
     let prior = export_knob_group_config(1);
     let mut harness = GenerationHarness::new(&prior);
@@ -6946,6 +6946,85 @@ async fn reverting_a_timed_out_export_update_resends_the_prior_chain() {
         installs(&harness),
         2,
         "an equal apply after the acknowledged resend sends nothing"
+    );
+    harness.shutdown().await;
+}
+
+/// Leave `addr`'s session holding `chain` after its import update timed out,
+/// with the owed Route Refresh already delivered: only the unknown installed
+/// chain still distinguishes the peer from one that converged.
+async fn late_install_import(harness: &mut GenerationHarness, addr: IpAddr, chain: PolicyChain) {
+    let peer = key(addr);
+    let recorded = harness.mgr.peers[&peer].import_policy.clone();
+    let export = harness.mgr.peers[&peer].export_policy.clone();
+    harness.counters[&addr]
+        .late_import_acks
+        .store(1, Ordering::SeqCst);
+    harness
+        .mgr
+        .update_runtime_policies(addr, Some(chain), export)
+        .await
+        .expect_err("the import acknowledgement times out");
+    let managed = harness.mgr.peers.get_mut(&peer).unwrap();
+    assert_eq!(managed.import_policy, recorded);
+    managed.pending_refresh = false;
+}
+
+/// The reload-matrix retarget claim: a generation-route reload whose
+/// candidate resolves to the recorded chain still reapplies a peer whose
+/// session may hold another chain.
+#[tokio::test(start_paused = true)]
+async fn generation_reapplies_a_peer_whose_import_chain_is_unknown() {
+    let prior = export_knob_group_config(1);
+    let mut harness = GenerationHarness::new(&prior);
+    let addr: IpAddr = "10.0.1.1".parse().unwrap();
+    let recorded = harness.mgr.peers[&key(addr)].import_policy.clone();
+    late_install_import(&mut harness, addr, deny_policy_chain()).await;
+
+    let candidate = remove_private_as_candidate(&harness.mgr.current_config);
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(receipt.policy_updated, 1, "the unknown peer is reapplied");
+    let counters = &harness.counters[&addr];
+    assert_eq!(counters.import_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(*counters.installed_import.lock().unwrap(), recorded);
+    harness.shutdown().await;
+}
+
+/// A dataset swap refreshes a peer whose installed import chain is unknown,
+/// even when the recorded chain does not reference the dataset: the session
+/// may hold one that does.
+#[tokio::test(start_paused = true)]
+async fn dataset_swap_refreshes_a_peer_whose_import_chain_is_unknown() {
+    let prior = export_knob_group_config(1);
+    let mut harness = GenerationHarness::new(&prior);
+    let addr: IpAddr = "10.0.1.1".parse().unwrap();
+    let late = super::wait_sites::dataset_policy_chain();
+    assert!(late.references_dataset("customers"));
+    assert!(
+        !harness.mgr.peers[&key(addr)]
+            .import_policy
+            .as_ref()
+            .is_some_and(|chain| chain.references_dataset("customers"))
+    );
+    late_install_import(&mut harness, addr, late).await;
+    let refreshes = harness.counters[&addr]
+        .route_refreshes
+        .load(Ordering::SeqCst);
+
+    harness
+        .mgr
+        .refresh_dataset_dependents(&["customers".to_string()], &[])
+        .await
+        .unwrap();
+    assert!(
+        harness.counters[&addr]
+            .route_refreshes
+            .load(Ordering::SeqCst)
+            > refreshes,
+        "the swap refreshes the peer"
     );
     harness.shutdown().await;
 }
