@@ -33,11 +33,11 @@ fn local_rule(rd: Option<RouteDistinguisher>, rt_value: u32) -> FlowSpecRoute {
     route.origin_type = crate::route::RouteOrigin::Local;
     route.peer_router_id = Ipv4Addr::UNSPECIFIED;
     route.rd = rd;
-    route.attributes = vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         rt(rt_value),
-    ];
+    ]);
     route
 }
 
@@ -449,14 +449,14 @@ async fn rpol_vpn_rt_rewrite_preserves_identity_actions_and_other_scopes() {
     let mut out_rx = peer_up(&tx, 10, vec![GLOBAL, VPN], Some(policy)).await;
     for (rd, target) in [(None, 777), (Some(RD_A), 777), (Some(RD_B), 779)] {
         let mut route = local_rule(rd, target);
-        for attr in &mut route.attributes {
-            if let PathAttribute::ExtendedCommunities(communities) = attr {
-                communities.push(action);
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            for attr in attrs.iter_mut() {
+                if let PathAttribute::ExtendedCommunities(communities) = attr {
+                    communities.push(action);
+                }
             }
-        }
-        route
-            .attributes
-            .push(PathAttribute::Communities(vec![marker]));
+            attrs.push(PathAttribute::Communities(vec![marker]));
+        });
         inject(&tx, route).await;
     }
     let updates = drain(&mut out_rx);
@@ -516,9 +516,9 @@ async fn vpn_no_advertise_suppresses_withdraws_and_recovers_exact_scope() {
         let mut out_rx = peer_up(&tx, 10, vec![GLOBAL, VPN], Some(rpol_chain(source))).await;
         let plain = local_rule(Some(RD_A), 777);
         let mut restricted = plain.clone();
-        restricted
-            .attributes
-            .push(PathAttribute::Communities(vec![marker]));
+        AttrSet::edit(&mut restricted.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![marker]));
+        });
         inject(&tx, restricted.clone()).await;
         assert!(
             drain(&mut out_rx).is_empty(),
@@ -546,7 +546,9 @@ async fn vpn_no_advertise_suppresses_withdraws_and_recovers_exact_scope() {
             [key(Some(RD_A))],
             "NO_ADVERTISE withdraws only the previously admitted VPN scope"
         );
-        restricted.attributes.push(PathAttribute::Med(999));
+        AttrSet::edit(&mut restricted.attributes, |attrs| {
+            attrs.push(PathAttribute::Med(999));
+        });
         inject(&tx, restricted).await;
         assert!(
             drain(&mut out_rx).is_empty(),
@@ -871,7 +873,7 @@ async fn vpn_rules_are_counted_apart_from_global_flowspec_in_both_afis() {
     let mut global = [1, 1];
     let mut vpn = [2, 2];
     for mut route in routes {
-        route.attributes[2] = rt(778);
+        AttrSet::edit(&mut route.attributes, |attrs| attrs[2] = rt(778));
         for outcome in [InjectOutcome::Replaced, InjectOutcome::Unchanged] {
             let (reply, mut response) = oneshot::channel();
             manager.handle_inject_flowspec(route.clone(), reply);

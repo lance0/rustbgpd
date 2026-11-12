@@ -1308,7 +1308,11 @@ impl RibManager {
                 );
                 extend_llgr_affected(
                     &mut fs_affected,
-                    rib.promote_to_llgr_stale_flowspec_with_checkpoint(family, &mut promote),
+                    rib.promote_to_llgr_stale_flowspec_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(

@@ -85,13 +85,15 @@ async fn advertised_flowspec_tracks_committed_policy_and_withdrawal() {
     let mut route = make_flowspec_route(local);
     route.origin_type = crate::route::RouteOrigin::Local;
     for suppressed in [false, true, false] {
-        route
-            .attributes
-            .retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+        });
         if suppressed {
-            route.attributes.push(PathAttribute::Communities(vec![
-                rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-            ]));
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+                ]));
+            });
         }
         let (reply, rx) = oneshot::channel();
         tx.send(RibUpdate::InjectFlowSpec {

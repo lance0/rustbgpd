@@ -3272,7 +3272,7 @@ mod tests {
             afi: Afi::Ipv4,
             rd: None,
             peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct))),
-            attributes: attrs,
+            attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type,
             peer_router_id: Ipv4Addr::new(1, 1, 1, router_id_oct),
@@ -3954,6 +3954,12 @@ mod tests {
         );
         // Same input again — no change.
         assert!(!loc.recompute_flowspec(flowspec_key(&rule), [&r2.clone()].into_iter()));
+        // Equal attributes in a separate allocation (a re-sent UPDATE) are
+        // not a change: detection compares content, not `Arc` identity.
+        let mut resent = r2.clone();
+        resent.attributes = AttrSet::new(r2.attributes.to_vec());
+        assert!(!Arc::ptr_eq(&resent.attributes, &r2.attributes));
+        assert!(!loc.recompute_flowspec(flowspec_key(&rule), [&resent].into_iter()));
     }
 
     /// Regression: `recompute_evpn` must report change when the same

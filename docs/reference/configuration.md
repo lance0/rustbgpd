@@ -3167,6 +3167,13 @@ FlowSpec routes pass through the same policy engine as unicast routes:
 import/export policy, iBGP split-horizon, and route reflector rules all
 apply. See [ADR-0035](../adr/0035-flowspec.md).
 
+Received FlowSpec rules are unbounded unless the neighbor sets
+`max_prefixes_ipv4_flowspec` or `max_prefixes_ipv6_flowspec`; set them for a
+FlowSpec peer that is not fully trusted. The bounds count rules, not bytes. The
+rules of one UPDATE share a single copy of its path attributes, so each rule
+retains at most one UPDATE's attributes (under 64 KiB with Extended Messages),
+and the rule bound therefore also caps that peer's retained FlowSpec memory.
+
 ### Per-neighbor policy
 
 Each neighbor can carry its own import and export policy. These are

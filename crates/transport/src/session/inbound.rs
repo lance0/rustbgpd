@@ -3232,16 +3232,12 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                // FlowSpec stores an owned `Vec` (not `Arc`),
-                                // so it can't share — but still skip the no-op
-                                // apply when policy made no modifications.
-                                let mut attrs = attr_bundle.mp.to_vec();
-                                if !result.modifications.is_empty() {
-                                    let _ = rustbgpd_policy::apply_modifications(
-                                        &mut attrs,
-                                        &result.modifications,
-                                    );
-                                }
+                                // Every rule of this UPDATE that policy leaves
+                                // unmodified shares the canonical `mp` set; equal
+                                // modifications share one modified set. FlowSpec
+                                // has no next hop, so the policy action is unused.
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 flowspec_announced.push(FlowSpecRoute {
                                     rule: rule.clone(),
                                     afi: mp.afi,

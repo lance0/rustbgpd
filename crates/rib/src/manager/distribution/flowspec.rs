@@ -887,8 +887,9 @@ pub(in crate::manager) fn flowspec_export_modified(
         modifications.set_next_hop = None;
         if !modifications.is_empty() {
             checkpoint();
-            let next_hop =
-                rustbgpd_policy::apply_modifications(&mut modified.attributes, &modifications);
+            let next_hop = AttrSet::edit(&mut modified.attributes, |attrs| {
+                rustbgpd_policy::apply_modifications(attrs, &modifications)
+            });
             checkpoint();
             debug_assert!(next_hop.is_none());
         }

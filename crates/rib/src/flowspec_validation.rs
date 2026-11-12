@@ -254,7 +254,7 @@ mod tests {
     fn fixture() -> (FlowSpecRoute, Route) {
         let peer = Ipv4Addr::new(198, 51, 100, 1);
         let mut flow = make_flowspec_route(peer);
-        flow.attributes.push(path(&[SOURCE_AS]));
+        AttrSet::edit(&mut flow.attributes, |attrs| attrs.push(path(&[SOURCE_AS])));
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), peer);
         cover.attributes = AttrSet::new(vec![path(&[SOURCE_AS])]);
         (flow, cover)
@@ -296,7 +296,9 @@ mod tests {
         );
 
         let id = Ipv4Addr::new(203, 0, 113, 1);
-        flow.attributes.push(PathAttribute::OriginatorId(id));
+        AttrSet::edit(&mut flow.attributes, |attrs| {
+            attrs.push(PathAttribute::OriginatorId(id));
+        });
         AttrSet::edit(&mut cover.attributes, |attrs| {
             attrs.push(PathAttribute::OriginatorId(id));
         });
@@ -304,7 +306,7 @@ mod tests {
 
         // Attribute identity and the same direct peer address denote the same
         // originator; their encoding provenance must not create a mismatch.
-        flow.attributes.pop();
+        AttrSet::edit(&mut flow.attributes, std::vec::Vec::pop);
         flow.peer = PeerId::from_addr(IpAddr::V4(id));
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
     }
@@ -333,7 +335,7 @@ mod tests {
     #[test]
     fn ebgp_compares_actual_leftmost_sequence_as() {
         let (mut flow, mut cover) = fixture();
-        flow.attributes = vec![path(&[SOURCE_AS, 64498])];
+        flow.attributes = AttrSet::new(vec![path(&[SOURCE_AS, 64498])]);
         cover.attributes = AttrSet::new(vec![path(&[SOURCE_AS, 64499])]);
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
         cover.attributes = AttrSet::new(vec![path(&[64497, SOURCE_AS])]);
@@ -347,7 +349,7 @@ mod tests {
     fn empty_ibgp_path_relaxes_only_originator_matching() {
         let (mut flow, mut cover) = fixture();
         flow.origin_type = RouteOrigin::Ibgp;
-        flow.attributes = vec![path(&[])];
+        flow.attributes = AttrSet::new(vec![path(&[])]);
         set_peer(
             &mut cover,
             PeerId::from_addr("198.51.100.2".parse().unwrap()),
@@ -366,7 +368,7 @@ mod tests {
             invalid(InfeasibleReason::ConflictingMoreSpecific)
         );
 
-        flow.attributes.clear();
+        AttrSet::edit(&mut flow.attributes, std::vec::Vec::clear);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::MissingAsPath)
@@ -387,14 +389,14 @@ mod tests {
     #[test]
     fn absent_and_empty_ebgp_paths_never_compare_equal() {
         let (mut flow, mut cover) = fixture();
-        flow.attributes.clear();
+        AttrSet::edit(&mut flow.attributes, std::vec::Vec::clear);
         cover.attributes = AttrSet::new(vec![]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::MissingAsPath)
         );
 
-        flow.attributes = vec![path(&[])];
+        flow.attributes = AttrSet::new(vec![path(&[])]);
         cover.attributes = AttrSet::new(vec![path(&[])]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
@@ -413,7 +415,7 @@ mod tests {
                 AsPathSegment::AsSet(vec![64497]),
             ],
         ] {
-            flow.attributes = vec![PathAttribute::AsPath(AsPath { segments })];
+            flow.attributes = AttrSet::new(vec![PathAttribute::AsPath(AsPath { segments })]);
             assert_eq!(
                 evaluate(&flow, Some(&cover), &[]),
                 invalid(InfeasibleReason::UnsupportedAsPath)
@@ -469,7 +471,7 @@ mod tests {
     fn local_domain_unicast_paths_share_local_as_identity() {
         let (mut flow, mut cover) = fixture();
         flow.origin_type = RouteOrigin::Ibgp;
-        flow.attributes = vec![path(&[])];
+        flow.attributes = AttrSet::new(vec![path(&[])]);
         cover.origin_type = RouteOrigin::Ibgp;
         cover.attributes = AttrSet::new(vec![path(&[])]);
         let mut child = cover.clone();
@@ -548,7 +550,7 @@ mod tests {
     fn local_injection_is_distinct_from_rfc_validated_receipt() {
         let (mut flow, _) = fixture();
         flow.origin_type = RouteOrigin::Local;
-        flow.attributes.clear();
+        AttrSet::edit(&mut flow.attributes, std::vec::Vec::clear);
         flow.rule.components.clear();
         assert_eq!(evaluate(&flow, None, &[]), Feasibility::Local);
     }

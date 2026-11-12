@@ -470,10 +470,10 @@ async fn vpn_and_global_flowspec_leave_in_separate_updates() {
         afi: Afi::Ipv4,
         rd,
         peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-        attributes: vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -570,10 +570,10 @@ async fn a_vpn_flowspec_batch_sends_every_section() {
             afi: Afi::Ipv4,
             rd: Some(announced.rd),
             peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-            attributes: vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath { segments: vec![] }),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -630,10 +630,10 @@ async fn dual_stack_vpn_and_global_flowspec_batches_keep_each_family_separate() 
                 afi,
                 rd: (safi == Safi::FlowSpecVpn).then_some(vpn.rd),
                 peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-                attributes: vec![
+                attributes: AttrSet::new(vec![
                     PathAttribute::Origin(Origin::Igp),
                     PathAttribute::AsPath(AsPath { segments: vec![] }),
-                ],
+                ]),
                 received_at: Instant::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Local,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,

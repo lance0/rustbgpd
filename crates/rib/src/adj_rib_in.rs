@@ -3637,13 +3637,18 @@ impl AdjRibIn {
     /// get `is_stale=false`, `is_llgr_stale=true`, `LLGR_STALE` community added.
     ///
     /// Returns rules affected (for best-path recalc).
-    pub fn promote_to_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
-        self.promote_to_llgr_stale_flowspec_with_checkpoint(family, &mut || {})
+    pub fn promote_to_llgr_stale_flowspec(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) -> Vec<FlowSpecKey> {
+        self.promote_to_llgr_stale_flowspec_with_checkpoint(family, attr_intern, &mut || {})
     }
 
     pub(crate) fn promote_to_llgr_stale_flowspec_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<FlowSpecKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
@@ -3686,9 +3691,12 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 checkpoint();
-                if add_llgr_stale_community(&mut route.attributes) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.flowspec_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
+                // Rules that shared one set before the edit share it again.
+                attr_intern.intern(&mut route.attributes);
                 checkpoint();
                 affected.push(route.selection_key());
             }
@@ -3778,7 +3786,7 @@ impl AdjRibIn {
         for key in keys {
             checkpoint();
             self.flowspec_routes.update(key, |route| {
-                remove_llgr_stale_community_attrs(&mut route.attributes);
+                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
             });
             self.flowspec_llgr_stale_local_tags.remove(key);
         }
@@ -4349,7 +4357,7 @@ mod tests {
         route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
             rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(addr, 32)),
         )];
-        route.attributes = attributes.clone();
+        route.attributes = AttrSet::new(attributes.clone());
         route.is_stale = stale;
         route.is_llgr_stale = llgr;
         rib.insert_flowspec(route);
@@ -4437,6 +4445,7 @@ mod tests {
             1 => rib
                 .promote_to_llgr_stale_flowspec_with_checkpoint(
                     (Afi::Ipv4, Safi::FlowSpec),
+                    intern,
                     checkpoint,
                 )
                 .len(),
@@ -4512,7 +4521,7 @@ mod tests {
             );
             // Allocation edges, both scans, two removal edges, mutation
             // and interning edges for two promoted rows, plus owned-key drops.
-            let promotion_edges = if index == 1 { 2 } else { 3 };
+            let promotion_edges = 3;
             // The unicast, VPN and labeled slabs' second scan also visits
             // the slot vacated by the removed NO_LLGR row.
             let vacated = usize::from(matches!(index, 0 | 4 | 5));
@@ -5736,7 +5745,10 @@ mod tests {
         route.is_stale = true;
         rib.insert_flowspec(route);
 
-        rib.promote_to_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        rib.promote_to_llgr_stale_flowspec(
+            (Afi::Ipv4, Safi::FlowSpec),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
         let route = rib.iter_flowspec().next().unwrap();
         assert!(route.is_llgr_stale);
         assert!(route.attributes.iter().any(
@@ -5749,6 +5761,41 @@ mod tests {
         assert!(!route.attributes.iter().any(
             |a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE))
         ));
+    }
+
+    /// LLGR promotion edits each rule's attributes copy-on-write; interning
+    /// afterwards keeps rules that shared one set before on one set after.
+    #[test]
+    fn promote_to_llgr_stale_flowspec_keeps_shared_attributes_shared() {
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut rib = AdjRibIn::new(peer);
+        let shared = AttrSet::new(vec![PathAttribute::Communities(vec![1, 2, 3])]);
+        for octet in 0..4 {
+            let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+            route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(192, 0, 2, octet),
+                    32,
+                )),
+            )];
+            route.attributes = Arc::clone(&shared);
+            route.is_stale = true;
+            rib.insert_flowspec(route);
+        }
+        let mut intern = crate::attr_intern::AttrInternTable::new();
+        assert_eq!(
+            rib.promote_to_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec), &mut intern)
+                .len(),
+            4
+        );
+        let first = Arc::clone(&rib.iter_flowspec().next().unwrap().attributes);
+        assert!(first.iter().any(
+            |a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE))
+        ));
+        assert!(
+            rib.iter_flowspec()
+                .all(|route| Arc::ptr_eq(&route.attributes, &first))
+        );
     }
 
     #[test]
@@ -5771,7 +5818,10 @@ mod tests {
         // First cycle: rule goes GR-stale, then promotes to LLGR-stale.
         rib.insert_flowspec(llgr_route);
         rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
-        rib.promote_to_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        rib.promote_to_llgr_stale_flowspec(
+            (Afi::Ipv4, Safi::FlowSpec),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
 
         // Reconnect advertises a second rule; two more drops follow.
         rib.insert_flowspec(gr_route);
@@ -8192,7 +8242,7 @@ mod tests {
                         rib.withdraw_flowspec(&route.key());
                         return;
                     }
-                    route.attributes = attrs(no_llgr);
+                    route.attributes = AttrSet::new(attrs(no_llgr));
                     (route.is_stale, route.is_llgr_stale) = (stale, llgr);
                     rib.insert_flowspec(route);
                 }
@@ -8310,7 +8360,7 @@ mod tests {
                 Op::Promote(f) => {
                     let family = family_at(f);
                     rib.promote_to_llgr_stale(family, intern);
-                    rib.promote_to_llgr_stale_flowspec(family);
+                    rib.promote_to_llgr_stale_flowspec(family, intern);
                     rib.promote_to_llgr_stale_evpn(family, intern);
                     rib.promote_to_llgr_stale_vpn(family, intern);
                     rib.promote_to_llgr_stale_labeled(family, intern);

@@ -958,7 +958,7 @@ fn make_flowspec_route() -> FlowSpecRoute {
         afi: Afi::Ipv4,
         rd: None,
         peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,

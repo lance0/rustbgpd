@@ -163,10 +163,10 @@ fn local_rule() -> FlowSpecRoute {
     route.peer = LOCAL_PEER;
     route.origin_type = crate::route::RouteOrigin::Local;
     route.peer_router_id = Ipv4Addr::UNSPECIFIED;
-    route.attributes = vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-    ];
+    ]);
     route
 }
 
@@ -1949,9 +1949,9 @@ fn guarded_rule(octet: u8, community: u32) -> FlowSpecRoute {
     route.rule.components = vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
     ))];
-    route
-        .attributes
-        .push(PathAttribute::Communities(vec![community]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![community]));
+    });
     route
 }
 
@@ -2071,7 +2071,7 @@ async fn local_rules(tx: &mpsc::Sender<RibUpdate>) -> Vec<(u8, Vec<PathAttribute
             let octet = (1..=u8::MAX)
                 .find(|octet| route.selection_key() == rule_key(*octet))
                 .expect("a guarded test rule");
-            (octet, route.attributes.clone())
+            (octet, route.attributes.to_vec())
         })
         .collect();
     rules.sort_by_key(|(octet, _)| *octet);
@@ -2480,8 +2480,8 @@ async fn a_delayed_delete_spares_a_newer_admission() {
     assert_eq!(
         local_rules(&h.tx).await,
         vec![
-            (1, guarded_rule(1, 2).attributes),
-            (2, guarded_rule(2, 1).attributes)
+            (1, guarded_rule(1, 2).attributes.to_vec()),
+            (2, guarded_rule(2, 1).attributes.to_vec())
         ]
     );
 
@@ -2763,11 +2763,11 @@ fn vpn_rule(octet: u8, rd: u8, rt: u32) -> FlowSpecRoute {
     route.rd = Some(rustbgpd_wire::RouteDistinguisher([
         0, 0, 0xad, 0x77, 0, 0, 0, rd,
     ]));
-    route
-        .attributes
-        .push(PathAttribute::ExtendedCommunities(vec![
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
             rustbgpd_wire::ExtendedCommunity::new(0x0002_ad77_0000_0000 | u64::from(rt)),
         ]));
+    });
     route
 }
 

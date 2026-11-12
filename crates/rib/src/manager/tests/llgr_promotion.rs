@@ -77,7 +77,7 @@ fn announce_case(manager: &mut RibManager, family: (Afi, Safi), index: u8, other
             route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
                 destination,
             )];
-            route.attributes = attrs;
+            route.attributes = AttrSet::new(attrs);
             route.is_stale = stale;
             route.is_llgr_stale = llgr;
             flowspec.push(route);

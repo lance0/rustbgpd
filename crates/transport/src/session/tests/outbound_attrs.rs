@@ -398,12 +398,12 @@ fn plain_ebgp_strips_non_transitive_extended_communities_for_mp_export() {
     let transitive = rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064);
     let non_transitive = rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID;
     let mut route = make_flowspec_route();
-    route
-        .attributes
-        .push(PathAttribute::ExtendedCommunitiesPartial(vec![
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunitiesPartial(vec![
             non_transitive,
             transitive,
         ]));
+    });
 
     let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
     assert!(matches!(
@@ -500,7 +500,9 @@ fn ipv6_extended_communities_filter_on_unicast_and_mp_export() {
                 attrs.push(attribute(values.clone()));
             });
             let mut flowspec = make_flowspec_route();
-            flowspec.attributes.push(attribute(values));
+            AttrSet::edit(&mut flowspec.attributes, |attrs| {
+                attrs.push(attribute(values));
+            });
             let expected = (!retained.is_empty()).then(|| attribute(retained));
             for attrs in [
                 session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None),
@@ -539,7 +541,9 @@ fn ipv6_extended_communities_preserve_on_exempt_or_opted_in_export() {
         let mut route = make_route(100);
         AttrSet::edit(&mut route.attributes, |attrs| attrs.push(attribute.clone()));
         let mut flowspec = make_flowspec_route();
-        flowspec.attributes.push(attribute.clone());
+        AttrSet::edit(&mut flowspec.attributes, |attrs| {
+            attrs.push(attribute.clone());
+        });
         for (local_asn, remote_asn, route_server_client, opted_in) in [
             (65001, 65001, false, false),
             (65001, 65002, true, false),
@@ -1012,9 +1016,11 @@ fn flowspec_route_server_client_does_not_prepend_asn() {
     let mut session = make_test_session(65001, 65002);
     session.config.route_server_client = true;
     let mut route = make_flowspec_route();
-    route.attributes.push(PathAttribute::AsPath(AsPath {
-        segments: vec![AsPathSegment::AsSequence(vec![64512])],
-    }));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![64512])],
+        }));
+    });
     let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
     let as_path = attrs
         .iter()
