@@ -45,8 +45,10 @@
                     owes,
                 )
             }).collect::<Vec<_>>().join(",");
-            eprintln!(
-                "evpn_qualification {{\"live_provenance_slots\":{},\"provenance_slot_capacity\":{},\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"owing\":{},\"recovery_pending\":{},\"peers\":[{}]}}",
+            // One write of the whole line: `eprintln!` writes each piece to
+            // unbuffered stderr, so an exit mid-sample could cut a line short.
+            let line = format!(
+                "evpn_qualification {{\"live_provenance_slots\":{},\"provenance_slot_capacity\":{},\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"owing\":{},\"recovery_pending\":{},\"peers\":[{}]}}\n",
                 receipt.live_provenance_slots,
                 receipt.provenance_slot_capacity,
                 elapsed_us,
@@ -74,4 +76,6 @@
                 recovery_pending,
                 peers,
             );
+            std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes())
+                .expect("qualification observer write");
         }

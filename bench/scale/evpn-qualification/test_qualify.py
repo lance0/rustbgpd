@@ -373,6 +373,22 @@ class TestQualification(unittest.TestCase):
             self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
             self.assertEqual(json.loads((root / "summary.json").read_text())["status"], "INVALID")
 
+    def test_memory_analysis_ends_the_observer_log_at_a_cut_off_final_line_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = self.make_campaign(root)
+            path = next(root.glob("memory-*-private-*/observer.log"))
+            complete = path.read_text()
+            torn = 'evpn_qualification {"live_provenance_slots":0,"members":0,"recovery_pending":'
+            path.write_text(complete + torn)
+            Q.analyze(args)
+            summary = json.loads((root / "summary.json").read_text())
+            self.assertEqual((summary["status"], summary["observer_torn_tails"]), ("PASS", [path.parent.name]))
+            path.write_text(torn + "\n" + complete)
+            with self.assertRaises(json.JSONDecodeError):
+                Q.analyze(args)
+            self.assertEqual(json.loads((root / "summary.json").read_text())["status"], "INVALID")
+
     def test_raw_memory_consumer_enforces_peer_and_daemon_headroom(self):
         for arm in ("candidate", "private"):
             for target in ("peer", "daemon"):

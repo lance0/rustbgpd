@@ -443,9 +443,19 @@ def ownership(row, arm, clients, routes):
     return row
 
 
+def observer_records(text, prefix="evpn_qualification "):
+    """The `prefix` records of an observer log, and whether its final line
+    was cut off. The daemon can exit partway through writing its last line,
+    so only an unterminated final line is end-of-log; the live reader never
+    parses one either. Any other malformed line still fails to parse."""
+    lines = text.split("\n")
+    torn = lines.pop() != ""
+    return [json.loads(line.removeprefix(prefix)) for line in lines if line.startswith(prefix)], torn
+
+
 def latest_observation(text):
-    rows = [json.loads(line.removeprefix("evpn_qualification ")) for line in text.splitlines()
-            if line.startswith("evpn_qualification ")]
+    # The daemon is still running, so an unterminated line is still being written.
+    rows, _ = observer_records(text)
     require(rows, "private daemon observer produced no evidence")
     return rows[-1]
 
@@ -612,6 +622,8 @@ def analyze_results(args):
     # A failed cell may be incomplete, so its evidence stays unvalidated.
     failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"], "evidence": "unvalidated"}
                 for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
+    # Validated cells whose observer log ended in a cut-off line.
+    torn_tails = []
 
     def validate(path, row):
         leg = path.parent
@@ -619,9 +631,9 @@ def analyze_results(args):
         require(row["driver_exit"] == 0, "driver did not finish successfully")
         # The final observer may describe peer teardown; the retained settled
         # observation must occur in the actual daemon log before that teardown.
-        observed = [json.loads(line.removeprefix("evpn_qualification "))
-                    for line in (leg / "observer.log").read_text().splitlines()
-                    if line.startswith("evpn_qualification ")]
+        observed, torn = observer_records((leg / "observer.log").read_text())
+        if torn:
+            torn_tails.append(leg.name)
         require(row["ownership"] in observed, "retained ownership witness absent from daemon log")
         for observation in observed:
             validate_provenance(observation, row["clients"])
@@ -654,7 +666,7 @@ def analyze_results(args):
         write_json(output / "summary.json", {
             "status": "FAIL", "correctness_only": correct, "scope": SCOPE,
             "head": manifest["head"], "production_activation_qualified": False,
-            "cells": len(rows), "slopes": [], "failed_cells": failures})
+            "cells": len(rows), "slopes": [], "failed_cells": failures, "observer_torn_tails": torn_tails})
         accept(False, "recorded cell acceptance failures; see failed_cells")
     if missed:
         raise missed
@@ -679,7 +691,8 @@ def analyze_results(args):
     summary = {"status": "PASS" if accepted else "FAIL", "correctness_only": correct,
                "scope": SCOPE, "head": manifest["head"], "slopes": slopes,
                "source_kind": manifest.get("source_kind", "committed"),
-               "production_activation_qualified": False, "max_slope_bytes_per_delivery": manifest["max_slope_bytes_per_delivery"]}
+               "production_activation_qualified": False, "max_slope_bytes_per_delivery": manifest["max_slope_bytes_per_delivery"],
+               "observer_torn_tails": torn_tails}
     write_json(output / "summary.json", summary)
     accept(accepted, "candidate live-heap slope exceeds predeclared bar")
 
