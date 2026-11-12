@@ -2816,6 +2816,12 @@ impl PeerSession {
     /// send: delivered later, it could follow a successor's `PeerUp` and
     /// mark a live peer down. Counted as a full-channel drop.
     fn abandon_bmp_peer_down(&mut self) {
+        // On a multi-thread runtime the task can be mid-poll on another
+        // worker while `is_finished()` reads false. `Sender::send` has no
+        // await between the permit and the push, so that poll still delivers
+        // the Peer Down, which is then counted and warned here too: an
+        // accepted overcount. Order holds: the push precedes any successor's
+        // Peer Up, which first needs a TCP and OPEN exchange.
         if let Some(handoff) = self.bmp_peer_down_handoff.take()
             && !handoff.is_finished()
         {

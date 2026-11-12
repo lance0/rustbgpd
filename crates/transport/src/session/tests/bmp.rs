@@ -1121,6 +1121,57 @@ async fn a_dropped_session_abandons_its_waiting_peer_down() {
     );
 }
 
+/// A hand-off that already delivered its Peer Down is not abandoned when
+/// the session is dropped without settling: nothing is counted, and the
+/// collector sees exactly one Peer Down.
+#[tokio::test]
+async fn a_dropped_session_with_a_delivered_peer_down_abandons_nothing() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..tx.max_capacity() {
+        session.emit_bmp_event(BmpEvent::RouteMonitoring {
+            peer_info: session.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(&[0xde, 0xad]),
+        });
+    }
+    let peer_down = BmpEvent::PeerDown {
+        peer_info: session.build_bmp_peer_info(),
+        reason: PeerDownReason::RemoteNoNotification,
+    };
+    session.hand_off_peer_down(tx.clone(), peer_down);
+    let mut events = Vec::new();
+    while !session
+        .bmp_peer_down_handoff
+        .as_ref()
+        .is_some_and(tokio::task::JoinHandle::is_finished)
+    {
+        if let Ok(event) = bmp_rx.try_recv() {
+            events.push(event);
+        }
+        tokio::task::yield_now().await;
+    }
+    let metrics = session.metrics.clone();
+    drop(session);
+    while let Ok(event) = bmp_rx.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, BmpEvent::PeerDown { .. }))
+            .count(),
+        1
+    );
+    let drops = counter_samples(&metrics, "bmp_source_drops_total");
+    assert!(
+        !drops.iter().any(|(labels, value)| {
+            labels.get("reason").map(String::as_str) == Some("channel_full") && *value > 0.0
+        }),
+        "a delivered Peer Down is not counted as abandoned: {drops:?}"
+    );
+}
+
 /// LAN-200: a TCP disconnect abandons any pending BMP divergence repair.
 /// Otherwise the run loop's `bmp_repair_timer` arm could fire after the
 /// socket died and emit a synthetic `PeerDown`/`PeerUp` for a dead session
