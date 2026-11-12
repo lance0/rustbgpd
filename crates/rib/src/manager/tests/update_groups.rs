@@ -14619,7 +14619,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
                 .with_replacement_readiness_age(Duration::ZERO, |manager| {
                     manager.send_route_refresh_response(fleet.members[0], Afi::Ipv4, Safi::Unicast);
                 });
-            reply.send(Ok(())).unwrap();
+            reply.send(Ok(Vec::new())).unwrap();
         } else {
             // A pre-existing dirty member outside the replacement batch must
             // also finish the forced repair before its command acknowledges.
@@ -14644,7 +14644,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             1,
             "{stage}: nested scope finalized early"
         );
-        assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(()));
+        assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(vec![]));
         assert!(fleet.manager.replacement_readiness.is_none());
         assert!(fleet.manager.pending_regroup_baseline.is_empty());
         assert!(fleet.manager.dirty_peers.is_empty());
@@ -14761,7 +14761,7 @@ fn replacement_readiness_terminal_paths_restore_service_before_ack() {
             let result = fleet
                 .manager
                 .restore_export_policy_replacements_synchronously(replacements)
-                .map(|_| ());
+                .map(|_| Vec::new());
             reply.send(result).unwrap();
         } else {
             fleet
@@ -16827,7 +16827,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
             replacements: batch_replacements(&fleet.members, &next_policy),
             reply,
         });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
 
     // One batch, every member on the shared transition, no fallback —
     // and ZERO distribution passes: the wire delta was derived and
@@ -16973,7 +16973,7 @@ fn batched_authoritative_apply_announces_only_changed_slots() {
             replacements: batch_replacements(&fleet.members, &next_policy),
             reply,
         });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
 
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 4);
@@ -17035,7 +17035,7 @@ fn batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels() {
             replacements,
             reply,
         });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
 
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_batches, 1);
@@ -17699,7 +17699,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                         replacements: batch_replacements(&fleet.members, &next),
                         reply,
                     });
-                assert_eq!(response.try_recv().unwrap(), Ok(()));
+                assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
             }
             assert!(
                 visits.load(Ordering::Relaxed) >= 2,
@@ -17963,7 +17963,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    assert_eq!(response.await.unwrap(), Ok(vec![]));
     let (after_batch, batched) = published_ids(&tx, &roster).await;
     assert_eq!(
         after_batch,
@@ -18883,6 +18883,45 @@ fn mixed_family_fleet(
     }
 }
 
+/// The peer manager's reload: the authoritative batch, then the paced walk
+/// over the members it hands back. Returns the deferred members.
+fn apply_paced_batch(
+    manager: &mut RibManager,
+    members: &[PeerId],
+    policy: &PolicyChain,
+) -> Vec<PeerId> {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: batch_replacements(members, policy),
+        reply,
+    });
+    let deferred = response.try_recv().unwrap().unwrap();
+    assert_eq!(
+        manager
+            .authoritative_transition_receipts
+            .last()
+            .unwrap()
+            .deferred_members,
+        deferred.len()
+    );
+    let (mut pending, mut cost, mut window) = (deferred.clone(), None, 1_usize);
+    while !pending.is_empty() {
+        let rest = pending.split_off(window.min(pending.len()));
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+            replacements: batch_replacements(&pending, policy),
+            cost,
+            reply,
+        });
+        let outcome = response.try_recv().unwrap().unwrap();
+        assert!(outcome.applied >= 1);
+        window = (2 * outcome.applied).max(1);
+        pending = outcome.pending.into_iter().chain(rest).collect();
+        cost = outcome.cost;
+    }
+    deferred
+}
+
 fn mixed_ipv4_evpn_fleet(initial: &PolicyChain) -> MixedFamilyFleet {
     mixed_family_fleet(initial, (Afi::L2Vpn, Safi::Evpn), 0)
 }
@@ -18937,14 +18976,10 @@ fn batched_authoritative_cohort_reexports_private_evpn_community_change() {
                 .all(|r| evpn_has_community(r, 0xFDE8_0001))
         );
     }
-    let (reply, mut response) = oneshot::channel();
-    fleet
-        .manager
-        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: batch_replacements(&fleet.members, &next_policy),
-            reply,
-        });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    let members = fleet.members.clone();
+    // Every member sends EVPN, so the batch hands each back to its own command.
+    let deferred = apply_paced_batch(&mut fleet.manager, &members, &next_policy);
+    assert_eq!(deferred, members);
     drain_route_chunks(&mut fleet.manager);
     // Not a vacuous run: record whether the shared path took the members.
     let stats = fleet.manager.policy_transition_stats;
@@ -18995,14 +19030,9 @@ fn batched_authoritative_cohort_withdraws_private_evpn_rejected_by_new_chain() {
         default_action: PolicyAction::Deny,
     }]);
     let mut fleet = mixed_ipv4_evpn_fleet(&old_policy);
-    let (reply, mut response) = oneshot::channel();
-    fleet
-        .manager
-        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: batch_replacements(&fleet.members, &deny_all),
-            reply,
-        });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    let members = fleet.members.clone();
+    let deferred = apply_paced_batch(&mut fleet.manager, &members, &deny_all);
+    assert_eq!(deferred, members);
     drain_route_chunks(&mut fleet.manager);
     let stats = fleet.manager.policy_transition_stats;
     eprintln!(
@@ -19035,14 +19065,19 @@ fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
             "{peer}: setup"
         );
     }
-    let (reply, mut response) = oneshot::channel();
-    fleet
-        .manager
-        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: batch_replacements(&fleet.members, &deny_all_chain()),
-            reply,
-        });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    let members = fleet.members.clone();
+    let deferred = apply_paced_batch(&mut fleet.manager, &members, &deny_all_chain());
+    // EVPN senders are applied one per command; other private families stay
+    // on the batch's per-member path.
+    let evpn = private.1 == Safi::Evpn;
+    assert_eq!(
+        deferred,
+        if evpn {
+            members[..MIXED_MEMBERS].to_vec()
+        } else {
+            Vec::new()
+        }
+    );
     drain_route_chunks(&mut fleet.manager);
     for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
         let peer = fleet.members[index];
@@ -19067,7 +19102,11 @@ fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
     // The unicast-only member keeps the shared path.
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 1);
-    assert_eq!(stats.batched_authoritative_fallback_members, MIXED_MEMBERS);
+    // EVPN senders are applied by paced commands, not the fallback.
+    assert_eq!(
+        stats.batched_authoritative_fallback_members,
+        if evpn { 0 } else { MIXED_MEMBERS }
+    );
 }
 
 #[test]
@@ -19099,14 +19138,10 @@ fn batched_authoritative_cohort_announces_private_evpn_permitted_by_new_chain() 
     for &peer in &fleet.members {
         assert_eq!(fleet.manager.adj_ribs_out[&peer].evpn_len(), 0, "setup");
     }
-    let (reply, mut response) = oneshot::channel();
-    fleet
-        .manager
-        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: batch_replacements(&fleet.members, &community_chain(0xFDE8_0002)),
-            reply,
-        });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    let members = fleet.members.clone();
+    // No member holds an EVPN row, yet the family decides the deferral.
+    let deferred = apply_paced_batch(&mut fleet.manager, &members, &community_chain(0xFDE8_0002));
+    assert_eq!(deferred, members[..MIXED_MEMBERS].to_vec());
     drain_route_chunks(&mut fleet.manager);
     for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
         let peer = fleet.members[index];
@@ -19130,7 +19165,8 @@ fn batched_authoritative_cohort_announces_private_evpn_permitted_by_new_chain() 
     // The unicast-only member keeps the shared path.
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 1);
-    assert_eq!(stats.batched_authoritative_fallback_members, MIXED_MEMBERS);
+    // The mixed members are applied by paced commands, not the fallback.
+    assert_eq!(stats.batched_authoritative_fallback_members, 0);
 }
 
 /// The member rule shared by the clean transition and the batched cohort:

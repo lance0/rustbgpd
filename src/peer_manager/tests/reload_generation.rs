@@ -159,9 +159,11 @@ fn spawn_generation_rib(
     let drainer = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
             match update {
-                RibUpdate::ReplacePeerExportPolicy { reply, .. }
-                | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    let _ = reply.send(Ok(Vec::new()));
                 }
                 RibUpdate::RefreshPeerOutbound { reply, .. }
                 | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
@@ -5871,8 +5873,12 @@ async fn failed_policy_snapshot_restores_the_conditional_install() {
     harness.rib = tokio::spawn(async move {
         while let Some(update) = stub_rx.recv().await {
             match update {
-                RibUpdate::ReplacePeerExportPolicy { reply, .. }
-                | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    let _ = reply.send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "refused by the test",
+                    )));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
                     let _ = reply.send(Err(rustbgpd_rib::RibCommandError::internal(
                         "refused by the test",
                     )));

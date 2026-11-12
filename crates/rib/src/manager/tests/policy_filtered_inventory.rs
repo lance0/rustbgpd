@@ -406,7 +406,7 @@ fn inventory_writer_uses_candidate_bounds(writer: Writer) {
                             .collect(),
                         reply,
                     });
-                    assert_eq!(response.try_recv().unwrap(), Ok(()));
+                    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
                 }
             },
         );

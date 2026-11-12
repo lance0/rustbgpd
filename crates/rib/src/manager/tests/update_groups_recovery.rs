@@ -755,7 +755,7 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
             }],
             reply,
         });
-        assert_eq!(response.try_recv().unwrap(), Ok(()));
+        assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
         assert_ne!(manager.grouped_member_of(member), Some(source_group));
         assert_eq!(
             manager
@@ -827,7 +827,7 @@ fn budget_refused_batched_narrowing_keeps_current_withdrawal_duties() {
         }],
         reply,
     });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(response.try_recv().unwrap(), Ok(vec![]));
     assert_eq!(
         manager
             .policy_transition_stats

@@ -1064,6 +1064,34 @@ pub struct PeerExportPolicyReplacement {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// The largest per-member cost a paced export-policy walk has measured so
+/// far: a member's recompute, and that member's own time in the shared
+/// distribution pass. The walk carries it from one
+/// [`RibUpdate::ApplyPacedExportPolicies`] reply into the next command.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PacedMemberCost {
+    /// Slowest single-member recompute.
+    pub recompute: std::time::Duration,
+    /// Slowest single member's own time in a command's distribution pass.
+    pub pass_share: std::time::Duration,
+}
+
+/// Reply to one [`RibUpdate::ApplyPacedExportPolicies`] command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PacedApplyOutcome {
+    /// Members left unapplied, in caller order; the caller sends them next.
+    pub pending: Vec<PeerId>,
+    /// Members no longer registered, in caller order: neither applied nor
+    /// pending (a reconnect installs the session's accepted chain).
+    pub skipped: Vec<PeerId>,
+    /// Members this command applied: every sent member that is neither
+    /// pending nor skipped, all before the first pending one.
+    pub applied: usize,
+    /// The walk's cost estimate, updated with this command's measurements;
+    /// `None` until a pass has measured an applied member.
+    pub cost: Option<PacedMemberCost>,
+}
+
 /// Ordered acknowledgement for one member of an exact rollback-only export
 /// policy batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3795,17 +3823,38 @@ pub enum RibUpdate {
     /// Contract: replacements naming peers no longer registered for
     /// outbound updates are skipped (a reconnect installs the desired
     /// policy — the same posture as the serial per-peer loop this
-    /// replaces). Everything else commits in the one synchronous call:
-    /// there is no partial-state failure mode after the first mutation.
-    /// Per-member wire delivery is best-effort — a member whose emission
-    /// cannot be prepared (closed channel, encoder churn, exact-export
-    /// rejection) is marked dirty and healed by the ordinary resync from
-    /// the already-committed state.
+    /// replaces). Residual members whose session sends EVPN are not
+    /// applied: their installed chain is left as it was and the reply
+    /// names them in caller order, for the caller to apply through
+    /// [`RibUpdate::ApplyPacedExportPolicies`], a few per command within a
+    /// turn budget, so that other RIB work runs between those commands. Everything else commits in the
+    /// one synchronous call: there is no partial-state failure mode after
+    /// the first mutation. Per-member wire delivery is best-effort — a
+    /// member whose emission cannot be prepared (closed channel, encoder
+    /// churn, exact-export rejection) is marked dirty and healed by the
+    /// ordinary resync from the already-committed state.
     ReplacePeerExportPoliciesAuthoritatively {
         /// Replacements in caller transaction order.
         replacements: Vec<PeerExportPolicyReplacement>,
-        /// Response channel for success/failure.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
+        /// Response channel: the deferred peers in caller order, or failure.
+        reply: oneshot::Sender<Result<Vec<PeerId>, RibCommandError>>,
+    },
+    /// Apply members the authoritative batch handed back, in caller order,
+    /// through the batch's per-member body and one shared distribution pass,
+    /// for as many members as are predicted to fit the paced turn budget. The
+    /// first member always runs. Members not reached keep their installed
+    /// chain and come back in `pending`; the caller sends them in the next
+    /// command with the returned cost. Unregistered peers come back in
+    /// `skipped`. Duplicate peers reject the command before any mutation. A
+    /// command whose caller already dropped the reply is skipped whole.
+    ApplyPacedExportPolicies {
+        /// Remaining members in caller transaction order.
+        replacements: Vec<PeerExportPolicyReplacement>,
+        /// The walk's cost estimate from the previous reply; `None` on the
+        /// first command, which then applies one member.
+        cost: Option<PacedMemberCost>,
+        /// Response channel: what was applied and what remains.
+        reply: oneshot::Sender<Result<PacedApplyOutcome, RibCommandError>>,
     },
     /// Restore prior export policies as one exact rollback-only actor call.
     ///
@@ -4484,6 +4533,7 @@ impl RibUpdate {
             | Self::ReplacePeerExportPolicy { .. }
             | Self::ReplacePeerExportPolicies { .. }
             | Self::ReplacePeerExportPoliciesAuthoritatively { .. }
+            | Self::ApplyPacedExportPolicies { .. }
             | Self::RestorePeerExportPoliciesAuthoritatively { .. }
             | Self::PrepareExportPolicyDestination { .. }
             | Self::DiscardPreparedExportPolicyDestination { .. }

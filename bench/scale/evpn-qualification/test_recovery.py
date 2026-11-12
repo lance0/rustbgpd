@@ -66,6 +66,52 @@ def actor_text(maximum, buckets):
     return "\n".join(lines) + "\n"
 
 
+def transition_text(fallback):
+    return "".join(f'bgp_rib_policy_transition_total{{outcome="{outcome}"}} {count}\n' for outcome, count in
+                   (("committed", 0), ("fallback_handoff", fallback), ("fallback_cleanup_error", 0)))
+
+
+def log_stamp(wall_us):
+    return datetime.fromtimestamp(wall_us / 1_000_000, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def batch_event(wall_us, fallback_members=148):
+    fields = {"message": "authoritative_batch_phase", "classification": "fallback", "input_peers": 148,
+              "present_peers": 148, "shared_members": 0, "fallback_members": fallback_members,
+              "fallback_regroup_us": 1_300_000, "distribution_us": 7_000_000, "total_us": 8_400_000}
+    return json.dumps({"timestamp": log_stamp(wall_us), "level": "INFO", "fields": fields,
+                       "target": "authoritative_batch_phase"})
+
+
+def regroup_evidence(leg, events, controls):
+    """Raw regroup-window evidence: the regroup witnesses are at wall 200 (b)
+    and 300 (a); each window opens before its signal and closes after them."""
+    log = []
+    for generation, base in (("b", 100), ("a", 200)):
+        signal = next(event for event in events
+                      if event["event"] == "reload_signal" and event["generation"] == generation)
+        signal["wall_us"] = base + 50
+        at = signal["at"]
+        # The probe stops after the policy command completes (3 for b, 6 for a).
+        converged = 3 if generation == "b" else 6
+        events.extend([{"event": "scrape", "name": f"regroup-{generation}-start", "at": at,
+                        "requested_at": at, "requested_us": base + 30, "wall_us": base + 40},
+                       {"event": "command", "command": f"probe-stop {generation}", "at": converged + .05},
+                       {"event": "complete", "command": f"probe-stop {generation}", "at": converged + .08},
+                       {"event": "scrape", "name": f"regroup-{generation}-end", "at": converged + .1,
+                        "requested_at": converged + .09, "requested_us": base + 110, "wall_us": base + 120}])
+        (leg / f"metrics-regroup-{generation}-start.txt").write_text(
+            actor_text(5, {"0.2": 1, "+Inf": 1}) + transition_text(0))
+        (leg / f"metrics-regroup-{generation}-end.txt").write_text(
+            actor_text(8_300_000, {"0.2": 1, "+Inf": 2}) + transition_text(1))
+        controls.append({"command": f"probe-stop {generation}", "result": {"samples": [
+            {"sent_us": base + 10, "seen_us": base + 20, "withdrawn": True, "every_receiver": None},
+            {"sent_us": base + 60, "seen_us": base + 105, "withdrawn": True, "every_receiver": True}]}})
+        log.extend([batch_event(base + 70), batch_event(base + 130, 1)])
+    with (leg / "daemon.log").open("a") as stream:
+        stream.write("".join(line + "\n" for line in log))
+
+
 class RecoveryTests(unittest.TestCase):
     def test_mass_dirty_actor_reads_the_closing_window_and_the_phase_bucket_delta(self):
         start = actor_text(900_000, {"0.2": 5, "0.5": 6, "+Inf": 6})
@@ -170,6 +216,122 @@ class RecoveryTests(unittest.TestCase):
                     R.analyze(root)
                 self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
                 self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+
+    def test_regroup_window_reads_actor_transitions_batches_and_probe_from_raw_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.analysis_fixture(root)
+            leg = root / "recovery-00-candidate"
+            row = json.loads((leg / "result.json").read_text())
+            window = row["regroup-b-window"]
+            self.assertEqual(window["actor"]["actor_poll_max_microseconds"], 8_300_000)
+            self.assertEqual(window["actor"]["route_chunk_over_200ms"], 1)
+            self.assertEqual(window["transitions"],
+                             {"committed": 0, "fallback_cleanup_error": 0, "fallback_handoff": 1})
+            # Only the events inside [signal, closing scrape] belong to this regroup.
+            self.assertEqual([batch["wall_us"] for batch in window["batches"]], [170])
+            self.assertEqual(window["batches"][0]["fallback_members"], 148)
+            self.assertEqual(window["batches"][0]["distribution_us"], 7_000_000)
+            self.assertEqual(window["probe"], {"status": "PASS", "reason": None, "samples": 2, "max_latency_us": 45})
+            self.assertEqual([batch["wall_us"] for batch in row["regroup-a-window"]["batches"]], [270])
+
+    def test_probe_that_never_arrives_or_misses_the_regroup_is_invalid_not_a_pass(self):
+        def sample(sent, seen, withdrawn=True, every=None, quiet=None):
+            row = {"sent_us": sent, "seen_us": seen, "withdrawn": withdrawn, "every_receiver": every}
+            if quiet is not None:
+                row["quiet"] = quiet
+            return row
+        good = [sample(10, 20), sample(60, 9_000_060), sample(9_000_100, 9_000_110, every=True)]
+        self.assertEqual(R.probe_window({"samples": good}, 50, 9_000_000),
+                         {"status": "PASS", "reason": None, "samples": 3, "max_latency_us": 9_000_000})
+        for name, samples, reason in (
+                ("never-arrives", [sample(10, 20), sample(60, None)], "never reached"),
+                ("left-behind", [sample(10, 20), sample(60, 9_000_060, False)], "not withdrawn"),
+                ("started-late", [sample(60, 9_000_060, every=True)], "does not span"),
+                ("stopped-early", [sample(10, 20), sample(30, 40, every=True)], "does not span"),
+                ("final-missed-a-receiver", [sample(10, 20), sample(60, 9_000_060, every=False)],
+                 "every receiver"),
+                ("final-unchecked", [sample(10, 20), sample(60, 9_000_060)], "every receiver"),
+                ("never-quiet", [sample(10, 20), sample(9_000_100, None, False, False, quiet=False)],
+                 "did not quiesce"),
+                ("empty", [], "no probe sample")):
+            with self.subTest(name):
+                result = R.probe_window({"samples": samples}, 50, 9_000_000)
+                self.assertEqual(result["status"], "INVALID")
+                self.assertIsNone(result["max_latency_us"])
+                self.assertIn(reason, result["reason"])
+        for malformed in (None, {}, {"samples": [sample(20, 10)]}, {"samples": [sample(10, 20), sample(10, 30)]},
+                          {"samples": [{"sent_us": 1, "seen_us": 2}]},
+                          {"samples": [dict(sample(1, 2), every_receiver="yes")]},
+                          {"samples": [dict(sample(1, 2), quiet="no")]}):
+            with self.subTest(malformed=malformed), self.assertRaises(Exception) as caught:
+                R.probe_window(malformed, 50, 100)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+
+    def test_transition_counts_and_batch_phases_reject_malformed_series(self):
+        self.assertEqual(R.transition_counts(metrics_text() + transition_text(3))["fallback_handoff"], 3)
+        for text in ("", transition_text(1) + transition_text(1),
+                     'bgp_rib_policy_transition_total{outcome="committed"} 1.5\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                R.transition_counts(text)
+        self.assertEqual(R.batch_phases("plain text\n" + batch_event(100), 50, 150)[0]["wall_us"], 100)
+        self.assertEqual(R.batch_phases(batch_event(100), 101, 150), [])
+        # A parent daemon logs no deferred_members; a paced one does.
+        self.assertIsNone(R.batch_phases(batch_event(100), 50, 150)[0]["deferred_members"])
+        paced = json.loads(batch_event(100))
+        paced["fields"]["deferred_members"] = 148
+        self.assertEqual(R.batch_phases(json.dumps(paced), 50, 150)[0]["deferred_members"], 148)
+        self.assertIsNone(R.batch_phases(json.dumps(paced), 50, 150)[0]["applied_members"])
+        paced["fields"].update(classification="paced_apply", applied_members=3, fallback_members=0)
+        row = R.batch_phases(json.dumps(paced), 50, 150)[0]
+        self.assertEqual((row["classification"], row["applied_members"], row["fallback_members"]),
+                         ("paced_apply", 3, 0))
+        paced["fields"]["deferred_members"] = "148"
+        with self.assertRaises(ValueError):
+            R.batch_phases(json.dumps(paced), 50, 150)
+        broken = json.loads(batch_event(100))
+        for field, value in (("timestamp", "yesterday"), ("timestamp", "2026-11-11T00:00:00")):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                R.batch_phases(json.dumps(dict(broken, **{field: value})), 0, 10**18)
+        del broken["fields"]["distribution_us"]
+        with self.assertRaises(ValueError):
+            R.batch_phases(json.dumps(broken), 0, 10**18)
+
+    def test_analyze_rejects_regroup_scrapes_that_miss_the_window_and_copied_receipts(self):
+        for defect in ("scrape-before-settled", "scrape-after-signal", "copied-window", "missing-window",
+                       "missing-probe", "missing-scrape", "counter-backwards"):
+            with self.subTest(defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = self.analysis_fixture(root)
+                leg = root / "recovery-00-candidate"
+                row = json.loads((leg / "result.json").read_text())
+                events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+                end = next(event for event in events if event.get("name") == "regroup-b-end")
+                start = next(event for event in events if event.get("name") == "regroup-b-start")
+                if defect == "scrape-before-settled":  # the regroup-b witness is at wall 200
+                    end["requested_us"] = 199
+                elif defect == "scrape-after-signal":  # the regroup-b signal is at wall 150
+                    start["wall_us"] = 151
+                elif defect == "copied-window":
+                    row["regroup-b-window"] = row["regroup-a-window"]
+                elif defect == "missing-window":
+                    del row["regroup-a-window"]
+                elif defect == "missing-probe":
+                    lines = (leg / "driver.log").read_text().splitlines()
+                    (leg / "driver.log").write_text("".join(line + "\n" for line in lines if "probe-stop b" not in line))
+                elif defect == "missing-scrape":
+                    events.remove(end)
+                else:  # the closing scrape holds fallback_handoff 1
+                    (leg / "metrics-regroup-b-start.txt").write_text(
+                        actor_text(5, {"0.2": 1, "+Inf": 1}) + transition_text(2))
+                (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+                Q.write_json(leg / "result.json", row)
+                with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
+                    R.analyze(root)
+                self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+                self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+                if defect.startswith("scrape-"):
+                    self.assertIn("scrape window does not bracket the regroup", str(caught.exception))
 
     def test_build_pins_same_source_cli_without_using_path(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -481,10 +643,25 @@ class RecoveryTests(unittest.TestCase):
                   {"event": "command", "command": "resume", "at": 10},
                   {"event": "complete", "command": "resume", "at": 11},
                   {"event": "complete", "command": "settle", "at": 15}]
+        # The probe stops after convergence, so nothing is subtracted.
+        for generation, converged in (("a", 3), ("b", 7)):
+            events += [{"event": "command", "command": f"probe-stop {generation}", "at": converged + .1},
+                       {"event": "complete", "command": f"probe-stop {generation}", "at": converged + 5}]
         self.assertEqual(R.timings(events), {"regroup-a-seconds": 2, "regroup-b-seconds": 3,
                                             "recovery-seconds": 4})
         with self.assertRaisesRegex(ValueError, "missing/duplicate"):
-            R.timings(events[:-1])
+            R.timings(events[:6] + events[7:])
+        # Convergence that completes while the probe stops: the stop's final
+        # cycle waits for every receiver, so it would absorb the drain. The
+        # measured regroup still includes it, and the overlap is refused.
+        overlapped = copy.deepcopy(events)
+        stop = next(event for event in overlapped if event.get("command") == "probe-stop b"
+                    and event["event"] == "command")
+        stop["at"] = 5
+        with self.assertRaisesRegex(ValueError, "probe-stop b overlapped wire convergence"):
+            R.timings(overlapped)
+        stop["at"] = 7
+        self.assertEqual(R.timings(overlapped)["regroup-b-seconds"], 3)
 
     def test_socket_writes_and_wrapped_final_state_cannot_replace_actor_barrier(self):
         def row(peer):
@@ -601,10 +778,13 @@ class RecoveryTests(unittest.TestCase):
                       {"event": "complete", "command": "resume", "at": 52},
                       {"event": "complete", "command": "settle", "at": 56}]
             reload_controls(leg, row, events)
+            controls = [{"command": "churn-overlap", "result": {"write_started_us": 2100, "writers_drained_us": 3900}}]
+            regroup_evidence(leg, events, controls)
             events.sort(key=lambda event: event["at"])
             (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
-            (leg / "driver.log").write_text('evpn_control ' + json.dumps({"command": "churn-overlap",
-                "result": {"write_started_us": 2100, "writers_drained_us": 3900}}) + "\n")
+            (leg / "driver.log").write_text("".join("evpn_control " + json.dumps(item) + "\n" for item in controls))
+            for generation in ("b", "a"):
+                row[f"regroup-{generation}-window"] = R.regroup_window(leg, generation, row[f"regroup-{generation}"])
             # One 20 Hz probe series covering the first through last workload event.
             write_readiness(leg, [1 + n * .05 for n in range(round((56 - 1) / .05) + 1)])
             (leg / "metrics.txt").write_text(metrics_text())

@@ -88,6 +88,9 @@ type SessionScript = fn(&PeerCommand, usize) -> SessionAction;
 enum CohortReply {
     Committed,
     Authoritative,
+    /// The authoritative batch hands every member back; one paced command
+    /// then applies them all.
+    Paced,
     Rejected,
 }
 
@@ -273,6 +276,10 @@ fn is_authoritative_replace(update: &RibUpdate) -> bool {
         update,
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
     )
+}
+
+fn is_paced_apply(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::ApplyPacedExportPolicies { .. })
 }
 
 fn is_single_replace(update: &RibUpdate) -> bool {
@@ -509,19 +516,36 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         rib: RibHold::Receiver(is_cohort_replace),
         session: answer_all,
-        additional_entry: None,
+        additional_entry: Some(
+            "the batch wait parked at RIB admission: one shared-budget future covers the send \
+             and the reply, so this is the reply row's call site",
+        ),
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
         site: "policy.rs::apply_export_policy_replacements_authoritatively",
-        awaits: "RibUpdate::ReplacePeerExportPoliciesAuthoritatively reply",
+        awaits: "RibUpdate::ReplacePeerExportPoliciesAuthoritatively send and reply (shared forward budget)",
         drive: Drive::ForwardCohort {
             import_delta: false,
             cohort_reply: CohortReply::Authoritative,
         },
         rib: RibHold::Reply(is_authoritative_replace),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "policy.rs::walk_paced_export_policies",
+        awaits: "RibUpdate::ApplyPacedExportPolicies send and reply (shared forward budget)",
+        drive: Drive::ForwardCohort {
+            import_delta: false,
+            cohort_reply: CohortReply::Paced,
+        },
+        rib: RibHold::Reply(is_paced_apply),
         session: answer_all,
         additional_entry: None,
         window: HELD_FOREVER,
@@ -1038,14 +1062,38 @@ fn answer_rib(
         RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
             let _ = reply.send(match cohort_reply {
                 CohortReply::Committed => Ok(ExportPolicyCohortOutcome::Committed),
-                CohortReply::Authoritative => {
+                CohortReply::Authoritative | CohortReply::Paced => {
                     Ok(ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply)
                 }
                 CohortReply::Rejected => Err("test: cohort rejected".to_string()),
             });
         }
-        RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
-        | RibUpdate::ReplacePeerExportPolicy { reply, .. }
+        RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } => {
+            let _ = reply.send(Ok(if matches!(cohort_reply, CohortReply::Paced) {
+                replacements
+                    .iter()
+                    .map(|replacement| replacement.peer)
+                    .collect()
+            } else {
+                Vec::new()
+            }));
+        }
+        RibUpdate::ApplyPacedExportPolicies {
+            replacements,
+            reply,
+            ..
+        } => {
+            let _ = reply.send(Ok(rustbgpd_rib::PacedApplyOutcome {
+                pending: Vec::new(),
+                skipped: Vec::new(),
+                applied: replacements.len(),
+                cost: Some(rustbgpd_rib::PacedMemberCost::default()),
+            }));
+        }
+        RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }
         | RibUpdate::ConfirmPeerOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
@@ -2350,6 +2398,12 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
         "try_send never waits: a full mailbox defers the update, which the run loop sends as a \
          select branch beside the readiness lane, or the next flush sends under \
          await_with_readiness",
+    ),
+    (
+        "policy.rs::admit_rib_command_before",
+        1,
+        "returns the admission to its caller: the paced walk awaits it inside the step it runs \
+         under await_with_readiness, bounded by the walk's forward deadline",
     ),
     (
         "notifications.rs::defer_retired_session_down",
