@@ -794,6 +794,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.InjectionService",
+        "BatchListFlowSpecExportDispositions",
+        "/rustbgpd.v1.InjectionService/BatchListFlowSpecExportDispositions",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
         "AddFlowSpec",
         "/rustbgpd.v1.InjectionService/AddFlowSpec",
         AuthTier::OperatorOnly,
@@ -1006,7 +1012,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 1 | 0.7% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 83 | 60.1% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 84 | 60.4% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1246,7 +1252,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 138);
+        assert_eq!(METHODS.len(), 139);
     }
 
     #[test]
@@ -1287,7 +1293,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 83);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 84);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 32);
     }
@@ -1334,6 +1340,7 @@ mod tests {
             "ListPathExportDispositions",
             "BatchListPathExportDispositions",
             "ListFlowSpecExportDispositions",
+            "BatchListFlowSpecExportDispositions",
         ] {
             let path = format!("/rustbgpd.v1.InjectionService/{method}");
             assert_eq!(
@@ -1507,7 +1514,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_rejects_stale_percentage() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 83 | 57.0% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 84 | 57.0% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("percentage mismatch")

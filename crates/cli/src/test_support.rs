@@ -1763,6 +1763,13 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         Err(Status::unimplemented("not mocked"))
     }
 
+    async fn batch_list_flow_spec_export_dispositions(
+        &self,
+        _request: Request<server_proto::BatchListFlowSpecExportDispositionsRequest>,
+    ) -> Result<Response<server_proto::BatchListFlowSpecExportDispositionsResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
     async fn list_leased_keys(
         &self,
         _request: Request<server_proto::ListLeasedKeysRequest>,

@@ -3886,6 +3886,16 @@ service InjectionService {
   // them. A key with no local rule returns NOT_FOUND. This new diagnostic RPC
   // is outside v1.
   rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
+  // ListFlowSpecExportDispositions over a list of local FlowSpec rule keys
+  // in one paged walk, with the key bound, duplicate check, page entries,
+  // key order, found flag and ABORTED and INVALID_ARGUMENT contract of
+  // BatchListPathExportDispositions. Keys may mix global and VPN families
+  // and RDs. Two keys are the same when ListFlowSpecExportDispositions
+  // would name the same rule. A malformed key returns INVALID_ARGUMENT
+  // naming its index before any rule is read; a key with no local rule is
+  // listed with found false. Each page reads all its keys in one RIB turn.
+  // This diagnostic RPC is outside v1.
+  rpc BatchListFlowSpecExportDispositions(BatchListFlowSpecExportDispositionsRequest) returns (BatchListFlowSpecExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an upsert
   // keyed on (afi_safi, components): repeating an identical request is
   // idempotent, and a request with the same key but different actions or
@@ -4295,6 +4305,35 @@ message PathExportDispositions {
 
 message BatchListPathExportDispositionsResponse {
   repeated PathExportDispositions routes = 1;
+  // Empty when no entries remain.
+  string next_page_token = 2;
+}
+
+message BatchListFlowSpecExportDispositionsRequest {
+  // The local rules' AddFlowSpec keys, in walk order: 1 to 1000 keys per
+  // walk, none named twice. rd is required for VPN FlowSpec and empty for
+  // global FlowSpec.
+  repeated LeasedFlowSpecKey keys = 1;
+  // As BatchListPathExportDispositionsRequest.page_size, page_token and
+  // include_configured.
+  uint32 page_size = 2;
+  string page_token = 3;
+  bool include_configured = 4;
+}
+
+// The export dispositions of one requested FlowSpec key on one page.
+message FlowSpecExportDispositions {
+  // The key as the request named it.
+  LeasedFlowSpecKey key = 1;
+  // As PathExportDispositions.found, for a local rule.
+  bool found = 2;
+  // One row per peer, as ListFlowSpecExportDispositions lists them; the
+  // key's remaining peers continue on the next page when it ends mid-key.
+  repeated PathExportDispositionEntry peers = 3;
+}
+
+message BatchListFlowSpecExportDispositionsResponse {
+  repeated FlowSpecExportDispositions rules = 1;
   // Empty when no entries remain.
   string next_page_token = 2;
 }

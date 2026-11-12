@@ -2142,33 +2142,39 @@ impl RibManager {
     /// Answer [`crate::update::RibUpdate::QueryLocalFlowSpecExport`].
     pub(super) fn handle_query_local_flowspec_export(
         &mut self,
-        key: &crate::route::FlowSpecKey,
+        keys: &[crate::route::FlowSpecKey],
         managed: Option<Vec<ExportDestination>>,
         resume: Option<(RouteExportCursor, RouteExportVersion)>,
         page_size: usize,
         reply: tokio::sync::oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     ) {
-        let rule = self
-            .ribs
-            .get(&LOCAL_PEER)
-            .and_then(|rib| {
-                rib.get_flowspec(&crate::route::FlowSpecRouteKey {
-                    afi: key.afi,
-                    rd: key.rd,
-                    rule: key.rule.clone(),
-                    path_id: 0,
-                })
+        let local = self.ribs.get(&LOCAL_PEER);
+        let rules: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                local
+                    .and_then(|rib| {
+                        rib.get_flowspec(&crate::route::FlowSpecRouteKey {
+                            afi: key.afi,
+                            rd: key.rd,
+                            rule: key.rule.clone(),
+                            path_id: 0,
+                        })
+                    })
+                    .cloned()
             })
-            .cloned();
+            .collect();
         let fingerprint = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            rule.as_ref().map(|rule| &rule.attributes).hash(&mut hasher);
+            for rule in &rules {
+                rule.as_ref().map(|rule| &rule.attributes).hash(&mut hasher);
+            }
             hasher.finish()
         };
         let version = self.export_walk_version(fingerprint, managed.as_deref());
         let page = self.local_export_page(
-            &[rule],
+            &rules,
             version,
             managed,
             resume,

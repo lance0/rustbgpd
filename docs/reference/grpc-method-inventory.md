@@ -228,7 +228,7 @@ shape itself does not raise the tier.
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
-### InjectionService (19 RPCs)
+### InjectionService (20 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -237,6 +237,7 @@ shape itself does not raise the tier.
 | `ListPathExportDispositions` | `sensitive_read` | Per-peer export disposition of one injected unicast route: committed, withheld with a bounded reason, or pending. Discloses per-peer export policy outcomes like `ExplainAdvertisedRoute`; mutates nothing. |
 | `BatchListPathExportDispositions` | `sensitive_read` | `ListPathExportDispositions` for up to 1000 injected unicast route keys in one paged walk; the same disclosure. |
 | `ListFlowSpecExportDispositions` | `sensitive_read` | Per-peer export disposition of one injected `(family, RD, components)` key; RD is required for VPN families 13/14. Same disclosure as `ListPathExportDispositions`; outside v1. |
+| `BatchListFlowSpecExportDispositions` | `sensitive_read` | `ListFlowSpecExportDispositions` for up to 1000 injected FlowSpec keys, global or VPN, in one paged walk; the same disclosure. Outside v1. |
 | `AddFlowSpec` | `operator_only` | Originates traffic-filter rules that receiving routers may enforce. Global families use an empty RD; outside-v1 VPN families 13/14 require an RD and scope RTs. Local acceptance does not establish remote enforcement. |
 | `DeleteFlowSpec` | `operator_only` | Withdraws one scoped local key; VPN families 13/14 require its RD. Same risk class as Add. |
 | `AddLeasedPath` | `operator_only` | `AddPath` under an owner's lease (ADR-0141); same risk class as `AddPath`. |
@@ -292,10 +293,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.7% |
-| `sensitive_read` | 83 | 60.1% |
-| `mutating` | 22 | 15.9% |
-| `operator_only` | 32 | 23.2% |
-| **Total** | **138** | **100%** |
+| `sensitive_read` | 84 | 60.4% |
+| `mutating` | 22 | 15.8% |
+| `operator_only` | 32 | 23.0% |
+| **Total** | **139** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
@@ -311,7 +312,8 @@ specific method if the model warrants it.
 1. **Tier vs. service granularity.** Every service has at least one
    `sensitive_read` method; `InjectionService` has only
    `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`,
-   `BatchListPathExportDispositions` and `ListFlowSpecExportDispositions`.
+   `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions` and
+   `BatchListFlowSpecExportDispositions`.
    `CheckLiveness` is a `read` method;
    `GetHealth` remains sensitive because it returns peer and route counts.
    `EventService` is pure observability (no mutations at all);

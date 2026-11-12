@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 138,
+  "method_count": 139,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 83,
+    "sensitive_read": 84,
     "mutating": 22,
     "operator_only": 32
   },
@@ -122,6 +122,7 @@
     { "service": "rustbgpd.v1.InjectionService", "method": "ListPathExportDispositions", "path": "/rustbgpd.v1.InjectionService/ListPathExportDispositions", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "BatchListPathExportDispositions", "path": "/rustbgpd.v1.InjectionService/BatchListPathExportDispositions", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "ListFlowSpecExportDispositions", "path": "/rustbgpd.v1.InjectionService/ListFlowSpecExportDispositions", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.InjectionService", "method": "BatchListFlowSpecExportDispositions", "path": "/rustbgpd.v1.InjectionService/BatchListFlowSpecExportDispositions", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddFlowSpec", "path": "/rustbgpd.v1.InjectionService/AddFlowSpec", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "DeleteFlowSpec", "path": "/rustbgpd.v1.InjectionService/DeleteFlowSpec", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddLeasedPath", "path": "/rustbgpd.v1.InjectionService/AddLeasedPath", "tier": "operator_only" },
