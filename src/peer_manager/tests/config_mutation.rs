@@ -861,6 +861,63 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
     );
 }
 
+/// The forced replay is queued only after the session acknowledged its new
+/// knobs: a replay that reached the RIB first could encode the old `AS_PATH`
+/// treatment and still count as refreshed.
+#[tokio::test(start_paused = true)]
+async fn hot_update_queues_outbound_refresh_only_after_the_knob_ack() {
+    let mut mgr = test_peer_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    mgr.rib_tx = rib_tx;
+    let (refreshes_tx, mut refreshes) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                let _ = refreshes_tx.send(peer);
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let (commands, mut command_rx) = mpsc::channel(8);
+    let (acks_tx, mut acks) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if let PeerCommand::UpdateRuntimeConfig { reply, .. } = command {
+                let _ = acks_tx.send(reply);
+            }
+        }
+        Ok(())
+    });
+    let addr: IpAddr = "10.0.0.92".parse().unwrap();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(commands, task),
+        false,
+    );
+    let mut updated = make_config(addr, 65002);
+    updated.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
+    let apply = tokio::spawn(async move {
+        let result = mgr.hot_update_peer(updated).await;
+        (result, mgr)
+    });
+    let ack = acks.recv().await.expect("knob update reaches the session");
+    // Well inside the session command's 500 ms bound.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        refreshes.try_recv().is_err(),
+        "a replay reached the RIB before the session acknowledged its knobs"
+    );
+    let _ = ack.send(Ok(false));
+    let (result, _mgr) = apply.await.unwrap();
+    result.unwrap();
+    let next = Duration::from_secs(1);
+    let first = tokio::time::timeout(next, refreshes.recv()).await.unwrap();
+    assert!(first.is_some(), "the acknowledged knobs are replayed");
+    let again = tokio::time::timeout(next, refreshes.recv()).await;
+    assert!(again.is_err(), "exactly one replay");
+}
+
 #[tokio::test]
 async fn ipv6_unlock_queues_one_table_walk_unless_other_export_knobs_change() {
     for (already_sendable, unlocked, remove_private_as, deferred, expected) in [

@@ -6678,7 +6678,10 @@ async fn group_export_knob_reload_applies_when_a_refresh_answers_after_the_rib_d
     let mut held = hold_outbound_refreshes(&mut harness);
     let candidate = remove_private_as_candidate(&prior);
     let rib = async {
-        let (_, reply) = held.recv().await.unwrap();
+        let (_, reply) = tokio::time::timeout(Duration::from_secs(30), held.recv())
+            .await
+            .expect("a member refresh reaches the RIB")
+            .unwrap();
         tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_secs(1)).await;
         let _ = reply.send(Ok(()));
         answer_refreshes(&mut held).await.len() + 1
@@ -6749,6 +6752,69 @@ async fn group_export_knob_reload_unwind_does_not_wait_for_member_refreshes() {
         refreshed.into_iter().collect::<BTreeSet<_>>(),
         rib_peers(&harness, &hot)
     );
+    harness.shutdown().await;
+}
+
+/// Answer every `RefreshPeerOutbound` at once, logging in arrival order the
+/// member it names and how many runtime-config updates that member's session
+/// had installed when it arrived.
+fn log_outbound_refreshes(harness: &mut GenerationHarness) -> Arc<Mutex<Vec<(IpAddr, u32)>>> {
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let counters = harness.counters.clone();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let in_task = Arc::clone(&log);
+    tokio::spawn(async move {
+        while let Some(update) = rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                let installs = counters[&peer.addr()]
+                    .runtime_config_updates
+                    .load(Ordering::SeqCst);
+                in_task.lock().unwrap().push((peer.addr(), installs));
+                let _ = reply.send(Ok(()));
+            } else if downstream.send(update).await.is_err() {
+                break;
+            }
+        }
+    });
+    log
+}
+
+/// A restore queues its own replay: with every refresh answered as it
+/// arrives, the forward replays are long done when the unwind restores the
+/// prior knobs, so each restored member's last replay must come after its
+/// session installed the restore (its second runtime-config update).
+#[tokio::test(start_paused = true)]
+async fn group_export_knob_reload_unwind_replays_each_member_after_its_restore() {
+    let prior = export_knob_group_config(8);
+    let mut harness = GenerationHarness::new(&prior);
+    let log = log_outbound_refreshes(&mut harness);
+    let mut candidate = remove_private_as_candidate(&prior);
+    let replaced = key("10.0.1.8".parse().unwrap());
+    candidate.neighbors[7].remote_asn = 65_200.into();
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(replaced.clone(), 0);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), harness.apply(&candidate))
+        .await
+        .expect("the generation finishes");
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    // Let the refresher drain.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let log = log.lock().unwrap().clone();
+    for peer in harness.mgr.peers.keys().filter(|peer| **peer != replaced) {
+        assert_eq!(harness.runtime_config_updates(&peer.address.to_string()), 2);
+        let last = log.iter().rev().find(|(addr, _)| *addr == peer.address);
+        assert_eq!(
+            last.map(|(_, installs)| *installs),
+            Some(2),
+            "{peer}: its last replay must follow its restore; log {log:?}"
+        );
+    }
     harness.shutdown().await;
 }
 
