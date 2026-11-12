@@ -1989,6 +1989,8 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,

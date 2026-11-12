@@ -751,6 +751,14 @@ struct ManagedPeerState {
     /// and the symmetry with the import side guarantees both halves
     /// of a `SetPolicy` carry the same all-or-nothing semantics.
     pending_export_apply: bool,
+    /// The session's installed import (export) chain is unknown: a policy
+    /// update to it failed without an acknowledgement, and the session may
+    /// still have installed it. `import_policy` (`export_policy`) keeps the
+    /// prior chain, so a later edit back to that chain compares equal. The
+    /// next apply resends the chain and refreshes regardless of equality; a
+    /// later acknowledged update clears the flag.
+    import_install_unknown: bool,
+    export_install_unknown: bool,
     /// A positively known-down peer classified during the authoritative
     /// per-peer apply pass (Idle/Connect/Active). Its pending flags after that
     /// apply represent deferred `PeerUp` adoption intent rather than

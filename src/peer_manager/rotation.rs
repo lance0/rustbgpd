@@ -1933,6 +1933,8 @@ mod tests {
                 ManagedPeerState {
                     admin_down: None,
                     policy_known_down: false,
+                    import_install_unknown: false,
+                    export_install_unknown: false,
                     remote_asn: 65_002,
                     description: address.to_string(),
                     peer_group: None,

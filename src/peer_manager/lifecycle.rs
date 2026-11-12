@@ -1297,6 +1297,8 @@ impl PeerManager {
                 session_id,
                 ManagedPeerState {
                     policy_known_down: false,
+                    import_install_unknown: false,
+                    export_install_unknown: false,
                     remote_asn,
                     description,
                     peer_group,
@@ -1699,7 +1701,9 @@ impl PeerManager {
                 export_knobs_changed,
                 tc.remove_private_as != config.remove_private_as,
                 managed.import_policy != config.import_policy
-                    || managed.export_policy != config.export_policy,
+                    || managed.export_policy != config.export_policy
+                    || managed.import_install_unknown
+                    || managed.export_install_unknown,
                 managed.max_prefix_restart_seconds != config.max_prefix_restart_seconds,
                 admin_enable,
             )

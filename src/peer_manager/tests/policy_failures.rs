@@ -566,6 +566,8 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -756,6 +758,8 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -956,6 +960,8 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -1175,6 +1181,8 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -1424,6 +1432,8 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -1612,6 +1622,8 @@ async fn stale_query_state_re_arms_pending_refresh() {
             ManagedPeerState {
                 admin_down: None,
                 policy_known_down: false,
+                import_install_unknown: false,
+                export_install_unknown: false,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,

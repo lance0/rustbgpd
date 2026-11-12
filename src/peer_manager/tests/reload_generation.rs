@@ -17,6 +17,14 @@ struct GenerationSessionCounters {
     import_installs: AtomicU32,
     /// Drop the reply to this many import-policy updates without installing.
     drop_import_replies: AtomicU32,
+    /// Install this many import (export) policy updates but answer each only
+    /// after the manager's update deadline has passed.
+    late_import_acks: AtomicU32,
+    late_export_acks: AtomicU32,
+    /// The chain this session last installed, as a session holds only its
+    /// current chain; meaningful once the matching install counter is nonzero.
+    installed_import: Mutex<Option<PolicyChain>>,
+    installed_export: Mutex<Option<PolicyChain>>,
     export_installs: AtomicU32,
     runtime_config_updates: AtomicU32,
     runtime_knobs: Mutex<Vec<rustbgpd_transport::PeerRuntimeConfigUpdate>>,
@@ -64,14 +72,16 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                         u64::from(generation),
                         policy.as_deref(),
                     )));
-                    let _ = reply.send(Ok(()));
+                    *in_task.installed_import.lock().unwrap() = policy.as_deref().cloned();
+                    answer_policy_update(&in_task.late_import_acks, reply);
                 }
                 PeerCommand::UpdateExportPolicy { policy, reply } => {
                     if let Some(owners) = policy.as_deref().and_then(PolicyOwners::observe) {
                         in_task.export_owners.lock().unwrap().push(owners);
                     }
                     in_task.export_installs.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                    *in_task.installed_export.lock().unwrap() = policy.as_deref().cloned();
+                    answer_policy_update(&in_task.late_export_acks, reply);
                 }
                 PeerCommand::UpdateRuntimeConfig { config, reply } => {
                     *in_task.runtime_remove_private_as.lock().unwrap() =
@@ -155,6 +165,23 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
         PeerHandle::from_parts_with_import_policy_counters(session_tx, task, receiver),
         counters,
     )
+}
+
+/// Acknowledge an installed policy update, or, while `late` is nonzero, only
+/// after the manager's update deadline has passed.
+fn answer_policy_update(
+    late: &AtomicU32,
+    reply: oneshot::Sender<Result<(), rustbgpd_transport::PeerCommandError>>,
+) {
+    if late.load(Ordering::SeqCst) > 0 {
+        late.fetch_sub(1, Ordering::SeqCst);
+        tokio::spawn(async move {
+            tokio::time::sleep(PEER_POLICY_UPDATE_TIMEOUT * 2).await;
+            let _ = reply.send(Ok(()));
+        });
+    } else {
+        let _ = reply.send(Ok(()));
+    }
 }
 
 /// A RIB stub that acknowledges every export-policy transition shape the
@@ -272,6 +299,8 @@ impl GenerationHarness {
                 ManagedPeerState {
                     admin_down: None,
                     policy_known_down: false,
+                    import_install_unknown: false,
+                    export_install_unknown: false,
                     remote_asn: resolved.transport_config.peer.remote_asn,
                     description: resolved.label,
                     peer_group: resolved.peer_group,
@@ -6789,6 +6818,136 @@ async fn honor_fan_out_names_and_generation_heals_a_peer_owing_route_refresh() {
         );
         harness.shutdown().await;
     }
+}
+
+/// An import update whose acknowledgement misses its deadline may still have
+/// installed. Bookkeeping keeps the prior chain, so a reload that reverts the
+/// edit compares equal; it must still resend the prior chain instead of
+/// refreshing under the chain the session actually holds.
+#[tokio::test]
+async fn reverting_a_timed_out_import_update_resends_the_prior_chain() {
+    let prior = export_knob_group_config(1);
+    let mut harness = GenerationHarness::new(&prior);
+    let addr: IpAddr = "10.0.1.1".parse().unwrap();
+    let peer = key(addr);
+    let prior_chain = harness.mgr.peers[&peer].import_policy.clone();
+    harness.counters[&addr]
+        .late_import_acks
+        .store(1, Ordering::SeqCst);
+
+    let partial = harness
+        .mgr
+        .set_honor_blackhole(true)
+        .await
+        .expect_err("the timed-out import update leaves the peer behind");
+    assert_eq!(partial.failed.len(), 1);
+    assert_eq!(harness.mgr.peers[&peer].import_policy, prior_chain);
+    let installed = |harness: &GenerationHarness| {
+        harness.counters[&addr]
+            .installed_import
+            .lock()
+            .unwrap()
+            .clone()
+    };
+    let installs = |harness: &GenerationHarness| {
+        harness.counters[&addr]
+            .import_installs
+            .load(Ordering::SeqCst)
+    };
+    assert_eq!(installs(&harness), 1);
+    assert_ne!(
+        installed(&harness),
+        prior_chain,
+        "the session installed the honored chain"
+    );
+
+    harness
+        .mgr
+        .set_honor_blackhole(false)
+        .await
+        .expect("the revert reaches the peer");
+    assert_eq!(installs(&harness), 2, "the revert resends the prior chain");
+    assert_eq!(
+        installed(&harness),
+        prior_chain,
+        "the session runs the reverted chain"
+    );
+    assert!(!harness.mgr.peers[&peer].pending_refresh);
+
+    // The acknowledged resend settled the session's chain: an equal apply
+    // sends nothing.
+    let export = harness.mgr.peers[&peer].export_policy.clone();
+    harness
+        .mgr
+        .update_runtime_policies(addr, prior_chain, export)
+        .await
+        .unwrap();
+    assert_eq!(installs(&harness), 2);
+    harness.shutdown().await;
+}
+
+/// The export counterpart: the session can install a new export chain (and
+/// hand it to the RIB) after its acknowledgement timed out, so a reverting
+/// apply must resend the prior export chain to the session.
+#[tokio::test]
+async fn reverting_a_timed_out_export_update_resends_the_prior_chain() {
+    let prior = export_knob_group_config(1);
+    let mut harness = GenerationHarness::new(&prior);
+    let addr: IpAddr = "10.0.1.1".parse().unwrap();
+    let peer = key(addr);
+    let import = harness.mgr.peers[&peer].import_policy.clone();
+    let prior_export = harness.mgr.peers[&peer].export_policy.clone();
+    let edited = Some(deny_policy_chain());
+    assert_ne!(edited, prior_export);
+    harness.counters[&addr]
+        .late_export_acks
+        .store(1, Ordering::SeqCst);
+
+    harness
+        .mgr
+        .update_runtime_policies(addr, import.clone(), edited.clone())
+        .await
+        .expect_err("the export acknowledgement times out");
+    assert_eq!(harness.mgr.peers[&peer].export_policy, prior_export);
+    let installed = |harness: &GenerationHarness| {
+        harness.counters[&addr]
+            .installed_export
+            .lock()
+            .unwrap()
+            .clone()
+    };
+    let installs = |harness: &GenerationHarness| {
+        harness.counters[&addr]
+            .export_installs
+            .load(Ordering::SeqCst)
+    };
+    assert_eq!(installs(&harness), 1);
+    assert_eq!(installed(&harness), edited);
+
+    harness
+        .mgr
+        .update_runtime_policies(addr, import.clone(), prior_export.clone())
+        .await
+        .expect("the revert reaches the peer");
+    assert_eq!(installs(&harness), 2, "the revert resends the prior chain");
+    assert_eq!(
+        installed(&harness),
+        prior_export,
+        "the session runs the reverted export chain"
+    );
+    assert!(!harness.mgr.peers[&peer].pending_export_apply);
+
+    harness
+        .mgr
+        .update_runtime_policies(addr, import, prior_export)
+        .await
+        .unwrap();
+    assert_eq!(
+        installs(&harness),
+        2,
+        "an equal apply after the acknowledged resend sends nothing"
+    );
+    harness.shutdown().await;
 }
 
 fn remove_private_as_candidate(prior: &Config) -> Config {

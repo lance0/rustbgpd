@@ -392,7 +392,8 @@ A peer left behind (its update or owed Route Refresh failed) does not abort
 the reload; the SIGHUP receipt (`rbgp config last-reload`) reports
 `known_partial` and names the peer until the next reload replaces it. A no-op
 SIGHUP does not retry the peer. A later generation-route reload, a per-peer
-policy apply that reaches it, re-setting the knob, or a restart does; see
+policy apply that reaches it, a later change to the knob (including a
+revert), or a restart does; see
 [Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply) for
 the exact triggers and limits.
 A SIGHUP that changes this field together with static-neighbor, peer-group,

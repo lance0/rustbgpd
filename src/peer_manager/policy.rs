@@ -653,12 +653,12 @@ impl PeerManager {
                 (
                     "import",
                     managed.import_policy.as_ref(),
-                    !managed.pending_refresh,
+                    !managed.pending_refresh && !managed.import_install_unknown,
                 ),
                 (
                     "export",
                     managed.export_policy.as_ref(),
-                    !managed.pending_export_apply,
+                    !managed.pending_export_apply && !managed.export_install_unknown,
                 ),
             ] {
                 let scope = snapshot
@@ -1516,7 +1516,9 @@ impl PeerManager {
         let managed = self.peers.get(&peer_key)?;
         (managed.export_policy != target.export_policy
             && !managed.pending_refresh
-            && !managed.pending_export_apply)
+            && !managed.pending_export_apply
+            && !managed.import_install_unknown
+            && !managed.export_install_unknown)
             .then_some((&managed.export_policy, &target.export_policy))
     }
 
@@ -1719,6 +1721,8 @@ impl PeerManager {
             if managed.export_policy == target.export_policy
                 || managed.pending_refresh
                 || managed.pending_export_apply
+                || managed.import_install_unknown
+                || managed.export_install_unknown
             {
                 return None;
             }
@@ -1844,6 +1848,7 @@ impl PeerManager {
                     // restoring.
                     if let Some(managed) = self.peers.get_mut(peer_key) {
                         managed.pending_refresh = true;
+                        managed.import_install_unknown = true;
                     }
                     let prior_restore = self
                         .restore_resolved_policies(captured, context, require_clean_convergence)
@@ -1913,6 +1918,11 @@ impl PeerManager {
                     .map_err(|restore_error| {
                         format!("{} session restore failed: {restore_error}", target.address)
                     });
+                if failing_restore.is_err()
+                    && let Some(managed) = self.peers.get_mut(peer_key)
+                {
+                    managed.export_install_unknown = true;
+                }
                 // LAN-462: the failing member's import chain was already
                 // acknowledged (and bookkeeping advanced) during setup, so
                 // reassert its prior import chain too, unwinding in reverse
@@ -1998,6 +2008,7 @@ impl PeerManager {
                             // unfired refresh intent armed.
                             if let Some(managed) = self.peers.get_mut(peer_key) {
                                 managed.pending_refresh = true;
+                                managed.import_install_unknown = true;
                             }
                             Err(format!(
                                 "{} import restore failed: {restore_error}",
@@ -3958,8 +3969,14 @@ impl PeerManager {
         // until the peer re-advertises. Without an automatic refresh
         // here, a permit→deny edit silently leaves forbidden routes
         // flowing.
-        let import_changed = managed.import_policy != import_policy;
-        let export_changed = managed.export_policy != export_policy;
+        //
+        // An unacknowledged update may have installed after all, so equality
+        // with bookkeeping proves nothing until a later update is
+        // acknowledged: treat that side as changed and resend it.
+        let import_changed =
+            managed.import_install_unknown || managed.import_policy != import_policy;
+        let export_changed =
+            managed.export_install_unknown || managed.export_policy != export_policy;
 
         // Drain any pending refresh / pending export-apply from a
         // prior call. If a previous round wanted to retry but the
@@ -4023,11 +4040,13 @@ impl PeerManager {
                 error = %error,
                 "failed to hot-apply import policy to peer session; retaining prior policy in daemon bookkeeping for retry"
             );
+            managed.import_install_unknown = true;
             true
         } else {
             if import_changed {
                 managed.import_policy = import_policy;
             }
+            managed.import_install_unknown = false;
             false
         };
 
@@ -4064,11 +4083,13 @@ impl PeerManager {
                 error = %error,
                 "failed to hot-apply export policy to peer session; retaining prior policy in daemon bookkeeping for retry"
             );
+            managed.export_install_unknown = true;
             true
         } else {
             if export_changed {
                 managed.export_policy.clone_from(&export_policy);
             }
+            managed.export_install_unknown = false;
             false
         };
 

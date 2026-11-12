@@ -842,6 +842,8 @@ impl PeerManager {
                 && managed.export_policy == chains.export
                 && !managed.pending_refresh
                 && !managed.pending_export_apply
+                && !managed.import_install_unknown
+                && !managed.export_install_unknown
             {
                 continue;
             }
