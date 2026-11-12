@@ -3,11 +3,14 @@
 //!
 //! The differential test drives random receives (announce, replace and
 //! withdraw with Add-Path IDs, a withdraw and an announce of one path in one
-//! message), Graceful Restart entry, GR and LLGR expiry, End-of-RIB, the
-//! in-place stale seams and session teardown, and
-//! after every step compares the Loc-RIB best of every key with the minimum
-//! over all stored paths. The work test bounds the candidate reads of one
-//! non-best change.
+//! message), Graceful Restart entry, GR and LLGR expiry, End-of-RIB,
+//! enhanced route refresh, the in-place stale seams and session teardown,
+//! and after every step compares the Loc-RIB best of every key with the
+//! minimum over all stored paths, computed from the Adj-RIB-Ins alone. The
+//! receive path compares changed paths with the Loc-RIB's stored copy of the
+//! best, so the test also catches an in-place Adj-RIB-In change whose key is
+//! not recomputed. The work tests bound the candidate reads and path-index
+//! lookups of one non-best change.
 
 use proptest::prelude::*;
 
@@ -116,6 +119,11 @@ enum Op {
     SweepLlgr { peer: u8 },
     /// Production End-of-RIB for one family.
     EndOfRib { peer: u8, vpn: bool },
+    /// Production Beginning-of-RIB-Refresh (RFC 7313) for one family.
+    BeginRefresh { peer: u8, vpn: bool },
+    /// Production End-of-RIB-Refresh: sweeps the paths not re-announced
+    /// since the matching `BoRR`.
+    EndRefresh { peer: u8, vpn: bool },
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -133,6 +141,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => (0..PEERS).prop_map(|peer| Op::SweepGr { peer }),
         1 => (0..PEERS).prop_map(|peer| Op::SweepLlgr { peer }),
         1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::EndOfRib { peer, vpn }),
+        1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::BeginRefresh { peer, vpn }),
+        1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::EndRefresh { peer, vpn }),
     ]
 }
 
@@ -244,7 +254,32 @@ fn apply(manager: &mut RibManager, op: &Op) {
                 safi,
             });
         }
+        Op::BeginRefresh { peer, vpn } => refresh(manager, *peer, *vpn, true),
+        Op::EndRefresh { peer, vpn } => refresh(manager, *peer, *vpn, false),
     }
+}
+
+/// Production `BoRR` (`begin`) or `EoRR` for one family.
+fn refresh(manager: &mut RibManager, peer: u8, vpn: bool, begin: bool) {
+    let peer = peer_v4(source(peer));
+    register_test_peer(manager, peer, 0);
+    let (afi, safi) = if vpn { VPN } else { LABELED };
+    manager.handle_update(if begin {
+        RibUpdate::BeginRouteRefresh {
+            peer,
+            session_id: 0,
+            afi,
+            safi,
+        }
+    } else {
+        RibUpdate::EndRouteRefresh {
+            peer,
+            session_id: 0,
+            afi,
+            safi,
+        }
+    });
+    drain_route_chunks(manager);
 }
 
 /// The fields the Loc-RIB change check compares.
@@ -487,13 +522,12 @@ fn non_best_change_index_lookups() -> [(usize, usize); 2] {
     lookups
 }
 
-/// A non-best replace looks up the replaced path to store it, the stored
-/// best, and the replaced path again to compare it; a non-best withdraw
-/// looks up the removed path and the stored best, and reads no withdrawn
-/// path back.
+/// A non-best replace looks up the replaced path to store it and again to
+/// compare it with the Loc-RIB's stored best; a non-best withdraw looks up
+/// only the path it removes.
 #[test]
 fn non_best_change_index_lookups_per_update() {
-    assert_eq!(non_best_change_index_lookups(), [(3, 3), (2, 2)]);
+    assert_eq!(non_best_change_index_lookups(), [(2, 2), (1, 1)]);
 }
 
 /// Two live handles on one endpoint share a selection rank, so identical

@@ -870,9 +870,8 @@ impl RibManager {
                 nlri_key: *key,
                 path_id,
             };
-            // The source's rib and the rib-resident stored best, when this
-            // UPDATE left that best alone.
-            let untouched_best = source.and_then(|super::ReceiveSource { peer, .. }| {
+            // The source's rib, when this UPDATE left the stored best alone.
+            let source_rib = source.and_then(|super::ReceiveSource { peer, .. }| {
                 let best = self.loc_rib.get_vpn(key)?;
                 if best.peer == peer
                     && only.map_or_else(
@@ -882,37 +881,33 @@ impl RibManager {
                 {
                     return None;
                 }
-                let best = self.ribs.get(&best.peer)?.get_vpn(&path(best.path_id))?;
-                Some((self.ribs.get(&peer)?, best))
+                self.ribs.get(&peer)
             });
-            let changed = if let Some((rib, best)) = untouched_best {
-                if touched.is_empty() {
-                    touched.extend(
-                        affected
-                            .iter()
-                            .inspect(|_| checkpoint())
-                            .map(|key| (key.nlri_key, key.path_id)),
-                    );
-                    touched.sort_unstable();
-                }
+            let changed = if let Some(rib) = source_rib {
                 // A withdraw-only UPDATE removed every path it changed:
                 // none of them is left to read.
-                let first = if source.is_some_and(|source| source.withdraw_only) {
-                    touched.len()
-                } else {
-                    touched.partition_point(|(touched_key, _)| touched_key < key)
-                };
-                // The stored best goes first: `min_by` keeps the first of
-                // equal candidates, so a tie leaves the selection alone.
-                let candidates = std::iter::once(best)
-                    .chain(
-                        touched[first..]
-                            .iter()
-                            .take_while(|(touched_key, _)| touched_key == key)
-                            .filter_map(|&(_, path_id)| rib.get_vpn(&path(path_id))),
-                    )
+                let changed_paths: &[(VpnRouteKey, u32)] =
+                    if source.is_some_and(|source| source.withdraw_only) {
+                        &[]
+                    } else {
+                        if touched.is_empty() {
+                            touched.extend(
+                                affected
+                                    .iter()
+                                    .inspect(|_| checkpoint())
+                                    .map(|key| (key.nlri_key, key.path_id)),
+                            );
+                            touched.sort_unstable();
+                        }
+                        let first = touched.partition_point(|(touched_key, _)| touched_key < key);
+                        &touched[first..]
+                    };
+                let challengers = changed_paths
+                    .iter()
+                    .take_while(|(touched_key, _)| touched_key == key)
+                    .filter_map(|&(_, path_id)| rib.get_vpn(&path(path_id)))
                     .inspect(|_| checkpoint());
-                self.loc_rib.recompute_vpn(*key, candidates)
+                self.loc_rib.challenge_vpn(*key, challengers)
             } else {
                 // Collected first: selecting straight from the nested
                 // iterator measured slower for a key with one stored path.
