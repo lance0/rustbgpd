@@ -567,3 +567,28 @@ async fn configured_owner_publication_serves_readiness_while_rib_acknowledgement
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     task.await.unwrap();
 }
+
+/// A settlement-owned Publish queues behind post-commit export work and the
+/// RIB cannot cancel it once dequeued, so a reply later than
+/// `RIB_REPLY_TIMEOUT` still publishes instead of reporting a lost
+/// acknowledgement, which fences the reload.
+#[tokio::test(start_paused = true)]
+async fn configured_owner_publish_waits_past_rib_reply_timeout() {
+    let (mut manager, mut rib_rx) = owner_manager();
+    manager.replace_current_config(static_config(65002));
+    let receipt = begin(&mut manager).await;
+    static_owner(&mut manager, 65002).unwrap();
+    let (result, ()) = tokio::join!(
+        manager.configured_owner_publication(PublicationOperation::Publish(receipt)),
+        async {
+            let RibUpdate::PublishDampeningOwners { reply, .. } = rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected owner publication")
+            };
+            tokio::time::sleep(crate::peer_manager::RIB_REPLY_TIMEOUT + Duration::from_millis(1))
+                .await;
+            let _ = reply.send(Ok(()));
+        }
+    );
+    assert_eq!(result, Ok(receipt));
+}

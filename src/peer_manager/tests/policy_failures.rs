@@ -56,13 +56,15 @@ async fn gshut_toggle_does_not_wait_when_rib_reply_wedges() {
     assert!(mgr.peers[&key(addr)].advertise_graceful_shutdown);
 }
 
+/// The single-peer inline export apply runs only inside an owned hot update,
+/// whose settlement owner bounds a RIB that never answers (LAN-286's wedge).
+/// A dropped reply fails the apply and keeps the export intent, so the
+/// content-equal retry revisits the RIB; that retry waits out a RIB slower
+/// than `RIB_REPLY_TIMEOUT` instead of failing it.
 #[tokio::test(start_paused = true)]
-async fn export_policy_apply_times_out_when_rib_reply_wedges() {
+async fn inline_export_policy_apply_retries_a_dropped_reply_and_waits_for_a_slow_rib() {
     use rustbgpd_transport::PeerCommand;
 
-    // LAN-286: same wedge class as the gshut refresh — the
-    // ReplacePeerExportPolicy reply await must be bounded so a wedged
-    // RIB cannot hang a SIGHUP reload / gRPC policy apply forever.
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let session_task = tokio::spawn(async move {
@@ -73,41 +75,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::QueryState { reply } => {
-                    let _ = reply.send(PeerSessionState {
-                        fsm_state: SessionState::Established,
-                        peer_ip: addr,
-                        peer_asn: None,
-                        prefix_count: 0,
-                        rejected_routes_retained: 0,
-                        policy_reject_counts: None,
-                        max_prefix: MaxPrefixState::default(),
-                        negotiated_hold_time: None,
-                        four_octet_as: None,
-                        remote_router_id: None,
-                        negotiated_session: None,
-                        local_role: None,
-                        remote_role: None,
-                        role_negotiated: false,
-                        peer_paths_limits: Vec::new(),
-                        effective_add_path_send_limits: Vec::new(),
-                        updates_received: 0,
-                        updates_sent: 0,
-                        notifications_received: 0,
-                        notifications_sent: 0,
-                        messages_received: 0,
-                        messages_sent: 0,
-                        otc_routes_blocked: 0,
-                        import_policy_routes_permitted: 0,
-                        import_policy_routes_denied: 0,
-                        flap_count: 0,
-                        uptime_secs: 0,
-                        last_error: String::new(),
-                        tcp_ao_info: None,
-                        tcp_ao_protected: false,
-                        slow_peer: false,
-                        reconnect_in_secs: 0,
-                        notification_idle_failures: 0,
-                    });
+                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
                 }
                 _ => {}
             }
@@ -120,15 +88,15 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
     let rib_attempts = Arc::new(AtomicU32::new(0));
     let rib_attempts_in_task = Arc::clone(&rib_attempts);
+    let (held_tx, mut held_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        let mut held = Vec::new();
         while let Some(update) = rib_rx.recv().await {
             if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
                 if rib_attempts_in_task.fetch_add(1, Ordering::SeqCst) == 0 {
-                    // First attempt wedges; the content-equal retry succeeds.
-                    held.push(reply);
+                    // First attempt loses its reply; the retry is slow.
+                    drop(reply);
                 } else {
-                    let _ = reply.send(Ok(()));
+                    let _ = held_tx.send(reply);
                 }
             }
         }
@@ -148,21 +116,70 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
     let err = mgr
         .update_runtime_policies(addr, None, Some(deny_policy_chain()))
         .await
-        .expect_err("wedged RIB reply must fail the export apply, not hang it");
-    assert!(
-        err.contains("did not reply within"),
-        "error must name the RIB reply timeout: {err}"
-    );
+        .expect_err("a dropped RIB reply must fail the export apply");
+    assert!(err.contains("dropped reply"), "{err}");
     assert!(
         mgr.peers.get(&key(addr)).unwrap().pending_export_apply,
-        "RIB reply timeout must retain export intent for a content-equal retry"
+        "a dropped RIB reply must retain export intent for a content-equal retry"
     );
 
-    mgr.update_runtime_policies(addr, None, Some(deny_policy_chain()))
-        .await
-        .expect("content-equal retry must revisit the RIB after the timeout");
+    let started = tokio::time::Instant::now();
+    let (retry, ()) = tokio::join!(
+        mgr.update_runtime_policies(addr, None, Some(deny_policy_chain())),
+        async {
+            tokio::time::sleep(crate::peer_manager::RIB_REPLY_TIMEOUT + Duration::from_millis(1))
+                .await;
+            let reply = held_rx.recv().await.expect("the retry reaches the RIB");
+            let _ = reply.send(Ok(()));
+        }
+    );
+    retry.expect("content-equal retry must revisit the RIB and wait for its answer");
+    assert!(started.elapsed() > crate::peer_manager::RIB_REPLY_TIMEOUT);
     assert_eq!(rib_attempts.load(Ordering::SeqCst), 2);
     assert!(!mgr.peers.get(&key(addr)).unwrap().pending_export_apply);
+}
+
+/// An owned hot update that changes a peer's export chain (as a peer-group
+/// hot edit does for each member) waits for the RIB's export replacement:
+/// the RIB cannot cancel it once dequeued, and a miss would report
+/// divergence and fence the owner.
+#[tokio::test(start_paused = true)]
+async fn owned_hot_export_chain_update_waits_past_rib_reply_timeout() {
+    use rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome;
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut mgr = test_peer_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    mgr.rib_tx = rib_tx;
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        acking_counted_policy_handle(addr, Arc::new(FakePeerCounters::default())),
+        false,
+    );
+    let mut updated = make_config(addr, 65002);
+    updated.export_policy = Some(deny_policy_chain());
+    let (outcome, ()) = tokio::join!(mgr.hot_update_peer_owned(updated), async {
+        let reply = loop {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx
+                .recv()
+                .await
+                .expect("the export replacement reaches the RIB")
+            {
+                break reply;
+            }
+        };
+        tokio::time::sleep(crate::peer_manager::RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        let _ = reply.send(Ok(()));
+    });
+    assert!(
+        matches!(outcome, OwnedHotUpdatePeerOutcome::Success),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        mgr.peers[&key(addr)].export_policy,
+        Some(deny_policy_chain())
+    );
 }
 
 /// Load-bearing error classification proof: removing the managed-peer check

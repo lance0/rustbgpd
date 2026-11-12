@@ -767,23 +767,18 @@ impl PeerManager {
     /// This proof rides the RIB manager's primary lane, so it waits behind the
     /// same backlog an export replacement does and is bounded the same way:
     /// `rib_budget` is `Some` for a step of an `O(peers)` walk, whose steps
-    /// all share one absolute admission-and-reply budget, and `None` for a
-    /// single inline qualification, which keeps [`super::RIB_REPLY_TIMEOUT`].
+    /// all share one absolute admission-and-reply budget, and `None` for the
+    /// single inline qualification of an owned hot update
+    /// ([`Self::update_runtime_policies_fatal`]), which waits for the RIB: its
+    /// settlement owner bounds it, and a miss there fences.
     pub(super) async fn query_peer_retained_stale(
         &mut self,
         peer: &PeerKey,
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
     ) -> Result<usize, PolicyApplyFailure> {
-        let allowance = if rib_budget.is_some() {
-            super::RIB_BATCH_REPLY_TIMEOUT
-        } else {
-            super::RIB_REPLY_TIMEOUT
-        };
-        let deadline = rib_budget.map_or_else(
-            || tokio::time::Instant::now() + allowance,
-            LazyRibBudget::deadline,
-        );
+        let allowance = super::RIB_BATCH_REPLY_TIMEOUT;
+        let deadline = rib_budget.map(LazyRibBudget::deadline);
         let rib_peer = self.rib_peer_of(peer);
         let failed = |detail: &str| PolicyApplyFailure {
             code: RuntimeConfigPolicyFailureCode::StateRibQueryFailed,
@@ -797,9 +792,10 @@ impl PeerManager {
                 "the RIB manager did not report retained stale routes within {allowance:?}"
             ))
         };
+        let expired = || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
         // An expired walk must not enqueue another command, even if the
         // channel is immediately writable (timeout polls its future first).
-        if tokio::time::Instant::now() >= deadline {
+        if expired() {
             return Err(timed_out());
         }
         let rib_tx = self.rib_tx.clone();
@@ -809,7 +805,7 @@ impl PeerManager {
                 .reserve()
                 .await
                 .map_err(|_| failed("the RIB manager is unavailable, so its retained stale routes cannot be confirmed"))?;
-            if tokio::time::Instant::now() >= deadline {
+            if expired() {
                 return Err(timed_out());
             }
             permit.send(RibUpdate::QueryPeerRetainedStale {
@@ -820,12 +816,15 @@ impl PeerManager {
                 .await
                 .map_err(|_| failed("the RIB manager dropped the retained-stale reply"))
         };
-        self.await_with_readiness(
-            tokio::time::timeout_at(deadline, round_trip),
-            operator_reads,
-        )
-        .await
-        .map_err(|_| timed_out())?
+        let bounded = async {
+            match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, round_trip)
+                    .await
+                    .map_err(|_| timed_out())?,
+                None => round_trip.await,
+            }
+        };
+        self.await_with_readiness(bounded, operator_reads).await
     }
 
     /// ADR-0112: qualify every target whose RFC 8212 import verdict would move,
@@ -960,8 +959,9 @@ impl PeerManager {
             RefreshFailureHandling::Fatal,
             None,
             None,
-            // A genuinely single-peer inline edit, not a walk step: keep the
-            // ordinary per-command RIB deadline.
+            // A single-peer inline edit, not a walk step. Every production
+            // caller is a settlement-owned hot update whose failure fences,
+            // so its RIB steps wait for the RIB instead of a fixed deadline.
             None,
             OperatorReadAdmission::Fenced {
                 reason: "inline hot updates also restore a rejected generation's session configuration",
@@ -2295,8 +2295,11 @@ impl PeerManager {
     ///
     /// `rib_budget` is `Some` when this command is one step of an
     /// `O(peers)` policy walk: every step of that walk shares the one absolute
-    /// deadline so the walk is bounded in total. `None` is a genuinely
-    /// single-peer inline operation and keeps [`super::RIB_REPLY_TIMEOUT`].
+    /// deadline so the walk is bounded in total. `None` is the single-peer
+    /// step of an owned hot update ([`Self::update_runtime_policies_fatal`]):
+    /// both halves wait for the RIB, bounded by the settlement owner, since
+    /// the dequeued replacement cannot be cancelled and a miss there fences.
+    /// Both halves run under `await_with_readiness` either way.
     pub(super) async fn replace_peer_export_policy_in_rib(
         &mut self,
         peer: &PeerKey,
@@ -2304,28 +2307,18 @@ impl PeerManager {
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
     ) -> Result<(), RibCommandError> {
-        let shared = rib_budget.is_some();
-        let deadline = rib_budget.map_or_else(
-            || tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT,
-            LazyRibBudget::deadline,
-        );
+        let deadline = rib_budget.map(LazyRibBudget::deadline);
         let rib_peer = self.rib_peer_of(peer);
         let timed_out = || {
-            RibCommandError::internal(if shared {
-                format!(
-                    "RIB manager did not reply within the {:?} shared policy-walk budget while updating export policy",
-                    super::RIB_BATCH_REPLY_TIMEOUT
-                )
-            } else {
-                format!(
-                    "RIB manager did not reply within {:?} while updating export policy",
-                    super::RIB_REPLY_TIMEOUT
-                )
-            })
+            RibCommandError::internal(format!(
+                "RIB manager did not reply within the {:?} shared policy-walk budget while updating export policy",
+                super::RIB_BATCH_REPLY_TIMEOUT
+            ))
         };
+        let expired = || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
         // Do not admit fresh mutations after an earlier walk step spent the
         // budget. An already-admitted command remains ordered before rollback.
-        if tokio::time::Instant::now() >= deadline {
+        if expired() {
             return Err(timed_out());
         }
         let rib_tx = self.rib_tx.clone();
@@ -2335,7 +2328,7 @@ impl PeerManager {
                 .reserve()
                 .await
                 .map_err(|_| RibCommandError::internal("RIB manager unavailable"))?;
-            if tokio::time::Instant::now() >= deadline {
+            if expired() {
                 return Err(timed_out());
             }
             permit.send(RibUpdate::ReplacePeerExportPolicy {
@@ -2347,12 +2340,15 @@ impl PeerManager {
                 .await
                 .map_err(|_| RibCommandError::internal("RIB manager dropped reply"))?
         };
-        self.await_with_readiness(
-            tokio::time::timeout_at(deadline, round_trip),
-            operator_reads,
-        )
-        .await
-        .map_err(|_| timed_out())?
+        let bounded = async {
+            match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, round_trip)
+                    .await
+                    .map_err(|_| timed_out())?,
+                None => round_trip.await,
+            }
+        };
+        self.await_with_readiness(bounded, operator_reads).await
     }
 
     /// Apply a live-impact transaction that may include static neighbors and
