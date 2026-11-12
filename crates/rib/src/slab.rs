@@ -137,6 +137,17 @@ impl<T> RouteSlab<T> {
         value
     }
 
+    /// Drop the value at `handle` in its slot and free the slot for reuse,
+    /// for a caller that discards the value. Returns whether it was occupied.
+    pub(crate) fn discard(&mut self, handle: u32) -> bool {
+        if self.slot(handle).is_none_or(Option::is_none) {
+            return false;
+        }
+        *self.slot_mut(handle) = None;
+        self.free.push(handle);
+        true
+    }
+
     /// Replace the value in an occupied slot.
     pub(crate) fn set(&mut self, handle: u32, value: T) {
         let slot = self.slot_mut(handle);
@@ -429,6 +440,25 @@ mod tests {
             slab.insert(value);
         }
         assert_eq!(growths, 4, "64 -> 128 -> 256 -> 512 -> 1024");
+    }
+
+    #[test]
+    fn discard_frees_the_slot_for_reuse() {
+        let mut slab: RouteSlab<String> = RouteSlab::default();
+        let a = slab.insert("a".to_string());
+        let b = slab.insert("b".to_string());
+        assert!(slab.discard(a));
+        assert!(!slab.discard(a), "double discard is a no-op");
+        assert!(!slab.discard(99), "an unallocated handle is a no-op");
+        assert_eq!(slab.get(a), None);
+        assert_eq!(slab.get(b).unwrap(), "b");
+        assert_eq!(slab.len(), 1);
+        assert_eq!(
+            slab.insert("c".to_string()),
+            a,
+            "the discarded slot is reused"
+        );
+        assert_eq!(slab.slot_count(), 2);
     }
 
     #[test]

@@ -586,26 +586,33 @@ impl<K: Eq + std::hash::Hash, R: RetainedRoute> PathSlab<K, R> {
         }
     }
 
-    /// Remove one path from the index and the slab, freeing its slot, with
-    /// checkpoints around the logarithmic path-index removal.
-    fn remove_with_checkpoint(
+    /// Remove one path from the index and drop it in its slab slot,
+    /// freeing the slot, with checkpoints around the logarithmic path-index
+    /// removal. Returns whether the path was stored.
+    fn discard_with_checkpoint(
         &mut self,
         key: &K,
         path_id: u32,
         checkpoint: &mut impl FnMut(),
-    ) -> Option<R> {
+    ) -> bool {
         #[cfg(test)]
         path_index_lookups::record();
-        let ids = self.index.get_mut(key)?;
+        let Some(ids) = self.index.get_mut(key) else {
+            return false;
+        };
         checkpoint();
-        let handle = ids.remove(path_id)?;
+        let Some(handle) = ids.remove(path_id) else {
+            return false;
+        };
         checkpoint();
         if ids.is_empty() {
             self.index.remove(key);
         }
-        let route = self.routes.remove(handle)?;
+        let Some(route) = self.routes.get(handle) else {
+            return false;
+        };
         self.counts.shift(route.retention(), None);
-        Some(route)
+        self.routes.discard(handle)
     }
 
     /// Every path stored for `key`, in path-ID order.
@@ -2455,8 +2462,7 @@ impl AdjRibIn {
             self.vpn_llgr_stale_local_tags.remove(key);
         }
         self.vpn_routes
-            .remove_with_checkpoint(&key.nlri_key, key.path_id, checkpoint)
-            .is_some()
+            .discard_with_checkpoint(&key.nlri_key, key.path_id, checkpoint)
     }
 
     /// Iterate the VPN routes stored for one RD+prefix identity across all
@@ -2825,8 +2831,7 @@ impl AdjRibIn {
             self.labeled_llgr_stale_local_tags.remove(key);
         }
         self.labeled_routes
-            .remove_with_checkpoint(&key.prefix, key.path_id, checkpoint)
-            .is_some()
+            .discard_with_checkpoint(&key.prefix, key.path_id, checkpoint)
     }
 
     /// Iterate the labeled routes stored for one prefix identity across all
