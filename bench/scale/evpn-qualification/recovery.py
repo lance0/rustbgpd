@@ -2,7 +2,8 @@
 """Controlled non-RTC actual-daemon recovery and two-policy regroup campaign."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers mo
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
 SAMPLE_PERIOD_US = 1_000_000 // Q.RECOVERY_BARS["sample_hz"]
+WIRE_WORKERS = 8
 ACTOR_SERIES = re.compile(r'(?P<name>bgp_rib_actor_slice_max_microseconds|bgp_rib_actor_work_duration_seconds_bucket)'
                           r'\{(?P<labels>[^}]*)\} (?P<value>\S+)')
 LABEL = re.compile(r'(\w+)="([^"]*)"')
@@ -572,43 +574,57 @@ def check_wire(leg, clients, routes):
     refreshes = [row["result"] for row in controls if row["command"] == "refresh"]
     Q.require(len(refreshes) == 2, "missing quiescent or paused refresh")
     report = {name: [] for name in PHASES}
-    for peer in range(clients):
-        receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5)
-        path = leg / "wire" / f"peer-{peer}.bgp"
-        cursor = 0
-        with path.open("rb") as stream:
-            for name in (*PHASES[:3], "refresh-start", *PHASES[3:]):
-                boundary = boundaries[name]
-                end = boundary["offsets"][peer]
-                Q.require(type(end) is int and cursor <= end <= path.stat().st_size, "invalid capture boundary")
-                data = stream.read(end - cursor)
-                cursor = end
-                communities = {1000, 2000} if name in ("regroup-b", "regroup-a") and peer >= 2 else {
-                    2000 if peer == 1 else 1000}
-                transition = name in ("regroup-b", "regroup-a") and peer >= 2
-                if transition:
-                    receiver.begin_policy(*((1000, 2000) if name == "regroup-b" else (2000, 1000)))
-                receiver.consume(data, communities)
-                Q.require(receiver.eors == boundary["eors"][peer], "driver EoR count differs from raw wire")
-                if name == "refresh-start":
-                    receiver.begin_replay()
-                    receiver.events.clear()
-                    continue
-                if name == "refresh":
-                    receiver.end_replay()
-                if name == "recovered":
-                    Q.accept(receiver.eors > refreshes[1]["eor_baseline"][peer],
-                             "recovery finished before receiver refresh EoR")
-                community = 2000 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1000
-                state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community)
-                if transition:
-                    receiver.end_policy()
-                ordered = receiver.ordered_digest()
-                report[name].append({"peer": peer, "state": state,
-                                     "ordered": ordered if name in PHASES[:3] else None,
-                                     "eors": receiver.eors})
-        require_validated_tail(cursor, boundaries["finished"]["offsets"][peer])
+    # Receivers are independent and a timed cell's captures take minutes to
+    # decode in one process. map() keeps peer order, so the report and the
+    # first failing peer's error are the sequential ones.
+    # ponytail: a fixed pool size; more workers finish sooner but raise the
+    # one-minute load average the next cell's quiet-host gate waits out.
+    with ProcessPoolExecutor(max_workers=min(WIRE_WORKERS, clients)) as pool:
+        for rows in pool.map(partial(check_peer_wire, leg, clients, routes, boundaries, refreshes), range(clients)):
+            for name, row in rows:
+                report[name].append(row)
     return report
+
+
+def check_peer_wire(leg, clients, routes, boundaries, refreshes, peer):
+    """One receiver's capture, phase by phase, as (phase, report row) pairs."""
+    rows = []
+    receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5)
+    path = leg / "wire" / f"peer-{peer}.bgp"
+    cursor = 0
+    with path.open("rb") as stream:
+        for name in (*PHASES[:3], "refresh-start", *PHASES[3:]):
+            boundary = boundaries[name]
+            end = boundary["offsets"][peer]
+            Q.require(type(end) is int and cursor <= end <= path.stat().st_size, "invalid capture boundary")
+            data = stream.read(end - cursor)
+            cursor = end
+            communities = {1000, 2000} if name in ("regroup-b", "regroup-a") and peer >= 2 else {
+                2000 if peer == 1 else 1000}
+            transition = name in ("regroup-b", "regroup-a") and peer >= 2
+            if transition:
+                receiver.begin_policy(*((1000, 2000) if name == "regroup-b" else (2000, 1000)))
+            receiver.consume(data, communities)
+            Q.require(receiver.eors == boundary["eors"][peer], "driver EoR count differs from raw wire")
+            if name == "refresh-start":
+                receiver.begin_replay()
+                receiver.events.clear()
+                continue
+            if name == "refresh":
+                receiver.end_replay()
+            if name == "recovered":
+                Q.accept(receiver.eors > refreshes[1]["eor_baseline"][peer],
+                         "recovery finished before receiver refresh EoR")
+            community = 2000 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1000
+            state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community)
+            if transition:
+                receiver.end_policy()
+            ordered = receiver.ordered_digest()
+            rows.append((name, {"peer": peer, "state": state,
+                                "ordered": ordered if name in PHASES[:3] else None,
+                                "eors": receiver.eors}))
+    require_validated_tail(cursor, boundaries["finished"]["offsets"][peer])
+    return rows
 
 
 def run_cell(output, manifest, arm, index, correctness):
