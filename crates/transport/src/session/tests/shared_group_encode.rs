@@ -1168,6 +1168,216 @@ async fn shared_group_elected_encoder_prunes_canceled_queued_reads() {
     }
 }
 
+/// A link check read during a group encode is judged on arrival. With its
+/// interface up it does nothing, so it takes no queue slot and the encode
+/// completes. With its interface down it closes the session, so the encode
+/// stops at the next slice and the run loop closes the connection.
+#[tokio::test]
+async fn shared_group_elected_encoder_judges_link_checks_on_arrival() {
+    use super::interface_down::{feed, healthy, iface, set};
+    use super::shared_group::{
+        PROGRESSIVE_SLICE_ROUTES, ProgressiveGroupEncode, SharedEncodeStops, StreamTerminal,
+    };
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for link_down in [false, true] {
+        let (mut member, commands, _frames) = shared_fairness_member();
+        let (links, link_state) = feed(healthy());
+        member.config.link_state = link_state;
+        let (client, _server) = connected_stream_pair().await;
+        member.test_install_stream(client);
+        let (bulk, _bulk_frames) = mpsc::channel(1 << 16);
+        member.writer_bulk_tx = Some(bulk);
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let routes = Arc::new(shared_fairness_routes());
+        assert!(routes.len() > 3 * PROGRESSIVE_SLICE_ROUTES);
+        let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 44, 0, 2), &routes);
+        let mut delivery = Box::pin(member.handle_outbound_route_update(update));
+        let mut cx = Context::from_waker(Waker::noop());
+        // The first slice is published; the encode yields before the next.
+        assert!(delivery.as_mut().poll(&mut cx).is_pending());
+        if link_down {
+            set(&links, iface(1, true, false, &["127.0.0.1"]));
+        }
+        commands.try_send(PeerCommand::CheckLinks).unwrap();
+        let stream = shared
+            .cell
+            .get()
+            .unwrap()
+            .downcast_ref::<ProgressiveGroupEncode>()
+            .unwrap();
+        if link_down {
+            assert!(
+                delivery.as_mut().poll(&mut cx).is_ready(),
+                "a link-down check stops the encode at the next slice"
+            );
+            assert_eq!(
+                stream.test_snapshot(),
+                (2 * PROGRESSIVE_SLICE_ROUTES, Some(StreamTerminal::Failed))
+            );
+        } else {
+            while delivery.as_mut().poll(&mut cx).is_pending() {}
+            assert_eq!(
+                stream.test_snapshot(),
+                (routes.len(), Some(StreamTerminal::Complete))
+            );
+        }
+        drop(delivery);
+        assert_eq!(
+            member.shared_encode_stops,
+            SharedEncodeStops {
+                close: u64::from(link_down),
+                queue_full: 0,
+            },
+            "link down {link_down}"
+        );
+        assert_eq!(
+            member.deferred_commands.len(),
+            usize::from(link_down),
+            "link down {link_down}: only a check with work to do takes a slot"
+        );
+        {
+            let actor = member.run();
+            tokio::pin!(actor);
+            let (reply, state) = oneshot::channel();
+            commands
+                .try_send(PeerCommand::QueryState { reply })
+                .unwrap();
+            tokio::select! {
+                state = state => { state.unwrap(); }
+                stopped = &mut actor => panic!("actor stopped: {stopped:?}"),
+            }
+        }
+        assert_eq!(
+            member.read_half.is_none(),
+            link_down,
+            "link down {link_down}: the run loop ran the check"
+        );
+    }
+}
+
+/// A link check whose only effect is purging routes retained from an
+/// earlier connection is held as a routine command: the encode completes,
+/// and the run loop then purges them. Later checks while one is held add
+/// nothing and take no slot. The held check reads the current snapshot at
+/// each slice, so a live link that goes down afterwards stops the encode.
+#[expect(
+    clippy::too_many_lines,
+    reason = "both variants share the retained connection, the encode polls and the run-loop purge"
+)]
+#[tokio::test]
+async fn shared_group_holds_a_retained_only_link_check_until_the_live_link_fails() {
+    use super::interface_down::{feed, healthy, iface, merge, set};
+    use super::shared_group::{
+        PROGRESSIVE_SLICE_ROUTES, ProgressiveGroupEncode, SharedEncodeStops, StreamTerminal,
+    };
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for live_fails_later in [false, true] {
+        let (mut member, commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+        member.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        member.config.route_server_client = true;
+        let (links, link_state) = feed(merge(healthy(), iface(7, true, true, &["127.0.0.3"])));
+        member.config.link_state = link_state;
+        let (client, _server) = connected_stream_pair().await;
+        member.test_install_stream(client);
+        let (bulk, _frames) = mpsc::channel(1 << 16);
+        member.writer_bulk_tx = Some(bulk);
+        member
+            .gr_retained_connection
+            .set(Some(crate::session::RetainedConnection {
+                connection: crate::session::ConnectionStamp {
+                    local: "127.0.0.3:40000".parse().unwrap(),
+                    remote: "127.0.0.1:179".parse().unwrap(),
+                    carrier: Some(7),
+                },
+                ebgp: true,
+                session_id: 17,
+            }));
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let routes = Arc::new(shared_fairness_routes());
+        assert!(routes.len() > 3 * PROGRESSIVE_SLICE_ROUTES);
+        let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 44, 0, 2), &routes);
+        let mut delivery = Box::pin(member.handle_outbound_route_update(update));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(delivery.as_mut().poll(&mut cx).is_pending());
+        set(
+            &links,
+            merge(healthy(), iface(7, true, false, &["127.0.0.3"])),
+        );
+        commands.try_send(PeerCommand::CheckLinks).unwrap();
+        commands.try_send(PeerCommand::CheckLinks).unwrap();
+        assert!(
+            delivery.as_mut().poll(&mut cx).is_pending(),
+            "a retained-only check does not stop the encode"
+        );
+        let stream = shared
+            .cell
+            .get()
+            .unwrap()
+            .downcast_ref::<ProgressiveGroupEncode>()
+            .unwrap();
+        if live_fails_later {
+            set(
+                &links,
+                merge(
+                    iface(1, true, false, &["127.0.0.1"]),
+                    iface(7, true, false, &["127.0.0.3"]),
+                ),
+            );
+            commands.try_send(PeerCommand::CheckLinks).unwrap();
+            assert!(
+                delivery.as_mut().poll(&mut cx).is_ready(),
+                "the held check now closes the session"
+            );
+            let (published, terminal) = stream.test_snapshot();
+            assert!(published < routes.len(), "stopped before the last slice");
+            assert_eq!(terminal, Some(StreamTerminal::Failed));
+        } else {
+            while delivery.as_mut().poll(&mut cx).is_pending() {}
+            assert_eq!(
+                stream.test_snapshot(),
+                (routes.len(), Some(StreamTerminal::Complete))
+            );
+        }
+        drop(delivery);
+        assert_eq!(
+            member.shared_encode_stops,
+            SharedEncodeStops {
+                close: u64::from(live_fails_later),
+                queue_full: 0,
+            },
+            "live fails later {live_fails_later}"
+        );
+        assert_eq!(
+            member.deferred_commands.len(),
+            1,
+            "live fails later {live_fails_later}: one check held, the rest coalesced"
+        );
+        while rib_rx.try_recv().is_ok() {}
+        {
+            let actor = member.run();
+            tokio::pin!(actor);
+            let (reply, state) = oneshot::channel();
+            commands
+                .try_send(PeerCommand::QueryState { reply })
+                .unwrap();
+            tokio::select! {
+                state = state => { state.unwrap(); }
+                stopped = &mut actor => panic!("actor stopped: {stopped:?}"),
+            }
+        }
+        assert!(
+            std::iter::from_fn(|| rib_rx.try_recv().ok())
+                .any(|update| matches!(update, RibUpdate::PeerDown { session_id: 17, .. })),
+            "live fails later {live_fails_later}: the retained routes are purged"
+        );
+        assert_eq!(member.read_half.is_none(), live_fails_later);
+    }
+}
+
 /// A yield must not let a later read pass the first deferred policy mutation.
 #[tokio::test]
 async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {

@@ -483,6 +483,10 @@ pub(crate) struct PeerSession {
     /// Armed whenever `bmp_stream_diverged` is set and the reset could
     /// not be emitted yet (BMP channel still full).
     bmp_repair_timer: Option<Pin<Box<Sleep>>>,
+    /// A Peer Down that found the BMP channel full, handed to a task that
+    /// awaits room so the close does not. The next Peer Up and the end of
+    /// the session task wait for it; dropping the session aborts it.
+    bmp_peer_down_handoff: Option<JoinHandle<()>>,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
     /// `None` when RPKI not configured or in tests.
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -1132,6 +1136,7 @@ struct AcceptedTransport {
 /// turn and the held messages with the RIB actor they were bound for.
 impl Drop for PeerSession {
     fn drop(&mut self) {
+        self.abandon_bmp_peer_down();
         if !std::thread::panicking() && tokio::runtime::Handle::try_current().is_ok() {
             self.hand_off_retirement();
             self.hand_off_rib_backlog();
@@ -2505,6 +2510,7 @@ impl PeerSession {
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
+            bmp_peer_down_handoff: None,
             validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
@@ -2732,10 +2738,10 @@ impl PeerSession {
     /// Reliable BMP emission for the per-peer lifecycle events
     /// (`PeerUp`, `PeerDown`). These are the collectors' state-reset
     /// signals — losing one leaves every collector permanently wrong
-    /// about the peer — so instead of the lossy `try_send` this awaits
-    /// channel space. Bounded: the `BmpManager` loop never blocks
-    /// (sync encode + per-collector `try_send`), so the wait is at most
-    /// one channel drain, and a dead manager surfaces as an immediate
+    /// about the peer — so instead of the lossy `try_send` they wait for
+    /// channel space. A `PeerDown` never makes the closing session wait
+    /// (see [`Self::hand_off_peer_down`]); a `PeerUp` waits for any
+    /// handed-off `PeerDown`, then for room. A dead manager surfaces as a
     /// send error (counted, session unaffected).
     ///
     /// A real `PeerDown` also supersedes any pending divergence repair:
@@ -2751,11 +2757,81 @@ impl PeerSession {
             self.metrics
                 .set_bmp_stream_diverged(&self.peer_label, false);
             self.bmp_repair_timer = None;
+            self.hand_off_peer_down(tx, event);
+            return;
         }
+        self.settle_bmp_peer_down().await;
         if tx.send(event).await.is_err() {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, "channel_closed");
             debug!(peer = %self.peer_label, "BMP event channel closed");
+        }
+    }
+
+    /// Queue a `PeerDown` without waiting: now when the channel has room,
+    /// otherwise from a task that awaits room, so a slow or stalled BMP
+    /// manager never delays the BGP close. RFC 7854 order holds: every
+    /// event this session emitted earlier is already in the channel, it
+    /// emits nothing more until its next `PeerUp`, and that `PeerUp` waits
+    /// for this task. The session task also waits for it before it ends
+    /// ([`Self::run`]), so a successor started after joining this session
+    /// cannot overtake it, and daemon shutdown delivers it before the BMP
+    /// manager stops.
+    fn hand_off_peer_down(&mut self, tx: mpsc::Sender<BmpEvent>, event: BmpEvent) {
+        let event = match tx.try_send(event) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_label, "channel_closed");
+                debug!(peer = %self.peer_label, "BMP event channel closed");
+                return;
+            }
+            Err(mpsc::error::TrySendError::Full(event)) => event,
+        };
+        debug!(
+            peer = %self.peer_label,
+            "BMP event channel full; Peer Down queued behind it without delaying the close"
+        );
+        let (metrics, peer) = (self.metrics.clone(), self.peer_label.clone());
+        self.bmp_peer_down_handoff = Some(tokio::spawn(async move {
+            if tx.send(event).await.is_err() {
+                metrics.record_bmp_source_drop(&peer, "channel_closed");
+                debug!(peer = %peer, "BMP event channel closed");
+            }
+        }));
+    }
+
+    /// Wait until a handed-off `PeerDown` is in the BMP channel. Cancel-safe:
+    /// the handle stays with the session until the send completes, so a
+    /// session dropped meanwhile abandons it (see the `Drop` impl).
+    async fn settle_bmp_peer_down(&mut self) {
+        if let Some(handoff) = self.bmp_peer_down_handoff.as_mut() {
+            let _ = handoff.await;
+            self.bmp_peer_down_handoff = None;
+        }
+    }
+
+    /// A session dropped while its `PeerDown` still waits for BMP room (its
+    /// task aborted, or the caller's shutdown budget ran out) abandons the
+    /// send: delivered later, it could follow a successor's `PeerUp` and
+    /// mark a live peer down. Counted as a full-channel drop.
+    fn abandon_bmp_peer_down(&mut self) {
+        // On a multi-thread runtime the task can be mid-poll on another
+        // worker while `is_finished()` reads false. `Sender::send` has no
+        // await between the permit and the push, so that poll still delivers
+        // the Peer Down, which is then counted and warned here too: an
+        // accepted overcount. Order holds: the push precedes any successor's
+        // Peer Up, which first needs a TCP and OPEN exchange.
+        if let Some(handoff) = self.bmp_peer_down_handoff.take()
+            && !handoff.is_finished()
+        {
+            handoff.abort();
+            self.metrics
+                .record_bmp_source_drop(&self.peer_label, "channel_full");
+            warn!(
+                peer = %self.peer_label,
+                "BMP Peer Down abandoned: the session ended while the BMP event channel stayed full"
+            );
         }
     }
 
@@ -3004,9 +3080,13 @@ impl PeerSession {
 
     /// Main event loop. Runs until Shutdown command or fatal error. The
     /// owning task drops the session next, which hands any outbound
-    /// inventory to the paced release (see the `Drop` impl).
+    /// inventory to the paced release (see the `Drop` impl). A `PeerDown`
+    /// handed off on a full BMP channel reaches the channel before this
+    /// returns, under the caller's join budget.
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
-        self.run_loop().await
+        let result = self.run_loop().await;
+        self.settle_bmp_peer_down().await;
+        result
     }
 
     #[expect(

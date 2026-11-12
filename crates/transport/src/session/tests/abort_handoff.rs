@@ -656,15 +656,14 @@ async fn end_of_an_earlier_epoch_ahead_of_a_held_peer_up_is_delivered() {
     assert_eq!(rib.loc_rib_count().await, 0);
 }
 
-/// The task is aborted inside its own teardown, before the session end is
-/// queued: the TCP has failed and the FSM is Idle, but the teardown is
-/// still waiting to hand its BMP Peer Down to a full BMP channel when a
-/// transport-safety abort (an unacknowledged TCP-AO reset) cancels it. The
-/// epoch is still open at that point, so the drop closes it.
-/// Mutation-red: a drop that only delivers held messages, with no
-/// `PeerDown` for the open epoch, leaves this session's route installed.
+/// A BMP channel that never drains does not hold the teardown: the TCP fails
+/// and the session end reaches the RIB without waiting for BMP room. A
+/// transport-safety abort (an unacknowledged TCP-AO reset) afterwards finds
+/// no open epoch and adds no second end.
+/// Mutation-red: a teardown that waits for BMP room before queueing its
+/// session end reaches the RIB only through the abort's drop.
 #[tokio::test(start_paused = true)]
-async fn abort_inside_the_teardown_before_the_session_end_is_queued() {
+async fn full_bmp_channel_does_not_hold_the_teardown() {
     let mut rib = GatedRib::spawn();
     let (mut s1, s1_commands, _s1_peer) = established(&rib, 1).await;
     receive(&mut s1, first());
@@ -672,7 +671,6 @@ async fn abort_inside_the_teardown_before_the_session_end_is_queued() {
     rib.release().await;
     assert_eq!(rib.loc_rib_count().await, 1);
 
-    // A BMP channel that never drains holds the teardown at its Peer Down.
     let (bmp_tx, _bmp_rx) = mpsc::channel(1);
     bmp_tx.try_send(s1.build_bmp_peer_up_event()).unwrap();
     s1.bmp_tx = Some(bmp_tx);
@@ -684,13 +682,12 @@ async fn abort_inside_the_teardown_before_the_session_end_is_queued() {
         }),
     );
     rib.release().await;
-    assert!(rib.ends.is_empty(), "the teardown has not reached the RIB");
+    assert_eq!(rib.ends, [("PeerDown", 1)], "the teardown reached the RIB");
+    assert_eq!(rib.loc_rib_count().await, 0);
 
     handle.abort_for_transport_safety();
     rib.release().await;
-
-    assert_eq!(rib.ends, [("PeerDown", 1)]);
-    assert_eq!(rib.loc_rib_count().await, 0);
+    assert_eq!(rib.ends, [("PeerDown", 1)], "no second end");
 }
 
 /// The aborted session's end is still behind the full relay when its

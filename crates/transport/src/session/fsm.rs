@@ -5,6 +5,7 @@ use super::{
     SessionNotification, SessionNotificationDirection, SessionState, cease_subcode, debug, info,
     mpsc, warn,
 };
+use crate::link::{LinkDown, LinkSnapshot};
 use rustbgpd_rib::update::ExactExportErrorCode;
 use rustbgpd_telemetry::reason_labels::ExactExportReason;
 
@@ -357,32 +358,14 @@ impl PeerSession {
     /// surviving connection alone. The session is not stop-requested, so the
     /// ordinary reconnect path brings it back.
     pub(super) async fn handle_check_links(&mut self) {
-        if !self.config.link_state.enabled() {
+        let Some(snapshot) = self.valid_link_snapshot() else {
             return;
-        }
-        let snapshot = self.config.link_state.current();
-        if !snapshot.valid {
-            return;
-        }
+        };
+        self.remember_link_carriers(&snapshot);
         self.purge_retained_if_link_down(&snapshot);
-        if self.read_half.is_none() {
-            return;
-        }
-        let Some(connection) = self.connection.as_mut() else {
+        let Some(down) = self.live_link_down(&snapshot) else {
             return;
         };
-        if let Some(carrier) = snapshot.carrier(connection.local, connection.remote) {
-            connection.carrier = Some(carrier);
-        }
-        let connection = *connection;
-        let Some(down) =
-            snapshot.connection_down(connection.local, connection.remote, connection.carrier)
-        else {
-            return;
-        };
-        if !self.peer_is_ebgp() {
-            return;
-        }
         warn!(
             peer = %self.peer_label,
             interface = %down.ifname,
@@ -396,6 +379,79 @@ impl PeerSession {
         // Only an Established teardown reaches `SessionDown`, which clears
         // the latch; a pre-Established close must not leak it forward.
         self.suppress_gr_retention = false;
+    }
+
+    /// What a `CheckLinks` read during owned work would do now, judged
+    /// without acting: `None` when nothing, else whether it closes the
+    /// session. It remembers the carriers it proves, as the handler does, so
+    /// dropping a check with nothing to do loses nothing. Link checks are
+    /// level-triggered: every later link change sends another.
+    pub(super) fn check_links_effect(&mut self) -> Option<bool> {
+        let snapshot = self.valid_link_snapshot()?;
+        self.remember_link_carriers(&snapshot);
+        if self.live_link_down(&snapshot).is_some() {
+            return Some(true);
+        }
+        self.retained_link_down(&snapshot).map(|_| false)
+    }
+
+    /// A held `CheckLinks` closes the session if it ran now.
+    pub(super) fn check_links_closes(&self) -> bool {
+        self.valid_link_snapshot()
+            .is_some_and(|snapshot| self.live_link_down(&snapshot).is_some())
+    }
+
+    /// The current link snapshot, when fast external failover is on and the
+    /// snapshot is valid. An invalid snapshot proves nothing.
+    fn valid_link_snapshot(&self) -> Option<Arc<LinkSnapshot>> {
+        if !self.config.link_state.enabled() {
+            return None;
+        }
+        let snapshot = self.config.link_state.current();
+        snapshot.valid.then_some(snapshot)
+    }
+
+    /// Remember each connection's carrier once a valid snapshot proves it,
+    /// so a later address or interface removal still maps to it.
+    fn remember_link_carriers(&mut self, snapshot: &LinkSnapshot) {
+        if let Some(mut retained) = self.gr_retained_connection.get().filter(|r| r.ebgp) {
+            if let Some(carrier) =
+                snapshot.carrier(retained.connection.local, retained.connection.remote)
+            {
+                retained.connection.carrier = Some(carrier);
+            }
+            self.gr_retained_connection.set(Some(retained));
+        }
+        if self.read_half.is_some()
+            && let Some(connection) = self.connection.as_mut()
+            && let Some(carrier) = snapshot.carrier(connection.local, connection.remote)
+        {
+            connection.carrier = Some(carrier);
+        }
+    }
+
+    /// The live connection's interface is down in `snapshot` and the peer is
+    /// eBGP, so the session closes. No side effects.
+    fn live_link_down(&self, snapshot: &LinkSnapshot) -> Option<LinkDown> {
+        self.read_half.as_ref()?;
+        let connection = self.connection.as_ref()?;
+        if !self.peer_is_ebgp() {
+            return None;
+        }
+        snapshot.connection_down(connection.local, connection.remote, connection.carrier)
+    }
+
+    /// The eBGP connection whose routes are retained under GR/LLGR, when its
+    /// interface is down in `snapshot`. No side effects.
+    fn retained_link_down(
+        &self,
+        snapshot: &LinkSnapshot,
+    ) -> Option<(super::RetainedConnection, LinkDown)> {
+        let retained = self.gr_retained_connection.get().filter(|r| r.ebgp)?;
+        let connection = retained.connection;
+        let down =
+            snapshot.connection_down(connection.local, connection.remote, connection.carrier)?;
+        Some((retained, down))
     }
 
     /// Close the connection from this side without a NOTIFICATION and give
@@ -445,25 +501,8 @@ impl PeerSession {
     /// An earlier TCP connection failed first and its routes are held under
     /// GR/LLGR: if that connection's interface is down now, purge them rather
     /// than wait for retention to expire.
-    fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
-        let Some(mut retained) = self.gr_retained_connection.get() else {
-            return;
-        };
-        if !retained.ebgp {
-            return;
-        }
-        // Remember the carrier once a valid snapshot proves it, as the live
-        // path does, so a later address or interface removal still maps here.
-        if let Some(carrier) =
-            snapshot.carrier(retained.connection.local, retained.connection.remote)
-        {
-            retained.connection.carrier = Some(carrier);
-        }
-        self.gr_retained_connection.set(Some(retained));
-        let connection = retained.connection;
-        let Some(down) =
-            snapshot.connection_down(connection.local, connection.remote, connection.carrier)
-        else {
+    fn purge_retained_if_link_down(&mut self, snapshot: &LinkSnapshot) {
+        let Some((retained, down)) = self.retained_link_down(snapshot) else {
             return;
         };
         warn!(

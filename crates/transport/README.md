@@ -32,6 +32,12 @@ commands) and run, in order, once the envelope finishes, so a queued mutation
 keeps its place before later reads. An encoding member stops publishing at the
 next slice when a queued command is a Stop, BFD-down or other session close,
 or when the queue fills; the group then falls back to per-member encoding.
+A fast-external-failover link check is judged when it arrives. With the
+session's interface up it does nothing and takes no queue slot. With the
+interface down it counts as a session close. When it would only purge routes
+retained from an earlier connection, it waits in the queue like a routine
+command. One held check covers later ones, and it reads the current link
+state, so it becomes a close if the session's own interface goes down.
 This does not impose a wall-clock bound on initial sorting, an individual
 encoding slice, or other session work.
 Abandoned read-only snapshots are discarded, including deferred diagnostics
@@ -98,7 +104,14 @@ before forwarding to the RIB — the FSM sees only payloadless events.
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients
 - **BMP hooks** — raw PDU capture and event emission for Peer Up,
-  Peer Down, and Route Monitoring
+  Peer Down, and Route Monitoring. A closing session never waits for BMP
+  queue room. A Peer Down that finds the queue full is sent once the queue
+  drains: after the session's earlier messages for the peer, and before its
+  next Peer Up. The session task ends only after the Peer Down is queued, so
+  a successor started after the old session is joined comes after it, and so
+  does daemon shutdown's BMP drain. If the session is aborted first, or its
+  shutdown budget runs out, the Peer Down is abandoned and counted in
+  `bmp_source_drops_total{reason="channel_full"}`
 - **Extended messages** (RFC 8654) — dynamic buffer sizing up to 65535 bytes
 - **Add-Path** (RFC 7911) — per-family path ID encode/decode
 - **Extended next hop** (RFC 8950) — IPv4 unicast and VPNv4 NLRI over

@@ -861,10 +861,9 @@ async fn bmp_repair_timer_retries_until_channel_drains() {
     ));
 }
 
-/// `PeerDown` is never lost to a full BMP channel: the session awaits
-/// channel space (bounded — the `BmpManager` loop always drains) rather
-/// than dropping the one signal that tells collectors to discard the
-/// peer's state.
+/// `PeerDown` is never lost to a full BMP channel while the session lives:
+/// it is delivered once the channel drains, rather than dropping the one
+/// signal that tells collectors to discard the peer's state.
 #[tokio::test]
 async fn bmp_peer_down_survives_full_channel() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
@@ -895,10 +894,281 @@ async fn bmp_peer_down_survives_full_channel() {
         false
     });
     session.execute_actions(vec![Action::SessionDown]).await;
+    session.settle_bmp_peer_down().await;
     drop(session);
     assert!(
         drain.await.unwrap(),
         "PeerDown must be delivered even when the channel was full"
+    );
+}
+
+/// A close from Established never waits on a full BMP channel: Stop and
+/// BFD-down finish while the channel stays full. Once it drains, the
+/// collector sees the peer's earlier Route Monitoring, then its Peer Down,
+/// then the next Peer Up.
+#[tokio::test(start_paused = true)]
+async fn established_close_does_not_wait_on_a_full_bmp_channel() {
+    for close in [PeerCommand::Stop { reason: None }, PeerCommand::BfdDown] {
+        let label = format!("{close:?}");
+        let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        while bmp_rx.try_recv().is_ok() {}
+        let tx = session.bmp_tx.clone().unwrap();
+        for index in 0..tx.max_capacity() {
+            session.emit_bmp_event(BmpEvent::RouteMonitoring {
+                peer_info: session.build_bmp_peer_info(),
+                update_pdu: Bytes::from(index.to_be_bytes().to_vec()),
+            });
+        }
+        assert_eq!(tx.capacity(), 0, "{label}: the channel is held full");
+        assert!(!session.bmp_stream_diverged, "{label}: nothing was dropped");
+
+        let closed = tokio::time::timeout(Duration::from_secs(1), session.handle_command(close))
+            .await
+            .unwrap_or_else(|_| panic!("{label}: the close waited on the BMP channel"));
+        assert_eq!(closed, ControlFlow::Continue(()), "{label}");
+        assert_ne!(session.fsm.state(), SessionState::Established, "{label}");
+
+        // The collector drains; the next Peer Up queues behind the Peer Down.
+        let peer_up = session.build_bmp_peer_up_event();
+        let expected = tx.max_capacity() + 2;
+        let collector = async {
+            let mut events = Vec::new();
+            while events.len() < expected {
+                events.push(bmp_rx.recv().await.unwrap());
+            }
+            events
+        };
+        let ((), events) = tokio::join!(session.emit_bmp_event_reliable(peer_up), collector);
+        for (index, event) in events[..tx.max_capacity()].iter().enumerate() {
+            match event {
+                BmpEvent::RouteMonitoring { update_pdu, .. } => {
+                    assert_eq!(update_pdu.as_ref(), index.to_be_bytes(), "{label}");
+                }
+                other => panic!("{label}: expected Route Monitoring {index}, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(events[tx.max_capacity()], BmpEvent::PeerDown { .. }),
+            "{label}: Peer Down follows the peer's Route Monitoring: {events:?}"
+        );
+        assert!(
+            matches!(events[tx.max_capacity() + 1], BmpEvent::PeerUp { .. }),
+            "{label}: the next Peer Up follows the Peer Down: {events:?}"
+        );
+        assert!(bmp_rx.try_recv().is_err(), "{label}");
+    }
+}
+
+/// A Peer Up emitted before the task holding a handed-off Peer Down has run
+/// still reaches the collector after that Peer Down.
+#[tokio::test]
+async fn a_peer_up_follows_a_handed_off_peer_down() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..tx.max_capacity() {
+        session.emit_bmp_event(BmpEvent::RouteMonitoring {
+            peer_info: session.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(&[0xde, 0xad]),
+        });
+    }
+    // No yield between the hand-off and the Peer Up, and the collector
+    // yields after each event so the Peer Up's send would hold the first
+    // free slot before the hand-off task first runs.
+    let peer_down = BmpEvent::PeerDown {
+        peer_info: session.build_bmp_peer_info(),
+        reason: PeerDownReason::RemoteNoNotification,
+    };
+    session.hand_off_peer_down(tx.clone(), peer_down);
+    assert!(
+        session.bmp_peer_down_handoff.is_some(),
+        "the channel was full"
+    );
+    let peer_up = session.build_bmp_peer_up_event();
+    let expected = tx.max_capacity() + 2;
+    let collector = async {
+        let mut events = Vec::new();
+        while events.len() < expected {
+            events.push(bmp_rx.recv().await.unwrap());
+            tokio::task::yield_now().await;
+        }
+        events
+    };
+    let ((), events) = tokio::join!(session.emit_bmp_event_reliable(peer_up), collector);
+    assert!(
+        matches!(events[tx.max_capacity()], BmpEvent::PeerDown { .. })
+            && matches!(events[tx.max_capacity() + 1], BmpEvent::PeerUp { .. }),
+        "Peer Down, then Peer Up: {:?}",
+        &events[tx.max_capacity()..]
+    );
+}
+
+/// A session that hands off its Peer Down on a full BMP channel ends its
+/// task only once that Peer Down is in the channel. The BMP manager's
+/// shutdown drain, which takes only what is already queued, finds it, and a
+/// successor session sharing the sender, started after the join, queues its
+/// Peer Up behind it.
+#[tokio::test(start_paused = true)]
+async fn the_session_task_ends_after_its_handed_off_peer_down() {
+    let (mut old, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    old.test_install_stream(client);
+    establish_test_session(&mut old, 65002).await;
+    while bmp_rx.try_recv().is_ok() {}
+    let tx = old.bmp_tx.clone().unwrap();
+    for _ in 0..tx.max_capacity() {
+        old.emit_bmp_event(BmpEvent::RouteMonitoring {
+            peer_info: old.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(&[0xde, 0xad]),
+        });
+    }
+    assert_eq!(
+        old.handle_command(PeerCommand::Stop { reason: None }).await,
+        ControlFlow::Continue(())
+    );
+    assert!(old.bmp_peer_down_handoff.is_some(), "the channel was full");
+    let (commands, receiver) = mpsc::channel(1);
+    old.commands = receiver;
+    commands.try_send(PeerCommand::Shutdown).unwrap();
+    // The collector starts draining only once the old task has nothing else
+    // to do (paused time), so the task cannot end on a Peer Down that some
+    // other wait happened to let through.
+    let mut events = Vec::new();
+    {
+        let run = old.run();
+        tokio::pin!(run);
+        let drain_later = tokio::time::sleep(Duration::from_secs(3600));
+        tokio::pin!(drain_later);
+        let mut draining = false;
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut run => {
+                    result.unwrap();
+                    break;
+                }
+                () = &mut drain_later, if !draining => draining = true,
+                Some(event) = bmp_rx.recv(), if draining => events.push(event),
+            }
+        }
+    }
+    drop(old);
+    // The manager's shutdown drain: what is queued now, without waiting.
+    while let Ok(event) = bmp_rx.try_recv() {
+        events.push(event);
+    }
+    let peer_down = events
+        .iter()
+        .position(|event| matches!(event, BmpEvent::PeerDown { .. }));
+    assert_eq!(
+        peer_down,
+        Some(tx.max_capacity()),
+        "Peer Down is queued, after the Route Monitoring, when the task ends: {events:?}"
+    );
+
+    let (mut successor, _successor_rib_rx, _successor_bmp_rx) =
+        make_test_session_with_rib_and_bmp(65001, 65002);
+    successor.bmp_tx = Some(tx);
+    successor.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let peer_up = successor.build_bmp_peer_up_event();
+    successor.emit_bmp_event_reliable(peer_up).await;
+    assert!(
+        matches!(bmp_rx.try_recv(), Ok(BmpEvent::PeerUp { .. })),
+        "the successor's Peer Up follows"
+    );
+}
+
+/// A session dropped while its Peer Down still waits for BMP room (an
+/// abort, or a spent shutdown budget) abandons it and counts the drop, so a
+/// late Peer Down can never follow a successor's Peer Up.
+#[tokio::test]
+async fn a_dropped_session_abandons_its_waiting_peer_down() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..tx.max_capacity() {
+        session.emit_bmp_event(BmpEvent::RouteMonitoring {
+            peer_info: session.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(&[0xde, 0xad]),
+        });
+    }
+    let peer_down = BmpEvent::PeerDown {
+        peer_info: session.build_bmp_peer_info(),
+        reason: PeerDownReason::RemoteNoNotification,
+    };
+    session.hand_off_peer_down(tx.clone(), peer_down);
+    let metrics = session.metrics.clone();
+    drop(session);
+    for _ in 0..tx.max_capacity() {
+        assert!(matches!(
+            bmp_rx.recv().await,
+            Some(BmpEvent::RouteMonitoring { .. })
+        ));
+        // A live hand-off task would take the freed slot here.
+        tokio::task::yield_now().await;
+    }
+    assert!(bmp_rx.try_recv().is_err(), "the Peer Down was abandoned");
+    let drops = counter_samples(&metrics, "bmp_source_drops_total");
+    assert!(
+        drops.iter().any(|(labels, value)| {
+            labels.get("reason").map(String::as_str) == Some("channel_full")
+                && (*value - 1.0).abs() < f64::EPSILON
+        }),
+        "{drops:?}"
+    );
+}
+
+/// A hand-off that already delivered its Peer Down is not abandoned when
+/// the session is dropped without settling: nothing is counted, and the
+/// collector sees exactly one Peer Down.
+#[tokio::test]
+async fn a_dropped_session_with_a_delivered_peer_down_abandons_nothing() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..tx.max_capacity() {
+        session.emit_bmp_event(BmpEvent::RouteMonitoring {
+            peer_info: session.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(&[0xde, 0xad]),
+        });
+    }
+    let peer_down = BmpEvent::PeerDown {
+        peer_info: session.build_bmp_peer_info(),
+        reason: PeerDownReason::RemoteNoNotification,
+    };
+    session.hand_off_peer_down(tx.clone(), peer_down);
+    let mut events = Vec::new();
+    while !session
+        .bmp_peer_down_handoff
+        .as_ref()
+        .is_some_and(tokio::task::JoinHandle::is_finished)
+    {
+        if let Ok(event) = bmp_rx.try_recv() {
+            events.push(event);
+        }
+        tokio::task::yield_now().await;
+    }
+    let metrics = session.metrics.clone();
+    drop(session);
+    while let Ok(event) = bmp_rx.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, BmpEvent::PeerDown { .. }))
+            .count(),
+        1
+    );
+    let drops = counter_samples(&metrics, "bmp_source_drops_total");
+    assert!(
+        !drops.iter().any(|(labels, value)| {
+            labels.get("reason").map(String::as_str) == Some("channel_full") && *value > 0.0
+        }),
+        "a delivered Peer Down is not counted as abandoned: {drops:?}"
     );
 }
 

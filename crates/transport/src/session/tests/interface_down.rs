@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 /// Interface `ifindex` with the given flags, holding each local address in
 /// 127.0.0.0/8 (so a loopback peer is "directly connected" through it).
-fn iface(ifindex: u32, admin_up: bool, lower_up: bool, locals: &[&str]) -> LinkSnapshot {
+pub(super) fn iface(ifindex: u32, admin_up: bool, lower_up: bool, locals: &[&str]) -> LinkSnapshot {
     LinkSnapshot {
         valid: true,
         links: BTreeMap::from([(
@@ -33,18 +33,18 @@ fn iface(ifindex: u32, admin_up: bool, lower_up: bool, locals: &[&str]) -> LinkS
     }
 }
 
-fn merge(a: LinkSnapshot, b: LinkSnapshot) -> LinkSnapshot {
+pub(super) fn merge(a: LinkSnapshot, b: LinkSnapshot) -> LinkSnapshot {
     let mut out = a;
     out.links.extend(b.links);
     out.addresses.extend(b.addresses);
     out
 }
 
-fn healthy() -> LinkSnapshot {
+pub(super) fn healthy() -> LinkSnapshot {
     iface(1, true, true, &["127.0.0.1"])
 }
 
-fn feed(initial: LinkSnapshot) -> (watch::Sender<Arc<LinkSnapshot>>, LinkStateFeed) {
+pub(super) fn feed(initial: LinkSnapshot) -> (watch::Sender<Arc<LinkSnapshot>>, LinkStateFeed) {
     let (tx, rx) = watch::channel(Arc::new(initial));
     (tx, LinkStateFeed::new(rx, true))
 }
@@ -99,7 +99,7 @@ async fn established_gr_session(
     (session, server, rib_rx, tx)
 }
 
-fn set(tx: &watch::Sender<Arc<LinkSnapshot>>, snapshot: LinkSnapshot) {
+pub(super) fn set(tx: &watch::Sender<Arc<LinkSnapshot>>, snapshot: LinkSnapshot) {
     tx.send_replace(Arc::new(snapshot));
 }
 
@@ -491,6 +491,36 @@ async fn a_retained_connection_learns_its_carrier_from_a_later_valid_snapshot() 
         matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })),
         "the learned carrier ties the removed address to the lost connection"
     );
+}
+
+/// A link check dropped during owned work, because its interface is up,
+/// still records the carrier it proved. The session started while the
+/// snapshot was invalid, so only that check ties it to interface 1. When
+/// the local address is later removed, the address is no longer in the
+/// snapshot, and only the remembered carrier ties the session to its
+/// interface.
+#[tokio::test]
+async fn a_link_check_dropped_during_owned_work_remembers_the_carrier() {
+    let mut invalid = healthy();
+    invalid.valid = false;
+    let (mut session, _server, _rib_rx, tx) = established_gr_session(invalid).await;
+    assert_eq!(session.connection.unwrap().carrier, None);
+
+    set(&tx, healthy());
+    session.handle_read_during_wait(PeerCommand::CheckLinks);
+    assert!(
+        session.deferred_commands.is_empty(),
+        "nothing to do: no slot"
+    );
+    assert_eq!(session.connection.unwrap().carrier, Some(1));
+
+    set(&tx, iface(1, true, true, &[]));
+    check(&mut session).await;
+    assert!(
+        session.read_half.is_none(),
+        "the remembered carrier ties the removed address to the session"
+    );
+    assert!(session.last_error.ends_with("local address removed"));
 }
 
 /// Retained routes of an iBGP session are never purged by this check.
