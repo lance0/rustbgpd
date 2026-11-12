@@ -1323,6 +1323,8 @@ class RecoveryTests(unittest.TestCase):
                 if received:
                     report = R.check_wire(root, 3, 10)
                     self.assertEqual(len(report["recovered"]), 3)
+                    # Receivers are checked in parallel; the report keeps peer order.
+                    self.assertTrue(all([row["peer"] for row in rows] == [0, 1, 2] for rows in report.values()))
                 else:
                     with self.assertRaisesRegex(Q.AcceptanceFailure, "before receiver refresh EoR"):
                         R.check_wire(root, 3, 10)
