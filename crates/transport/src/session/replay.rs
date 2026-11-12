@@ -136,6 +136,19 @@ impl PeerSession {
                     operation: "replay_outbound",
                     deadline: REPLAY_TIMEOUT,
                 }),
+                // A queued snapshot's caller leaving lets the reads behind it
+                // be served now rather than after admission.
+                () = std::future::poll_fn(|cx| {
+                    if self
+                        .deferred_commands
+                        .iter_mut()
+                        .any(|held| held.poll_read_canceled(cx))
+                    {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }) => self.serve_deferred_reads(),
                 command = self.commands.recv(), if commands_open => match command {
                     Some(command) => self.handle_read_during_wait(command),
                     None => commands_open = false,

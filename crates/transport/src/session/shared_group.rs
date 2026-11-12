@@ -91,7 +91,17 @@ pub(super) enum DeferredStop {
     QueueFull,
 }
 
-/// Why an elected encoder abandoned a shared encode for its commands.
+impl DeferredStop {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::QueueFull => "queue_full",
+        }
+    }
+}
+
+/// Why an elected encoder abandoned a shared encode for its commands. A test
+/// hook: production reports each stop on its `debug!` line with `reason`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SharedEncodeStops {
     /// A held command closes the session.
@@ -723,25 +733,32 @@ pub(super) fn encode_shared_evpn_slice(
 }
 
 impl PeerSession {
-    /// Only small operator snapshots may interleave an owned wait, and only
-    /// with nothing held ahead of them. Every other command joins the
-    /// deferred queue in arrival order. Abandoned snapshots are discarded.
+    /// Queue a command read during owned work, in arrival order, then serve
+    /// what may run ahead of the run loop.
     pub(super) fn handle_read_during_wait(&mut self, command: crate::PeerCommand) {
+        if !command.is_canceled_read() {
+            self.deferred_commands.push_back(command);
+        }
+        self.serve_deferred_reads();
+    }
+
+    /// Discard abandoned snapshots, then answer the leading small operator
+    /// snapshots in order. The first other command, a mutation included,
+    /// stops the run, so no read passes it.
+    pub(super) fn serve_deferred_reads(&mut self) {
         self.deferred_commands
             .retain(|held| !held.is_canceled_read());
-        if command.is_canceled_read() {
-            return;
-        }
-        if !self.deferred_commands.is_empty() {
-            self.deferred_commands.push_back(command);
-            return;
-        }
-        match command {
-            crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
-            crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
-                self.answer_import_policy_term_hits(reply);
+        while let Some(command) = self.deferred_commands.pop_front() {
+            match command {
+                crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
+                crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
+                    self.answer_import_policy_term_hits(reply);
+                }
+                command => {
+                    self.deferred_commands.push_front(command);
+                    break;
+                }
             }
-            command => self.deferred_commands.push_back(command),
         }
     }
 
@@ -763,9 +780,10 @@ impl PeerSession {
     }
 
     /// Read what the queue has room for at each checkpoint; the limit also
-    /// bounds work under a continuous read stream. Returns `false` when the
-    /// encode must stop so the run loop can act.
-    fn poll_shared_group_command(&mut self) -> bool {
+    /// bounds work under a continuous read stream. Returns why the encode
+    /// must stop so the run loop can act, if it must.
+    fn poll_shared_group_command(&mut self) -> Option<DeferredStop> {
+        self.serve_deferred_reads();
         for _ in 0..DEFERRED_COMMAND_LIMIT {
             if self.deferred_commands.len() >= DEFERRED_COMMAND_LIMIT {
                 break;
@@ -775,17 +793,12 @@ impl PeerSession {
             };
             self.handle_read_during_wait(command);
         }
-        match self.deferred_commands_stop() {
-            None => true,
-            Some(DeferredStop::Close) => {
-                self.shared_encode_stops.close += 1;
-                false
-            }
-            Some(DeferredStop::QueueFull) => {
-                self.shared_encode_stops.queue_full += 1;
-                false
-            }
+        let stop = self.deferred_commands_stop()?;
+        match stop {
+            DeferredStop::Close => self.shared_encode_stops.close += 1,
+            DeferredStop::QueueFull => self.shared_encode_stops.queue_full += 1,
         }
+        Some(stop)
     }
 
     /// Elect synchronously, then publish with cooperative slice boundaries.
@@ -881,10 +894,14 @@ impl PeerSession {
         let mut sent: u64 = 0;
         let mut idx = 0;
         while idx < order.len() {
-            if !self.poll_shared_group_command() {
+            if let Some(stop) = self.poll_shared_group_command() {
                 // The guard fails the stream: every member, this one
                 // included, falls back to its own encoding.
-                debug!(peer = %self.peer_label, "shared encode stopped for a session command");
+                debug!(
+                    peer = %self.peer_label,
+                    reason = stop.label(),
+                    "shared encode stopped for a session command"
+                );
                 return None;
             }
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());

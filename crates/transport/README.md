@@ -49,8 +49,9 @@ canceled.
 An inbound ORF ROUTE-REFRESH that finds the RIB mailbox full is held like peer
 input instead of waiting for capacity. One the mailbox takes at once waits at
 most 500 ms for the RIB's reply. When the outcome is unknown or a failure, an
-IMMEDIATE update is followed by a plain refresh request; a DEFER update never
-is (RFC 5291), so re-advertisement still waits for the peer's own refresh.
+update with an IMMEDIATE or unrecognised When-to-refresh is followed by a
+plain refresh request; a DEFER update never is (RFC 5291), so
+re-advertisement still waits for the peer's own refresh.
 
 The transport layer intercepts UPDATEs (parse, validate, apply policy)
 before forwarding to the RIB — the FSM sees only payloadless events.

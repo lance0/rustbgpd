@@ -376,6 +376,60 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
         );
         assert_eq!(rib_tx.capacity(), 0, "RIB pressure remains held");
 
+        // A queued diagnostic holds later snapshots in the FIFO; once its
+        // caller leaves, before or after it is queued, they are answered
+        // while the replay still waits.
+        for cancel_after_deferral in [false, true] {
+            let (reply, diagnostic) = oneshot::channel();
+            let mut diagnostic = Some(diagnostic);
+            if !cancel_after_deferral {
+                drop(diagnostic.take());
+            }
+            commands
+                .try_send(PeerCommand::ListRejectedRoutes { reply })
+                .unwrap();
+            let later = replay_read_pair(&commands);
+            tokio::pin!(later);
+            assert!(
+                poll_fn(|cx| Poll::Ready(later.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            if cancel_after_deferral {
+                assert!(
+                    poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                        .await
+                        .is_pending()
+                );
+                assert!(
+                    poll_fn(|cx| Poll::Ready(later.as_mut().poll(cx)))
+                        .await
+                        .is_pending(),
+                    "live diagnostic holds both later snapshots in the FIFO"
+                );
+                drop(diagnostic.take());
+            }
+            let result = tokio::select! {
+                result = &mut later => result,
+                stopped = &mut actor => panic!("actor stopped during held admission: {stopped:?}"),
+            };
+            assert!(
+                matches!(
+                    &result,
+                    (
+                        crate::StateQueryOutcome::State(_),
+                        crate::SessionQueryOutcome::Reply(Some(_))
+                    )
+                ),
+                "{wait:?}, cancel after deferral {cancel_after_deferral}: \
+                 snapshots behind a canceled diagnostic are answered: {result:?}"
+            );
+            assert!(matches!(
+                replay_response.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        }
+
         // A mutation queues and the replay keeps waiting; the close queued
         // behind it ends the wait at once rather than after the five-second
         // replay window, and both run in order.

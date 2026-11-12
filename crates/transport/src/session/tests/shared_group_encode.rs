@@ -1102,6 +1102,72 @@ async fn shared_group_elected_encoder_queues_routine_commands_and_stops_for_a_cl
     }
 }
 
+/// Snapshots whose callers left after they were queued free their queue
+/// slots: they never count toward a full queue, so the encode completes.
+#[tokio::test]
+async fn shared_group_elected_encoder_prunes_canceled_queued_reads() {
+    use super::shared_group::{
+        DEFERRED_COMMAND_LIMIT, ProgressiveGroupEncode, SharedEncodeStops, StreamTerminal,
+    };
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut member, commands, _frames) = shared_fairness_member();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let routes = Arc::new(shared_fairness_routes());
+    let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 44, 0, 2), &routes);
+    let mut delivery = Box::pin(member.handle_outbound_route_update(update));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(delivery.as_mut().poll(&mut cx).is_pending());
+    let mut abandoned = Vec::new();
+    for _ in 0..DEFERRED_COMMAND_LIMIT - 1 {
+        let (reply, response) = oneshot::channel();
+        abandoned.push(response);
+        commands
+            .try_send(PeerCommand::ListRejectedRoutes { reply })
+            .unwrap();
+    }
+    assert!(delivery.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(
+        commands.capacity(),
+        commands.max_capacity(),
+        "all seven queued"
+    );
+    drop(abandoned);
+    let mut live = Vec::new();
+    for _ in 0..2 {
+        let (reply, response) = oneshot::channel();
+        live.push(response);
+        commands
+            .try_send(PeerCommand::ListRejectedRoutes { reply })
+            .unwrap();
+    }
+    while delivery.as_mut().poll(&mut cx).is_pending() {}
+    drop(delivery);
+    let stream = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<ProgressiveGroupEncode>()
+        .unwrap();
+    assert_eq!(
+        stream.test_snapshot(),
+        (routes.len(), Some(StreamTerminal::Complete))
+    );
+    assert_eq!(member.shared_encode_stops, SharedEncodeStops::default());
+    assert_eq!(member.deferred_commands.len(), 2, "only live reads remain");
+    {
+        let actor = member.run();
+        tokio::pin!(actor);
+        for response in live {
+            tokio::select! {
+                reply = response => { reply.unwrap(); }
+                stopped = &mut actor => panic!("actor stopped: {stopped:?}"),
+            }
+        }
+    }
+}
+
 /// A yield must not let a later read pass the first deferred policy mutation.
 #[tokio::test]
 async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {

@@ -867,6 +867,19 @@ impl PeerCommand {
         }
     }
 
+    /// Ready once a queued snapshot's caller has gone. Commands outside the
+    /// snapshot allowlist remain owned until execution and never wake.
+    pub(crate) fn poll_read_canceled(&mut self, cx: &mut std::task::Context<'_>) -> bool {
+        match self {
+            Self::QueryState { reply } => reply.poll_closed(cx).is_ready(),
+            Self::QueryWarmCheckpointState { reply } => reply.poll_closed(cx).is_ready(),
+            Self::ExplainImportPolicy { reply, .. } => reply.poll_closed(cx).is_ready(),
+            Self::ListRejectedRoutes { reply } => reply.poll_closed(cx).is_ready(),
+            Self::QueryImportPolicyTermHits { reply } => reply.poll_closed(cx).is_ready(),
+            _ => false,
+        }
+    }
+
     /// Commands that tear the session down or reset it. Owned output work
     /// must not make them wait.
     pub(crate) fn closes_session(&self) -> bool {
