@@ -3312,10 +3312,11 @@ async fn paced_handoff_mid_walk_failure_restores_every_prior() {
     }
 }
 
-/// The batch and every paced command share one forward budget. A batch that
-/// takes 70 s leaves 50 s for the walk: a command answering 70 s later is
-/// past the budget, so the reload restores instead of issuing the next one.
-/// A fresh deadline per command would accept it.
+/// The cohort batch and every paced command share one budget of their own:
+/// the cohort walk alone exceeding it fails and restores. A batch that takes
+/// 70 s leaves 50 s for the walk: a command answering 70 s later is past the
+/// budget, so the reload restores instead of issuing the next one. A fresh
+/// deadline per command would accept it.
 #[tokio::test(start_paused = true)]
 async fn paced_handoff_walk_shares_the_batch_budget() {
     let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(46, 3);
@@ -3369,6 +3370,67 @@ async fn paced_handoff_walk_shares_the_batch_budget() {
                 .export_policy
                 .is_none()
         );
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// The cohort walk's budget is its own: the authoritative remainder anchors
+/// the transaction's forward budget at its first command, as before pacing.
+/// The cohort batch replies at 100 s and its paced command 10 s later; the
+/// remainder's one command replies 30 s after that, at 140 s, inside its own
+/// budget. One budget shared by the cohort walk and the remainder would
+/// expire at 120 s and roll the reload back.
+#[tokio::test(start_paused = true)]
+async fn paced_cohort_walk_does_not_spend_the_remainder_budget() {
+    let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(54, 4);
+    let next = deny_policy_chain();
+    let mut targets = paced_targets(&peers, &next);
+    // A distinct chain keeps the fourth peer out of the cohort.
+    targets[3].export_policy = Some(distinct_deny_policy_chain(1));
+    let apply = manager.apply_resolved_policy_snapshot(targets);
+    let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = recv_rib(&mut rib_rx).await else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(
+                rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+            ))
+            .unwrap();
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = recv_rib(&mut rib_rx).await
+        else {
+            panic!("expected batched authoritative RIB command");
+        };
+        let ids: Vec<_> = replacements
+            .iter()
+            .map(|replacement| replacement.peer)
+            .collect();
+        assert_eq!(ids.len(), 3, "the cohort is the three shared-chain peers");
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        reply.send(Ok(ids[2..].to_vec())).unwrap();
+        let (_, reply) = expect_paced(&mut rib_rx, &ids[2..], &next).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        reply.send(Ok(paced_reply(&[], 1, 1))).unwrap();
+        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = recv_rib(&mut rib_rx).await
+        else {
+            panic!("expected the remainder's per-peer command");
+        };
+        assert_eq!(peer.addr(), peers[3]);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        // A walk that already timed out dropped the reply; the result says so.
+        let _ = reply.send(Ok(()));
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+    result.expect("the remainder runs on its own budget and the reload commits");
+    assert!(
+        matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "no restore after the commit"
+    );
+    for peer in peers {
         manager.delete_peer(key(peer), false).await.unwrap();
     }
 }

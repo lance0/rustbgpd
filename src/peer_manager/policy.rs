@@ -2325,11 +2325,14 @@ impl PeerManager {
     /// paced RIB commands. Each command applies the members that fit the
     /// RIB's turn budget and returns the rest, so other RIB work runs between
     /// commands instead of waiting behind one turn that grows with members ×
-    /// rows. The batch and every command of that walk share the transaction's
-    /// one forward budget, never a fresh deadline per command. Any failure,
-    /// including that budget expiring mid-walk, returns `Err` and the caller
-    /// restores every captured prior; a peer that left the RIB (`NotFound`)
-    /// is skipped, as its reconnect installs the session's accepted chain.
+    /// rows. The batch and every command of that walk share one
+    /// `RIB_BATCH_REPLY_TIMEOUT` budget of their own, anchored when the batch
+    /// is sent and never renewed per command; the authoritative remainder
+    /// keeps the transaction's forward budget, anchored at its own first
+    /// command. Any failure, including that budget expiring mid-walk, returns
+    /// `Err` and the caller restores every captured prior; a peer that left
+    /// the RIB comes back skipped, as its reconnect installs the session's
+    /// accepted chain.
     /// The dedicated readiness lane is admitted throughout the send/reply,
     /// plus the operator-read lane on the same terms as the clean transition.
     async fn apply_export_policy_replacements_authoritatively(
@@ -2339,7 +2342,9 @@ impl PeerManager {
         context: &mut PolicySnapshotContext,
     ) -> Result<(), String> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
-        let deadline = context.forward.deadline();
+        // The cohort's own budget: the remainder walk anchors the forward
+        // budget at its first command, so it is not charged for this one.
+        let deadline = tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT;
         let rib_tx = self.rib_tx.clone();
         let batch = async {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -2376,7 +2381,7 @@ impl PeerManager {
     /// The paced walk over the members the authoritative batch handed back:
     /// each `ApplyPacedExportPolicies` command applies as many of the
     /// remaining members as fit the RIB's turn budget and returns the rest,
-    /// under the transaction's one forward deadline.
+    /// under the cohort batch's deadline.
     async fn walk_paced_export_policies(
         &mut self,
         peer_keys: &[PeerKey],
