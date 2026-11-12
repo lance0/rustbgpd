@@ -19287,3 +19287,17 @@ fn conditional_attachment_regroup_answers_readiness_while_retiring_the_group_tab
     });
     assert_group_retirement_answered("conditional attachment", routes, &answered);
 }
+
+/// The lone member's session going down retires its group table in the
+/// teardown turn: the retirement answers readiness at every row.
+#[test]
+fn peer_down_answers_readiness_while_retiring_the_last_members_group() {
+    let routes = 256;
+    let answered = lone_member_leaves_group(routes, |manager, peer| {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 0,
+        });
+    });
+    assert_group_retirement_answered("peer down", routes, &answered);
+}

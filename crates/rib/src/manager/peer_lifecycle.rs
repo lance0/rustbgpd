@@ -1911,8 +1911,14 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
-        self.release_group_admitted_keys(peer);
-        self.remove_update_group_member(peer);
+        // The last member's leave retires the group table; keep readiness
+        // served across it, as the Adj-RIB-Out retirement above does.
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.release_group_admitted_keys(peer);
+                manager.remove_update_group_member(peer);
+            });
+        });
         if keeps_label {
             self.metrics.remove_peer_update_group(&peer_label);
         }
