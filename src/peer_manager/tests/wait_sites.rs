@@ -88,6 +88,9 @@ type SessionScript = fn(&PeerCommand, usize) -> SessionAction;
 enum CohortReply {
     Committed,
     Authoritative,
+    /// The authoritative batch hands every member back; one paced command
+    /// then applies them all.
+    Paced,
     Rejected,
 }
 
@@ -269,6 +272,10 @@ fn is_authoritative_replace(update: &RibUpdate) -> bool {
         update,
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
     )
+}
+
+fn is_paced_apply(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::ApplyPacedExportPolicies { .. })
 }
 
 fn is_single_replace(update: &RibUpdate) -> bool {
@@ -521,6 +528,20 @@ const WAIT_SITES: &[WaitSite] = &[
             cohort_reply: CohortReply::Authoritative,
         },
         rib: RibHold::Reply(is_authoritative_replace),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "policy.rs::walk_paced_export_policies",
+        awaits: "RibUpdate::ApplyPacedExportPolicies send and reply (shared forward budget)",
+        drive: Drive::ForwardCohort {
+            import_delta: false,
+            cohort_reply: CohortReply::Paced,
+        },
+        rib: RibHold::Reply(is_paced_apply),
         session: answer_all,
         additional_entry: None,
         window: HELD_FOREVER,
@@ -1037,14 +1058,35 @@ fn answer_rib(
         RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
             let _ = reply.send(match cohort_reply {
                 CohortReply::Committed => Ok(ExportPolicyCohortOutcome::Committed),
-                CohortReply::Authoritative => {
+                CohortReply::Authoritative | CohortReply::Paced => {
                     Ok(ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply)
                 }
                 CohortReply::Rejected => Err("test: cohort rejected".to_string()),
             });
         }
-        RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
-            let _ = reply.send(Ok(Vec::new()));
+        RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } => {
+            let _ = reply.send(Ok(if matches!(cohort_reply, CohortReply::Paced) {
+                replacements
+                    .iter()
+                    .map(|replacement| replacement.peer)
+                    .collect()
+            } else {
+                Vec::new()
+            }));
+        }
+        RibUpdate::ApplyPacedExportPolicies {
+            replacements,
+            reply,
+            ..
+        } => {
+            let _ = reply.send(Ok(rustbgpd_rib::PacedApplyOutcome {
+                pending: Vec::new(),
+                applied: replacements.len(),
+                cost: rustbgpd_rib::PacedMemberCost::default(),
+            }));
         }
         RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }

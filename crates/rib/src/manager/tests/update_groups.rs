@@ -18883,8 +18883,8 @@ fn mixed_family_fleet(
     }
 }
 
-/// The peer manager's reload: the authoritative batch, then one per-peer
-/// replacement for every member it hands back. Returns the deferred members.
+/// The peer manager's reload: the authoritative batch, then the paced walk
+/// over the members it hands back. Returns the deferred members.
 fn apply_paced_batch(
     manager: &mut RibManager,
     members: &[PeerId],
@@ -18904,14 +18904,18 @@ fn apply_paced_batch(
             .deferred_members,
         deferred.len()
     );
-    for &peer in &deferred {
+    let (mut pending, mut cost) = (deferred.clone(), None);
+    while !pending.is_empty() {
         let (reply, mut response) = oneshot::channel();
-        manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
-            peer,
-            export_policy: Some(policy.clone()),
+        manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+            replacements: batch_replacements(&pending, policy),
+            cost,
             reply,
         });
-        response.try_recv().unwrap().unwrap();
+        let outcome = response.try_recv().unwrap().unwrap();
+        assert!(outcome.applied >= 1);
+        pending = outcome.pending;
+        cost = Some(outcome.cost);
     }
     deferred
 }
@@ -19096,6 +19100,7 @@ fn assert_batched_cohort_withdraws_private_rows(private: (Afi, Safi)) {
     // The unicast-only member keeps the shared path.
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 1);
+    // EVPN senders are applied by paced commands, not the fallback.
     assert_eq!(
         stats.batched_authoritative_fallback_members,
         if evpn { 0 } else { MIXED_MEMBERS }
@@ -19158,6 +19163,7 @@ fn batched_authoritative_cohort_announces_private_evpn_permitted_by_new_chain() 
     // The unicast-only member keeps the shared path.
     let stats = fleet.manager.policy_transition_stats;
     assert_eq!(stats.batched_authoritative_shared_members, 1);
+    // The mixed members are applied by paced commands, not the fallback.
     assert_eq!(stats.batched_authoritative_fallback_members, 0);
 }
 

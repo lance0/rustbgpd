@@ -474,7 +474,7 @@ impl DeferredRibUpdates {
 
 /// Hard deadline for the batched authoritative export-policy apply
 /// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`) together with
-/// the per-peer commands that follow it for members the batch deferred,
+/// the paced commands that follow it for members the batch deferred,
 /// and for the other `O(peers)` RIB walks of one policy transaction. One
 /// command carries the whole fallback cohort, so unlike the inline replies
 /// above it legitimately performs a destination-table build plus a

@@ -2993,22 +2993,46 @@ async fn defer_from_batch(
     ids
 }
 
-async fn expect_step(
+/// The next paced command: its members (in order) and chains, and the cost
+/// estimate it carries.
+async fn expect_paced(
     rib_rx: &mut mpsc::Receiver<RibUpdate>,
-    expected: PeerId,
+    expected: &[PeerId],
     next: &PolicyChain,
-) -> oneshot::Sender<Result<(), rustbgpd_rib::RibCommandError>> {
-    let RibUpdate::ReplacePeerExportPolicy {
-        peer,
-        export_policy,
+) -> (
+    Option<rustbgpd_rib::PacedMemberCost>,
+    oneshot::Sender<Result<rustbgpd_rib::PacedApplyOutcome, rustbgpd_rib::RibCommandError>>,
+) {
+    let RibUpdate::ApplyPacedExportPolicies {
+        replacements,
+        cost,
         reply,
     } = recv_rib(rib_rx).await
     else {
-        panic!("expected one per-peer RIB command for a deferred member");
+        panic!("expected one paced RIB command for the remaining members");
     };
-    assert_eq!(peer, expected, "the walk follows the batch's caller order");
-    assert_eq!(export_policy.as_ref(), Some(next));
-    reply
+    assert_eq!(
+        replacements.iter().map(|r| r.peer).collect::<Vec<_>>(),
+        expected,
+        "the walk sends the remaining members in caller order"
+    );
+    assert!(
+        replacements
+            .iter()
+            .all(|r| r.export_policy.as_ref() == Some(next))
+    );
+    (cost, reply)
+}
+
+fn paced_reply(pending: &[PeerId], applied: usize, millis: u64) -> rustbgpd_rib::PacedApplyOutcome {
+    rustbgpd_rib::PacedApplyOutcome {
+        pending: pending.to_vec(),
+        applied,
+        cost: rustbgpd_rib::PacedMemberCost {
+            recompute: Duration::from_millis(millis),
+            pass_share: Duration::from_millis(millis),
+        },
+    }
 }
 
 async fn answer_restore(rib_rx: &mut mpsc::Receiver<RibUpdate>, peers: &[IpAddr]) {
@@ -3049,23 +3073,26 @@ async fn answer_restore(rib_rx: &mut mpsc::Receiver<RibUpdate>, peers: &[IpAddr]
 /// EVPN members back: each gets one per-peer command, in caller order; one
 /// that left the RIB (`NotFound`) is skipped, and the reload commits.
 #[tokio::test]
-async fn paced_handoff_applies_each_deferred_member_once_and_skips_a_departed_one() {
+async fn paced_handoff_walks_the_deferred_list_until_the_rib_returns_none() {
     let (mut manager, mut rib_rx, peers, installs) = paced_handoff_fixture(44);
     let next = deny_policy_chain();
     let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
     let drive_rib = async {
+        // The batch applied member 0 inline and handed 1 and 2 back.
         let ids = defer_from_batch(&mut rib_rx, &[1, 2]).await;
-        expect_step(&mut rib_rx, ids[1], &next)
-            .await
-            .send(Err(rustbgpd_rib::RibCommandError::not_found("peer left")))
-            .unwrap();
-        expect_step(&mut rib_rx, ids[2], &next)
-            .await
-            .send(Ok(()))
-            .unwrap();
+        let (cost, reply) = expect_paced(&mut rib_rx, &ids[1..], &next).await;
+        assert_eq!(cost, None, "the first command has no estimate");
+        reply.send(Ok(paced_reply(&ids[2..], 1, 40))).unwrap();
+        // The next command carries the remaining member and the estimate.
+        let (cost, reply) = expect_paced(&mut rib_rx, &ids[2..], &next).await;
+        assert_eq!(
+            cost.map(|cost| cost.pass_share),
+            Some(Duration::from_millis(40))
+        );
+        reply.send(Ok(paced_reply(&[], 1, 40))).unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
-    result.expect("a paced handoff whose departed member is skipped commits");
+    result.expect("a paced walk that the RIB finishes commits");
     assert!(
         matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
         "no restore and no repeated command after the walk"
@@ -3080,8 +3107,41 @@ async fn paced_handoff_applies_each_deferred_member_once_and_skips_a_departed_on
     }
 }
 
-/// A RIB error mid-walk fails the reload only after every captured prior is
-/// restored: the inline member, the one already walked and the one not yet.
+/// A reply that would loop or reorder the walk (nothing applied, or the
+/// rest out of caller order) fails it, and every prior is restored.
+#[tokio::test]
+async fn paced_handoff_refuses_a_reply_that_does_not_advance_the_walk() {
+    for stuck in [true, false] {
+        let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(47);
+        let next = deny_policy_chain();
+        let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
+        let drive_rib = async {
+            let ids = defer_from_batch(&mut rib_rx, &[0, 1, 2]).await;
+            let (_, reply) = expect_paced(&mut rib_rx, &ids, &next).await;
+            let pending = if stuck {
+                ids.clone()
+            } else {
+                vec![ids[2], ids[1]]
+            };
+            reply.send(Ok(paced_reply(&pending, 0, 1))).unwrap();
+            answer_restore(&mut rib_rx, &peers).await;
+        };
+        let (result, ()) = tokio::join!(apply, drive_rib);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("does not continue the walk")
+                    && error.contains("already-applied peers restored")),
+            "stuck={stuck}: {result:?}"
+        );
+        for peer in peers {
+            manager.delete_peer(key(peer), false).await.unwrap();
+        }
+    }
+}
+
+/// A RIB error after a partial list fails the reload only after every
+/// captured prior is restored: those already applied and those not yet.
 #[tokio::test]
 async fn paced_handoff_mid_walk_failure_restores_every_prior() {
     let (mut manager, mut rib_rx, peers, installs) = paced_handoff_fixture(45);
@@ -3089,12 +3149,12 @@ async fn paced_handoff_mid_walk_failure_restores_every_prior() {
     let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
     let drive_rib = async {
         let ids = defer_from_batch(&mut rib_rx, &[0, 1, 2]).await;
-        expect_step(&mut rib_rx, ids[0], &next)
-            .await
-            .send(Ok(()))
-            .unwrap();
-        expect_step(&mut rib_rx, ids[1], &next)
-            .await
+        // The first command applies one member; the second fails partway
+        // through the list.
+        let (_, reply) = expect_paced(&mut rib_rx, &ids, &next).await;
+        reply.send(Ok(paced_reply(&ids[1..], 1, 40))).unwrap();
+        let (_, reply) = expect_paced(&mut rib_rx, &ids[1..], &next).await;
+        reply
             .send(Err(rustbgpd_rib::RibCommandError::internal(
                 "synthetic step failure",
             )))
@@ -3118,10 +3178,10 @@ async fn paced_handoff_mid_walk_failure_restores_every_prior() {
     }
 }
 
-/// The batch and every walk step share one forward budget. A batch that
-/// takes 70 s leaves 50 s for the walk: a step answering 70 s later is past
-/// the budget, so the reload restores instead of issuing the next step. A
-/// fresh deadline per step would accept it.
+/// The batch and every paced command share one forward budget. A batch that
+/// takes 70 s leaves 50 s for the walk: a command answering 70 s later is
+/// past the budget, so the reload restores instead of issuing the next one.
+/// A fresh deadline per command would accept it.
 #[tokio::test(start_paused = true)]
 async fn paced_handoff_walk_shares_the_batch_budget() {
     let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(46);
@@ -3150,11 +3210,11 @@ async fn paced_handoff_walk_shares_the_batch_budget() {
             .map(|replacement| replacement.peer)
             .collect();
         reply.send(Ok(ids.clone())).unwrap();
-        let late = expect_step(&mut rib_rx, ids[0], &next).await;
+        let (_, late) = expect_paced(&mut rib_rx, &ids, &next).await;
         tokio::time::sleep(Duration::from_secs(70)).await;
         assert!(
-            late.send(Ok(())).is_err(),
-            "the step's wait ended at the shared deadline, 50 s after it was sent"
+            late.send(Ok(paced_reply(&ids[1..], 1, 1))).is_err(),
+            "the command's wait ended at the shared deadline, 50 s after it was sent"
         );
         answer_restore(&mut rib_rx, &peers).await;
     };

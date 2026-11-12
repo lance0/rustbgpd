@@ -470,6 +470,27 @@ impl std::fmt::Display for PolicyRollbackFailure {
     }
 }
 
+/// Positions in `sent` of a paced reply's remaining members, or `None` when
+/// the reply would loop or reorder the walk. The RIB applies at least one
+/// member and returns the rest in caller order; a peer that left the RIB is
+/// skipped, not returned.
+fn paced_remaining(sent: &[PeerId], pending: &[PeerId]) -> Option<Vec<usize>> {
+    let position: std::collections::HashMap<_, _> = sent
+        .iter()
+        .enumerate()
+        .map(|(position, peer)| (*peer, position))
+        .collect();
+    pending
+        .iter()
+        .map(|peer| position.get(peer).copied())
+        .collect::<Option<Vec<usize>>>()
+        .filter(|positions| {
+            positions.len() < sent.len()
+                && positions.first().is_none_or(|first| *first > 0)
+                && positions.windows(2).all(|pair| pair[0] < pair[1])
+        })
+}
+
 fn metric_count(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -2251,11 +2272,12 @@ impl PeerManager {
     /// installs the desired policy), matching the prior per-peer loop.
     ///
     /// Members carrying EVPN outbound state come back unapplied: each one's
-    /// move resyncs its whole EVPN table, so they are applied here one per
-    /// ordinary per-peer RIB command, and other RIB work runs between them
-    /// instead of waiting behind one turn that grows with members × rows.
-    /// The batch and every step of that walk share the transaction's one
-    /// forward budget, never a fresh deadline per step. Any failure,
+    /// move resyncs its whole EVPN table, so they are applied here through
+    /// paced RIB commands. Each command applies the members that fit the
+    /// RIB's turn budget and returns the rest, so other RIB work runs between
+    /// commands instead of waiting behind one turn that grows with members ×
+    /// rows. The batch and every command of that walk share the transaction's
+    /// one forward budget, never a fresh deadline per command. Any failure,
     /// including that budget expiring mid-walk, returns `Err` and the caller
     /// restores every captured prior; a peer that left the RIB (`NotFound`)
     /// is skipped, as its reconnect installs the session's accepted chain.
@@ -2298,28 +2320,116 @@ impl PeerManager {
                 super::RIB_BATCH_REPLY_TIMEOUT
             )
         })??;
+        self.walk_paced_export_policies(peer_keys, replacements, &deferred, deadline, context)
+            .await
+    }
+
+    /// The paced walk over the members the authoritative batch handed back:
+    /// each `ApplyPacedExportPolicies` command applies as many of the
+    /// remaining members as fit the RIB's turn budget and returns the rest,
+    /// under the transaction's one forward deadline.
+    async fn walk_paced_export_policies(
+        &mut self,
+        peer_keys: &[PeerKey],
+        replacements: &[PeerExportPolicyReplacement],
+        deferred: &[PeerId],
+        deadline: tokio::time::Instant,
+        context: &mut PolicySnapshotContext,
+    ) -> Result<(), String> {
         let index_of: std::collections::HashMap<_, _> = replacements
             .iter()
             .enumerate()
             .map(|(index, replacement)| (replacement.peer, index))
             .collect();
-        for peer in deferred {
-            let index = *index_of
-                .get(&peer)
-                .ok_or_else(|| format!("RIB deferred peer {peer} outside the batch"))?;
-            match self
-                .replace_peer_export_policy_in_rib(
-                    &peer_keys[index],
-                    replacements[index].export_policy.clone(),
-                    Some(&mut context.forward),
+        let mut pending = deferred
+            .iter()
+            .map(|peer| {
+                index_of
+                    .get(peer)
+                    .copied()
+                    .ok_or_else(|| format!("RIB deferred peer {peer} outside the batch"))
+            })
+            .collect::<Result<Vec<usize>, String>>()?;
+        // The paced walk: each command applies as many of the remaining
+        // members as fit the RIB's turn budget and returns the rest.
+        let (mut cost, mut commands, mut widest) = (None, 0_usize, 0_usize);
+        while !pending.is_empty() {
+            // Expiry never admits another command; an admitted one stays
+            // ahead of its rollback in FIFO order.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "RIB manager did not reply within the {:?} shared policy-walk budget while applying paced export policies",
+                    super::RIB_BATCH_REPLY_TIMEOUT
+                ));
+            }
+            // A peer that re-registered since the batch gets its current RIB
+            // identity, as the per-peer replacement resolves it.
+            let sent: Vec<(usize, PeerExportPolicyReplacement)> = pending
+                .iter()
+                .map(|&index| {
+                    (
+                        index,
+                        PeerExportPolicyReplacement {
+                            peer: self.rib_peer_of(&peer_keys[index]),
+                            export_policy: replacements[index].export_policy.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let rib_tx = self.rib_tx.clone();
+            let command = sent
+                .iter()
+                .map(|(_, replacement)| replacement.clone())
+                .collect();
+            let step = async {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                rib_tx
+                    .send(RibUpdate::ApplyPacedExportPolicies {
+                        replacements: command,
+                        cost,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .map_err(|_| "RIB manager unavailable".to_string())?;
+                match reply_rx.await {
+                    Err(_) => Err("RIB manager dropped paced export-policy reply".to_string()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Ok(Ok(outcome)) => Ok(outcome),
+                }
+            };
+            let outcome = self
+                .await_with_readiness(
+                    tokio::time::timeout_at(deadline, step),
                     context.operator_reads,
                 )
                 .await
-            {
-                Ok(()) | Err(RibCommandError::NotFound(_)) => {}
-                Err(error) => return Err(format!("{}: {error}", peer_keys[index])),
-            }
+                .map_err(|_| {
+                    format!(
+                        "RIB manager did not reply within the {:?} shared policy-walk budget while applying paced export policies",
+                        super::RIB_BATCH_REPLY_TIMEOUT
+                    )
+                })??;
+            commands += 1;
+            widest = widest.max(outcome.applied);
+            cost = Some(outcome.cost);
+            let sent_peers: Vec<PeerId> = sent.iter().map(|(_, r)| r.peer).collect();
+            let positions = paced_remaining(&sent_peers, &outcome.pending).ok_or_else(|| {
+                "RIB paced export-policy reply does not continue the walk in caller order"
+                    .to_string()
+            })?;
+            pending = positions
+                .into_iter()
+                .map(|position| sent[position].0)
+                .collect();
             self.drain_operator_queries(context.operator_reads).await;
+        }
+        if commands > 0 {
+            info!(
+                commands,
+                members = deferred.len(),
+                widest_command = widest,
+                "paced export-policy walk applied"
+            );
         }
         Ok(())
     }

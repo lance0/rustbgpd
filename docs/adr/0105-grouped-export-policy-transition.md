@@ -142,19 +142,29 @@ residual EVPN senders unapplied. The negotiated family decides, not current
 rows, because an old chain that denied every EVPN route leaves no rows while
 the new one may announce the whole table; EVPN group ownership requires the
 family too. Their installed chain instance is put back and the reply names
-them in caller order. PeerManager applies each through the
-ordinary per-peer replacement, so other RIB work runs between them. The batch
-and every such step share the transaction's forward RIB budget; it is never
-renewed per step. Each step is its own commit point: between steps an `rbgp`
-read or a route chunk sees applied members on the new chain and the rest on the
-old one, as in the serial remainder walk. The reload replies, and its
-configuration is published, only after the last step is committed and
-enqueued. A step that fails, or a budget that expires mid-walk, restores every
-captured prior through the existing rollback batch, which stays one synchronous
-turn. A member that left the RIB answers `NotFound` and is skipped; its
-reconnect registers the session's chain, which cohort setup already
-hot-applied. Two limits remain. Rollback after k paced steps restores through
-the non-deferring batch, so the failure path is one turn of k members.
+them in caller order. PeerManager sends them in paced commands. Each command
+runs the batch's per-member body for a caller-order prefix of the list, then
+one shared distribution pass, and returns the rest. It starts another member
+only while the predicted turn stays within 250 ms (the qualification bars the
+regroup window's actor poll at 300 ms): the time so far, plus the pass shares
+the applied members still owe, plus one member's recompute and pass share,
+taken as the slowest seen so far in the walk. The first member always runs; the
+walk's first command, having no estimate yet, runs one. Grouping members this
+way keeps their recomputes warm and their resyncs back to back, which one
+member per command did not: measured per member, the recompute ran cold on
+every turn and the resync overlapped the previous member's session encode.
+The batch and every command share the transaction's forward RIB budget; it is
+never renewed per command. Each command is its own commit point: between
+commands an `rbgp` read or a route chunk sees applied members on the new chain
+and the rest on the old one, as in the serial remainder walk. The reload
+replies, and its configuration is published, only after the last command is
+committed and enqueued. A command that fails, a reply that does not advance
+the walk in caller order, or a budget that expires mid-walk restores every
+captured prior through the existing rollback batch, which stays one
+synchronous turn. A member that left the RIB is skipped; its reconnect
+registers the session's chain, which cohort setup already hot-applied. Two
+limits remain. Rollback after k paced members restores through the
+non-deferring batch, so the failure path is one turn of k members.
 Residual members of other private families (VPN, labeled unicast, FlowSpec,
 BGP-LS), per-client-best groups, ungrouped peers and sources with mixed
 destinations still run inside the batch.

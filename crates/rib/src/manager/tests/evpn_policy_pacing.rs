@@ -7,10 +7,14 @@ use super::evpn_group_storage::received;
 use super::update_groups::community_chain;
 use super::*;
 use crate::PeerId;
+use crate::manager::distribution::{PACED_TURN_BUDGET, paced_admits_next};
 use crate::manager::helpers::evpn_routes_equal;
 use crate::manager::update_groups::GroupMembership;
-use crate::update::{PeerExportPolicyReplacement, RibCommandError};
+use crate::update::{
+    PacedApplyOutcome, PacedMemberCost, PeerExportPolicyReplacement, RibCommandError,
+};
 use rustbgpd_wire::{EthernetTagId, EvpnRouteKey};
+use std::time::Duration as Span;
 
 const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
 const TAGGED: u32 = 0xFC00_0001;
@@ -97,7 +101,58 @@ impl Fleet {
         response.try_recv().unwrap().unwrap()
     }
 
-    /// One step of the peer manager's walk.
+    /// One paced command for `peers`, with the walk's cost estimate.
+    pub(super) fn paced(
+        &mut self,
+        peers: &[PeerId],
+        cost: Option<PacedMemberCost>,
+    ) -> PacedApplyOutcome {
+        let (reply, mut response) = oneshot::channel();
+        self.manager
+            .handle_update(RibUpdate::ApplyPacedExportPolicies {
+                replacements: peers
+                    .iter()
+                    .map(|&peer| PeerExportPolicyReplacement {
+                        peer,
+                        export_policy: Some(self.next.clone()),
+                    })
+                    .collect(),
+                cost,
+                reply,
+            });
+        response.try_recv().unwrap().unwrap()
+    }
+
+    /// The peer manager's walk over `pending`, one paced command at a time;
+    /// `between` runs after each command. A fixed `cost` replaces the
+    /// estimate each reply carries, so the members per command are
+    /// controlled rather than timed. Returns each command's applied count.
+    pub(super) fn walk(
+        &mut self,
+        mut pending: Vec<PeerId>,
+        cost: Option<PacedMemberCost>,
+        mut between: impl FnMut(&mut Self, &[PeerId]),
+    ) -> Vec<usize> {
+        let mut estimate = cost;
+        let mut applied = Vec::new();
+        while !pending.is_empty() {
+            let outcome = self.paced(&pending, estimate);
+            assert!(outcome.applied >= 1, "every command makes progress");
+            let done = pending.len() - outcome.pending.len();
+            assert_eq!(
+                pending[done..],
+                outcome.pending[..],
+                "the rest, in caller order"
+            );
+            between(self, &pending[..done]);
+            applied.push(outcome.applied);
+            pending = outcome.pending;
+            estimate = cost.or(Some(outcome.cost));
+        }
+        applied
+    }
+
+    /// The per-peer replacement (the reference path).
     pub(super) fn step(&mut self, peer: PeerId) -> Result<(), RibCommandError> {
         let (reply, mut response) = oneshot::channel();
         self.manager
@@ -258,10 +313,24 @@ fn assert_same_end_state(left: &KeyEvents, right: &KeyEvents, context: &str) {
     }
 }
 
-/// Paced (batch, then one per-peer command each, with a source route chunk
-/// before every command) emits, per receiver and key, exactly the per-peer
-/// reference sequence under the same interleaving, and ends where the whole
-/// synchronous batch ends.
+/// An estimate under which the budget admits exactly two members: the second
+/// is predicted at `elapsed + 100 + 100` ms, the third at `elapsed + 200 +
+/// 100` ms, against the 250 ms budget.
+const TWO_PER_COMMAND: PacedMemberCost = PacedMemberCost {
+    recompute: Span::ZERO,
+    pass_share: Span::from_millis(100),
+};
+
+/// An estimate under which only the always-admitted first member fits.
+const ONE_PER_COMMAND: PacedMemberCost = PacedMemberCost {
+    recompute: Span::from_millis(200),
+    pass_share: Span::from_millis(100),
+};
+
+/// Paced (batch, then paced commands of two members, with a source route
+/// chunk after every command) emits, per receiver and key, exactly the
+/// per-peer reference sequence under the same interleaving, and ends where
+/// the whole synchronous batch ends.
 #[test]
 fn paced_reload_matches_the_per_peer_reference_with_route_chunks_between_steps() {
     for owned in [false, true] {
@@ -279,17 +348,22 @@ fn paced_reload_matches_the_per_peer_reference_with_route_chunks_between_steps()
             .map(|peer| paced.manager.export_chains.get(peer).cloned())
             .collect();
         assert_eq!(after, before, "owned={owned}: deferred chains untouched");
-        // A chunk follows every step: before the first member joins it, the
-        // owned arm's hand-prepared destination is memberless and not
-        // maintained, which production never leaves behind.
-        for (round, peer) in (0..).zip(deferred) {
-            paced.step(peer).unwrap();
-            paced.churn(round);
-        }
+        // Two members per command, then a source route chunk. A chunk
+        // follows every command: before the first member joins it, the owned
+        // arm's hand-prepared destination is memberless and not maintained,
+        // which production never leaves behind.
+        let mut round = 0;
+        let per_command = paced.walk(deferred, Some(TWO_PER_COMMAND), |fleet, _| {
+            fleet.churn(round);
+            round += 1;
+        });
+        assert_eq!(per_command, [2, 2], "owned={owned}");
 
         let mut reference = evpn_fleet(4, 6, owned);
-        for (round, peer) in (0..).zip(reference.members.clone()) {
-            reference.step(peer).unwrap();
+        for (round, pair) in (0..).zip(reference.members.clone().chunks(2)) {
+            for &peer in pair {
+                reference.step(peer).unwrap();
+            }
             reference.churn(round);
         }
 
@@ -299,7 +373,7 @@ fn paced_reload_matches_the_per_peer_reference_with_route_chunks_between_steps()
             .manager
             .apply_export_policy_replacements_synchronously(replacements)
             .unwrap();
-        for round in 0..4 {
+        for round in 0..2 {
             whole.churn(round);
         }
 
@@ -363,6 +437,10 @@ fn deferred_member_that_flaps_mid_walk_is_skipped_or_converges_to_the_new_chain(
         peer: gone,
         session_id: 7,
     });
+    // A peer that left the RIB is skipped, not returned: the per-peer
+    // replacement answers `NotFound` and the walk moves on.
+    let outcome = fleet.paced(&[gone], None);
+    assert_eq!((outcome.applied, outcome.pending), (0, vec![]));
     assert!(matches!(
         fleet.step(gone),
         Err(RibCommandError::NotFound(_))
@@ -390,7 +468,8 @@ fn deferred_member_that_flaps_mid_walk_is_skipped_or_converges_to_the_new_chain(
         );
         let initial = end_state(&drain_events(std::slice::from_mut(&mut fleet.outputs[index]))[0]);
         assert_eq!(initial.len(), 4, "{peer}: initial table");
-        fleet.step(peer).unwrap();
+        let outcome = fleet.paced(&[peer], None);
+        assert_eq!((outcome.applied, outcome.pending), (1, vec![]));
         assert_eq!(
             fleet.manager.export_chains.get(&peer),
             Some(&Some(fleet.next.clone())),
@@ -477,9 +556,17 @@ fn mixed_reload_applies_the_unicast_cohort_inline_and_defers_evpn_members() {
     }
     assert_eq!(fleet.manager.export_chains.get(&evpn), Some(&None));
 
-    for peer in deferred {
-        fleet.step(peer).unwrap();
-    }
+    // The budget splits the list after the EVPN-only member; each command
+    // applies a caller-order prefix and the walk commits both, once.
+    let per_command = fleet.walk(deferred, Some(ONE_PER_COMMAND), |fleet, applied| {
+        for peer in applied {
+            assert_eq!(
+                fleet.manager.export_chains.get(peer),
+                Some(&Some(fleet.next.clone()))
+            );
+        }
+    });
+    assert_eq!(per_command, [1, 1]);
     fleet.manager.resync_dirty_peers_bounded();
     for &peer in &fleet.members {
         fleet.manager.settle_eor_now(peer);
@@ -505,5 +592,183 @@ fn mixed_reload_applies_the_unicast_cohort_inline_and_defers_evpn_members() {
             "{peer}: Adj-RIB-Out carries the new policy"
         );
         assert_eq!(fleet.manager.adj_ribs_out[&peer].evpn_len(), 4, "{peer}");
+    }
+}
+
+/// The budget predicate: the first member always runs; later ones only with
+/// an estimate, and only while the predicted turn stays within the budget,
+/// counting the pass shares the applied members still owe.
+#[test]
+fn paced_budget_admits_exactly_while_the_predicted_turn_fits() {
+    let ms = Span::from_millis;
+    assert!(
+        paced_admits_next(ms(10_000), 0, None),
+        "the first member always runs"
+    );
+    assert!(
+        !paced_admits_next(Span::ZERO, 1, None),
+        "no estimate: one member"
+    );
+    let cost = PacedMemberCost {
+        recompute: ms(30),
+        pass_share: ms(50),
+    };
+    // elapsed + applied × pass_share + recompute + pass_share
+    assert_eq!(PACED_TURN_BUDGET, ms(250));
+    assert!(
+        paced_admits_next(ms(70), 1, Some(cost)),
+        "70 + 50 + 30 + 50 = 200"
+    );
+    assert!(
+        paced_admits_next(ms(120), 1, Some(cost)),
+        "120 + 50 + 30 + 50 = 250, at the budget"
+    );
+    assert!(!paced_admits_next(ms(121), 1, Some(cost)), "251 exceeds it");
+    assert!(
+        paced_admits_next(ms(70), 2, Some(cost)),
+        "70 + 100 + 30 + 50 = 250"
+    );
+    assert!(
+        !paced_admits_next(ms(71), 2, Some(cost)),
+        "the owed pass share of each applied member counts"
+    );
+}
+
+/// One paced command applies as many members as the estimate admits, in
+/// caller order, through one distribution pass, and returns the rest with
+/// their installed chains untouched.
+#[test]
+fn paced_command_applies_the_admitted_prefix_through_one_pass() {
+    let mut fleet = evpn_fleet(6, 4, false);
+    let mut pending = fleet.batch();
+    assert_eq!(pending, fleet.members);
+    let old = fleet.manager.export_chains.get(&pending[0]).cloned();
+    for (cost, expected) in [
+        (None, 1),
+        (Some(TWO_PER_COMMAND), 2),
+        (Some(ONE_PER_COMMAND), 1),
+        (Some(PacedMemberCost::default()), 2),
+    ] {
+        let passes = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
+        let outcome = fleet.paced(&pending, cost);
+        assert_eq!(outcome.applied, expected, "{cost:?}");
+        assert_eq!(
+            fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones - passes,
+            1,
+            "{cost:?}: one distribution pass per command, not per member"
+        );
+        assert_eq!(
+            outcome.pending[..],
+            pending[expected..],
+            "{cost:?}: the rest, in order"
+        );
+        for peer in &pending[..expected] {
+            assert_eq!(
+                fleet.manager.export_chains.get(peer),
+                Some(&Some(fleet.next.clone()))
+            );
+        }
+        for peer in &outcome.pending {
+            assert_eq!(
+                fleet.manager.export_chains.get(peer),
+                old.as_ref(),
+                "{peer}: untouched"
+            );
+        }
+        let receipt = fleet
+            .manager
+            .authoritative_transition_receipts
+            .last()
+            .unwrap();
+        assert_eq!(
+            (
+                receipt.classification,
+                receipt.applied_members,
+                receipt.deferred_members,
+                receipt.fallback_members
+            ),
+            ("paced_apply", expected, outcome.pending.len(), 0),
+            "{cost:?}: paced members are not the fallback"
+        );
+        // The reply's estimate is the slowest seen, this command's included.
+        let incoming = cost.unwrap_or_default();
+        assert!(outcome.cost.recompute >= incoming.recompute);
+        assert!(outcome.cost.pass_share >= incoming.pass_share);
+        pending = outcome.pending;
+    }
+    assert_eq!(pending, Vec::<PeerId>::new());
+}
+
+/// A list mixing members of two source groups (IPv4+EVPN and EVPN-only),
+/// split by the budget mid-list: every member is applied exactly once, in
+/// caller order, and ends on the new policy.
+#[test]
+fn paced_walk_split_mid_list_commits_every_member_once_and_in_order() {
+    let mut fleet = evpn_fleet(3, 4, false);
+    let evpn_only: Vec<_> = (0..2)
+        .map(|index| PeerId::from_addr(Ipv4Addr::new(198, 51, 100, 40 + index).into()))
+        .collect();
+    for &peer in &evpn_only {
+        let output = peer_up(&mut fleet.manager, peer, 7, vec![EVPN], None);
+        fleet.outputs.push(output);
+    }
+    drain_events(&mut fleet.outputs);
+    assert_ne!(
+        fleet.manager.grouped_member_of(evpn_only[0]),
+        fleet.manager.grouped_member_of(fleet.members[0]),
+        "two source groups"
+    );
+    let order = vec![
+        fleet.members[0],
+        evpn_only[0],
+        fleet.members[1],
+        evpn_only[1],
+        fleet.members[2],
+    ];
+    let mut all = fleet.members.clone();
+    all.extend(&evpn_only);
+    fleet.members = all;
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: order
+                .iter()
+                .map(|&peer| PeerExportPolicyReplacement {
+                    peer,
+                    export_policy: Some(fleet.next.clone()),
+                })
+                .collect(),
+            reply,
+        });
+    let deferred = response.try_recv().unwrap().unwrap();
+    assert_eq!(deferred, order, "caller order");
+    let receipts = fleet.manager.authoritative_transition_receipts.len();
+    let mut committed = Vec::new();
+    let per_command = fleet.walk(deferred, Some(TWO_PER_COMMAND), |fleet, applied| {
+        committed.extend_from_slice(applied);
+        for peer in &order[committed.len()..] {
+            assert_ne!(
+                fleet.manager.export_chains.get(peer),
+                Some(&Some(fleet.next.clone())),
+                "{peer}: not yet applied"
+            );
+        }
+    });
+    assert_eq!(per_command, [2, 2, 1]);
+    assert_eq!(committed, order, "each member once, in caller order");
+    let applied: usize = fleet.manager.authoritative_transition_receipts[receipts..]
+        .iter()
+        .map(|receipt| receipt.applied_members)
+        .sum();
+    assert_eq!(applied, order.len(), "no member is applied twice");
+    fleet.manager.resync_dirty_peers_bounded();
+    for (index, events) in drain_events(&mut fleet.outputs).iter().enumerate() {
+        let rows = end_state(events);
+        assert_eq!(rows.len(), 4, "receiver {index}");
+        assert!(
+            rows.values()
+                .all(|route| route.communities().contains(&TAGGED))
+        );
     }
 }

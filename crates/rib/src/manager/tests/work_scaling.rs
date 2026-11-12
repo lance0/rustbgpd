@@ -411,9 +411,9 @@ enum EvpnArm {
 /// An export-policy reload moves `size` EVPN receivers onto
 /// [`EVPN_ROWS`] reflected routes each, the peer manager's way: the
 /// authoritative batch, then one per-peer command for every member it hands
-/// back. Each move resyncs one member's table, so the longest single command
-/// must not grow with the moved members; one turn carrying the whole cohort
-/// grows members × rows.
+/// back, in paced commands. A command applies the members its budget admits
+/// (two here), so the longest single command must not grow with the moved
+/// members; one turn carrying the whole cohort grows members × rows.
 fn evpn_cohort_reload(size: usize, arm: EvpnArm) -> Work {
     let mut fleet =
         super::evpn_policy_pacing::evpn_fleet(size, EVPN_ROWS, matches!(arm, EvpnArm::Owned));
@@ -447,9 +447,17 @@ fn evpn_cohort_reload(size: usize, arm: EvpnArm) -> Work {
     }
     let mut deferred = Vec::new();
     let mut longest = checkpoints_in(|| deferred = fleet.batch())[ALL];
-    for peer in deferred {
-        let step = checkpoints_in(|| fleet.step(peer).unwrap());
-        longest = longest.max(step[ALL]);
+    // The walk's commands, with an estimate that admits two members per
+    // command: the work of one command is bounded by the budget, not by the
+    // moved members.
+    let mut pending = deferred;
+    while !pending.is_empty() {
+        let mut outcome = None;
+        let command = checkpoints_in(|| {
+            outcome = Some(fleet.paced(&pending, Some(TWO_PER_COMMAND)));
+        });
+        longest = longest.max(command[ALL]);
+        pending = outcome.unwrap().pending;
     }
     fleet.manager.resync_dirty_peers_bounded();
     // Pin the wire: every member ends with every row under the new policy.
@@ -470,6 +478,12 @@ fn evpn_cohort_reload(size: usize, arm: EvpnArm) -> Work {
     }
     Work::from([("longest command checkpoints", longest)])
 }
+
+/// An estimate under which the paced budget admits two members per command.
+const TWO_PER_COMMAND: crate::update::PacedMemberCost = crate::update::PacedMemberCost {
+    recompute: Duration::ZERO,
+    pass_share: Duration::from_millis(100),
+};
 
 /// Reflected EVPN routes per member, fixed across sizes.
 const EVPN_ROWS: u32 = 256;

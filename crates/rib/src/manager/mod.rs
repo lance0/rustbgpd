@@ -191,8 +191,11 @@ struct PolicyTransitionStats {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AuthoritativeTransitionReceipt {
-    /// Residual members carrying EVPN outbound state, returned unapplied.
+    /// Residual members handed back unapplied (EVPN senders in the forward
+    /// batch; members past the budget in a paced command).
     deferred_members: usize,
+    /// Members a paced command applied; 0 for every other batch.
+    applied_members: usize,
     outcome: &'static str,
     classification: &'static str,
     failure_stage: &'static str,
@@ -3883,6 +3886,7 @@ impl RibManager {
             RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
             | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
+            | RibUpdate::ApplyPacedExportPolicies { .. }
             | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::ReevaluatePeerExportPolicies { .. }
@@ -5420,6 +5424,13 @@ impl RibManager {
                 replacements,
                 reply,
             } => self.handle_replace_peer_export_policies_authoritatively(replacements, reply),
+            RibUpdate::ApplyPacedExportPolicies {
+                replacements,
+                cost,
+                reply,
+            } => {
+                let _ = reply.send(self.apply_paced_export_policies(replacements, cost));
+            }
             RibUpdate::RestorePeerExportPoliciesAuthoritatively {
                 replacements,
                 reply,
