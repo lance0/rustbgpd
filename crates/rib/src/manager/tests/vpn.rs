@@ -1886,7 +1886,9 @@ async fn vpn_distribution_serves_readiness_at_each_peer_boundary() {
 
 /// A withdrawal can leave a tombstone that returns no insertion headroom, so
 /// re-announcing withdrawn keys on a full table can force a rehash inside the
-/// UPDATE. A large VPN table is sharded, so that rehash is one shard's.
+/// UPDATE. A large VPN key index is sharded, so that rehash is one shard's;
+/// the route bodies live in a slab whose freed slots the re-announcements
+/// reuse.
 #[test]
 fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
     let (_tx, rx) = mpsc::channel(8);
@@ -1908,11 +1910,8 @@ fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
             withdrawn: vec![],
         });
     }
-    let before = manager.ribs[&peer].vpn_shard_capacities();
-    assert!(
-        before.iter().all(|shards| shards.len() == 16),
-        "large table is sharded"
-    );
+    let (before, slab_before) = manager.ribs[&peer].vpn_storage_capacities();
+    assert_eq!(before.len(), 16, "large key index is sharded");
 
     let churn: Vec<u32> = (0..total).step_by(8).collect();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
@@ -1921,10 +1920,14 @@ fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
         announced: churn.iter().map(|&n| route(n, 200)).collect(),
         withdrawn: churn.iter().map(|&n| route(n, 100).key()).collect(),
     });
-    let after = manager.ribs[&peer].vpn_shard_capacities();
-    for (before, after) in before.iter().flatten().zip(after.iter().flatten()) {
+    let (after, slab_after) = manager.ribs[&peer].vpn_storage_capacities();
+    for (before, after) in before.iter().zip(&after) {
         assert!(after <= &(before * 2), "a shard grew more than once");
     }
+    assert_eq!(
+        slab_after, slab_before,
+        "re-announcements reuse freed slots"
+    );
     assert_eq!(
         manager.ribs[&peer].vpn_len(),
         usize::try_from(total).unwrap()
@@ -1933,4 +1936,69 @@ fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
         let selected = manager.loc_rib.get_vpn(&route(n, 200).nlri.key()).unwrap();
         assert_eq!(selected.local_pref_attr(), Some(200));
     }
+}
+
+/// The initial dump to a VPN Add-Path-send peer collects every Adj-RIB-In
+/// VPN identity slot by slot: 240 vacant source slots add at least one
+/// `initial_inventory` answer each.
+#[test]
+fn vpn_add_path_initial_inventory_checkpoints_vacant_slots() {
+    let inventory = |vacated: u8| {
+        let (mut manager, _readiness_tx) = super::llgr_promotion::readiness_manager();
+        manager.test_force_ungrouped = true;
+        let source = Ipv4Addr::new(10, 0, 0, 1);
+        let peer = peer_v4(source);
+        manager.handle_update(registering_peer_up(peer, 0));
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: (0..8 + vacated)
+                .map(|index| make_vpn_rib_route(source, index, 100, 100))
+                .collect(),
+            withdrawn: Vec::new(),
+        });
+        drain_route_chunks(&mut manager);
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: Vec::new(),
+            withdrawn: (8..8 + vacated)
+                .map(|index| make_vpn_rib_route(source, index, 100, 100).key())
+                .collect(),
+        });
+        drain_route_chunks(&mut manager);
+        assert_eq!(manager.ribs[&peer].vpn_len(), 8);
+        let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let observed = owned_checkpoints(&mut manager, |manager| {
+            manager.handle_update(RibUpdate::PeerUp {
+                supersedes: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                session_id: 0,
+                peer: target,
+                peer_asn: 65000,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vpn_sendable(),
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                add_path_send_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+                add_path_send_max: 3,
+                negotiated_orf_recv: Vec::new(),
+                negotiated_llgr_families: Vec::new(),
+            });
+        });
+        observed
+            .iter()
+            .filter(|(stage, _)| *stage == "initial_inventory")
+            .count()
+    };
+    let (dense, sparse) = (inventory(0), inventory(240));
+    assert!(
+        sparse >= dense + 240,
+        "initial_inventory checkpoints {dense} dense, {sparse} with 240 vacant slots"
+    );
 }

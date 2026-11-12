@@ -725,8 +725,7 @@ impl LocRib {
     ) -> bool {
         let best = candidates
             .filter(|route| crate::srv6::vpn_eligible(route))
-            .min_by(|a, b| vpn_tiebreak(a, b))
-            .cloned();
+            .min_by(|a, b| vpn_tiebreak(a, b));
         match best {
             Some(new_best) => {
                 let changed = self.vpn_routes.get(&key).is_none_or(|(old, _)| {
@@ -737,17 +736,49 @@ impl LocRib {
                         || old.next_hop != new_best.next_hop
                         || old.link_local_next_hop != new_best.link_local_next_hop
                         || old.next_hop_scope != new_best.next_hop_scope
+                        || old.origin_type != new_best.origin_type
                         || old.peer_router_id != new_best.peer_router_id
                         || old.nlri != new_best.nlri
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.store_vpn(key, new_best);
+                    self.store_vpn(key, new_best.clone());
                 }
                 changed
             }
             None => self.remove_vpn(&key),
         }
+    }
+
+    /// Selection for a key whose stored best an UPDATE left in place: only
+    /// `challengers`, the paths the UPDATE changed, can displace it, since
+    /// the stored best was the minimum of the other paths. A challenger
+    /// replaces it only when strictly better. A tie keeps the stored best:
+    /// `PeerId::cmp_resolved` gives two live handles on one endpoint (a
+    /// superseded and a new session) the same rank, so identical paths from
+    /// both compare equal, where a full rescan would take `HashMap`
+    /// iteration order. Returns whether the selection changed.
+    ///
+    /// The stored copy stands in for the Adj-RIB-In copy: every writer that
+    /// changes a stored path in place or removes it recomputes its key in
+    /// full.
+    pub(crate) fn challenge_vpn<'a>(
+        &mut self,
+        key: rustbgpd_wire::VpnRouteKey,
+        challengers: impl Iterator<Item = &'a VpnRibRoute>,
+    ) -> bool {
+        let Some((best, _)) = self.vpn_routes.get(&key) else {
+            return false;
+        };
+        let Some(winner) = challengers
+            .filter(|route| crate::srv6::vpn_eligible(route))
+            .min_by(|a, b| vpn_tiebreak(a, b))
+            .filter(|winner| vpn_tiebreak(winner, best) == Ordering::Less)
+        else {
+            return false;
+        };
+        self.store_vpn(key, winner.clone());
+        true
     }
 
     /// Insert or replace the selected VPN route for a key.
@@ -827,7 +858,7 @@ impl LocRib {
         key: Prefix,
         candidates: impl Iterator<Item = &'a LabeledRibRoute>,
     ) -> bool {
-        let best = candidates.min_by(|a, b| labeled_tiebreak(a, b)).cloned();
+        let best = candidates.min_by(|a, b| labeled_tiebreak(a, b));
         match best {
             Some(new_best) => {
                 let changed = self.labeled_routes.get(&key).is_none_or(|old| {
@@ -838,19 +869,39 @@ impl LocRib {
                         || old.next_hop != new_best.next_hop
                         || old.link_local_next_hop != new_best.link_local_next_hop
                         || old.next_hop_scope != new_best.next_hop_scope
+                        || old.origin_type != new_best.origin_type
                         || old.peer_router_id != new_best.peer_router_id
                         || old.nlri != new_best.nlri
                         || old.attributes != new_best.attributes
                 });
                 if changed {
                     let v6 = matches!(key, Prefix::V6(_));
-                    let added = self.labeled_routes.insert(key, new_best).is_none();
+                    let added = self.labeled_routes.insert(key, new_best.clone()).is_none();
                     track(&mut self.second_family.labeled, v6, added, false);
                 }
                 changed
             }
             None => self.remove_labeled(&key),
         }
+    }
+
+    /// The labeled-unicast analog of [`Self::challenge_vpn`].
+    pub(crate) fn challenge_labeled<'a>(
+        &mut self,
+        key: Prefix,
+        challengers: impl Iterator<Item = &'a LabeledRibRoute>,
+    ) -> bool {
+        let Some(best) = self.labeled_routes.get(&key) else {
+            return false;
+        };
+        let Some(winner) = challengers
+            .min_by(|a, b| labeled_tiebreak(a, b))
+            .filter(|winner| labeled_tiebreak(winner, best) == Ordering::Less)
+        else {
+            return false;
+        };
+        self.labeled_routes.insert(key, winner.clone());
+        true
     }
 
     /// Insert or replace the selected labeled route for a key.

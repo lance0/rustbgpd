@@ -1527,8 +1527,9 @@ impl RibManager {
                 .ribs
                 .get(&super::helpers::LOCAL_PEER)
                 .into_iter()
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter)
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_slots)
                 .inspect(|_| checkpoint())
+                .flatten()
                 .filter(|route| families.contains(&super::helpers::prefix_family(&route.prefix)))
                 .map(|route| route.prefix)
                 .collect();
@@ -1918,8 +1919,9 @@ impl RibManager {
             self.ribs
                 .values()
                 .inspect(|_| checkpoint())
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter)
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_slots)
                 .inspect(|_| checkpoint())
+                .flatten()
                 .filter(|route| super::helpers::prefix_family(&route.prefix) == family)
                 .map(|route| route.prefix),
         );
@@ -2072,8 +2074,9 @@ impl RibManager {
             self.ribs
                 .values()
                 .inspect(|_| checkpoint())
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_vpn)
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_vpn_slots)
                 .inspect(|_| checkpoint())
+                .flatten()
                 .filter(|route| route.afi_safi() == family)
                 .map(crate::route::VpnRibRoute::key),
         );
@@ -2118,8 +2121,9 @@ impl RibManager {
             self.ribs
                 .values()
                 .inspect(|_| checkpoint())
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_labeled)
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_labeled_slots)
                 .inspect(|_| checkpoint())
+                .flatten()
                 .filter(|route| route.afi_safi() == family)
                 .map(crate::route::LabeledRibRoute::key),
         );

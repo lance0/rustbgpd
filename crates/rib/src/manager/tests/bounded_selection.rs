@@ -3,11 +3,14 @@
 //!
 //! The differential test drives random receives (announce, replace and
 //! withdraw with Add-Path IDs, a withdraw and an announce of one path in one
-//! message), Graceful Restart entry, GR and LLGR expiry, End-of-RIB, the
-//! in-place stale seams and session teardown, and
-//! after every step compares the Loc-RIB best of every key with the minimum
-//! over all stored paths. The work test bounds the candidate reads of one
-//! non-best change.
+//! message), Graceful Restart entry, GR and LLGR expiry, End-of-RIB,
+//! enhanced route refresh, the in-place stale seams and session teardown,
+//! and after every step compares the Loc-RIB best of every key with the
+//! minimum over all stored paths, computed from the Adj-RIB-Ins alone. The
+//! receive path compares changed paths with the Loc-RIB's stored copy of the
+//! best, so the test also catches an in-place Adj-RIB-In change whose key is
+//! not recomputed. The work tests bound the candidate reads and path-index
+//! lookups of one non-best change.
 
 use proptest::prelude::*;
 
@@ -116,6 +119,11 @@ enum Op {
     SweepLlgr { peer: u8 },
     /// Production End-of-RIB for one family.
     EndOfRib { peer: u8, vpn: bool },
+    /// Production Beginning-of-RIB-Refresh (RFC 7313) for one family.
+    BeginRefresh { peer: u8, vpn: bool },
+    /// Production End-of-RIB-Refresh: sweeps the paths not re-announced
+    /// since the matching `BoRR`.
+    EndRefresh { peer: u8, vpn: bool },
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -133,6 +141,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => (0..PEERS).prop_map(|peer| Op::SweepGr { peer }),
         1 => (0..PEERS).prop_map(|peer| Op::SweepLlgr { peer }),
         1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::EndOfRib { peer, vpn }),
+        1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::BeginRefresh { peer, vpn }),
+        1 => (0..PEERS, any::<bool>()).prop_map(|(peer, vpn)| Op::EndRefresh { peer, vpn }),
     ]
 }
 
@@ -244,7 +254,32 @@ fn apply(manager: &mut RibManager, op: &Op) {
                 safi,
             });
         }
+        Op::BeginRefresh { peer, vpn } => refresh(manager, *peer, *vpn, true),
+        Op::EndRefresh { peer, vpn } => refresh(manager, *peer, *vpn, false),
     }
+}
+
+/// Production `BoRR` (`begin`) or `EoRR` for one family.
+fn refresh(manager: &mut RibManager, peer: u8, vpn: bool, begin: bool) {
+    let peer = peer_v4(source(peer));
+    register_test_peer(manager, peer, 0);
+    let (afi, safi) = if vpn { VPN } else { LABELED };
+    manager.handle_update(if begin {
+        RibUpdate::BeginRouteRefresh {
+            peer,
+            session_id: 0,
+            afi,
+            safi,
+        }
+    } else {
+        RibUpdate::EndRouteRefresh {
+            peer,
+            session_id: 0,
+            afi,
+            safi,
+        }
+    });
+    drain_route_chunks(manager);
 }
 
 /// The fields the Loc-RIB change check compares.
@@ -441,6 +476,82 @@ fn non_best_change_reads_do_not_grow_with_stored_paths() {
             "selection checkpoints per non-best change: vpn {vpn}, labeled {labeled}"
         );
     }
+}
+
+/// Path-index lookups of one non-best change of a key holding 64 paths from
+/// one session, `[replace, withdraw]` as `(vpn, labeled)`: the storage
+/// write plus what selection reads.
+fn non_best_change_index_lookups() -> [(usize, usize); 2] {
+    let mut manager = manager();
+    let paths = || (1..=64).map(|id| (id, u8::from(id == 1)));
+    receive_vpn(
+        &mut manager,
+        0,
+        paths().map(|(id, v)| vpn_route(0, 0, id, v)).collect(),
+        vec![],
+    );
+    receive_labeled(
+        &mut manager,
+        0,
+        paths().map(|(id, v)| labeled_route(0, 0, id, v)).collect(),
+        vec![],
+    );
+    let steps: [(Vec<_>, Vec<_>, Vec<_>, Vec<_>); 2] = [
+        (
+            vec![vpn_route(0, 0, 2, 2)],
+            vec![],
+            vec![labeled_route(0, 0, 2, 2)],
+            vec![],
+        ),
+        (
+            vec![],
+            vec![vpn_route(0, 0, 3, 0).key()],
+            vec![],
+            vec![labeled_route(0, 0, 3, 0).key()],
+        ),
+    ];
+    let mut lookups = [(0, 0); 2];
+    for (step, (vpn_in, vpn_out, labeled_in, labeled_out)) in steps.into_iter().enumerate() {
+        crate::adj_rib_in::path_index_lookups::take();
+        receive_vpn(&mut manager, 0, vpn_in, vpn_out);
+        lookups[step].0 = crate::adj_rib_in::path_index_lookups::take();
+        receive_labeled(&mut manager, 0, labeled_in, labeled_out);
+        lookups[step].1 = crate::adj_rib_in::path_index_lookups::take();
+        check_bests(&manager, step);
+    }
+    lookups
+}
+
+/// A non-best replace looks up the replaced path to store it and again to
+/// compare it with the Loc-RIB's stored best; a non-best withdraw looks up
+/// only the path it removes.
+#[test]
+fn non_best_change_index_lookups_per_update() {
+    assert_eq!(non_best_change_index_lookups(), [(2, 2), (1, 1)]);
+}
+
+/// An `SRv6` Prefix-SID whose SID structure is ineligible keeps a VPN path out
+/// of selection: a challenger that would win on `LOCAL_PREF` leaves the
+/// stored best selected. Labeled unicast has no eligibility filter.
+#[test]
+fn an_ineligible_vpn_challenger_does_not_displace_the_stored_best() {
+    let mut manager = manager();
+    receive_vpn(&mut manager, 0, vec![vpn_route(0, 0, 1, 0)], vec![]);
+    let mut challenger = vpn_route(1, 0, 7, 1);
+    AttrSet::edit(&mut challenger.attributes, |attrs| {
+        attrs.push(crate::srv6::tests::service_attribute(
+            5,
+            "2001:db8:111:1::".parse().unwrap(),
+            19,
+            Some([255; 6]),
+        ));
+    });
+    assert!(!crate::srv6::vpn_eligible(&challenger));
+    receive_vpn(&mut manager, 1, vec![challenger], vec![]);
+    let key = vpn_route(0, 0, 0, 0).nlri.key();
+    let best = manager.loc_rib.get_vpn(&key).unwrap();
+    assert_eq!((best.peer, best.path_id), (peer_v4(source(0)), 1));
+    check_bests(&manager, 0);
 }
 
 /// Two live handles on one endpoint share a selection rank, so identical

@@ -560,8 +560,9 @@ impl RibManager {
                     let mut keys = Vec::with_capacity(rib.vpn_len());
                     mark();
                     keys.extend(
-                        rib.iter_vpn()
+                        rib.iter_vpn_slots()
                             .inspect(|_| mark())
+                            .flatten()
                             .filter(|r| r.afi_safi() == family)
                             .map(crate::route::VpnRibRoute::key),
                     );
@@ -581,8 +582,9 @@ impl RibManager {
                     let mut keys = Vec::with_capacity(rib.labeled_len());
                     mark();
                     keys.extend(
-                        rib.iter_labeled()
+                        rib.iter_labeled_slots()
                             .inspect(|_| mark())
+                            .flatten()
                             .filter(|r| r.afi_safi() == family)
                             .map(crate::route::LabeledRibRoute::key),
                     );
@@ -669,12 +671,12 @@ impl RibManager {
             // paths do above. (BGP-LS stale routes deliberately stay in the
             // topology feed: `iter_bgpls` includes them, which is what keeps
             // ORR vantages resolved through the restart window.)
-            for route in rib.iter_vpn().inspect(|_| inventory()) {
+            for route in rib.iter_vpn_slots().inspect(|_| inventory()).flatten() {
                 if retained.contains(&route.afi_safi()) {
                     vpn_affected.insert(route.key());
                 }
             }
-            for route in rib.iter_labeled().inspect(|_| inventory()) {
+            for route in rib.iter_labeled_slots().inspect(|_| inventory()).flatten() {
                 if retained.contains(&route.afi_safi()) {
                     labeled_affected.insert(route.key());
                 }
