@@ -3648,6 +3648,9 @@ fn main() -> ExitCode {
     }
     let worker_threads = resolve_worker_threads(config.global.worker_threads);
     info!(worker_threads, "initializing tokio runtime");
+    // ponytail: workers inherit the blocked SIGHUP for life; an on_thread_start
+    // unblock would race `run`'s handler registration (workers launch in
+    // build()), so it waits until the daemon spawns a child that needs SIGHUP.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .enable_all()

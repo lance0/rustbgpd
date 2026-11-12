@@ -10,4 +10,5 @@
   already did; stdout and the exit code are unchanged. A failed daemon-side
   write with EACCES or EROFS, such as config persistence under
   `ProtectSystem=strict`, now adds a hint naming `chown` and
-  `ReadWritePaths=`.
+  `ReadWritePaths=`; other EACCES failures, such as an unreadable policy
+  source, get a neutral ownership-and-mode hint.
