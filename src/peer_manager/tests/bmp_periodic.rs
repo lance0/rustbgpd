@@ -381,7 +381,7 @@ async fn periodic_reports_preserve_order_selection_and_output_drop_counters() {
                 "Loc-RIB report precedes per-peer reports"
             );
             assert!(matches!(receiver.try_recv(), Ok(BmpEvent::StatsReport {
-                peer_info, adj_rib_in_routes: 0, adj_rib_out_post: Some(counts), ..
+                peer_info, adj_rib_in_routes: None, adj_rib_out_post: Some(counts), ..
             }) if peer_info.peer_addr == peer && counts == vec![(1, 1, 7)]));
             assert!(
                 receiver.try_recv().is_err(),

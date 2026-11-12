@@ -1284,6 +1284,7 @@ impl PeerSession {
                         ipv6_unicast,
                     }
                 }),
+            pre_policy_route_counts: self.pre_policy_route_counts(),
             max_prefix: MaxPrefixState {
                 scopes: MaxPrefixScope::ALL
                     .into_iter()

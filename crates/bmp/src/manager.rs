@@ -23,6 +23,27 @@ use crate::types::{
     BmpMonitorFilter, BmpRpkiValidationCounts, BmpVersion,
 };
 
+/// Append one row per `(AFI, SAFI)` for each of `stat_types`, in family
+/// order so the legacy (unsorted) block stays deterministic.
+fn append_family_counters(
+    stat_types: &[u16],
+    per_family: &[(u16, u8, u64)],
+    afi_counters: &mut Vec<codec::AfiStatCounter>,
+) {
+    let mut sorted = per_family.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
+    for &&(afi, safi, value) in &sorted {
+        for &stat_type in stat_types {
+            afi_counters.push(codec::AfiStatCounter {
+                stat_type,
+                afi,
+                safi,
+                value,
+            });
+        }
+    }
+}
+
 fn append_rpki_validation_counters(
     per_family: &[(u16, u8, BmpRpkiValidationCounts)],
     afi_counters: &mut Vec<codec::AfiStatCounter>,
@@ -430,49 +451,38 @@ impl BmpManager {
             BmpEvent::StatsReport {
                 peer_info,
                 adj_rib_in_routes,
+                rfc9972_adj_rib_in_pre,
                 rfc9972_adj_rib_in_post,
                 rfc9972_policy_rejects,
                 rfc9972_rpki_adj_rib_in_post,
                 adj_rib_out_post,
             } => {
-                let mut counters = vec![codec::StatCounter {
-                    stat_type: 7,
-                    value: *adj_rib_in_routes,
-                }];
+                let mut counters = Vec::new();
                 let mut afi_counters = Vec::new();
+                // RFC 7854 type 7 and RFC 9972 type 18 carry the same exact
+                // pre-policy count; RFC 9972 §5 recommends sending both.
+                if let Some(value) = *adj_rib_in_routes {
+                    counters.push(codec::StatCounter {
+                        stat_type: 7,
+                        value,
+                    });
+                    counters.push(codec::StatCounter {
+                        stat_type: 18,
+                        value,
+                    });
+                }
+                if let Some(per_family) = rfc9972_adj_rib_in_pre {
+                    append_family_counters(&[19], per_family, &mut afi_counters);
+                }
                 if let Some(per_family) = rfc9972_adj_rib_in_post {
                     counters.push(codec::StatCounter {
                         stat_type: 20,
                         value: per_family.iter().map(|(_, _, count)| count).sum(),
                     });
-                    let mut sorted = per_family.iter().collect::<Vec<_>>();
-                    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
-                    for &&(afi, safi, value) in &sorted {
-                        afi_counters.push(codec::AfiStatCounter {
-                            stat_type: 21,
-                            afi,
-                            safi,
-                            value,
-                        });
-                        afi_counters.push(codec::AfiStatCounter {
-                            stat_type: 23,
-                            afi,
-                            safi,
-                            value,
-                        });
-                    }
+                    append_family_counters(&[21, 23], per_family, &mut afi_counters);
                 }
                 if let Some(per_family) = rfc9972_policy_rejects {
-                    let mut sorted = per_family.iter().collect::<Vec<_>>();
-                    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
-                    for &&(afi, safi, value) in &sorted {
-                        afi_counters.push(codec::AfiStatCounter {
-                            stat_type: 22,
-                            afi,
-                            safi,
-                            value,
-                        });
-                    }
+                    append_family_counters(&[22], per_family, &mut afi_counters);
                 }
                 if let Some(per_family) = rfc9972_rpki_adj_rib_in_post {
                     append_rpki_validation_counters(per_family, &mut afi_counters);
@@ -485,16 +495,7 @@ impl BmpManager {
                         stat_type: 15,
                         value: per_family.iter().map(|(_, _, count)| count).sum(),
                     });
-                    let mut sorted = per_family.iter().collect::<Vec<_>>();
-                    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
-                    for &&(afi, safi, value) in &sorted {
-                        afi_counters.push(codec::AfiStatCounter {
-                            stat_type: 17,
-                            afi,
-                            safi,
-                            value,
-                        });
-                    }
+                    append_family_counters(&[17], per_family, &mut afi_counters);
                 }
                 codec::encode_stats_report(peer_info, &counters, &afi_counters, version)
             }
@@ -1771,7 +1772,8 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 42,
+                adj_rib_in_routes: Some(42),
+                rfc9972_adj_rib_in_pre: None,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
                 rfc9972_rpki_adj_rib_in_post: None,
@@ -2014,7 +2016,8 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 42,
+                adj_rib_in_routes: Some(23),
+                rfc9972_adj_rib_in_pre: Some(vec![(2, 1, 10), (1, 1, 13)]),
                 rfc9972_adj_rib_in_post: Some(vec![(2, 1, 7), (1, 1, 11)]),
                 rfc9972_policy_rejects: Some(vec![(2, 1, 3), (1, 1, 2)]),
                 rfc9972_rpki_adj_rib_in_post: Some(vec![
@@ -2044,7 +2047,7 @@ mod tests {
 
         let msg = c_rx.recv().await.unwrap();
         let stats = decode_stats(&msg);
-        assert_eq!(stats.len(), 17);
+        assert_eq!(stats.len(), 20);
 
         let adj_rib_in_type = stats[0].0;
         let adj_rib_out_total_type = stats[1].0;
@@ -2064,7 +2067,7 @@ mod tests {
                 .map(|(_, payload)| payload.len())
                 .collect::<Vec<_>>(),
             vec![
-                8, 8, 11, 11, 8, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11
+                8, 8, 11, 11, 8, 11, 11, 8, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11
             ]
         );
         assert_eq!(
@@ -2073,34 +2076,42 @@ mod tests {
                 .map(|(stat_type, _)| *stat_type)
                 .collect::<Vec<_>>(),
             vec![
-                7, 15, 17, 17, 20, 21, 21, 22, 22, 23, 23, 35, 35, 36, 36, 37, 37,
+                7, 15, 17, 17, 18, 19, 19, 20, 21, 21, 22, 22, 23, 23, 35, 35, 36, 36, 37, 37,
             ]
         );
-        assert_eq!(u64::from_be_bytes(stats[4].1.try_into().unwrap()), 18);
+        // Types 7 and 18 carry the same exact pre-policy total; type 19 is
+        // its per-family breakdown, sorted by (AFI, SAFI).
+        assert_eq!(u64::from_be_bytes(stats[4].1.try_into().unwrap()), 23);
         assert_eq!(&stats[5].1[..3], &[0, 1, 1]);
+        assert_eq!(u64::from_be_bytes(stats[5].1[3..].try_into().unwrap()), 13);
         assert_eq!(&stats[6].1[..3], &[0, 2, 1]);
-        assert_eq!(&stats[7].1[..3], &[0, 1, 1]);
-        assert_eq!(u64::from_be_bytes(stats[7].1[3..].try_into().unwrap()), 2);
-        assert_eq!(&stats[8].1[..3], &[0, 2, 1]);
-        assert_eq!(u64::from_be_bytes(stats[8].1[3..].try_into().unwrap()), 3);
+        assert_eq!(u64::from_be_bytes(stats[6].1[3..].try_into().unwrap()), 10);
+        assert_eq!(u64::from_be_bytes(stats[7].1.try_into().unwrap()), 18);
+        assert_eq!(&stats[8].1[..3], &[0, 1, 1]);
+        assert_eq!(&stats[9].1[..3], &[0, 2, 1]);
+        assert_eq!(&stats[10].1[..3], &[0, 1, 1]);
+        assert_eq!(u64::from_be_bytes(stats[10].1[3..].try_into().unwrap()), 2);
+        assert_eq!(&stats[11].1[..3], &[0, 2, 1]);
+        assert_eq!(u64::from_be_bytes(stats[11].1[3..].try_into().unwrap()), 3);
 
-        assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 42);
+        assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 23);
         assert_eq!(u64::from_be_bytes(stats[1].1.try_into().unwrap()), 15);
         assert_eq!(&stats[2].1[..3], &[0, 1, 1]);
         assert_eq!(u64::from_be_bytes(stats[2].1[3..].try_into().unwrap()), 10);
         assert_eq!(&stats[3].1[..3], &[0, 2, 1]);
         assert_eq!(u64::from_be_bytes(stats[3].1[3..].try_into().unwrap()), 5);
-        assert_eq!(u64::from_be_bytes(stats[11].1[3..].try_into().unwrap()), 2);
-        assert_eq!(u64::from_be_bytes(stats[12].1[3..].try_into().unwrap()), 5);
-        assert_eq!(u64::from_be_bytes(stats[13].1[3..].try_into().unwrap()), 3);
-        assert_eq!(u64::from_be_bytes(stats[14].1[3..].try_into().unwrap()), 7);
-        assert_eq!(u64::from_be_bytes(stats[15].1[3..].try_into().unwrap()), 4);
-        assert_eq!(u64::from_be_bytes(stats[16].1[3..].try_into().unwrap()), 9);
+        assert_eq!(u64::from_be_bytes(stats[14].1[3..].try_into().unwrap()), 2);
+        assert_eq!(u64::from_be_bytes(stats[15].1[3..].try_into().unwrap()), 5);
+        assert_eq!(u64::from_be_bytes(stats[16].1[3..].try_into().unwrap()), 3);
+        assert_eq!(u64::from_be_bytes(stats[17].1[3..].try_into().unwrap()), 7);
+        assert_eq!(u64::from_be_bytes(stats[18].1[3..].try_into().unwrap()), 4);
+        assert_eq!(u64::from_be_bytes(stats[19].1[3..].try_into().unwrap()), 9);
 
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 0,
+                adj_rib_in_routes: Some(0),
+                rfc9972_adj_rib_in_pre: Some(vec![(1, 1, 0), (2, 1, 0)]),
                 rfc9972_adj_rib_in_post: Some(vec![(1, 1, 0), (2, 1, 0)]),
                 rfc9972_policy_rejects: Some(vec![(1, 1, 0), (2, 1, 0)]),
                 rfc9972_rpki_adj_rib_in_post: Some(vec![
@@ -2118,7 +2129,9 @@ mod tests {
                 .iter()
                 .map(|(stat_type, _)| *stat_type)
                 .collect::<Vec<_>>(),
-            vec![7, 20, 21, 21, 22, 22, 23, 23, 35, 35, 36, 36, 37, 37,],
+            vec![
+                7, 18, 19, 19, 20, 21, 21, 22, 22, 23, 23, 35, 35, 36, 36, 37, 37,
+            ],
             "available zero gauges remain present in legacy-then-RFC order"
         );
         assert_eq!(
@@ -2132,8 +2145,8 @@ mod tests {
             zero_stats
                 .iter()
                 .all(|(stat_type, payload)| match stat_type {
-                    7 | 20 => payload.len() == 8 && payload.iter().all(|byte| *byte == 0),
-                    21..=23 | 35..=37 => {
+                    7 | 18 | 20 => payload.len() == 8 && payload.iter().all(|byte| *byte == 0),
+                    19 | 21..=23 | 35..=37 => {
                         payload.len() == 11
                             && matches!(&payload[..3], [0, 1 | 2, 1])
                             && payload[3..].iter().all(|byte| *byte == 0)
@@ -2141,7 +2154,7 @@ mod tests {
                     _ => false,
                 })
         );
-        for stat_type in [21, 22, 23, 35, 36, 37] {
+        for stat_type in [19, 21, 22, 23, 35, 36, 37] {
             let families = zero_stats
                 .iter()
                 .filter(|(candidate, _)| *candidate == stat_type)
@@ -2150,11 +2163,38 @@ mod tests {
             assert_eq!(families, vec![&[0, 1, 1], &[0, 2, 1]]);
         }
 
+        // A family without an exact pre-policy count (for example a
+        // negotiated VPN family) removes the global total but keeps the
+        // exact unicast rows.
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 43,
+                adj_rib_in_routes: None,
+                rfc9972_adj_rib_in_pre: Some(vec![(1, 1, 43)]),
                 rfc9972_adj_rib_in_post: None,
+                rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
+                adj_rib_out_post: None,
+            })
+            .await
+            .unwrap();
+        let family_only = c_rx.recv().await.unwrap();
+        let family_only_stats = decode_stats(&family_only);
+        assert_eq!(family_only_stats.len(), 1);
+        assert_eq!(family_only_stats[0].0, 19);
+        assert_eq!(&family_only_stats[0].1[..3], &[0, 1, 1]);
+        assert_eq!(
+            u64::from_be_bytes(family_only_stats[0].1[3..].try_into().unwrap()),
+            43
+        );
+
+        // An inexact count is omitted, never sent as a lower bound.
+        event_tx
+            .send(BmpEvent::StatsReport {
+                peer_info: sample_peer_info(),
+                adj_rib_in_routes: None,
+                rfc9972_adj_rib_in_pre: None,
+                rfc9972_adj_rib_in_post: Some(vec![(1, 1, 44)]),
                 rfc9972_policy_rejects: None,
                 rfc9972_rpki_adj_rib_in_post: None,
                 adj_rib_out_post: None,
@@ -2163,12 +2203,13 @@ mod tests {
             .unwrap();
         let unavailable = c_rx.recv().await.unwrap();
         let unavailable_stats = decode_stats(&unavailable);
-        assert_eq!(unavailable_stats.len(), 1);
-        assert_eq!(unavailable_stats[0].0, adj_rib_in_type);
-        assert_eq!(unavailable_stats[0].1.len(), 8);
         assert_eq!(
-            u64::from_be_bytes(unavailable_stats[0].1.try_into().unwrap()),
-            43
+            unavailable_stats
+                .iter()
+                .map(|(stat_type, _)| *stat_type)
+                .collect::<Vec<_>>(),
+            vec![20, 21, 23],
+            "no pre-policy type 7/18/19 without an exact count"
         );
 
         let readme =
@@ -2206,19 +2247,25 @@ mod tests {
         assert_eq!(matching.len(), 1);
         let actual = matching[0].split_whitespace().collect::<Vec<_>>().join(" ");
         let expected = format!(
-            "- Periodic Stats Reports for each peer carry the RFC 7854 Adj-RIB-In route count \
-             (type {adj_rib_in_type}); when available, they also carry the RFC 8671 post-policy \
-             Adj-RIB-Out total (type {adj_rib_out_total_type}) and per-(AFI, SAFI) counts \
-             (type {adj_rib_out_family_type}); types \
-             {adj_rib_out_total_type}/{adj_rib_out_family_type} are omitted when unavailable \
-             rather than reported as false zero. RFC 9972 post-policy Adj-RIB-In gauges \
-             (types 20/21/23) cover negotiated IPv4/IPv6 unicast and are omitted when effective \
-             unicast Add-Path receive is active. Type 22 reports exact retained policy \
-             rejections for those negotiated families, including under Add-Path; it is omitted \
-             when rejected-route retention is disabled or a capacity eviction makes the \
-             retained set incomplete. Types 35/36/37 report exact post-policy RPKI Invalid, \
-             Valid, and NotFound path counts per negotiated IPv4/IPv6-unicast family, including \
-             Add-Path identities; they are omitted until a VRP table is authoritative."
+            "- Periodic Stats Reports for each peer carry the pre-policy Adj-RIB-In route \
+             count only when it is exact: RFC 9972 type 19 per negotiated IPv4/IPv6 unicast \
+             family, plus the RFC 7854 total (type {adj_rib_in_type}) and its RFC 9972 twin \
+             (type 18) when no other family is negotiated. Exact means rejected-route \
+             retention is enabled with no eviction or max-prefix `Block` withholding since the \
+             session reset and no unicast Add-Path receive; otherwise types \
+             {adj_rib_in_type}/18/19 are omitted rather than approximated. When available, \
+             reports also carry the RFC 8671 post-policy Adj-RIB-Out total (type \
+             {adj_rib_out_total_type}) and per-(AFI, SAFI) counts (type \
+             {adj_rib_out_family_type}); types {adj_rib_out_total_type}/{adj_rib_out_family_type} \
+             are omitted when unavailable rather than reported as false zero. RFC 9972 \
+             post-policy Adj-RIB-In gauges (types 20/21/23) cover negotiated IPv4/IPv6 unicast \
+             and are omitted when effective unicast Add-Path receive is active. Type 22 reports \
+             exact retained policy rejections for those negotiated families, including under \
+             Add-Path; it is omitted when rejected-route retention is disabled or a capacity \
+             eviction makes the retained set incomplete. Types 35/36/37 report exact \
+             post-policy RPKI Invalid, Valid, and NotFound path counts per negotiated \
+             IPv4/IPv6-unicast family, including Add-Path identities; they are omitted until a \
+             VRP table is authoritative."
         );
         assert_eq!(
             actual,
@@ -2991,7 +3038,8 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 1,
+                adj_rib_in_routes: Some(1),
+                rfc9972_adj_rib_in_pre: None,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
                 rfc9972_rpki_adj_rib_in_post: None,
@@ -3716,7 +3764,8 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 7,
+                adj_rib_in_routes: Some(7),
+                rfc9972_adj_rib_in_pre: None,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
                 rfc9972_rpki_adj_rib_in_post: None,
@@ -3790,7 +3839,8 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
-                adj_rib_in_routes: 9,
+                adj_rib_in_routes: Some(9),
+                rfc9972_adj_rib_in_pre: None,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
                 rfc9972_rpki_adj_rib_in_post: None,
@@ -4362,7 +4412,8 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: b.clone(),
-                adj_rib_in_routes: 42,
+                adj_rib_in_routes: Some(42),
+                rfc9972_adj_rib_in_pre: None,
                 rfc9972_adj_rib_in_post: Some(vec![(1, 1, 40)]),
                 rfc9972_policy_rejects: None,
                 rfc9972_rpki_adj_rib_in_post: None,

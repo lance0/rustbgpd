@@ -66,6 +66,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         prefix_count: 0,
                         rejected_routes_retained: 0,
                         policy_reject_counts: None,
+                        pre_policy_route_counts: None,
                         max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,

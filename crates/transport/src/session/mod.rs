@@ -574,6 +574,11 @@ pub(crate) struct PeerSession {
     /// bound (which also requests one route refresh so the peer replays what
     /// was withheld).
     max_prefix_blocking: [bool; MaxPrefixScope::ALL.len()],
+    /// Set when `Block` withholds a unicast announcement that passed import
+    /// policy; cleared only on session reset. Such a route is in neither the
+    /// accepted set nor the rejected-route store, so the pre-policy
+    /// Adj-RIB-In count is unknown until the session restarts.
+    unicast_announcement_withheld: bool,
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
@@ -1554,6 +1559,7 @@ impl PeerSession {
                 && !self.received_slot_available(prefix, reserved_received[family_index])
             {
                 self.note_max_prefix_block(received_scope);
+                self.unicast_announcement_withheld = true;
                 continue;
             }
             let (usage, bound) = self.max_prefix_scope_usage(accepted_scope);
@@ -1562,6 +1568,7 @@ impl PeerSession {
             }) {
                 self.note_max_prefix_block(accepted_scope);
                 self.remember_rejected_path(prefix, route.path_id);
+                self.unicast_announcement_withheld = true;
                 continue;
             }
             reserved.insert(prefix);
@@ -1903,6 +1910,29 @@ impl PeerSession {
         self.known_unicast_v6 + self.rejected_only_v6
     }
 
+    /// Exact pre-policy Adj-RIB-In unicast route counts: accepted prefixes
+    /// plus retained rejections other than treat-as-withdraw. `None` unless
+    /// every route the peer still announces is in one of those two sets —
+    /// retention enabled with no eviction, no `Block` withholding — and both
+    /// count the same unit (one route per prefix, so no unicast Add-Path
+    /// receive).
+    pub(super) fn pre_policy_route_counts(&self) -> Option<crate::PrePolicyRouteCounts> {
+        if !self.reject_retention_enabled
+            || self.rejected_routes.evictions_since_reset() != 0
+            || self.unicast_announcement_withheld
+            || self.receives_add_path_for_family((Afi::Ipv4, Safi::Unicast))
+            || self.receives_add_path_for_family((Afi::Ipv6, Safi::Unicast))
+        {
+            return None;
+        }
+        let (rejected_v4, rejected_v6) = self.rejected_routes.resident_reject_counts();
+        let accepted = |count: usize| u64::try_from(count).unwrap_or(u64::MAX);
+        Some(crate::PrePolicyRouteCounts {
+            ipv4_unicast: accepted(self.known_unicast_v4).saturating_add(rejected_v4),
+            ipv6_unicast: accepted(self.known_unicast_v6).saturating_add(rejected_v6),
+        })
+    }
+
     fn tracks_received(&self, prefix: Prefix) -> bool {
         match prefix {
             Prefix::V4(_) => self.config.max_prefixes_received_ipv4.is_some(),
@@ -2130,6 +2160,7 @@ impl PeerSession {
         self.rejected_only_v6 = 0;
         self.max_prefix_warned = [false; MaxPrefixScope::ALL.len()];
         self.max_prefix_blocking = [false; MaxPrefixScope::ALL.len()];
+        self.unicast_announcement_withheld = false;
         self.known_flowspec.clear();
         self.known_evpn.clear();
         self.known_bgpls.clear();
@@ -2533,6 +2564,7 @@ impl PeerSession {
             max_prefix_warned: [false; MaxPrefixScope::ALL.len()],
             max_prefix_warning_crossings: Default::default(),
             max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
+            unicast_announcement_withheld: false,
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             evpn_discard_warned: [false; 256],

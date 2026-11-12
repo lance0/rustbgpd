@@ -287,27 +287,29 @@ def cmd_stats_locrib_counts():
     if not peer:
         fail("no stats report for a regular peer")
     ptypes = _stat_types(peer[-1]["raw"][6 + PER_PEER_LEN :])
-    if 7 not in ptypes:
-        fail(f"peer stats types {ptypes} missing 7 (Adj-RIB-In)")
-    for required in (20, 21, 23):
+    for required in (19, 20, 21, 22, 23):
         if required not in ptypes:
             fail(f"peer stats types {ptypes} missing RFC 9972 type {required}")
-    legacy_end = max(i for i, t in enumerate(ptypes) if t in (7, 15, 17))
+    legacy_end = max((i for i, t in enumerate(ptypes) if t in (15, 17)), default=-1)
     rfc_start = min(i for i, t in enumerate(ptypes) if t >= 18)
     if legacy_end >= rfc_start:
         fail(f"peer stats types {ptypes}: RFC 9972 block precedes legacy block")
     rfc_types = ptypes[rfc_start:]
     if rfc_types != sorted(rfc_types):
         fail(f"peer RFC 9972 stats block is not sorted by type: {rfc_types}")
-    if ptypes.count(20) != 1 or ptypes.count(21) != 2 or ptypes.count(23) != 2:
+    if (ptypes.count(20) != 1 or ptypes.count(19) != 2 or ptypes.count(21) != 2
+            or ptypes.count(22) != 2 or ptypes.count(23) != 2):
         fail(f"peer stats types {ptypes}: expected one global and two family gauges")
     entries = _stats(peer[-1]["raw"][6 + PER_PEER_LEN :])
     global_rows = [payload for stat_type, payload in entries if stat_type == 20]
+    family_19 = [payload for stat_type, payload in entries if stat_type == 19]
     family_21 = [payload for stat_type, payload in entries if stat_type == 21]
+    family_22 = [payload for stat_type, payload in entries if stat_type == 22]
     family_23 = [payload for stat_type, payload in entries if stat_type == 23]
     if len(global_rows[0]) != 8:
         fail(f"RFC 9972 type 20 length {len(global_rows[0])} != 8")
-    for stat_type, rows in ((21, family_21), (23, family_23)):
+    for stat_type, rows in ((19, family_19), (21, family_21), (22, family_22),
+                            (23, family_23)):
         if any(len(row) != 11 for row in rows):
             fail(f"RFC 9972 type {stat_type} rows do not all have length 11")
         families = [(u16(row, 0), row[2]) for row in rows]
@@ -319,8 +321,37 @@ def cmd_stats_locrib_counts():
     family_total = sum(int.from_bytes(row[3:], "big") for row in family_21)
     if total != family_total:
         fail(f"RFC 9972 type 20 value {total} != family sum {family_total}")
+    _assert_pre_policy_rows(entries)
     ok(f"stats: loc-rib peer carries types 8+10 ({types}); regular peer "
-       f"carries legacy and RFC 9972 Adj-RIB-In gauges ({ptypes})")
+       f"carries exact pre-policy type 19 without global 7/18 and RFC 9972 "
+       f"Adj-RIB-In gauges ({ptypes})")
+
+
+def _assert_pre_policy_rows(entries):
+    """Type 19 rows equal type 21 plus type 22 per family, with no 7/18.
+
+    Both PEs negotiate VPNv4, which has no exact pre-policy count, so the
+    global totals must be absent. The topology has no loop, OTC, or
+    next-hop-ownership rejections, so the exact pre-policy count is accepted
+    (21) plus policy-rejected (22).
+    """
+    types = [stat_type for stat_type, _payload in entries]
+    for omitted in (7, 18):
+        if omitted in types:
+            fail(f"stats types {types} carry global pre-policy type {omitted} "
+                 "despite a negotiated VPNv4 family")
+    rows = {
+        stat_type: {(u16(p, 0), p[2]): int.from_bytes(p[3:], "big")
+                    for t, p in entries if t == stat_type and len(p) == 11}
+        for stat_type in (19, 21, 22)
+    }
+    if list(rows[19]) != [(1, 1), (2, 1)]:
+        fail(f"RFC 9972 type 19 families {list(rows[19])} != v4/v6 unicast")
+    for family, pre in rows[19].items():
+        expected = rows[21].get(family, 0) + rows[22].get(family, 0)
+        if pre != expected:
+            fail(f"RFC 9972 type 19 family {family} value {pre} != "
+                 f"type 21 + type 22 = {expected}")
 
 
 def _stats_bodies_for_peer(peer_ip):
@@ -369,8 +400,11 @@ def cmd_stats_policy_reject_counts(peer_ip):
              "IPv4/IPv6-unicast value-1 rows")
     if not set(exact_v3).intersection(exact_v4):
         fail(f"peer {peer_ip}: exact type-22 Stats bodies differ across v3/v4")
+    for body in exact_v3:
+        _assert_pre_policy_rows(_stats(body))
     ok(f"peer {peer_ip}: exactly two unique type-22 length-11 rows "
-       "[(1,1,1), (2,1,1)] with byte-equal v3/v4 Stats body")
+       "[(1,1,1), (2,1,1)] with byte-equal v3/v4 Stats body; pre-policy "
+       "type 19 = type 21 + type 22 per family, no 7/18")
 
 
 def cmd_stats_rpki_counts(peer_ip):

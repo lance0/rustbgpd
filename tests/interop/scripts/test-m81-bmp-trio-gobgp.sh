@@ -60,7 +60,8 @@
 #   30  raw: v4 Stats Report wraps Stats Count + data in Stats TLV
 #       code 1; unwrapped value byte-matches a v3 stats body
 #   31  raw: stats carry loc-rib type 8 + 10 counters (instance peer)
-#       and type 7 (Adj-RIB-In) on a regular peer
+#       and, on a regular peer, exact pre-policy type 19 rows equal to
+#       type 21 + type 22 with no global type 7/18 (VPNv4 is negotiated)
 #   32  raw v4: every RM carries only BGP Message TLV type 4; no
 #       ambiguous type-5 Path Marking is emitted
 #   33  tshark: all v4-port messages dissect with bmp.version == 4
@@ -76,7 +77,8 @@
 #       (bmp.version == 3, no v4 TLV fields)
 #   38  raw: PE1 Stats Reports carry exactly one IPv4-unicast and one
 #       IPv6-unicast RFC 9972 policy-rejection row (type 22), both 1,
-#       with byte-equal v3 body / v4 Stats TLV value
+#       with byte-equal v3 body / v4 Stats TLV value; the same bodies
+#       carry type 19 = type 21 + type 22 per family and no type 7/18
 #   39  raw: PE1 Stats Reports carry exact RFC 9972 RPKI post-policy
 #       Adj-RIB-In rows (types 35/36/37) for IPv4/IPv6 unicast: one
 #       Invalid, one Valid, and one NotFound path in each family, with
@@ -542,7 +544,7 @@ test_stats() {
                 and ([.msg_data.per_afi_loc_rib[]
                       | select(.afi == 1 and .safi == 128 and .count >= 1)] | length) > 0' \
         "(2) loc-rib per-AFI stats: ipv4-unicast + vpnv4 counts >= 1 (RFC 9069 type 10)" 40
-    raw_assert "(38) PE1 policy rejects: exact v4/v6 type-22 rows, v3/v4-equal body" \
+    raw_assert "(38) PE1 policy rejects: exact v4/v6 type-22 rows, v3/v4-equal body, type 19 = 21 + 22" \
         stats_policy_reject_counts "$PE1_ADDR"
     raw_assert "(39) PE1 RPKI states: exact v4/v6 type-35/36/37 rows, v3/v4-equal body" \
         stats_rpki_counts "$PE1_ADDR"
@@ -588,7 +590,7 @@ test_raw_byte_matrix() {
     raw_assert "(28) v4 Initiation == v3 except version byte" init_equal
     raw_assert "(29) v4 PeerUp == v3 except version byte (pe1)" peerup_equal "$PE1_ADDR"
     raw_assert "(30) v4 Stats wrapped in Stats TLV 1, value == v3 body" stats_v4_wrap
-    raw_assert "(31) stats: loc-rib types 8+10, peer type 7" stats_locrib_counts
+    raw_assert "(31) stats: loc-rib types 8+10, peer pre-policy type 19 = 21 + 22, no 7/18" stats_locrib_counts
     raw_assert "(32) no ambiguous type-5 Path Marking on any v4 RM" no_path_marking
 }
 

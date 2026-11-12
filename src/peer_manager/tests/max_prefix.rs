@@ -488,6 +488,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         prefix_count: 0,
                         rejected_routes_retained: 0,
                         policy_reject_counts: None,
+                        pre_policy_route_counts: None,
                         max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,

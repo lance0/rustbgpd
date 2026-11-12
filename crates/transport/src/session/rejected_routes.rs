@@ -258,8 +258,13 @@ pub struct RejectedRouteStore {
     entries: Option<LruCache<ImportDecisionKey, RejectedRouteEntry>>,
     capacity: usize,
     evictions_since_reset: u64,
-    policy_reject_ipv4_unicast: u64,
-    policy_reject_ipv6_unicast: u64,
+    /// Retained IPv4/IPv6-unicast policy rejections, indexed by
+    /// [`Self::unicast_index`].
+    policy_rejects: [u64; 2],
+    /// Retained IPv4/IPv6-unicast rejections whose route stays in the peer's
+    /// pre-policy Adj-RIB-In: every reason except RFC 7606 treat-as-withdraw,
+    /// which removes the route instead.
+    resident_rejects: [u64; 2],
 }
 
 impl RejectedRouteStore {
@@ -272,8 +277,8 @@ impl RejectedRouteStore {
             entries: None,
             capacity: cap,
             evictions_since_reset: 0,
-            policy_reject_ipv4_unicast: 0,
-            policy_reject_ipv6_unicast: 0,
+            policy_rejects: [0; 2],
+            resident_rejects: [0; 2],
         }
     }
 
@@ -299,7 +304,7 @@ impl RejectedRouteStore {
     pub fn insert(&mut self, key: ImportDecisionKey, mut entry: RejectedRouteEntry) -> Option<u64> {
         entry.enforce_bounds();
         let capacity = self.capacity;
-        let incoming = Self::policy_reject_family(&key, &entry);
+        let incoming = (Self::unicast_index(&key), entry.reason);
         let (refresh, removed) = {
             let entries = self.storage();
             let refresh = entries.contains(&key);
@@ -307,9 +312,13 @@ impl RejectedRouteStore {
             (refresh, removed)
         };
         if let Some((removed_key, removed_entry)) = removed.as_ref() {
-            self.subtract_policy_reject(removed_key, removed_entry);
+            self.account(
+                Self::unicast_index(removed_key),
+                removed_entry.reason,
+                false,
+            );
         }
-        self.add_policy_reject(incoming);
+        self.account(incoming.0, incoming.1, true);
         let displaced = removed.is_some() && !refresh;
         if displaced {
             self.evictions_since_reset = self.evictions_since_reset.saturating_add(1);
@@ -324,7 +333,7 @@ impl RejectedRouteStore {
     pub fn remove(&mut self, key: &ImportDecisionKey) {
         let removed = self.entries.as_mut().and_then(|entries| entries.pop(key));
         if let Some(entry) = removed {
-            self.subtract_policy_reject(key, &entry);
+            self.account(Self::unicast_index(key), entry.reason, false);
         }
     }
 
@@ -333,8 +342,8 @@ impl RejectedRouteStore {
     pub fn clear(&mut self) {
         self.entries = None;
         self.evictions_since_reset = 0;
-        self.policy_reject_ipv4_unicast = 0;
-        self.policy_reject_ipv6_unicast = 0;
+        self.policy_rejects = [0; 2];
+        self.resident_rejects = [0; 2];
     }
 
     /// Number of retained rejections (the gauge value).
@@ -364,39 +373,47 @@ impl RejectedRouteStore {
     /// store is authoritative from its configuration and eviction history.
     #[must_use]
     pub fn policy_reject_counts(&self) -> (u64, u64) {
-        (
-            self.policy_reject_ipv4_unicast,
-            self.policy_reject_ipv6_unicast,
-        )
+        (self.policy_rejects[0], self.policy_rejects[1])
     }
 
-    fn policy_reject_family(key: &ImportDecisionKey, entry: &RejectedRouteEntry) -> Option<Afi> {
-        if entry.reason != ImportRejectReason::PolicyReject || key.safi != Safi::Unicast {
-            return None;
+    /// Exact retained IPv4/IPv6-unicast rejections whose route remains in
+    /// the pre-policy Adj-RIB-In (every reason except treat-as-withdraw).
+    /// Authority is decided by the caller, as for
+    /// [`Self::policy_reject_counts`].
+    #[must_use]
+    pub fn resident_reject_counts(&self) -> (u64, u64) {
+        (self.resident_rejects[0], self.resident_rejects[1])
+    }
+
+    fn unicast_index(key: &ImportDecisionKey) -> Option<usize> {
+        match (key.afi, key.safi) {
+            (Afi::Ipv4, Safi::Unicast) => Some(0),
+            (Afi::Ipv6, Safi::Unicast) => Some(1),
+            _ => None,
         }
-        matches!(key.afi, Afi::Ipv4 | Afi::Ipv6).then_some(key.afi)
     }
 
-    fn add_policy_reject(&mut self, family: Option<Afi>) {
-        let count = match family {
-            Some(Afi::Ipv4) => &mut self.policy_reject_ipv4_unicast,
-            Some(Afi::Ipv6) => &mut self.policy_reject_ipv6_unicast,
-            _ => return,
+    fn account(&mut self, family: Option<usize>, reason: ImportRejectReason, add: bool) {
+        let Some(index) = family else {
+            return;
         };
-        *count = count
-            .checked_add(1)
-            .expect("retained policy-reject count overflowed store cardinality");
-    }
-
-    fn subtract_policy_reject(&mut self, key: &ImportDecisionKey, entry: &RejectedRouteEntry) {
-        let count = match Self::policy_reject_family(key, entry) {
-            Some(Afi::Ipv4) => &mut self.policy_reject_ipv4_unicast,
-            Some(Afi::Ipv6) => &mut self.policy_reject_ipv6_unicast,
-            _ => return,
+        let step = |count: &mut u64| {
+            *count = if add {
+                count
+                    .checked_add(1)
+                    .expect("retained reject count overflowed store cardinality")
+            } else {
+                count
+                    .checked_sub(1)
+                    .expect("retained reject count drifted below zero")
+            };
         };
-        *count = count
-            .checked_sub(1)
-            .expect("retained policy-reject count drifted below zero");
+        if reason == ImportRejectReason::PolicyReject {
+            step(&mut self.policy_rejects[index]);
+        }
+        if reason != ImportRejectReason::TreatAsWithdraw {
+            step(&mut self.resident_rejects[index]);
+        }
     }
 
     /// Clone out every retained rejection, sorted by
@@ -471,12 +488,29 @@ mod tests {
             })
     }
 
+    fn snapshot_resident_reject_counts(store: &RejectedRouteStore) -> (u64, u64) {
+        store
+            .snapshot()
+            .into_iter()
+            .filter(|(_, entry)| entry.reason != ImportRejectReason::TreatAsWithdraw)
+            .fold((0, 0), |(ipv4, ipv6), (key, _)| match (key.afi, key.safi) {
+                (Afi::Ipv4, Safi::Unicast) => (ipv4 + 1, ipv6),
+                (Afi::Ipv6, Safi::Unicast) => (ipv4, ipv6 + 1),
+                _ => (ipv4, ipv6),
+            })
+    }
+
     fn assert_policy_reject_counts(store: &RejectedRouteStore, expected: (u64, u64)) {
         assert_eq!(store.policy_reject_counts(), expected);
         assert_eq!(
             store.policy_reject_counts(),
             snapshot_policy_reject_counts(store),
             "constant-time accounting must match the test-only store scan"
+        );
+        assert_eq!(
+            store.resident_reject_counts(),
+            snapshot_resident_reject_counts(store),
+            "constant-time resident accounting must match the test-only store scan"
         );
     }
 
@@ -680,6 +714,38 @@ mod tests {
             assert_eq!(store.insert(new_key, entry(new_reason)), Some(1));
             assert_policy_reject_counts(&store, expected);
         }
+    }
+
+    /// Every reason except treat-as-withdraw leaves the route in the
+    /// pre-policy Adj-RIB-In, across insert, reason replacement, eviction,
+    /// removal and clear.
+    #[test]
+    fn resident_reject_counts_exclude_only_treat_as_withdraw() {
+        let mut store = RejectedRouteStore::with_capacity(4);
+        store.insert(key(1), entry(ImportRejectReason::PolicyReject));
+        store.insert(key(2), entry(ImportRejectReason::AsPathLoop));
+        store.insert(v6_key(1), entry(ImportRejectReason::OtcRouteLeak));
+        store.insert(v6_key(2), entry(ImportRejectReason::TreatAsWithdraw));
+        assert_eq!(store.resident_reject_counts(), (2, 1));
+        assert_policy_reject_counts(&store, (1, 0));
+
+        store.insert(key(2), entry(ImportRejectReason::TreatAsWithdraw));
+        assert_eq!(store.resident_reject_counts(), (1, 1));
+        store.insert(v6_key(2), entry(ImportRejectReason::NextHopOwnership));
+        assert_eq!(store.resident_reject_counts(), (1, 2));
+
+        // Evicts key(1), the least recently rejected entry.
+        assert_eq!(
+            store.insert(key(3), entry(ImportRejectReason::RrLoop)),
+            Some(1)
+        );
+        assert_eq!(store.resident_reject_counts(), (1, 2));
+        assert_policy_reject_counts(&store, (0, 0));
+
+        store.remove(&v6_key(1));
+        assert_eq!(store.resident_reject_counts(), (1, 1));
+        store.clear();
+        assert_eq!(store.resident_reject_counts(), (0, 0));
     }
 
     #[test]

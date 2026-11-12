@@ -1101,6 +1101,11 @@ fn rfc9972_stats_peer_handle(peer_addr: IpAddr) -> PeerHandle {
                         ipv4_unicast: 2,
                         ipv6_unicast: 3,
                     });
+                    state.pre_policy_route_counts =
+                        Some(rustbgpd_transport::PrePolicyRouteCounts {
+                            ipv4_unicast: 14,
+                            ipv6_unicast: 10,
+                        });
                     let mut negotiated = test_negotiated_session(true);
                     negotiated.families =
                         vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
@@ -1175,13 +1180,17 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         rustbgpd_bmp::BmpEvent::StatsReport {
             peer_info,
             adj_rib_in_routes,
+            rfc9972_adj_rib_in_pre,
             rfc9972_adj_rib_in_post,
             rfc9972_policy_rejects,
             rfc9972_rpki_adj_rib_in_post,
             adj_rib_out_post,
         } => {
             assert_eq!(peer_info.peer_addr, addr);
-            assert_eq!(adj_rib_in_routes, 22);
+            // The session's post-policy `prefix_count` (22) never reaches
+            // the pre-policy statistics.
+            assert_eq!(adj_rib_in_routes, Some(24));
+            assert_eq!(rfc9972_adj_rib_in_pre, Some(vec![(1, 1, 14), (2, 1, 10)]));
             assert_eq!(rfc9972_adj_rib_in_post, Some(vec![(1, 1, 12), (2, 1, 7)]));
             assert_eq!(rfc9972_policy_rejects, Some(vec![(1, 1, 2), (2, 1, 3)]));
             assert_eq!(
@@ -1208,6 +1217,58 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         }
         other => panic!("expected StatsReport, got {other:?}"),
     }
+}
+
+/// Types 7/18 are totals, so any negotiated family without a pre-policy count
+/// removes them while the exact unicast type-19 rows stay; an absent session
+/// count (retention off, eviction, `Block`, Add-Path) omits all three.
+/// Break-to-red: summing only the unicast families regardless of the others
+/// reports `Some(24)` in the VPN case.
+#[test]
+fn bmp_pre_policy_counts_emit_totals_only_for_unicast_only_sessions() {
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut state = policy_test_peer_state(addr, SessionState::Established);
+    let mut negotiated = test_negotiated_session(true);
+    negotiated.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    state.negotiated_session = Some(negotiated);
+    assert_eq!(
+        super::snapshot::bmp_pre_policy_counts(&state),
+        (None, None),
+        "no exact session count"
+    );
+
+    state.pre_policy_route_counts = Some(rustbgpd_transport::PrePolicyRouteCounts {
+        ipv4_unicast: 14,
+        ipv6_unicast: 10,
+    });
+    assert_eq!(
+        super::snapshot::bmp_pre_policy_counts(&state),
+        (Some(24), Some(vec![(1, 1, 14), (2, 1, 10)]))
+    );
+
+    let negotiated = state.negotiated_session.as_mut().unwrap();
+    negotiated.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    assert_eq!(
+        super::snapshot::bmp_pre_policy_counts(&state),
+        (Some(14), Some(vec![(1, 1, 14)])),
+        "only negotiated families are reported and summed"
+    );
+
+    let negotiated = state.negotiated_session.as_mut().unwrap();
+    negotiated.families = vec![
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+    ];
+    assert_eq!(
+        super::snapshot::bmp_pre_policy_counts(&state),
+        (None, Some(vec![(1, 1, 14), (2, 1, 10)])),
+        "a VPN family has no pre-policy count, so no total"
+    );
+
+    let negotiated = state.negotiated_session.as_mut().unwrap();
+    negotiated.families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    assert_eq!(super::snapshot::bmp_pre_policy_counts(&state), (None, None));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1464,7 +1525,8 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
                 is_as4: true,
                 timestamp: std::time::SystemTime::now(),
             },
-            adj_rib_in_routes: 0,
+            adj_rib_in_routes: Some(0),
+            rfc9972_adj_rib_in_pre: None,
             rfc9972_adj_rib_in_post: None,
             rfc9972_policy_rejects: None,
             rfc9972_rpki_adj_rib_in_post: None,
