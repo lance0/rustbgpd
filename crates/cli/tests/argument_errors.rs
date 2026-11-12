@@ -24,6 +24,7 @@ fn parser_and_neighbor_usage_errors_exit_usage_before_transport() {
         vec!["top", "--interval", "not-a-number"],
         vec!["neighbor", "lst"],
         vec!["neighbor", "list"],
+        vec!["neighbor", "lst", "delete"],
         vec!["neighbor", "999.999.999.999"],
         vec!["neighbor", "fe80::1%"],
         vec!["neighbor", "fe80::1%eth0%eth1"],
@@ -76,6 +77,8 @@ fn valid_neighbor_addresses_and_list_mode_reach_transport() {
         vec!["neighbor", "2001:db8::1"],
         vec!["neighbor", "fe80::1%eth0"],
         vec!["neighbor", "fe80::1%7", "reset"],
+        vec!["neighbor", "swp1"],
+        vec!["neighbor", "swp1", "delete"],
     ] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");

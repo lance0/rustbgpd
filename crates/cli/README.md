@@ -184,6 +184,7 @@ rbgp neighbor <addr> refresh-in             # re-apply import policy via inbound
 rbgp neighbor <addr> refresh-out            # re-send this peer's current exportable outbound routes
 rbgp neighbor <addr> replay-out             # explicit unicast replay; scheduling acknowledgement only
 rbgp neighbor <addr> delete
+rbgp neighbor swp1 delete                   # <addr> may name an unnumbered peer by its interface
 
 rbgp dynamic-neighbor list
 rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members

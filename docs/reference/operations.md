@@ -3638,8 +3638,13 @@ The peer is persisted to the config file automatically. `--role` enables RFC
 for example `external (session 65009)`.
 
 An interface-only neighbor is selected by its interface name, as in
-`rbgp neighbor swp1`; the table lists it as `swp1 (fe80::2)`, or `swp1 (-)`
-until its peer's address is learned.
+`rbgp neighbor swp1` or `rbgp neighbor swp1 delete`; the table lists it as
+`swp1 (fe80::2)`, or `swp1 (-)` until its peer's address is learned. The name
+follows the kernel's rules (1 to 15 bytes, no `/`, `:` or whitespace) and must
+contain a letter. A token that is, or is one typo away from, a `neighbor`
+command word (`list`, `show`, `delete`, `reset` and the other actions) is a
+usage error rather than an interface name, so `rbgp neighbor lst` exits 64
+without contacting the daemon.
 
 ### Remove a peer
 

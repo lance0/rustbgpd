@@ -41,6 +41,83 @@ pub(crate) fn parse_peer_address(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+/// The `rbgp neighbor` action names and aliases, plus the `list`, `show` and
+/// `help` verbs operators type from habit. A positional equal to one of these,
+/// or one edit away from one, is a usage error rather than an interface name,
+/// so a mistyped command such as `rbgp neighbor lst` never becomes a lookup of
+/// an interface called `lst`.
+pub(crate) const NEIGHBOR_RESERVED_WORDS: &[&str] = &[
+    "add",
+    "delete",
+    "enable",
+    "disable",
+    "reset",
+    "refresh-in",
+    "softreset",
+    "refresh-out",
+    "replay-out",
+    "help",
+    "list",
+    "show",
+];
+
+const NEIGHBOR_SELECTOR_HINT: &str = "select a peer by IP address (192.0.2.1), \
+    scoped link-local address (fe80::1%eth0) or, for an unnumbered peer, its \
+    interface name, then the action, as `rbgp neighbor swp1 delete`";
+
+/// The `rbgp neighbor` positional: anything [`parse_peer_address`] accepts,
+/// or the interface name of an interface-only (unnumbered) neighbor, which
+/// [`split_scoped_address`] sends as an empty address plus the interface.
+pub(crate) fn parse_neighbor_selector(value: &str) -> Result<String, String> {
+    if parse_peer_address(value).is_ok() {
+        return Ok(value.to_string());
+    }
+    if let Some(word) = NEIGHBOR_RESERVED_WORDS
+        .iter()
+        .find(|word| within_one_edit(value, word))
+    {
+        return Err(format!(
+            "`{value}` looks like the command word `{word}`, not a neighbor; \
+             {NEIGHBOR_SELECTOR_HINT}; `rbgp neighbor` alone lists peers"
+        ));
+    }
+    if !is_interface_name(value) {
+        return Err(format!(
+            "expected a peer IP address or interface name; {NEIGHBOR_SELECTOR_HINT}"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// A Linux interface name as the kernel's `dev_valid_name` accepts it: 1 to
+/// 15 bytes (`IFNAMSIZ - 1`), not `.` or `..`, no `/`, `:` or whitespace.
+/// Two further rules keep address typos usage errors: no `%`, the scope
+/// separator, and at least one ASCII letter, so `999.999.999.999` is refused.
+fn is_interface_name(value: &str) -> bool {
+    (1..=15).contains(&value.len())
+        && value != "."
+        && value != ".."
+        && value.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '/' | ':' | '%'))
+}
+
+/// Whether `a` and `b` differ by at most one substitution, insertion,
+/// deletion or adjacent transposition.
+fn within_one_edit(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let common = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let (a, b) = (&a[common..], &b[common..]);
+    match a.len().abs_diff(b.len()) {
+        0 if a.is_empty() => true,
+        0 => a[1..] == b[1..] || (a.len() >= 2 && a[..2] == [b[1], b[0]] && a[2..] == b[2..]),
+        1 if a.len() > b.len() => a[1..] == *b,
+        1 => *a == b[1..],
+        _ => false,
+    }
+}
+
 pub(super) fn restore_matching_scoped_address(requested: Option<&str>, response: &mut String) {
     let Some(address) = requested else {
         return;
@@ -1452,13 +1529,21 @@ pub async fn add(
         address,
         &format!("Neighbor {address} added"),
     )?;
-    output::print_next_step(
-        json,
-        &format!(
-            "watch the session establish: rbgp watch {address} (or check: rbgp neighbor {address})"
-        ),
-    );
+    output::print_next_step(json, &add_next_step(address));
     Ok(())
+}
+
+/// The follow-up after `add`. `rbgp watch` takes only an IP or scoped
+/// address, so an interface-only neighbor is checked through
+/// `rbgp neighbor`, which shows its discovery state and session.
+fn add_next_step(address: &str) -> String {
+    if split_scoped_address(address).0.is_empty() {
+        format!("check discovery and the session: rbgp neighbor {address}")
+    } else {
+        format!(
+            "watch the session establish: rbgp watch {address} (or check: rbgp neighbor {address})"
+        )
+    }
 }
 
 pub async fn delete(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
@@ -1773,6 +1858,99 @@ mod tests {
     }
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn neighbor_selector_accepts_addresses_and_interface_names() {
+        for value in [
+            "192.0.2.1",
+            "2001:db8::1",
+            "fe80::1%eth0",
+            "fe80::1%7",
+            "swp1",
+            "eth0",
+            "lo",
+            "bond0",
+            "enp3s0f1",
+            "Ethernet0",
+            "PortChannel01",
+            "br-lan",
+            "a23456789012345",
+        ] {
+            assert_eq!(parse_neighbor_selector(value).as_deref(), Ok(value));
+        }
+    }
+
+    #[test]
+    fn neighbor_selector_rejects_command_words_and_malformed_tokens() {
+        // Command words and near misses read as typos, not interfaces.
+        for value in [
+            "lst",
+            "list",
+            "lsit",
+            "lists",
+            "show",
+            "shw",
+            "help",
+            "delete",
+            "delte",
+            "reste",
+            "enabel",
+            "disable",
+            "add",
+            "ad",
+            "softreset",
+            "refresh-ot",
+            "replay-out",
+        ] {
+            let error = parse_neighbor_selector(value).unwrap_err();
+            assert!(
+                error.contains("looks like the command word"),
+                "{value}: {error}"
+            );
+            assert!(
+                error.contains("rbgp neighbor swp1 delete"),
+                "{value}: {error}"
+            );
+        }
+        for value in [
+            "",
+            ".",
+            "..",
+            "fe80::1%",
+            "fe80::1%eth0%eth1",
+            "192.0.2.1%eth0",
+            "999.999.999.999",
+            "a234567890123456",
+            "sw p1",
+            "swp1/0",
+            "swp1:0",
+        ] {
+            let error = parse_neighbor_selector(value).unwrap_err();
+            assert!(
+                error.starts_with("expected a peer IP address or interface name"),
+                "{value:?}: {error}"
+            );
+        }
+    }
+
+    /// `rbgp watch` rejects an interface name, so only address selectors
+    /// are pointed at it after `add`.
+    #[test]
+    fn add_next_step_suggests_watch_only_for_address_selectors() {
+        assert_eq!(
+            add_next_step("swp1"),
+            "check discovery and the session: rbgp neighbor swp1"
+        );
+        for address in ["192.0.2.1", "fe80::2%swp1"] {
+            assert_eq!(
+                add_next_step(address),
+                format!(
+                    "watch the session establish: rbgp watch {address} \
+                     (or check: rbgp neighbor {address})"
+                )
+            );
+        }
+    }
 
     // Exhaustive generated-message literals intentionally avoid Default so new
     // API fields require an explicit curated-output decision.
