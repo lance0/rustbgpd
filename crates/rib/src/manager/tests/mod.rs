@@ -1693,6 +1693,7 @@ mod evpn_group_checkpoints;
 mod evpn_group_fleet;
 mod evpn_group_storage;
 mod evpn_peer_pages;
+mod evpn_policy_pacing;
 mod evpn_recovery_budget;
 mod evpn_recovery_differential;
 mod exact_export_lifecycle;

@@ -191,6 +191,11 @@ struct PolicyTransitionStats {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AuthoritativeTransitionReceipt {
+    /// Residual members handed back unapplied (EVPN senders in the forward
+    /// batch; members past the budget in a paced command).
+    deferred_members: usize,
+    /// Members a paced command applied; 0 for every other batch.
+    applied_members: usize,
     outcome: &'static str,
     classification: &'static str,
     failure_stage: &'static str,
@@ -1277,6 +1282,14 @@ pub struct RibManager {
     evpn_table_stamp: u64,
     /// Fairness position for marker-only completion retries on the resync timer.
     evpn_marker_cursor: Option<PeerId>,
+    /// Set only for the distribution pass of one paced export-policy command:
+    /// keyed by the command's applied members, each one's own time in that
+    /// pass once measured, read back by the command.
+    paced_member_costs: Option<HashMap<PeerId, Option<std::time::Duration>>>,
+    /// Tests fix the paced budget clock so members per command do not depend
+    /// on host load.
+    #[cfg(test)]
+    paced_elapsed_for_test: Option<std::time::Duration>,
     /// Closed-cohort wire-oracle preparation only. Never configured by the daemon.
     #[cfg(feature = "bench-internals")]
     bench_evpn_group_ownership: bool,
@@ -2959,6 +2972,9 @@ impl RibManager {
             evpn_recovery_reset: None,
             evpn_table_stamp: 0,
             evpn_marker_cursor: None,
+            paced_member_costs: None,
+            #[cfg(test)]
+            paced_elapsed_for_test: None,
             #[cfg(feature = "bench-internals")]
             bench_evpn_group_ownership: false,
             #[cfg(test)]
@@ -3881,6 +3897,7 @@ impl RibManager {
             RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
             | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
+            | RibUpdate::ApplyPacedExportPolicies { .. }
             | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::ReevaluatePeerExportPolicies { .. }
@@ -5418,6 +5435,11 @@ impl RibManager {
                 replacements,
                 reply,
             } => self.handle_replace_peer_export_policies_authoritatively(replacements, reply),
+            RibUpdate::ApplyPacedExportPolicies {
+                replacements,
+                cost,
+                reply,
+            } => self.handle_apply_paced_export_policies(replacements, cost, reply),
             RibUpdate::RestorePeerExportPoliciesAuthoritatively {
                 replacements,
                 reply,

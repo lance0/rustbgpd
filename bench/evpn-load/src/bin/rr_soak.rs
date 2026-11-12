@@ -416,6 +416,11 @@ struct View {
     capture: Option<qualification::WireCapture>,
     qualification_communities: Option<Vec<u16>>,
     eors: u64,
+    /// The primary-lane probe's bits, and how many of their announcements
+    /// and withdrawals this receiver has applied. While the probe runs these
+    /// bits are outside the inventory the convergence checks compare.
+    watched: Vec<usize>,
+    watched_events: u64,
 }
 
 impl View {
@@ -430,6 +435,8 @@ impl View {
             capture: None,
             qualification_communities: None,
             eors: 0,
+            watched: Vec::new(),
+            watched_events: 0,
         }
     }
 
@@ -447,6 +454,9 @@ impl View {
             return;
         }
         let bit = origin as usize * shape.block() + offset;
+        if self.watched.contains(&bit) {
+            self.watched_events += 1;
+        }
         // `classify` matched the route key. An announcement must also carry
         // every non-key field the origin sent (ESI, labels, gateway): a
         // same-key route with other content replaces the originated route,
@@ -733,12 +743,14 @@ fn check(shape: Shape, clients: &[Client]) -> Check {
         } else {
             out.exact = false;
         }
-        out.min_live = out.min_live.min(view.live);
-        out.max_live = out.max_live.max(view.live);
+        // A running probe's routes are outside the compared inventory.
+        let live = view.live - view.watched.iter().filter(|&&bit| view.has(bit)).count() as u64;
+        out.min_live = out.min_live.min(live);
+        out.max_live = out.max_live.max(live);
         out.invalid += view.invalid;
         out.parse_errors += view.parse_errors;
         out.self_reflected += view.self_reflected;
-        if view.live != expected {
+        if live != expected {
             out.exact = false;
         }
         // Equal count plus every expected bit set is set equality.

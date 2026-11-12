@@ -28,6 +28,11 @@ SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers mo
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
 SAMPLE_PERIOD_US = 1_000_000 // Q.RECOVERY_BARS["sample_hz"]
+# Stopping the probe can wait for the ordinary cycle already in progress (its
+# arrival and withdrawal caps) and the final cycle's four (quiet, arrival,
+# every receiver, withdrawal); it gets its own bound.
+PROBE_STOP_SECONDS = 6 * Q.RECOVERY_BARS["convergence_seconds"] + 30
+
 ACTOR_SERIES = re.compile(r'(?P<name>bgp_rib_actor_slice_max_microseconds|bgp_rib_actor_work_duration_seconds_bucket)'
                           r'\{(?P<labels>[^}]*)\} (?P<value>\S+)')
 LABEL = re.compile(r'(\w+)="([^"]*)"')
@@ -124,6 +129,133 @@ def mass_dirty_actor(start, end):
               "route_chunk bucket increases are not cumulative")
     return {"actor_poll_max_microseconds": maximum, "route_chunk_buckets": buckets,
             "route_chunk_over_200ms": buckets["+Inf"] - buckets["0.2"]}
+
+
+TRANSITION = re.compile(r'bgp_rib_policy_transition_total\{outcome="(?P<outcome>[a-z_]+)"\} (?P<value>\S+)')
+BATCH_FIELDS = ("input_peers", "present_peers", "shared_members", "fallback_members",
+                "fallback_regroup_us", "distribution_us", "total_us")
+# Logged only by daemons that hand EVPN senders back from the batch and
+# apply them in paced commands, so a parent without them records None; they
+# are never required.
+OPTIONAL_BATCH_FIELDS = ("deferred_members", "applied_members")
+
+
+def probe_keys(routes):
+    """The driver's primary-lane probe route and its final-cycle marker:
+    client 0's last two Type 5 pool slots, outside its window until the
+    later churn phases."""
+    width = routes // 5
+    return frozenset({(5, 0, 2 * width - 1), (5, 0, 2 * width - 2)})
+
+
+def transition_counts(text):
+    """Cumulative `bgp_rib_policy_transition_total` by outcome from one scrape."""
+    counts = {}
+    for line in text.splitlines():
+        match = TRANSITION.fullmatch(line)
+        if match:
+            value = float(match["value"])
+            Q.require(match["outcome"] not in counts and value >= 0 and value.is_integer(),
+                      f"invalid or duplicate policy transition series: {line}")
+            counts[match["outcome"]] = int(value)
+    Q.require(counts, "policy transition counter missing")
+    return counts
+
+
+def batch_phases(log, opened_us, closed_us):
+    """Every `authoritative_batch_phase` event the daemon logged inside the window."""
+    rows = []
+    for line in log.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if type(event) is not dict or event.get("target") != "authoritative_batch_phase":
+            continue
+        fields = event.get("fields")
+        Q.require(type(fields) is dict and type(fields.get("classification")) is str
+                  and all(type(fields.get(key)) is int and fields[key] >= 0 for key in BATCH_FIELDS)
+                  and all(fields.get(key) is None or type(fields[key]) is int and fields[key] >= 0
+                          for key in OPTIONAL_BATCH_FIELDS),
+                  "malformed authoritative_batch_phase event")
+        try:
+            stamp = Q.datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+        except (KeyError, AttributeError, ValueError):
+            stamp = None
+        Q.require(stamp is not None and stamp.utcoffset() is not None,
+                  "malformed authoritative_batch_phase timestamp")
+        at = round(stamp.timestamp() * 1_000_000)
+        if opened_us <= at <= closed_us:
+            rows.append({"wall_us": at, "classification": fields["classification"],
+                         **{key: fields[key] for key in BATCH_FIELDS},
+                         **{key: fields.get(key) for key in OPTIONAL_BATCH_FIELDS}})
+    return rows
+
+
+def probe_window(result, opened_us, closed_us):
+    """Primary-lane latency during one regroup: an unmoved source's one-route
+    announcement until the other unmoved receiver holds it. Any probe that
+    never arrived, a route left behind, or a train that does not span the
+    regroup makes the measurement INVALID; it is never read as a pass."""
+    samples = result.get("samples") if type(result) is dict else None
+    Q.require(type(samples) is list and all(
+        type(sample) is dict and type(sample.get("sent_us")) is int
+        and (sample.get("seen_us") is None or type(sample["seen_us"]) is int and sample["seen_us"] >= sample["sent_us"])
+        and type(sample.get("withdrawn")) is bool
+        and sample.get("every_receiver") in (None, True, False)
+        and sample.get("quiet", True) in (True, False) for sample in samples)
+        and all(left["sent_us"] < right["sent_us"] for left, right in zip(samples, samples[1:])),
+        "malformed probe receipt")
+    reason = None
+    if not samples:
+        reason = "no probe sample"
+    elif samples[-1].get("quiet") is False:
+        reason = "probe events did not quiesce before the final cycle"
+    elif any(sample["seen_us"] is None for sample in samples):
+        reason = "probe route never reached the unmoved receiver"
+    elif not all(sample["withdrawn"] for sample in samples):
+        reason = "probe route was not withdrawn"
+    elif samples[0]["sent_us"] > opened_us or samples[-1]["seen_us"] < closed_us:
+        reason = "probe train does not span the regroup"
+    elif samples[-1].get("every_receiver") is not True:
+        # Only then has every receiver applied every probe event before the
+        # acknowledgement, so none can install the route afterwards.
+        reason = "final probe did not reach every receiver"
+    latency = None if reason else max(sample["seen_us"] - sample["sent_us"] for sample in samples)
+    return {"status": "INVALID" if reason else "PASS", "reason": reason,
+            "samples": len(samples), "max_latency_us": latency}
+
+
+def regroup_window(leg, generation, settled_row):
+    """Actor turns, transition outcomes, batch phases and the primary-lane
+    probe of one regroup, recomputed from the raw scrapes and logs. The
+    opening scrape precedes the reload signal and the closing one follows
+    the settled roster, so the closing maximum covers the whole regroup."""
+    events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+
+    def one(kind, **fields):
+        rows = [row for row in events if row["event"] == kind
+                and all(row.get(key) == value for key, value in fields.items())]
+        Q.require(len(rows) == 1 and type(rows[0].get("wall_us")) is int, f"missing/duplicate {kind} {fields}")
+        return rows[0]
+    signal = one("reload_signal", generation=generation)["wall_us"]
+    opened = one("scrape", name=f"regroup-{generation}-start")
+    closed = one("scrape", name=f"regroup-{generation}-end")
+    Q.require(opened["wall_us"] < signal and closed["requested_us"] > settled_row["wall_us"],
+              f"regroup-{generation} scrape window does not bracket the regroup")
+    start = (leg / f"metrics-regroup-{generation}-start.txt").read_text()
+    end = (leg / f"metrics-regroup-{generation}-end.txt").read_text()
+    before, after = transition_counts(start), transition_counts(end)
+    Q.require(set(before) == set(after) and all(after[key] >= before[key] for key in after),
+              "policy transition counter changed layout or moved backwards")
+    probes = [json.loads(line.removeprefix("evpn_control "))["result"] for line in
+              (leg / "driver.log").read_text().splitlines() if line.startswith("evpn_control ")
+              and json.loads(line.removeprefix("evpn_control "))["command"] == f"probe-stop {generation}"]
+    Q.require(len(probes) == 1, f"missing/duplicate probe-stop {generation}")
+    return {"actor": mass_dirty_actor(start, end),
+            "transitions": {key: after[key] - before[key] for key in sorted(after)},
+            "batches": batch_phases((leg / "daemon.log").read_text(), signal, closed["wall_us"]),
+            "probe": probe_window(probes[0], signal, settled_row["wall_us"])}
 
 
 def churn_applied_at(barriers, clients):
@@ -303,6 +435,13 @@ def timings(events):
         return rows[0]["at"]
     values = {f"regroup-{generation}-seconds": at("complete", command=f"policy {generation}")
               - at("reload", generation=generation) for generation in ("a", "b")}
+    # Wire convergence is measured before the probe stops: the final probe
+    # cycle waits for every receiver, so it would absorb the receivers'
+    # drain if it ran first.
+    for generation in ("a", "b"):
+        Q.require(at("command", command=f"probe-stop {generation}")
+                  >= at("complete", command=f"policy {generation}"),
+                  f"probe-stop {generation} overlapped wire convergence")
     values["recovery-seconds"] = at("complete", command="settle") - at("complete", command="resume")
     Q.require(all(value >= 0 for value in values.values()), "reversed timing boundaries")
     return values
@@ -543,6 +682,13 @@ class Controller:
                 return self.last_event.copy()
         raise MissingWitness("not every source EoR reached the actor after its route burst")
 
+    def scrape(self, name):
+        """Render /metrics once; nothing else scrapes this daemon, so each
+        render closes the actor-slice maxima window the previous one opened."""
+        requested, requested_at = time.time_ns() // 1000, time.monotonic()
+        (self.leg / f"metrics-{name}.txt").write_text(Q.fetch(19186, "/metrics", 10)[1])
+        self.event("scrape", name=name, requested_us=requested, requested_at=requested_at)
+
     def close(self):
         self.probes.stop()
         self.selector.close()
@@ -573,7 +719,7 @@ def check_wire(leg, clients, routes):
     Q.require(len(refreshes) == 2, "missing quiescent or paused refresh")
     report = {name: [] for name in PHASES}
     for peer in range(clients):
-        receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5)
+        receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5, probe=probe_keys(routes))
         path = leg / "wire" / f"peer-{peer}.bgp"
         cursor = 0
         with path.open("rb") as stream:
@@ -600,7 +746,9 @@ def check_wire(leg, clients, routes):
                     Q.accept(receiver.eors > refreshes[1]["eor_baseline"][peer],
                              "recovery finished before receiver refresh EoR")
                 community = 2000 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1000
-                state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community)
+                # A regroup boundary is taken while that regroup's probe runs.
+                state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community,
+                                          during_probe=name in ("regroup-b", "regroup-a"))
                 if transition:
                     receiver.end_policy()
                 ordered = receiver.ordered_digest()
@@ -671,16 +819,36 @@ def run_cell(output, manifest, arm, index, correctness):
             record["baseline"] = baseline
             for generation in ("b", "a"):
                 shutil.copyfile(fixture / f"config-{generation}.toml", fixture / "config.toml")
+                # Bracket the regroup: the opening scrape precedes the signal
+                # and the probe train runs from before it until after the
+                # settled roster, so both cover every regroup actor turn.
+                controller.scrape(f"regroup-{generation}-start")
+                controller.command(f"probe-start {generation}")
                 started, deadline, response = controller.reload(
                     generation, client, "unix://" + str(fixture / "grpc.sock"), bars["convergence_seconds"])
                 record[f"reload-{generation}"] = response
                 record[f"regroup-{generation}"] = controller.witness(
                     lambda row, generation=generation: group_members(row, arm, clients, generation) and settled(row),
                     deadline=deadline)
+                # Wire convergence first, under the original deadline: the
+                # driver leaves the running probe's routes out of the
+                # inventory it compares, and the probe stops only after.
                 controller.command(f"policy {generation}", deadline=deadline)
                 elapsed = controller.last_completion - started
-                Q.accept(elapsed <= bars["convergence_seconds"], "regroup wire convergence exceeded bar")
                 record[f"regroup-{generation}-seconds"] = None if correctness else elapsed
+                # The probe stop has its own bound; a failed stop still
+                # leaves an INVALID probe receipt.
+                try:
+                    controller.command(f"probe-stop {generation}", PROBE_STOP_SECONDS)
+                except Q.AcceptanceFailure:
+                    record[f"regroup-{generation}-window"] = {"probe": {
+                        "status": "INVALID", "reason": "probe-stop not acknowledged",
+                        "samples": None, "max_latency_us": None}}
+                    raise
+                controller.scrape(f"regroup-{generation}-end")
+                record[f"regroup-{generation}-window"] = regroup_window(
+                    leg, generation, record[f"regroup-{generation}"])
+                Q.accept(elapsed <= bars["convergence_seconds"], "regroup wire convergence exceeded bar")
             controller.command("mark refresh-start")
             controller.command("refresh")
             controller.command("refresh-settle", bars["convergence_seconds"])
@@ -808,6 +976,8 @@ def analyze_results(output):
     # A failed cell may be incomplete, so its evidence stays unvalidated.
     failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"], "evidence": "unvalidated"}
                 for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
+    # Validated cells whose observer log ended in a cut-off line.
+    torn_tails = []
 
     def validate(path, row):
         leg, clients = path.parent, row["clients"]
@@ -825,11 +995,17 @@ def analyze_results(output):
                                  (leg / "metrics-mass-dirty-end.txt").read_text())
         Q.require("mass_dirty_actor" in row and row["mass_dirty_actor"] == (None if correctness else actor),
                   "mass-dirty actor receipt differs from raw metrics")
+        for generation in ("b", "a"):
+            Q.require(row.get(f"regroup-{generation}-window")
+                      == regroup_window(leg, generation, row[f"regroup-{generation}"]),
+                      f"regroup-{generation} window receipt differs from raw evidence")
         cgroup = json.loads((leg / "cgroup.json").read_text())
         Q.require(row["cgroup"] == cgroup, "cgroup receipt differs from raw observation")
         Q.check_cgroup(cgroup)
-        observed = [json.loads(line.removeprefix("evpn_qualification ")) for line in
-                    (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_qualification ")]
+        log = (leg / "observer.log").read_text()
+        observed, torn = Q.observer_records(log)
+        if torn:
+            torn_tails.append(leg.name)
         for observation in observed:
             roster(observation, row["arm"], clients)
         for key in ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_recovery_previous", "mass_recovery",
@@ -856,8 +1032,7 @@ def analyze_results(output):
         controls = [json.loads(line.removeprefix("evpn_control ")) for line in
                     (leg / "driver.log").read_text().splitlines() if line.startswith("evpn_control ")]
         protocol_overlap(row, events, controls)
-        barriers = [json.loads(line.removeprefix("evpn_input_barrier ")) for line in
-                    (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_input_barrier ")]
+        barriers, _ = Q.observer_records(log, "evpn_input_barrier ")
         Q.require(input_applied(barriers, clients, 3), "missing actor-applied input barriers")
         Q.require(row.get("mass_dirty_close") in observed
                   and closes_mass_dirty(row["mass_dirty_close"], barriers, clients, resumed),
@@ -882,11 +1057,15 @@ def analyze_results(output):
                 validate(path, row)
             except Q.AcceptanceFailure as error:
                 missed = missed or error
+    # Any later failure, of a bar or a whole cell, keeps the cut-off tails
+    # in the summary that analyze() completes from this one.
+    summary_path = output / "recovery-summary.json"
+    Q.write_json(summary_path, {**json.loads(summary_path.read_text()), "observer_torn_tails": torn_tails})
     if failures:
         Q.write_json(output / "recovery-summary.json", {
             "status": "FAIL", "correctness_only": correctness, "scope": SCOPE,
             "production_activation_qualified": False, "terminal_only_qualified": False,
-            "cells": len(rows), "medians": {}, "failed_cells": failures})
+            "cells": len(rows), "medians": {}, "failed_cells": failures, "observer_torn_tails": torn_tails})
         Q.accept(False, "recorded cell acceptance failures; see failed_cells")
     if missed:
         raise missed
@@ -898,10 +1077,12 @@ def analyze_results(output):
     median_timings = {} if correctness else median_report(rows)
     summary = {"status": "PASS", "correctness_only": correctness, "scope": SCOPE,
                "production_activation_qualified": False, "terminal_only_qualified": False,
-               "cells": len(rows), "medians": median_timings,
+               "cells": len(rows), "medians": median_timings, "observer_torn_tails": torn_tails,
                "recovery_witness": Q.RECOVERY_BARS["recovery_witness"],
                "recovery": [{"cell": path.parent.name, "arm": row["arm"],
                              "mass_dirty_actor": row["mass_dirty_actor"],
+                             "regroup_windows": {generation: row[f"regroup-{generation}-window"]
+                                                 for generation in ("b", "a")},
                              "pending": row["mass_recovery"]["recovery_pending"],
                              "dirty": [peer[0] for peer in row["mass_recovery"]["peers"] if peer[2]],
                              "owing": [peer[0] for peer in row["mass_recovery"]["peers"] if peer[10]]}

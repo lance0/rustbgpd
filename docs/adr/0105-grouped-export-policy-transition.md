@@ -134,6 +134,66 @@ Wire-profile compatibility and each member's ceiling are still checked during
 `ProbeAndPrepare`; `Validate` keeps its exact current owner/generation checks
 before any emission.
 
+**Amended:** 2026-11-11 — the authoritative fallback batch paces members whose
+sessions send EVPN. Each such move can resync the member's whole EVPN table,
+so a batch of N of them was one RIB poll growing with N × rows. The batch now
+applies shared cohorts and every other residual member as before, but leaves
+residual EVPN senders unapplied. The negotiated family decides, not current
+rows, because an old chain that denied every EVPN route leaves no rows while
+the new one may announce the whole table; EVPN group ownership requires the
+family too. Their installed chain instance is put back and the reply names
+them in caller order. PeerManager sends them in paced commands. Each command
+runs the batch's per-member body for a caller-order prefix of the members it
+was sent, then one shared distribution pass, and returns the rest. It starts
+another member only while the predicted turn stays within 250 ms (the
+qualification bars the regroup window's actor poll at 300 ms): the time so
+far, plus the pass shares the applied members still owe, plus one member's
+recompute and pass share. The estimate is the largest single-member recompute
+and the largest single member's own time in a pass measured so far in the
+walk; it never shrinks, so a light member does not lower it. The converse is
+accepted: one outlier member (its time includes any readiness drain, forced
+checkpoint or host preemption) pins the rest of the walk at one member per
+command, the convergence of the earlier one-member-per-command walk. A member
+whose writer was full still counts: a resynced member is often left marked
+dirty for replay, so the dirty mark cannot tell the two apart, and a low first
+estimate is bounded by the window below. The first member always runs;
+without an estimate only it runs. A member heavier than any
+measured yet can still overshoot, so PeerManager sends each command at most
+twice the previous command's applied members (one for the first), which bounds
+one command's overshoot and keeps the walk's setup linear in the list. The
+command's clock starts before its summary capture, so the capture counts. Not
+in the prediction: the pass's shared work (the speculative capture and
+update-group staging before its member loop; retirement, EoR settlement and
+the stale-exempt flush after it), the pass's visits to other dirty or forced
+peers, including earlier members still replaying, which is not constant, and
+the summary retirement and policy reclamation after the pass. Within a paced
+command no member takes the shared cohort transition, which is not budgeted.
+Grouping members this way keeps their recomputes warm and their resyncs back
+to back, which one
+member per command did not: measured per member, the recompute ran cold on
+every turn and the resync overlapped the previous member's session encode.
+The batch and every command share the transaction's forward RIB budget; it is
+never renewed per command. Each command is its own commit point: between
+commands an `rbgp` read or a route chunk sees applied members on the new chain
+and the rest on the old one, as in the serial remainder walk. The reload
+replies, and its configuration is published, only after the last command is
+committed and enqueued. A command that fails, a reply that does not account
+for every sent member (applied first, then the rest in caller order, or
+skipped), or a budget that expires mid-walk restores every captured prior
+through the existing rollback batch, which stays one synchronous turn. The
+deadline is checked before a command waits for channel capacity and again once
+capacity is reserved, and the RIB skips a command whose caller has already
+dropped the reply, so an expired walk sends no further command. A command the
+RIB is already applying when its reply times out still applies; the rollback
+queued behind it in FIFO order restores the end state. A command naming a peer twice is rejected before any mutation. A
+member that left the RIB comes back as skipped; its reconnect registers the
+session's chain, which cohort setup already hot-applied. Two limits remain.
+Rollback carries every captured member, applied or not, through the
+non-deferring batch, so the failure path is one turn over the whole list.
+Residual members of other private families (VPN, labeled unicast, FlowSpec,
+BGP-LS), per-client-best groups, ungrouped peers and sources with mixed
+destinations still run inside the batch.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
