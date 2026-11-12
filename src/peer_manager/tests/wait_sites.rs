@@ -88,6 +88,9 @@ type SessionScript = fn(&PeerCommand, usize) -> SessionAction;
 enum CohortReply {
     Committed,
     Authoritative,
+    /// The authoritative batch hands every member back; one paced command
+    /// then applies them all.
+    Paced,
     Rejected,
 }
 
@@ -256,6 +259,10 @@ fn is_outbound_refresh(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::RefreshPeerOutbound { .. })
 }
 
+fn is_outbound_confirm(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::ConfirmPeerOutbound { .. })
+}
+
 fn is_prestage(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::PrepareExportPolicyDestination { .. })
 }
@@ -269,6 +276,10 @@ fn is_authoritative_replace(update: &RibUpdate) -> bool {
         update,
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
     )
+}
+
+fn is_paced_apply(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::ApplyPacedExportPolicies { .. })
 }
 
 fn is_single_replace(update: &RibUpdate) -> bool {
@@ -505,19 +516,36 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         rib: RibHold::Receiver(is_cohort_replace),
         session: answer_all,
-        additional_entry: None,
+        additional_entry: Some(
+            "the batch wait parked at RIB admission: one shared-budget future covers the send \
+             and the reply, so this is the reply row's call site",
+        ),
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
         site: "policy.rs::apply_export_policy_replacements_authoritatively",
-        awaits: "RibUpdate::ReplacePeerExportPoliciesAuthoritatively reply",
+        awaits: "RibUpdate::ReplacePeerExportPoliciesAuthoritatively send and reply (shared forward budget)",
         drive: Drive::ForwardCohort {
             import_delta: false,
             cohort_reply: CohortReply::Authoritative,
         },
         rib: RibHold::Reply(is_authoritative_replace),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "policy.rs::walk_paced_export_policies",
+        awaits: "RibUpdate::ApplyPacedExportPolicies send and reply (shared forward budget)",
+        drive: Drive::ForwardCohort {
+            import_delta: false,
+            cohort_reply: CohortReply::Paced,
+        },
+        rib: RibHold::Reply(is_paced_apply),
         session: answer_all,
         additional_entry: None,
         window: HELD_FOREVER,
@@ -770,15 +798,15 @@ const WAIT_SITES: &[WaitSite] = &[
     },
     WaitSite {
         site: "lifecycle.rs::refresh_peer_outbound_in_rib",
-        awaits: "RibUpdate::RefreshPeerOutbound after acknowledged export-knob update",
+        awaits: "RibUpdate::ConfirmPeerOutbound after the session acknowledged an IPv6 unlock",
         drive: Drive::HotExportKnobs,
-        rib: RibHold::Reply(is_outbound_refresh),
+        rib: RibHold::Reply(is_outbound_confirm),
         session: answer_all,
         additional_entry: Some("hot_update_peer_in_place"),
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "the session has candidate knobs while manager metadata retains prior \
-                     values until refresh succeeds; reads would mix the two",
+                     values until the RIB confirms the unlock; reads would mix the two",
         },
         completion: Completion::Finished,
     },
@@ -1034,15 +1062,40 @@ fn answer_rib(
         RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
             let _ = reply.send(match cohort_reply {
                 CohortReply::Committed => Ok(ExportPolicyCohortOutcome::Committed),
-                CohortReply::Authoritative => {
+                CohortReply::Authoritative | CohortReply::Paced => {
                     Ok(ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply)
                 }
                 CohortReply::Rejected => Err("test: cohort rejected".to_string()),
             });
         }
-        RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
-        | RibUpdate::ReplacePeerExportPolicy { reply, .. }
+        RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } => {
+            let _ = reply.send(Ok(if matches!(cohort_reply, CohortReply::Paced) {
+                replacements
+                    .iter()
+                    .map(|replacement| replacement.peer)
+                    .collect()
+            } else {
+                Vec::new()
+            }));
+        }
+        RibUpdate::ApplyPacedExportPolicies {
+            replacements,
+            reply,
+            ..
+        } => {
+            let _ = reply.send(Ok(rustbgpd_rib::PacedApplyOutcome {
+                pending: Vec::new(),
+                skipped: Vec::new(),
+                applied: replacements.len(),
+                cost: Some(rustbgpd_rib::PacedMemberCost::default()),
+            }));
+        }
+        RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }
+        | RibUpdate::ConfirmPeerOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
             let _ = reply.send(Ok(()));
         }
@@ -1216,13 +1269,15 @@ fn answer_session(command: PeerCommand, addr: IpAddr, established: bool, fail: b
         | PeerCommand::SendRouteRefresh { reply, .. } => {
             let _ = reply.send(if fail { failed() } else { Ok(()) });
         }
-        PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+        PeerCommand::UpdateRuntimeConfig { config, reply } => {
+            // A newly configured IPv6 next hop unlocks the withheld family,
+            // which the session itself re-emits.
             let _ = reply.send(if fail {
                 Err(rustbgpd_transport::PeerCommandError::CommandFailed(
                     "test: injected failure".to_string(),
                 ))
             } else {
-                Ok(false)
+                Ok(config.local_ipv6_nexthop.is_some())
             });
         }
         PeerCommand::RevalidateImport { reply, .. } => {
@@ -1622,7 +1677,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::HotExportKnobs => {
             let peer = key(peers[0]);
             let mut config = PeerManager::removed_peer_config(&peer, &manager.peers[&peer]);
-            config.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
+            config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
             manager
                 .hot_update_peer_in_place(config)
                 .await
@@ -1668,8 +1723,13 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
                 attachments: BTreeMap::from([(peers[0].into(), vec![Arc::from("backup")])]),
             };
             let prior = manager
-                .install_conditional_advertisements(set.clone(), &[])
-                .await?;
+                .install_conditional_advertisements(
+                    set.clone(),
+                    &[],
+                    crate::peer_manager::conditional::ConditionalReplyWait::Owned,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             assert!(prior.is_some());
             assert_eq!(manager.conditional_advertisements, set);
             Ok(())
@@ -2338,6 +2398,12 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
         "try_send never waits: a full mailbox defers the update, which the run loop sends as a \
          select branch beside the readiness lane, or the next flush sends under \
          await_with_readiness",
+    ),
+    (
+        "policy.rs::admit_rib_command_before",
+        1,
+        "returns the admission to its caller: the paced walk awaits it inside the step it runs \
+         under await_with_readiness, bounded by the walk's forward deadline",
     ),
     (
         "notifications.rs::defer_retired_session_down",

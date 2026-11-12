@@ -2531,8 +2531,8 @@ async fn chain_node_budget_generation_rejects_late_tail_on_idle_dynamic_range() 
     ));
 }
 
-/// ADR-0137: mailbox admission and the acknowledgement of a conditional
-/// install share one absolute deadline. A send that waits most of the
+/// ADR-0137: for a retrying caller, mailbox admission and the
+/// acknowledgement of a conditional install share one absolute deadline. A send that waits most of the
 /// budget for mailbox space leaves only the remainder for the reply, so the
 /// request fails at `RIB_REPLY_TIMEOUT`, not up to twice that.
 #[tokio::test(start_paused = true)]
@@ -2565,17 +2565,117 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
     );
     let started = tokio::time::Instant::now();
     let error = mgr
-        .install_conditional_advertisements(set, &[])
+        .install_conditional_advertisements(
+            set,
+            &[],
+            super::super::conditional::ConditionalReplyWait::Retrying,
+        )
         .await
         .err()
         .expect("an unanswered install fails");
-    assert!(error.contains("acknowledgement timed out"), "{error}");
+    assert!(
+        matches!(
+            error,
+            super::super::conditional::ConditionalRequestError::Unacknowledged(_)
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("acknowledgement timed out"));
     assert_eq!(
         started.elapsed(),
         super::super::RIB_REPLY_TIMEOUT,
         "admission and acknowledgement share one deadline"
     );
+    assert!(
+        mgr.conditional_install_uncertain,
+        "a dispatched install without an acknowledgement may have committed"
+    );
     rib.abort();
+}
+
+/// A retrying caller's install that never leaves a full RIB mailbox reached
+/// nothing: the reconcile backs off and retries, and the installed set stays
+/// certain, so an unchanged set is not resent once the retry succeeds.
+#[tokio::test(start_paused = true)]
+async fn conditional_reconcile_refused_before_dispatch_keeps_certainty() {
+    let mut mgr = test_peer_manager();
+    let (rib_tx, _held_rx) = mpsc::channel(1);
+    rib_tx
+        .try_send(RibUpdate::PeerDeleted {
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into()),
+            label: None,
+            keep_series: false,
+        })
+        .unwrap();
+    mgr.rib_tx = rib_tx;
+    // The RIB holds a gate the current config no longer attaches.
+    mgr.conditional_advertisements.attachments.insert(
+        std::net::IpAddr::from(Ipv4Addr::new(10, 0, 0, 1)).into(),
+        vec![Arc::from("backup")],
+    );
+    let installed = mgr.conditional_advertisements.clone();
+    let started = tokio::time::Instant::now();
+    mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(started.elapsed(), super::super::RIB_REPLY_TIMEOUT);
+    assert!(
+        !mgr.conditional_install_uncertain,
+        "an install refused before dispatch changed nothing"
+    );
+    assert_eq!(mgr.conditional_advertisements, installed);
+    assert!(mgr.conditional_reconcile_retry.is_some(), "retry armed");
+}
+
+/// A catalog change whose conditional install never leaves a full RIB
+/// mailbox reached nothing: nothing precedes the install, so the owned
+/// mutation is rejected with no effect instead of fenced as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn catalog_conditional_install_refused_before_dispatch_rejects_cleanly() {
+    use rustbgpd_api::peer_types::{
+        ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+    };
+
+    let mut mgr = test_peer_manager();
+    let (rib_tx, _held_rx) = mpsc::channel(1);
+    rib_tx
+        .try_send(RibUpdate::PeerDeleted {
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into()),
+            label: None,
+            keep_series: false,
+        })
+        .unwrap();
+    mgr.rib_tx = rib_tx;
+    // The RIB holds a gate the candidate no longer attaches, so the
+    // catalog change installs.
+    mgr.conditional_advertisements.attachments.insert(
+        std::net::IpAddr::from(Ipv4Addr::new(10, 0, 0, 1)).into(),
+        vec![Arc::from("backup")],
+    );
+    let installed = mgr.conditional_advertisements.clone();
+    let before = mgr.current_config.clone();
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-in".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "permit".to_string(),
+                    statements: vec![],
+                },
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        matches!(
+            &outcome,
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+                if error.to_string().contains("rib_apply_rejected")
+        ),
+        "{outcome:?}"
+    );
+    assert!(!mgr.conditional_install_uncertain);
+    assert_eq!(mgr.conditional_advertisements, installed);
+    assert_eq!(mgr.current_config, before);
 }
 
 /// A session that answers RFC 9324 re-evaluation requests with `answer` and

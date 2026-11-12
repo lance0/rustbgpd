@@ -80,6 +80,22 @@ impl ExportChains {
         self.peers.insert(peer, chain);
     }
 
+    /// Install `peer`'s entry and return the entry it displaced, the same
+    /// instance, so a caller can put it back without resetting its term-hit
+    /// counters or compiled IR.
+    #[expect(
+        clippy::option_option,
+        reason = "the map's own insert shape: no entry (global fallback) differs from an explicitly disabled chain"
+    )]
+    pub(super) fn replace(
+        &mut self,
+        peer: PeerId,
+        chain: Option<PolicyChain>,
+    ) -> Option<Option<PolicyChain>> {
+        self.version += 1;
+        self.peers.insert(peer, chain)
+    }
+
     /// Remove `peer`'s entry, so it falls back to the global chain.
     #[expect(
         clippy::trivially_copy_pass_by_ref,

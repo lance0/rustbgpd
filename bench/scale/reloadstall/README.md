@@ -841,6 +841,78 @@ and `PROBE_PREFIXES` (a 50 ms `rbgp health` loop plus a 250 ms
 pinned dual-stack shape lives in
 [`docs/perf/artifacts/ixp-dualstack-2026-09/README.md`](../../../docs/perf/artifacts/ixp-dualstack-2026-09/README.md).
 
+### Heterogeneous export shape and actor-turn record (all additive)
+
+The daemon batches only the largest group of changed peers that share one
+export-policy pair; every other changed peer is applied one at a time, each a
+full-table resync, inside the reload's one forward RIB budget. The default
+mixed shape has a single changed pair, so that per-peer walk stays empty.
+
+- `GEN_EXPORT_PAIRS=G` (generator, mixed mode only, `1..=changed_peers`) splits
+  the changed peers into `G` contiguous groups; the first `changed % G` groups
+  get one extra peer. Group 0 keeps the global `member-out`; group `k >= 1`
+  gets a per-neighbor `member-out-k` chain that adds the generation marker plus
+  the constant community `65401:k`; with `GEN_FILTER_COUNT`, generation B
+  rejects the named set in every pair chain. The daemon batches group 0
+  (`ceil(changed / G)` peers, when at least 2) and walks the other
+  `changed - ceil(changed / G)` one at a time. `G = changed` is the distinct
+  shape: no cohort, every changed peer in the walk. Seven pairs at 700 changed
+  peers give cohort 100 and remainder 600. `G` absent or 1 emits the historical
+  files byte for byte. Observers still complete on the generation marker.
+- `RELOADSTALL_EXPORT_PAIRS=G` (harness) requires an explicit `changed_peers`
+  and prints `# export_shape pairs=G changed_peers=C expected_cohort=..
+  expected_remainder=..`. It only logs the expected split; set it to the
+  generator's `G`.
+- `RELOADSTALL_DAEMON_LOG=<path>` (native SIGHUP only): the daemon's JSON log.
+  For each reload the harness reads the first `reload_generation_phase` line
+  written after the pre-trigger scrape (after staging, so a reload a stage
+  command causes is not attributed) and reports its fields below. A missing
+  line reports `absent`; an unreadable file fails the run.
+
+Every native SIGHUP run prints three new records; existing rows are unchanged.
+Each `/metrics` render resets `bgp_rib_actor_slice_max_microseconds`, so the
+harness records `{stage="actor_poll"}` from every scrape it makes: the
+outcome baseline before staging, one scrape just before the SIGHUP, each
+one-second settlement check, and one closing scrape at receiver completion.
+The scrape before the SIGHUP resets the gauge, so polls that finish during
+staging (for example while a stage command waits for a previous roster to
+settle) stay out of the reload window. The daemon publishes each poll's
+duration when the poll returns, so the window edges are poll-completion
+boundaries, not strict bounds on when the work ran. A poll that started during
+staging and returns after the pre-trigger scrape counts in full toward the
+reload, and a poll that returns after the closing scrape is missing from that
+reload's max (it lands in the next `pre_stage` value). Another `/metrics`
+reader during the reload also resets the gauge and hides part of the window
+from these records.
+
+- `reloadstall_actor_scrape_csv,reload,seq,window,since_trigger_ms,actor_poll_max_us`:
+  one row per scrape. `window` is `pre_stage` (the outcome baseline, covering
+  the time since the previous scrape), `pre_trigger` (covering staging), or
+  `reload`. The two bracket rows have `seq` 0 and are not counted in the
+  reload window; reload-window scrapes are numbered from 1.
+- `reloadstall_actor_csv,reload,outcome,scrapes,actor_poll_pre_us,actor_poll_stage_us,actor_poll_max_us,
+  phase_lines,phase_outcome,cohort_targets,remainder_targets,
+  authoritative_remainder_apply_us,phase_total_us`: one row per reload.
+  `outcome` is the `bgp_sighup_reload_outcomes_total` label that moved
+  (`complete`, `rejected_no_effect` for a rolled-back reload, or `pending`
+  when the reload failed before it settled). Every failure exit after the
+  trigger (a non-complete outcome, a failed scrape, a delivery watchdog stall,
+  or an integrity check) prints this row and the run row, flushed, before its
+  `FAIL:` line (the soak runner stops the harness on that line), then fails
+  as before. Command reloads have no metrics window. `actor_poll_pre_us`
+  and `actor_poll_stage_us` are the two bracket values; `actor_poll_max_us` is
+  the max over the reload window only. The `phase_*` and target columns come from
+  `RELOADSTALL_DAEMON_LOG`; `phase_lines` above 1 means a generation
+  compensation re-applied the prior policy.
+- `reloadstall_actor_run_csv,reloads,actor_poll_max_us`: the max over every
+  reload window in the run so far, also printed before any failure exit.
+
+Remainder sweep shape (heavy, quiet host): 700 peers × 400,400 routes, with
+`GEN_EXPORT_PAIRS` and `RELOADSTALL_EXPORT_PAIRS` set to the same `G`, and
+`changed_peers` and `G` chosen for the remainder size `R`. The distinct shape
+uses `changed = G = R`. The grouped shape uses `changed = 700, G = 7` for
+`R = 600`.
+
 Cross-daemon cells generate their route-server configs with
 `gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same addressing contract)
 and are sequenced by `bench/scale/matrix/run-matrix.sh`. The runner defaults
