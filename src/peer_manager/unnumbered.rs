@@ -49,6 +49,7 @@ use crate::ra_discovery::{
 };
 
 use super::PeerManager;
+use super::conditional::ConditionalReplyWait;
 
 /// Tell discovery that `key`'s session on `name` is Established. An
 /// interface-only peer's key is always built from a link-local IPv6 address.
@@ -2594,12 +2595,15 @@ impl PeerManager {
         let set = self
             .conditional_set_with_bindings(&self.current_config, &bindings)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
-        if let Err(error) = self.install_conditional_advertisements(set, &[]).await {
+        if let Err(error) = self
+            .install_conditional_advertisements(set, &[], ConditionalReplyWait::Retrying)
+            .await
+        {
             // The RIB may hold the set although its acknowledgement failed:
             // reconcile it against the live bindings, or a binding that ends
             // before the retry leaves the gate at an endpoint with no peer.
             self.conditional_reconcile_pending = true;
-            return Err(PeerLifecycleError::Internal(error));
+            return Err(PeerLifecycleError::Internal(error.to_string()));
         }
         Ok(true)
     }

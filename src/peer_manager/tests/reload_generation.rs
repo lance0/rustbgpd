@@ -5341,6 +5341,103 @@ async fn generation_holds_session_replacement_until_the_conditional_install_comm
     relay.abort();
 }
 
+/// A dispatched conditional install cannot be cancelled by the RIB, so the
+/// generation waits for its acknowledgement past `RIB_REPLY_TIMEOUT`, bounded
+/// only by the reload's settlement budget. A slow but live RIB applies the
+/// reload instead of fencing it as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn generation_conditional_install_waits_past_rib_reply_timeout() {
+    let fixture = RsFixture::new();
+    let prior = group_attachment(&fixture, "");
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (seen_tx, seen_rx) = oneshot::channel::<()>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let relay = tokio::spawn(async move {
+        let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
+        let real = tokio::spawn(
+            rustbgpd_rib::RibManager::new(
+                real_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                BgpMetrics::new(),
+            )
+            .run(),
+        );
+        let (mut seen_tx, mut release_rx) = (Some(seen_tx), Some(release_rx));
+        while let Some(command) = rx.recv().await {
+            if matches!(command, RibUpdate::InstallConditionalAdvertisements { .. }) {
+                if let Some(seen) = seen_tx.take() {
+                    let _ = seen.send(());
+                }
+                if let Some(release) = release_rx.take() {
+                    let _ = release.await;
+                }
+                let _ = real_tx.send(command).await;
+            } else if downstream.send(command).await.is_err() {
+                break;
+            }
+        }
+        drop(real_tx);
+        let _ = real.await;
+    });
+    let candidate = group_attachment(&fixture, "conditional_advertisements = [\"backup\"]\n");
+    let driver = async {
+        seen_rx.await.expect("the generation sends its install");
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        release_tx.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(harness.apply(&candidate), driver);
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert!(!harness.mgr.conditional_install_uncertain);
+    assert_eq!(
+        installed_attachments(&harness),
+        [
+            ("10.0.0.2".to_string(), vec!["backup".to_string()]),
+            ("2001:db8::3".to_string(), vec!["backup".to_string()]),
+        ]
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// A conditional install that never leaves a full RIB mailbox reached
+/// nothing: the generation rejects with no effect and the installed set
+/// stays certain, instead of fencing the daemon as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn generation_conditional_install_refused_before_dispatch_rejects_cleanly() {
+    let fixture = RsFixture::new();
+    let prior = group_attachment(&fixture, "");
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, _held_rx) = mpsc::channel::<RibUpdate>(1);
+    tx.try_send(RibUpdate::PeerDeleted {
+        peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into()),
+        label: None,
+        keep_series: false,
+    })
+    .unwrap();
+    harness.mgr.rib_tx = tx;
+    let installed = harness.mgr.conditional_advertisements.clone();
+    let candidate = group_attachment(&fixture, "conditional_advertisements = [\"backup\"]\n");
+    let started = tokio::time::Instant::now();
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(&outcome, ReloadGenerationOutcome::RejectedNoEffect(message)
+            if message.contains("before dispatch")),
+        "{outcome:?}"
+    );
+    assert_eq!(started.elapsed(), RIB_REPLY_TIMEOUT, "admission deadline");
+    assert!(!harness.mgr.conditional_install_uncertain);
+    assert_eq!(harness.mgr.conditional_advertisements, installed);
+    assert_eq!(harness.mgr.current_config, prior);
+    harness.shutdown().await;
+}
+
 /// ADR-0137: a generation that removes a gated neighbor keeps the gate
 /// installed until the neighbor's session is torn down, then prunes it.
 /// Dropping it at the config swap would let the RIB export what the gate

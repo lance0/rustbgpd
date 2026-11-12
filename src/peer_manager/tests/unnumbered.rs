@@ -6117,7 +6117,11 @@ async fn a_compensated_restore_keeps_a_lost_acknowledgements_doubt() {
         .unwrap();
     let prior = h
         .mgr
-        .install_conditional_advertisements(set, &[])
+        .install_conditional_advertisements(
+            set,
+            &[],
+            crate::peer_manager::conditional::ConditionalReplyWait::Owned,
+        )
         .await
         .unwrap()
         .expect("an uncertain install is always sent");
