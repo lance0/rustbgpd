@@ -6272,11 +6272,20 @@ impl RibManager {
         }
         // A FlowSpec, BGP-LS or RT-Constrain identity missing at path id 0
         // is confirmed gone by walking that family's rows in every
-        // Adj-RIB-In, so the rest takes the readiness lane. It is reached
-        // only when a withdrawn identity holds a rejection.
-        self.with_ingest_readiness(|manager| {
-            manager.retire_withdrawn_rejections(withdrawn, rejected_withdrawn);
-        });
+        // Adj-RIB-In, so then the rest takes the readiness lane. The other
+        // families' liveness is indexed and needs no owner.
+        if rejected_withdrawn.iter().any(|identity| {
+            matches!(
+                identity,
+                ExactExportKey::FlowSpec(_) | ExactExportKey::BgpLs(_) | ExactExportKey::Rtc(_)
+            )
+        }) {
+            self.with_ingest_readiness(|manager| {
+                manager.retire_withdrawn_rejections(withdrawn, rejected_withdrawn);
+            });
+        } else {
+            self.retire_withdrawn_rejections(withdrawn, rejected_withdrawn);
+        }
     }
 
     /// [`Self::retire_exact_export_rejections`] for the withdrawn identities

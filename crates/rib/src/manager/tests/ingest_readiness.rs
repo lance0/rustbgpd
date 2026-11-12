@@ -635,3 +635,38 @@ fn end_of_rib_prune_answers_readiness_while_walking_bgpls_routes() {
         "{routes} routes: the prune walk answered {walked}: {counts:?}"
     );
 }
+
+/// Retiring a withdrawn Unicast identity's rejection checks liveness through
+/// the prefix index, so it takes no readiness owner; a withdrawn BGP-LS
+/// identity, whose liveness check can walk the family, takes one.
+#[test]
+fn indexed_rejection_retirement_takes_no_readiness_owner() {
+    let (mut manager, _readiness_tx) = readiness_manager();
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let bgpls = chain_topology(FEED, 1)[0].key();
+    let rejected = [
+        ExactExportKey::Unicast(prefix, 0),
+        ExactExportKey::BgpLs(bgpls.clone()),
+    ];
+    manager
+        .peer_unexportable
+        .insert(peer_v4(CLIENT), rejected.iter().cloned().collect());
+    manager.replacement_readiness_receipts.clear();
+
+    manager.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, 0)]);
+    assert!(
+        manager.replacement_readiness_receipts.is_empty(),
+        "a Unicast retirement took an owner: {:?}",
+        manager.replacement_readiness_receipts
+    );
+    manager.retire_exact_export_rejections([ExactExportKey::BgpLs(bgpls)]);
+    assert_eq!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .map(|receipt| receipt.kind)
+            .collect::<Vec<_>>(),
+        [ReadinessOwnerKind::Ingest]
+    );
+    assert!(manager.peer_unexportable.is_empty(), "both were retired");
+}
