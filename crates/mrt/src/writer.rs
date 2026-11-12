@@ -1,13 +1,19 @@
 //! Atomic file writer for MRT dumps with optional gzip compression.
 
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::io::Write;
 use std::num::NonZeroU32;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use chrono::Utc;
+use nix::dir::Dir;
+use nix::errno::Errno;
+use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
+use nix::sys::stat::{Mode, SFlag, fstatat};
+use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
 use tracing::{debug, info, warn};
 
 use crate::types::MrtWriterConfig;
@@ -32,60 +38,107 @@ pub fn validate_file_prefix(prefix: &str) -> std::io::Result<()> {
 /// warning appears once per process per directory.
 static WARNED_READABLE_DIRS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
-/// Ensure the configured output path exists as a directory the daemon owns.
+/// The validated output directory, pinned by descriptor for one dump.
 ///
-/// Missing directories are created 0700. An existing directory is held to the
-/// runtime-state directory's rule: a real directory, not a symlink, owned by
-/// the effective UID and not group- or world-writable. Retention deletes the
-/// oldest names here, so another user who could plant newer-named files could
-/// make it delete real dumps. `config.ancestor_check`, when set, then vets the
-/// directories above it. Publishing and pruning use paths rather than a
-/// pinned descriptor; that is sound because the ancestor check refuses any
-/// parent that a user other than root or the daemon user could rename.
-/// A group- or other-readable directory is only warned about; it is an
-/// operator-chosen path that may be shared, so it is never chmodded. Dump
-/// files themselves are 0600.
+/// Publishing and pruning are relative to `file`, so renaming the directory
+/// or replacing it with a symlink after validation cannot redirect them.
+pub(crate) struct OutputDir {
+    file: File,
+    /// Normalized spelling of the configured path, for messages and the
+    /// returned dump path only.
+    path: PathBuf,
+}
+
+/// Ensure the configured output path exists as a directory the daemon owns.
 ///
 /// The manager calls this before asking the RIB actor to materialize a
 /// snapshot. `write_dump` repeats the check so direct library callers retain
 /// the same lazy-directory-creation contract.
 pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()> {
+    open_output_dir(config).map(drop)
+}
+
+/// Create, open and validate the output directory.
+///
+/// Missing directories are created 0700. The directory is held to the
+/// runtime-state directory's rule: opened with `O_NOFOLLOW`, so it must be a
+/// real directory and not a symlink however it is spelled, and the opened
+/// descriptor must be owned by the effective UID and not group- or
+/// world-writable. Retention deletes the oldest names here, so another user
+/// who could plant newer-named files could make it delete real dumps.
+/// `config.ancestor_check`, when set, then vets the directories above it. A
+/// group- or other-readable directory is only warned about; it is an
+/// operator-chosen path that may be shared, so it is never chmodded. Dump
+/// files themselves are 0600.
+fn open_output_dir(config: &MrtWriterConfig) -> std::io::Result<OutputDir> {
     validate_file_prefix(&config.file_prefix)?;
+    // `dir/` and `dir/.` name the same entry as `dir`, but O_NOFOLLOW would
+    // judge their final `.` and follow a symlink at `dir`. Pin the spelling
+    // without them, so a symlinked directory is refused however it is
+    // written. A final `..` cannot be judged that way at all.
+    let path: PathBuf = config.output_dir.components().collect();
+    if matches!(
+        path.components().next_back(),
+        None | Some(std::path::Component::ParentDir)
+    ) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "MRT output_dir {} must name a directory, not end in `..`",
+                config.output_dir.display()
+            ),
+        ));
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&config.output_dir)?;
-    let metadata = std::fs::symlink_metadata(&config.output_dir)?;
+        .create(&path)?;
+    let fd = open(
+        &path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|errno| match errno {
+        Errno::ELOOP | Errno::ENOTDIR => std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "MRT output_dir {} must be a real directory, not a symlink",
+                path.display()
+            ),
+        ),
+        errno => errno.into(),
+    })?;
+    let file = File::from(fd);
+    let metadata = file.metadata()?;
     let mode = metadata.mode() & 0o7777;
-    if !metadata.is_dir() || metadata.uid() != nix::unistd::geteuid().as_raw() || mode & 0o022 != 0
-    {
+    if !metadata.is_dir() || metadata.uid() != geteuid().as_raw() || mode & 0o022 != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
                 "MRT output_dir {} must be a real directory owned by the daemon user and not \
                  group- or world-writable (is_dir={}, uid={}, mode={mode:o})",
-                config.output_dir.display(),
+                path.display(),
                 metadata.is_dir(),
                 metadata.uid(),
             ),
         ));
     }
     if let Some(check) = config.ancestor_check {
-        check(&config.output_dir)?;
+        check(&path)?;
     }
     if mode & 0o077 != 0
         && WARNED_READABLE_DIRS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(config.output_dir.clone())
+            .insert(path.clone())
     {
         warn!(
-            output_dir = %config.output_dir.display(),
+            output_dir = %path.display(),
             mode = format_args!("{mode:o}"),
             "MRT output_dir is accessible to group or other; dump files are 0600 but their names are listable"
         );
     }
-    Ok(())
+    Ok(OutputDir { file, path })
 }
 
 /// Parse `<prefix>.<YYYYMMDD>.<HHMMSS>.<nanos>.mrt[.gz]` and return the
@@ -106,24 +159,37 @@ fn dump_timestamp<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
 
 /// Delete this writer's oldest dumps so at most `keep` remain, never
 /// `published`. Only regular files whose whole name matches the writer's
-/// own pattern are considered.
+/// own pattern are considered. Every lookup is relative to the pinned
+/// directory descriptor.
 fn prune_old_dumps(
-    output_dir: &Path,
+    dir: &OutputDir,
     prefix: &str,
     keep: NonZeroU32,
-    published: &Path,
+    published: &str,
 ) -> std::io::Result<()> {
-    let published = published.file_name();
+    let mut entries = Dir::openat(
+        &dir.file,
+        ".",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?;
     let mut dumps = Vec::new();
-    for entry in std::fs::read_dir(output_dir)? {
+    for entry in entries.iter() {
         let entry = entry?;
-        let name = entry.file_name();
-        if Some(name.as_os_str()) == published || !entry.file_type()?.is_file() {
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name == published {
             continue;
         }
-        if let Some(stamp) = name.to_str().and_then(|name| dump_timestamp(name, prefix)) {
-            dumps.push((stamp.to_owned(), entry.path()));
+        let Some(stamp) = dump_timestamp(name, prefix) else {
+            continue;
+        };
+        let stat = fstatat(&dir.file, name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
+        if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG {
+            continue;
         }
+        dumps.push((stamp.to_owned(), name.to_owned()));
     }
     // The published dump counts toward `keep`; retain the newest others.
     let keep_others = usize::try_from(keep.get() - 1).unwrap_or(usize::MAX);
@@ -132,11 +198,11 @@ fn prune_old_dumps(
     }
     dumps.sort_unstable();
     let excess = dumps.len() - keep_others;
-    for (_, path) in dumps.drain(..excess) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => debug!(path = %path.display(), "pruned old MRT dump"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+    for (_, name) in dumps.drain(..excess) {
+        match unlinkat(&dir.file, name.as_str(), UnlinkatFlags::NoRemoveDir) {
+            Ok(()) => debug!(path = %dir.path.join(&name).display(), "pruned old MRT dump"),
+            Err(Errno::ENOENT) => {}
+            Err(errno) => return Err(errno.into()),
         }
     }
     Ok(())
@@ -152,19 +218,23 @@ fn prune_old_dumps(
 /// A parent-directory sync error occurs after the final file is published;
 /// retrying after that error can produce a second dump.
 pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
-    prepare_output_dir(config)?;
+    let dir = open_output_dir(config)?;
+    publish(&dir, config, data)
+}
 
+/// Publish one dump into the pinned directory, then apply retention there.
+fn publish(dir: &OutputDir, config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
     let now = Utc::now();
     let timestamp = now.format("%Y%m%d.%H%M%S");
     let nanos = now.timestamp_subsec_nanos();
     let ext = if config.compress { ".mrt.gz" } else { ".mrt" };
     let filename = format!("{}.{timestamp}.{nanos:09}{ext}", config.file_prefix);
-    let final_path = config.output_dir.join(&filename);
-    let tmp_path = config.output_dir.join(format!(".{filename}.tmp"));
+    let final_path = dir.path.join(&filename);
+    let tmp_name = format!(".{filename}.tmp");
 
     debug!(path = %final_path.display(), bytes = data.len(), "writing MRT dump");
 
-    write_atomic(&tmp_path, &final_path, data, config.compress)?;
+    write_atomic(&dir.file, &tmp_name, &filename, data, config.compress)?;
 
     info!(
         path = %final_path.display(),
@@ -176,11 +246,10 @@ pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<Path
     // Retention runs only after the new dump is durably published, and a
     // pruning failure never fails the dump that already succeeded.
     if let Some(keep) = config.max_files
-        && let Err(error) =
-            prune_old_dumps(&config.output_dir, &config.file_prefix, keep, &final_path)
+        && let Err(error) = prune_old_dumps(dir, &config.file_prefix, keep, &filename)
     {
         warn!(
-            output_dir = %config.output_dir.display(),
+            output_dir = %dir.path.display(),
             error = %error,
             "MRT dump retention failed; older dumps were kept"
         );
@@ -190,22 +259,18 @@ pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<Path
 }
 
 fn write_atomic(
-    tmp_path: &Path,
-    final_path: &Path,
+    directory: &File,
+    tmp_name: &str,
+    final_name: &str,
     data: &[u8],
     compress: bool,
 ) -> std::io::Result<()> {
-    let directory = std::fs::File::open(
-        final_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new(".")),
-    )?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(tmp_path)?;
+    let mut file = File::from(openat(
+        directory,
+        tmp_name,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::from_bits_truncate(0o600),
+    )?);
     let result = (|| -> std::io::Result<()> {
         if compress {
             let mut encoder =
@@ -216,10 +281,11 @@ fn write_atomic(
             file.write_all(data)?;
         }
         file.sync_all()?;
-        std::fs::rename(tmp_path, final_path)
+        renameat(directory, tmp_name, directory, final_name)?;
+        Ok(())
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(tmp_path);
+        let _ = unlinkat(directory, tmp_name, UnlinkatFlags::NoRemoveDir);
     }
     result?;
     directory.sync_all().map_err(|error| {
@@ -244,6 +310,7 @@ pub(crate) fn private_tempdir() -> tempfile::TempDir {
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::path::Path;
 
     use super::*;
 
@@ -364,7 +431,17 @@ mod tests {
             std::fs::write(&original, "keep this").unwrap();
             let tmp_path = dir.path().join(".rib.mrt.tmp");
 
-            assert!(write_atomic(&tmp_path, &final_path, b"replacement", compress).is_err());
+            let directory = File::open(dir.path()).unwrap();
+            assert!(
+                write_atomic(
+                    &directory,
+                    ".rib.mrt.tmp",
+                    "rib.mrt",
+                    b"replacement",
+                    compress
+                )
+                .is_err()
+            );
             assert!(!tmp_path.exists());
             assert!(final_path.is_dir());
             assert_eq!(std::fs::read_to_string(original).unwrap(), "keep this");
@@ -380,7 +457,9 @@ mod tests {
         std::fs::write(&final_path, "original").unwrap();
         std::fs::write(&tmp_path, "another writer's stage").unwrap();
 
-        let error = write_atomic(&tmp_path, &final_path, b"replacement", false).unwrap_err();
+        let directory = File::open(dir.path()).unwrap();
+        let error =
+            write_atomic(&directory, ".rib.mrt.tmp", "rib.mrt", b"replacement", false).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(final_path).unwrap(), "original");
         assert_eq!(
@@ -515,13 +594,48 @@ mod tests {
         write_dump(&config, b"allowed").unwrap();
         assert_eq!(mode_of(dir.path()), 0o755);
 
-        // A symlinked output_dir is refused, as the runtime-state directory is.
+        // A symlinked output_dir is refused however it is spelled, as the
+        // runtime-state directory is; `dir/` and `dir/.` would otherwise
+        // judge the symlink's target.
         let real = private_tempdir();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
-        let error = write_dump(&retaining(&link, 10), b"refused").unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        for spelling in [link.clone(), link.join(""), link.join(".")] {
+            let error = write_dump(&retaining(&spelling, 10), b"refused").unwrap_err();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{}",
+                spelling.display()
+            );
+        }
         assert_eq!(file_names(real.path()), Vec::<String>::new());
+        // A final `..` cannot be judged without following it.
+        let error = write_dump(&retaining(&real.path().join(".."), 10), b"refused").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn dump_and_retention_stay_in_the_directory_pinned_at_validation() {
+        let base = private_tempdir();
+        let output_dir = base.path().join("mrt");
+        let other = base.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let decoy = "rib.20000101.000000.000000000.mrt".to_string();
+        std::fs::write(other.join(&decoy), "not ours").unwrap();
+        let config = retaining(&output_dir, 1);
+        let pinned = open_output_dir(&config).unwrap();
+        std::fs::write(output_dir.join(&decoy), "ours, old").unwrap();
+
+        // Swap the validated directory for a symlink after the check.
+        let moved = base.path().join("moved");
+        std::fs::rename(&output_dir, &moved).unwrap();
+        std::os::unix::fs::symlink(&other, &output_dir).unwrap();
+
+        let published = publish(&pinned, &config, b"dump").unwrap();
+        let name = published.file_name().unwrap().to_str().unwrap().to_string();
+        assert_eq!(file_names(&moved), vec![name]);
+        assert_eq!(file_names(&other), vec![decoy]);
     }
 
     #[test]
@@ -616,7 +730,9 @@ mod tests {
         std::fs::write(&published, "new").unwrap();
         std::fs::write(&newer, "newer name").unwrap();
 
-        prune_old_dumps(dir.path(), "rib", NonZeroU32::new(1).unwrap(), &published).unwrap();
+        let pinned = open_output_dir(&retaining(dir.path(), 1)).unwrap();
+        let name = published.file_name().unwrap().to_str().unwrap();
+        prune_old_dumps(&pinned, "rib", NonZeroU32::new(1).unwrap(), name).unwrap();
         assert!(published.exists());
         assert!(!newer.exists());
     }

@@ -4970,12 +4970,16 @@ For example: `rib.20260305.143022.123456789.mrt.gz`
 Dump files are created with mode 0600. A missing `output_dir`, and any
 missing parent, is created 0700. An existing `output_dir` is held to the same
 rules as [`runtime_state_dir`](#global): it must be a real directory (not a
-symlink) owned by the daemon user and not group- or world-writable, and every
+symlink, however the path is spelled; a path ending in `..` is refused) owned
+by the daemon user and not group- or world-writable, and every
 directory above it, along the configured path and its resolved form, must be
 owned by root or the daemon user and not writable by other users unless it is
 sticky, as `/tmp` is. Retention deletes the oldest dump names in this
 directory, so a user who could add files to it, or rename it and put another
-directory in its place, could make it delete other data. If a check fails, the
+directory in its place, could make it delete other data. Each dump opens the
+directory once, checks the opened handle, and then writes, renames and prunes
+relative to that handle, so renaming the path afterwards cannot redirect it.
+If a check fails, the
 dump fails with a permission error and the `mrt_*` failure metrics record it;
 the checks run before every dump, so fixing ownership or mode takes effect
 without a restart. Like the runtime-state checks, they read only the owner and
