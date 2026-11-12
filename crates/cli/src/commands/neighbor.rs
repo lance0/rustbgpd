@@ -235,17 +235,23 @@ async fn neighbor_list_view(
         let out: Vec<JsonNeighbor> = resp.neighbors.iter().map(json_neighbor).collect();
         Ok(NeighborListView::Json(out))
     } else if resp.neighbors.is_empty() {
-        let dynamic_range_count = read_rpc(
+        // The range count only refines the empty-state line, so its failure
+        // degrades the line instead of failing the read; `-j` exits 0 here
+        // too. `ListDynamicNeighbors` uses the ordinary peer-manager queue,
+        // not the operator lane that served `ListNeighbors`.
+        let message = match read_rpc(
             "ListDynamicNeighbors",
             client.list_dynamic_neighbors(ListDynamicNeighborsRequest {}),
         )
-        .await?
-        .into_inner()
-        .ranges
-        .len();
-        Ok(NeighborListView::Empty(empty_neighbor_list_message(
-            dynamic_range_count,
-        )))
+        .await
+        {
+            Ok(response) => empty_neighbor_list_message(response.into_inner().ranges.len()),
+            Err(status) => format!(
+                "no active neighbors; dynamic-neighbor range count unavailable: {}",
+                status.message()
+            ),
+        };
+        Ok(NeighborListView::Empty(message))
     } else {
         Ok(NeighborListView::Table(resp.neighbors))
     }
@@ -3332,6 +3338,34 @@ Last Error:               last_error-value
             message,
             "no active neighbors; 2 dynamic-neighbor acceptance ranges configured"
         );
+    }
+
+    /// Load-bearing degradation proof: restoring `?` on the range query makes
+    /// the human read fail (exit 1, no output) while `-j` succeeds with `[]`.
+    #[tokio::test]
+    async fn empty_neighbor_list_survives_a_failed_range_query_in_both_modes() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_dynamic_neighbors_error.lock().await =
+            Some((tonic::Code::Unavailable, "peer manager busy".to_string()));
+        let view = neighbor_list_view(connect(&server.addr, None).await.unwrap(), false)
+            .await
+            .expect("human empty state must not fail on the range query");
+        let NeighborListView::Empty(message) = view else {
+            panic!("empty human result must render the empty-state message")
+        };
+        assert_eq!(
+            message,
+            "no active neighbors; dynamic-neighbor range count unavailable: peer manager busy"
+        );
+        let view = neighbor_list_view(connect(&server.addr, None).await.unwrap(), true)
+            .await
+            .expect("JSON read must succeed");
+        assert!(matches!(view, NeighborListView::Json(ref out) if out.is_empty()));
+        for json in [false, true] {
+            list(connect(&server.addr, None).await.unwrap(), json, false)
+                .await
+                .unwrap_or_else(|error| panic!("json={json}: {error}"));
+        }
     }
 
     /// Load-bearing JSON compatibility proof: moving the range query before

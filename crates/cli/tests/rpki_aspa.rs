@@ -208,7 +208,7 @@ async fn aspa_real_cli_preserves_requests_json_and_operational_errors() {
 
 #[tokio::test]
 async fn aspa_bad_arguments_fail_before_connecting() {
-    // This endpoint cannot connect; argument errors must retain usage exit 2.
+    // This endpoint cannot connect; argument errors must keep usage exit 64.
     for args in [
         vec!["rpki", "aspa", "0"],
         vec![

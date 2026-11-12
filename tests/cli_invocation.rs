@@ -95,6 +95,40 @@ fn unknown_options_use_the_documented_invocation_exit() {
     }
 }
 
+/// Exit 70 is a recoverable fail-stop, not a bug report: both help surfaces
+/// must say so, and must describe the foreground/stdout runtime model.
+#[test]
+fn help_and_man_explain_exit_70_and_the_runtime_model() {
+    for (mode, phrases) in [
+        (
+            "--help",
+            [
+                "70 Settlement fail-stop: a running daemon could not prove",
+                "Restart it to\n     recover",
+                "Runs in the foreground with no pidfile and logs to stdout",
+                "rewrites CONFIG_PATH in canonical form",
+            ],
+        ),
+        (
+            "--man",
+            [
+                ".B 70\nSettlement fail\\-stop: a running daemon could not prove",
+                "Restart it to recover",
+                "runs in the foreground, writes no pidfile and logs to\nstdout",
+                "in canonical form",
+            ],
+        ),
+    ] {
+        let output = run(&[mode], None);
+        assert_eq!(output.status.code(), Some(0), "{mode}: {output:?}");
+        let text = String::from_utf8(output.stdout).expect("UTF-8 help");
+        assert!(!text.contains("Internal error"), "{mode}: {text}");
+        for phrase in phrases {
+            assert!(text.contains(phrase), "{mode}: missing {phrase:?}:\n{text}");
+        }
+    }
+}
+
 #[test]
 fn display_modes_are_standalone() {
     for args in [
