@@ -6715,6 +6715,82 @@ async fn generation_retargets_a_peer_left_behind_by_an_honor_fan_out() {
     harness.shutdown().await;
 }
 
+/// A peer that took the honored chain but did not get its Route Refresh is
+/// named as left behind, and the next generation heals it through the
+/// pending refresh alone: its installed chain already matches the config.
+/// Two causes: a lost state query (the fan-out's call succeeds with the
+/// refresh deferred) and a rejected Route Refresh (the call fails).
+#[tokio::test]
+async fn honor_fan_out_names_and_generation_heals_a_peer_owing_route_refresh() {
+    for lost_state_query in [false, true] {
+        let prior = export_knob_group_config(2);
+        let mut harness = GenerationHarness::new(&prior);
+        let owed: IpAddr = "10.0.1.1".parse().unwrap();
+        if lost_state_query {
+            harness.counters[&owed]
+                .drop_state_after
+                .store(1, Ordering::SeqCst);
+        } else {
+            harness.counters[&owed]
+                .refresh_failures
+                .lock()
+                .unwrap()
+                .push_back(rustbgpd_transport::PeerCommandError::SendFailed(
+                    "injected writer rejection".to_string(),
+                ));
+        }
+
+        let partial = harness
+            .mgr
+            .set_honor_graceful_shutdown(true)
+            .await
+            .expect_err("a peer owing its Route Refresh is left behind");
+        assert_eq!(
+            partial
+                .failed
+                .iter()
+                .map(|(peer, _)| peer.clone())
+                .collect::<Vec<_>>(),
+            vec![key(owed)],
+            "lost_state_query={lost_state_query}"
+        );
+        if lost_state_query {
+            assert_eq!(partial.failed[0].1, "route refresh owed");
+        }
+        let installed = harness.mgr.peers[&key(owed)].import_policy.clone();
+        let resolved = harness
+            .mgr
+            .current_config
+            .resolve_neighbor(&harness.mgr.current_config.neighbors[0])
+            .unwrap()
+            .import_policy;
+        assert_eq!(installed, resolved, "the session took the honored chain");
+        assert!(harness.mgr.peers[&key(owed)].pending_refresh);
+        let refreshes = harness.counters[&owed]
+            .route_refreshes
+            .load(Ordering::SeqCst);
+
+        harness.counters[&owed]
+            .drop_state_after
+            .store(0, Ordering::SeqCst);
+        let candidate = remove_private_as_candidate(&harness.mgr.current_config);
+        let outcome = harness.apply(&candidate).await;
+        let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+            panic!("lost_state_query={lost_state_query}: {outcome:?}");
+        };
+        assert_eq!(receipt.policy_updated, 1);
+        assert!(!harness.mgr.peers[&key(owed)].pending_refresh);
+        assert_eq!(
+            harness.counters[&owed]
+                .route_refreshes
+                .load(Ordering::SeqCst),
+            refreshes + 1,
+            "the generation delivers the owed Route Refresh"
+        );
+        harness.shutdown().await;
+    }
+}
+
 fn remove_private_as_candidate(prior: &Config) -> Config {
     let mut candidate = prior.clone();
     candidate

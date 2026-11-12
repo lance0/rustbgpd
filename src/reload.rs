@@ -4983,10 +4983,11 @@ log_format = "json"
             // +2: so does the excluded same-address pair reload test.
             // +3: the interface-only maxima test writes its prior, raise and
             // lowering.
-            // +2: the honor partial fan-out test writes its prior and candidate.
-            (concat!("write_tier", "_test_config("), 47),
-            // +1: the honor partial fan-out test loads its prior.
-            (concat!("load_tier", "_test_config("), 38),
+            // +4: the two honor partial fan-out tests write their prior and
+            // candidate.
+            (concat!("write_tier", "_test_config("), 49),
+            // +2: the two honor partial fan-out tests load their prior.
+            (concat!("load_tier", "_test_config("), 39),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),
@@ -7333,6 +7334,86 @@ hold_time = 90
             );
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    /// A partial honor step does not halt the reload: the next step still
+    /// runs and is receipted applied beside the left-behind peer.
+    #[tokio::test]
+    async fn honor_knob_partial_fan_out_lets_the_reload_continue() {
+        let path = unique_temp_path("reload-honor-partial-continues");
+        write_tier_test_config(&path, baseline_toml());
+        let initial = load_tier_test_config(&path);
+        write_tier_test_config(
+            &path,
+            &baseline_toml().replace(
+                "asn = 65001",
+                "asn = 65001\nhonor_graceful_shutdown = true\nhonor_blackhole = true",
+            ),
+        );
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let actor = tokio::spawn(async move {
+            let Some(PeerManagerCommand::SetHonorGracefulShutdown { reply, .. }) =
+                peer_mgr_rx.recv().await
+            else {
+                panic!("expected the graceful-shutdown step first");
+            };
+            reply
+                .send(Err(HonorKnobPartial {
+                    targeted: 1,
+                    failed: vec![(
+                        rustbgpd_api::peer_types::PeerKey::new("10.0.0.2".parse().unwrap(), None),
+                        "route refresh owed".to_string(),
+                    )],
+                }))
+                .unwrap();
+            let Some(PeerManagerCommand::SetHonorBlackhole { enabled, reply }) =
+                peer_mgr_rx.recv().await
+            else {
+                panic!("a partial graceful-shutdown step must not halt the reload");
+            };
+            assert!(enabled);
+            reply.send(Ok(())).unwrap();
+        });
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_recorded(
+            path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        // A halted reload never sends the next step; the closed channel then
+        // fails the actor instead of leaving it waiting.
+        drop(peer_mgr_tx);
+        actor.await.unwrap();
+        let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+            panic!("expected partial authority: {outcome:?}");
+        };
+        assert!(authority.runtime.global.honor_graceful_shutdown);
+        assert!(authority.runtime.global.honor_blackhole);
+        let SighupCompletion::KnownPartial { failures } = &authority.completion else {
+            panic!("the left-behind peer must keep the receipt partial");
+        };
+        assert_eq!(
+            failures
+                .iter()
+                .map(|failure| (failure.bucket, failure.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("honor_graceful_shutdown.apply", "10.0.0.2")],
+        );
+        let trace = trace.lock().unwrap();
+        for bucket in ["honor_graceful_shutdown.apply", "honor_blackhole.apply"] {
+            assert!(trace.applied.contains(&SighupEffect {
+                bucket,
+                target: "[global]".to_string(),
+            }));
+        }
+        drop(trace);
+        std::fs::remove_file(path).unwrap();
     }
 
     async fn assert_honor_reply_loss_fences(graceful: bool, bucket: &'static str) {

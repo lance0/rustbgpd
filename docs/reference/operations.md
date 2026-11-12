@@ -932,9 +932,10 @@ before the owner settles. The operator can then fix the failing TOML and
 reload again to converge. The generation route never produces a known-partial
 receipt: it settles the candidate or restores the prior generation. One
 sequential step does not halt: a `honor_graceful_shutdown` or
-`honor_blackhole` fan-out that leaves EBGP peers on their prior chains installs
-the knob, names each such peer as a failure, and lets the reload continue to a
-`known_partial` receipt. The next generation-route reload retargets those peers
+`honor_blackhole` fan-out that leaves EBGP peers behind (prior chains kept, or
+a Route Refresh still owed) installs the knob, names each such peer as a
+failure, and lets the reload continue to a `known_partial` receipt. A no-op
+SIGHUP does not retry those peers
 ([Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply)). A command
 that was definitely not accepted before any prior effect is a clean rejection;
 an accepted reply loss or non-authoritative reconcile instead recovery-fences

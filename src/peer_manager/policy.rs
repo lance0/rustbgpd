@@ -640,6 +640,9 @@ fn record_import_validation_refresh_metrics(
     metrics.record_validation_import_refresh(dependency_label, "failed", metric_count(failed));
 }
 
+/// Reason reported for a peer an honor fan-out left owing a Route Refresh.
+const HONOR_REFRESH_OWED: &str = "route refresh owed";
+
 impl PeerManager {
     pub(super) fn installed_policy_routes_reachability(&self) -> InstalledPolicyRoutesReachability {
         let mut snapshot = InstalledPolicyRoutesReachability::default();
@@ -4941,6 +4944,17 @@ impl PeerManager {
             )
     }
 
+    /// Whether an honor fan-out left `peer` with its new import chain but no
+    /// delivered Route Refresh: the session state was unconfirmed (a timed-out
+    /// or lost state query), so routes already in its `Adj-RIB-In` were not
+    /// re-evaluated. A positively known-down peer owes nothing until it
+    /// re-establishes under the new chain.
+    fn honor_refresh_owed(&self, peer: &PeerKey) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|managed| managed.pending_refresh && !managed.policy_known_down)
+    }
+
     pub(super) async fn set_honor_graceful_shutdown(
         &mut self,
         enabled: bool,
@@ -5027,6 +5041,12 @@ impl PeerManager {
                      advances anyway; the next generation-route reload retargets it"
                 );
                 failures.push((peer_key, format!("hot-apply: {e}")));
+            } else if self.honor_refresh_owed(&peer_key) {
+                warn!(
+                    peer = %address,
+                    "honor_graceful_shutdown: peer took the new chain but its Route Refresh is still owed"
+                );
+                failures.push((peer_key, HONOR_REFRESH_OWED.to_string()));
             }
         }
 
@@ -5122,6 +5142,12 @@ impl PeerManager {
                      advances anyway; the next generation-route reload retargets it"
                 );
                 failures.push((peer_key, format!("hot-apply: {e}")));
+            } else if self.honor_refresh_owed(&peer_key) {
+                warn!(
+                    peer = %address,
+                    "honor_blackhole: peer took the new chain but its Route Refresh is still owed"
+                );
+                failures.push((peer_key, HONOR_REFRESH_OWED.to_string()));
             }
         }
 

@@ -388,11 +388,13 @@ new value even if the refresh fan-out fails for some peers (channel-full,
 session wedged, etc.). The value reported by `rustbgpd --diff` and
 `rustbgpd --check` therefore always matches what the daemon believes it is
 running.
-A peer whose update fails keeps its prior chains and does not abort the
-reload; the SIGHUP receipt (`rbgp config last-reload`) reports `known_partial`
-and names the peer. Nothing retries it until a later reload takes the
-generation route, the knob is reverted and set again, or the daemon restarts
-([Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply)).
+A peer left behind (its update or owed Route Refresh failed) does not abort
+the reload; the SIGHUP receipt (`rbgp config last-reload`) reports
+`known_partial` and names the peer until the next reload replaces it. A no-op
+SIGHUP does not retry the peer. A later generation-route reload, a per-peer
+policy apply that reaches it, re-setting the knob, or a restart does; see
+[Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply) for
+the exact triggers and limits.
 A SIGHUP that changes this field together with static-neighbor, peer-group,
 policy, or dataset changes is rejected before any effect; reload it on its own
 ([SIGHUP reload routes](reload-matrix.md#sighup-reload-routes)).
@@ -507,9 +509,9 @@ failure signal.
 
 SIGHUP hot-applies this field with the same best-effort partial-apply
 semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
-for EBGP peers and advances the live snapshot; a peer left on its prior
-chains is named in a `known_partial` receipt and retargeted by the next
-generation-route reload. As with
+for EBGP peers and advances the live snapshot; a left-behind peer is named
+in a `known_partial` receipt and retried by the triggers in
+[Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply). As with
 `honor_graceful_shutdown`, combining the change with static-neighbor,
 peer-group, policy, or dataset changes in one SIGHUP is rejected before any
 effect.

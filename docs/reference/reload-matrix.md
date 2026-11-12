@@ -515,33 +515,56 @@ that are stood up once at startup. Three fields are not restart-required:
 
 A `honor_graceful_shutdown` or `honor_blackhole` change recomputes the
 effective import and export chains of every EBGP peer. The fan-out is
-best-effort: the peer manager installs the new knob value even when some
-peers keep their prior chains, for example after a session-side policy update
-timeout, a failed Route Refresh, an RFC 8212 qualification failure or an
-unresolvable chain. The running config advances with it, so a later SIGHUP
-that reverts the knob still reaches every peer.
+best-effort: the peer manager installs the new knob value even when it
+leaves some peers behind, and the running config advances with it. A peer
+is left behind when:
+
+- its chains could not be resolved;
+- its session did not acknowledge the new chains (a policy update timeout or
+  a departed session task), so it keeps its prior chains; or
+- it took the new chains but still owes follow-up work: the RIB rejected its
+  new export chain, or the Route Refresh that re-evaluates its `Adj-RIB-In`
+  was rejected or withheld because its session state query was not
+  answered. A peer positively known to be down owes no refresh and is not
+  reported; it re-establishes under the new chains.
 
 The reload receipt reports that step as `known_partial`. The step's `[global]`
-target counts as applied, and each peer left on its prior chains is a failure
-and an unapplied identity named by its peer key, with the bucket
+target counts as applied. Each left-behind peer is a failure and an
+unapplied identity named by its peer key, under the bucket
 `honor_graceful_shutdown.apply` or `honor_blackhole.apply`. Unlike other
 sequential-route failures, the reload continues with its remaining steps.
+The receipt describes only the latest SIGHUP: any later reload, including a
+no-op SIGHUP, replaces it and clears the `rbgp doctor` warning while a
+left-behind peer may still be behind. The per-peer `WARN` log lines remain.
 
-Nothing retries such a peer on its own. A no-op SIGHUP, or one that changes
-only other sequential-route fields, does not touch it. These retarget it:
+Nothing retries a left-behind peer on a timer, and a no-op SIGHUP does not
+touch it. These retarget it:
 
-- The next reload whose candidate takes the **generation** route (any change
-  in its row in [SIGHUP reload routes](#sighup-reload-routes): static
-  `[[neighbors]]`, `[peer_groups]`, inline policies, neighbor sets, global
-  chains, conditional advertisements, `.rpol` content, datasets, BFD member
-  attachments or outbound prefix maxima). The generation re-resolves every
-  live peer against the candidate and reapplies each one whose installed
-  chains differ, including a missing honor tail.
+- The next reload that takes the **generation** route. That needs a
+  generation-class change (static or interface-only `[[neighbors]]`,
+  `[peer_groups]`, inline policies, neighbor sets, global chains,
+  `route_flap_dampening`, conditional advertisements, `.rpol` content,
+  datasets, BFD member attachments or outbound prefix maxima) without a
+  TCP-AO rotation or listener MD5/GTSM edit, which move the reload to the
+  sequential route ([SIGHUP reload routes](#sighup-reload-routes)). The
+  generation resolves each live peer against the candidate and reapplies
+  each one whose installed chains differ or that still owes a refresh. A
+  dynamic peer whose chains still cannot be resolved keeps its prior chains.
+  The generation requires every reapplied peer to converge cleanly, so while
+  a left-behind peer still does not answer, it rejects the operator's
+  unrelated edit and restores the prior generation.
+- A later per-peer policy apply that reaches the peer: a sequential policy,
+  peer-group or neighbor edit or a runtime policy mutation that touches it,
+  or a full validation-state refresh, which delivers an owed Route Refresh.
 - Reverting the knob and then setting it again, as two reloads.
 - A daemon restart.
 
-A sequential policy, peer-group or neighbor edit retargets only the peers it
-affects.
+Reverting the knob alone does not guarantee that a left-behind peer drops the
+new tail. If the session installed the new chain after its acknowledgement
+timed out, the daemon still records the prior chain for that peer. A revert
+then sends it no policy update, and the receipt reports `complete` while the
+peer keeps the honored chain. Set the knob again or restart to bring it back
+in line.
 
 `apply_bum_enforcement` is **restart-required** but is a top-level
 (document-root) key, **not** a `[global]` key — EVPN BUM-port enforcement is
