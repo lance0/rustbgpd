@@ -76,6 +76,8 @@ async fn send_session_command(
 }
 
 /// Peers waiting for a forced outbound refresh, each at most once.
+/// A request for a peer whose replay is already running queues another,
+/// so a change accepted during a replay is still re-emitted.
 #[derive(Default)]
 struct OutboundRefreshQueue {
     pending: std::collections::VecDeque<PeerId>,
@@ -108,10 +110,12 @@ fn lock_refresh_queue(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The peer manager's handle on the outbound refresher. Requests merge
-/// straight into the refresher's queue, so however many toggles arrive while
-/// a refresh waits on the RIB, it holds each waiting peer once. Dropping the
-/// handle stops the refresher.
+/// The peer manager's handle on the outbound refresher, which replays a
+/// peer's table after an outbound attribute change its session already
+/// accepted: a graceful-shutdown toggle or a hot-applied export knob.
+/// Requests merge straight into the refresher's queue, so however many
+/// changes arrive while a refresh waits on the RIB, it holds each waiting
+/// peer once. Dropping the handle stops the refresher.
 pub(super) struct OutboundRefresher {
     queue: std::sync::Arc<std::sync::Mutex<OutboundRefreshQueue>>,
     wake: std::sync::Arc<tokio::sync::Notify>,
@@ -168,7 +172,7 @@ async fn run_outbound_refresher(
             if refreshed + skipped + failed > 0 {
                 info!(
                     refreshed,
-                    skipped, failed, "graceful-shutdown outbound refreshes complete"
+                    skipped, failed, "forced outbound refreshes complete"
                 );
                 (refreshed, skipped, failed) = (0, 0, 0);
             }
@@ -188,13 +192,13 @@ async fn run_outbound_refresher(
             Ok(Err(RibCommandError::NotFound(_))) => skipped += 1,
             Ok(Err(error)) => {
                 failed += 1;
-                warn!(%peer, %error, "graceful-shutdown outbound refresh failed");
+                warn!(%peer, %error, "forced outbound refresh failed");
             }
             Err(_) => {
                 // The RIB dropped the reply. If it has exited, the next send
                 // fails and ends the refresher.
                 failed += 1;
-                warn!(%peer, "graceful-shutdown outbound refresh reply dropped");
+                warn!(%peer, "forced outbound refresh reply dropped");
             }
         }
     }
@@ -1745,53 +1749,59 @@ impl PeerManager {
                 })?;
         }
 
-        // Force re-emission after an export-affecting knob swap unless the
-        // session already queued the IPv6 family unlock's full-table resync.
-        // A simultaneous remove_private_as change still needs the refresh
-        // for other already-sendable families. This is the same
-        // reason the gshut toggle and live-policy apply refresh: routes the
-        // exact-export preflight suppressed under the OLD knobs (e.g.
+        // Force re-emission after an export-affecting knob swap. This is the
+        // same reason the gshut toggle and live-policy apply refresh: routes
+        // the exact-export preflight suppressed under the OLD knobs (e.g.
         // `MissingIpv6NextHop`) are only re-probed, and already-advertised
         // AS_PATHs only re-encoded, on an outbound event. Without this the
         // remediation stays off the wire until unrelated churn or a session
-        // bounce. Runs BEFORE bookkeeping: a hard refresh failure returns
-        // Err with live knobs changed but stored transport config still old.
-        // Applying the stored prior through normal change detection cannot
-        // prove restoration; owned callers must fence this uncertainty.
-        if export_knobs_changed {
-            let addr = peer.address;
-            let confirm_unlock = ipv6_unlock_only && !remove_private_as_changed;
+        // bounce. The session published its new knobs before acknowledging
+        // them and the replay encodes with whatever the session holds when
+        // the RIB runs it, so the replay goes to the outbound refresher,
+        // like the gshut toggle's: a peer-group edit (and its rollback) then
+        // waits for no member's full-table replay, and a slow replay delays
+        // only that member's wire update rather than failing the edit.
+        //
+        // When the session already queued the IPv6 family unlock's
+        // full-table resync and no other export knob changed, the RIB only
+        // confirms the unlock, which needs no replay. That check runs BEFORE
+        // bookkeeping: a failure returns Err with live knobs changed but
+        // stored transport config still old. Applying the stored prior
+        // through normal change detection cannot prove restoration; owned
+        // callers must fence this uncertainty.
+        if export_knobs_changed && ipv6_unlock_only && !remove_private_as_changed {
             match self
                 .refresh_peer_outbound_in_rib(
                     &peer,
                     OperatorReadAdmission::Fenced {
-                        reason: "session knobs changed but manager metadata awaits refresh acknowledgement",
+                        reason: "session knobs changed but manager metadata awaits unlock confirmation",
                     },
-                    confirm_unlock,
+                    true,
                 )
                 .await
             {
                 Err(error) => {
                     return Err(PeerLifecycleError::Internal(format!(
-                        "failed to refresh outbound routes after hot-applying export knobs to {peer}: {error}"
+                        "failed to confirm the IPv6 unlock after hot-applying export knobs to {peer}: {error}"
                     )));
                 }
+                // "not registered for outbound updates" is expected for a
+                // peer not yet Established — the next PeerUp emits from the
+                // updated config.
+                Ok(Err(RibCommandError::NotFound(error))) => debug!(
+                    %peer, %error,
+                    "RIB declined IPv6 unlock confirmation (peer likely not yet Established)"
+                ),
                 Ok(Err(error)) => {
-                    if confirm_unlock && !matches!(error, RibCommandError::NotFound(_)) {
-                        return Err(PeerLifecycleError::Internal(format!(
-                            "RIB did not confirm IPv6 unlock for {peer}: {error}"
-                        )));
-                    }
-                    // "not registered for outbound updates" is expected for a
-                    // peer not yet Established — the next PeerUp emits from
-                    // the updated config.
-                    debug!(
-                        peer = %addr, error = %error,
-                        "RIB declined export-knob refresh (peer likely not yet Established)"
-                    );
+                    return Err(PeerLifecycleError::Internal(format!(
+                        "RIB did not confirm IPv6 unlock for {peer}: {error}"
+                    )));
                 }
                 Ok(Ok(())) => {}
             }
+        } else if export_knobs_changed {
+            let rib_peer = self.rib_peer_of(&peer);
+            self.request_outbound_refresh(vec![rib_peer]);
         }
 
         // The actor runs this method serially, so a deadline cannot fire while

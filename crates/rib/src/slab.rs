@@ -21,8 +21,10 @@
 
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
-/// Slots per segment: 64Ki routes, about 6.5 MiB of 104-byte route bodies.
-const SEGMENT: usize = 1 << 16;
+/// Slots per segment: 64Ki routes. One segment holds 6.5 MiB of 104-byte
+/// unicast bodies, 9 MiB of 144-byte VPN bodies or 8.5 MiB of 136-byte
+/// labeled-unicast bodies.
+pub(crate) const SEGMENT: usize = 1 << 16;
 
 /// Dense storage for route bodies addressed by `u32` handles.
 ///
@@ -133,6 +135,17 @@ impl<T> RouteSlab<T> {
             self.free.push(handle);
         }
         value
+    }
+
+    /// Drop the value at `handle` in its slot and free the slot for reuse,
+    /// for a caller that discards the value. Returns whether it was occupied.
+    pub(crate) fn discard(&mut self, handle: u32) -> bool {
+        if self.slot(handle).is_none_or(Option::is_none) {
+            return false;
+        }
+        *self.slot_mut(handle) = None;
+        self.free.push(handle);
+        true
     }
 
     /// Replace the value in an occupied slot.
@@ -430,6 +443,25 @@ mod tests {
     }
 
     #[test]
+    fn discard_frees_the_slot_for_reuse() {
+        let mut slab: RouteSlab<String> = RouteSlab::default();
+        let a = slab.insert("a".to_string());
+        let b = slab.insert("b".to_string());
+        assert!(slab.discard(a));
+        assert!(!slab.discard(a), "double discard is a no-op");
+        assert!(!slab.discard(99), "an unallocated handle is a no-op");
+        assert_eq!(slab.get(a), None);
+        assert_eq!(slab.get(b).unwrap(), "b");
+        assert_eq!(slab.len(), 1);
+        assert_eq!(
+            slab.insert("c".to_string()),
+            a,
+            "the discarded slot is reused"
+        );
+        assert_eq!(slab.slot_count(), 2);
+    }
+
+    #[test]
     fn set_replaces_in_place() {
         let mut slab: RouteSlab<u64> = RouteSlab::default();
         let h = slab.insert(1);
@@ -491,9 +523,17 @@ mod tests {
     /// the niche.
     #[test]
     fn option_is_niche_free_for_route_types() {
-        use crate::route::Route;
+        use crate::route::{LabeledRibRoute, Route, VpnRibRoute};
         use std::mem::size_of;
         assert_eq!(size_of::<Option<Route>>(), size_of::<Route>());
         assert_eq!(size_of::<Route>(), 104);
+        // Adj-RIB-In VPN and labeled-unicast slots.
+        assert_eq!(size_of::<Option<VpnRibRoute>>(), size_of::<VpnRibRoute>());
+        assert_eq!(size_of::<VpnRibRoute>(), 144);
+        assert_eq!(
+            size_of::<Option<LabeledRibRoute>>(),
+            size_of::<LabeledRibRoute>()
+        );
+        assert_eq!(size_of::<LabeledRibRoute>(), 136);
     }
 }

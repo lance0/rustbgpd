@@ -30,11 +30,48 @@ pub(super) struct ConditionalAdvertisementPrior {
     uncertain: bool,
 }
 
+/// How long a dispatched conditional-advertisement request waits for the
+/// RIB's reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConditionalReplyWait {
+    /// Until the RIB answers. The RIB cannot cancel a dequeued request, so a
+    /// timer could only misreport a slow but healthy completion as
+    /// ambiguous; the owning operation's settlement budget bounds a RIB that
+    /// never answers.
+    Owned,
+    /// At most `RIB_REPLY_TIMEOUT` from the request, for a caller outside any
+    /// settlement owner that retries: nothing else would bound the wait, and
+    /// readiness is served during it.
+    Retrying,
+}
+
+/// Why a conditional-advertisement request failed.
+#[derive(Debug)]
+pub(super) enum ConditionalRequestError {
+    /// The request never reached the RIB: nothing changed.
+    NotDispatched(String),
+    /// The request was dispatched without an acknowledgement: the RIB may
+    /// have applied it.
+    Unacknowledged(String),
+}
+
+impl std::fmt::Display for ConditionalRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotDispatched(message) | Self::Unacknowledged(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
 impl PeerManager {
     /// Send one request to the RIB and wait for its reply. Mailbox admission
-    /// and the acknowledgement share one absolute deadline, so a full actor
-    /// mailbox cannot stretch the request past `RIB_REPLY_TIMEOUT`. Any
-    /// failure after the send leaves the RIB outcome unknown.
+    /// has a `RIB_REPLY_TIMEOUT` deadline; nothing is dispatched before it,
+    /// so expiry is [`ConditionalRequestError::NotDispatched`] and leaves the
+    /// install's certainty as it was. `wait` bounds the reply. A dropped or,
+    /// for [`ConditionalReplyWait::Retrying`], late reply leaves the RIB
+    /// outcome unknown.
     ///
     /// The request queues behind the RIB's primary-lane work, which can take
     /// seconds after a large export commit, so the wait serves readiness.
@@ -44,8 +81,10 @@ impl PeerManager {
     /// at the policy steps around this one.
     async fn conditional_rib_request<T>(
         &mut self,
+        wait: ConditionalReplyWait,
         request: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
-    ) -> Result<T, String> {
+    ) -> Result<T, ConditionalRequestError> {
+        use ConditionalRequestError::{NotDispatched, Unacknowledged};
         let (reply, response) = oneshot::channel();
         let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
         let rib_tx = self.rib_tx.clone();
@@ -53,18 +92,30 @@ impl PeerManager {
         let round_trip = async move {
             tokio::time::timeout_at(deadline, rib_tx.send(request))
                 .await
-                .map_err(|_| "RIB conditional-advertisement request timed out before dispatch")?
-                .map_err(|_| "RIB unavailable for conditional-advertisement request")?;
-            tokio::time::timeout_at(deadline, response)
-                .await
-                .map_err(|_| "RIB conditional-advertisement acknowledgement timed out".to_string())?
-                .map_err(|_| "RIB dropped conditional-advertisement acknowledgement".to_string())
+                .map_err(|_| {
+                    NotDispatched(
+                        "RIB conditional-advertisement request timed out before dispatch".into(),
+                    )
+                })?
+                .map_err(|_| {
+                    NotDispatched("RIB unavailable for conditional-advertisement request".into())
+                })?;
+            let reply = match wait {
+                ConditionalReplyWait::Owned => Ok(response.await),
+                ConditionalReplyWait::Retrying => tokio::time::timeout_at(deadline, response).await,
+            };
+            reply
+                .map_err(|_| {
+                    Unacknowledged("RIB conditional-advertisement acknowledgement timed out".into())
+                })?
+                .map_err(|_| {
+                    Unacknowledged("RIB dropped conditional-advertisement acknowledgement".into())
+                })
         };
         let result = self
             .await_with_readiness(round_trip, OperatorReadAdmission::Served)
             .await;
-        // Any failure leaves the RIB's install unknown.
-        if result.is_err() {
+        if matches!(result, Err(Unacknowledged(_))) {
             self.conditional_install_uncertain = true;
         }
         result
@@ -76,13 +127,14 @@ impl PeerManager {
         &mut self,
         set: ConditionalAdvertisementSet,
         swapping_datasets: &[String],
-    ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
+        wait: ConditionalReplyWait,
+    ) -> Result<Option<ConditionalAdvertisementPrior>, ConditionalRequestError> {
         let uncertain = self.conditional_install_uncertain;
         if !uncertain && set == self.conditional_advertisements {
             return Ok(None);
         }
         let capture = self
-            .conditional_rib_request(|reply| RibUpdate::InstallConditionalAdvertisements {
+            .conditional_rib_request(wait, |reply| RibUpdate::InstallConditionalAdvertisements {
                 set: set.clone(),
                 swapping_datasets: swapping_datasets.to_vec(),
                 reply,
@@ -107,10 +159,12 @@ impl PeerManager {
     pub(super) async fn restore_conditional_advertisements(
         &mut self,
         prior: ConditionalAdvertisementPrior,
-    ) -> Result<(), String> {
-        self.conditional_rib_request(|reply| RibUpdate::RestoreConditionalAdvertisements {
-            capture: prior.capture,
-            reply,
+    ) -> Result<(), ConditionalRequestError> {
+        self.conditional_rib_request(ConditionalReplyWait::Owned, |reply| {
+            RibUpdate::RestoreConditionalAdvertisements {
+                capture: prior.capture,
+                reply,
+            }
         })
         .await?;
         self.conditional_advertisements = prior.set;
@@ -195,11 +249,12 @@ impl PeerManager {
     pub(super) async fn install_conditional_advertisements_for(
         &mut self,
         candidate: &Config,
-    ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
-        let set = self
-            .conditional_set(candidate)
-            .map_err(|error| format!("conditional advertisements: {error}"))?;
-        self.install_conditional_advertisements(set, &[]).await
+    ) -> Result<Option<ConditionalAdvertisementPrior>, ConditionalRequestError> {
+        let set = self.conditional_set(candidate).map_err(|error| {
+            ConditionalRequestError::NotDispatched(format!("conditional advertisements: {error}"))
+        })?;
+        self.install_conditional_advertisements(set, &[], ConditionalReplyWait::Owned)
+            .await
     }
 
     /// Bring the RIB install in line with `current_config` after a config
@@ -218,7 +273,10 @@ impl PeerManager {
                 return;
             }
         };
-        match self.install_conditional_advertisements(set, &[]).await {
+        match self
+            .install_conditional_advertisements(set, &[], ConditionalReplyWait::Retrying)
+            .await
+        {
             Ok(_) => self.conditional_reconcile_retry = None,
             Err(error) => {
                 let backoff = self
@@ -257,7 +315,7 @@ impl PeerManager {
         &mut self,
         datasets: &[String],
         changed: Vec<Arc<str>>,
-    ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
+    ) -> Result<Option<ConditionalAdvertisementPrior>, ConditionalRequestError> {
         if !self
             .conditional_advertisements
             .condition_policy_references(datasets)
@@ -266,10 +324,12 @@ impl PeerManager {
         }
         let datasets = datasets.to_vec();
         let capture = self
-            .conditional_rib_request(|reply| RibUpdate::ReobserveConditionalAdvertisements {
-                datasets,
-                changed,
-                reply,
+            .conditional_rib_request(ConditionalReplyWait::Owned, |reply| {
+                RibUpdate::ReobserveConditionalAdvertisements {
+                    datasets,
+                    changed,
+                    reply,
+                }
             })
             .await?;
         Ok(Some(ConditionalAdvertisementPrior {

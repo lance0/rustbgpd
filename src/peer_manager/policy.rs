@@ -31,6 +31,7 @@ use crate::policy_admin::{
 };
 
 use super::ManagedPeerState;
+use super::conditional::ConditionalRequestError;
 use super::{
     CLEAN_STATE_QUERY_WINDOW, OperatorReadAdmission, PEER_POLICY_UPDATE_TIMEOUT,
     PEER_QUERY_TIMEOUT, PeerManager, RIB_REPLY_TIMEOUT, lifecycle::PeerReshapeSnapshotOutcome,
@@ -4652,14 +4653,24 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        // Nothing precedes the install, so one that never reached the RIB is
+        // a clean rejection; an unacknowledged one may have committed.
         let conditional_prior = self
             .install_conditional_advertisements_for(next_config)
             .await
-            .map_err(|message| {
-                PolicySnapshotFailure::ambiguous_code(
-                    RuntimeConfigPolicyFailureCode::RibApplyRejected,
-                    message,
-                )
+            .map_err(|error| match error {
+                ConditionalRequestError::NotDispatched(message) => {
+                    PolicySnapshotFailure::rejected_code(
+                        RuntimeConfigPolicyFailureCode::RibApplyRejected,
+                        message,
+                    )
+                }
+                ConditionalRequestError::Unacknowledged(message) => {
+                    PolicySnapshotFailure::ambiguous_code(
+                        RuntimeConfigPolicyFailureCode::RibApplyRejected,
+                        message,
+                    )
+                }
             })?;
         match self
             .apply_resolved_policy_snapshot_with_prestage_reads(

@@ -21,6 +21,11 @@
 //!   the `meta` line). `announce` replaces one non-best path per key and
 //!   `withdraw` removes one. `announce_best_worse` and `withdraw_best` are
 //!   report-only extras.
+//! - `many_key_interleaved`: the `many_key` cells, report-only, over keys
+//!   filled path by path (path 2 for every key, then path 3, and so on)
+//!   instead of key by key. Storage that places a key's paths in arrival
+//!   order keeps them adjacent in `many_key` and spreads them across the
+//!   table here.
 //! - `llgr`: sessions of 1,024 fresh path IDs for one key, each ended by
 //!   Graceful Restart and the LLGR promotion, then one UPDATE that replaces
 //!   the best path with an identical route.
@@ -31,10 +36,15 @@
 //!
 //!   cargo bench -p rustbgpd-rib --features bench-internals \
 //!     --bench addpath_selection_rescan -- --reps 50
+//!
+//! `--perf-ctl CTL,ACK --perf-cells PATTERN` drives the control FIFOs of
+//! `perf stat --control fifo:CTL,ACK --delay -1`, so hardware counters cover
+//! only the timed UPDATEs of the non-warm-up repetitions of cells whose name
+//! contains `PATTERN`. Timings are unchanged; the counters are attribution.
 
-use std::io::Write as _;
+use std::io::{BufRead as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustbgpd_rib::route::{AspaContextId, ReceivedAt};
 use rustbgpd_rib::update::WireRoutesReceived;
@@ -72,6 +82,30 @@ const WORSE: u32 = 50;
 const DEFAULT_CAP_LIMIT_NS: u64 = 10_000_000;
 const OPT_IN_LIMIT_NS: u64 = 50_000_000;
 const OPT_IN_STORED: usize = 65_536;
+
+/// Control FIFOs of a `perf stat --control` run, and whether the repetition
+/// now running is one it counts.
+struct PerfControl {
+    ctl: std::fs::File,
+    ack: std::io::BufReader<std::fs::File>,
+    cells: String,
+    armed: bool,
+}
+
+static PERF: Mutex<Option<PerfControl>> = Mutex::new(None);
+
+/// Send `enable` or `disable` to perf and wait for its acknowledgement, when
+/// the running repetition is counted.
+fn perf_command(command: &str) {
+    let mut perf = PERF.lock().expect("perf control lock");
+    let Some(perf) = perf.as_mut().filter(|perf| perf.armed) else {
+        return;
+    };
+    writeln!(perf.ctl, "{command}").expect("write perf control");
+    let mut ack = String::new();
+    perf.ack.read_line(&mut ack).expect("read perf ack");
+    assert_eq!(ack.trim_matches(['\n', '\0']), "ack", "perf ack");
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Family {
@@ -503,6 +537,14 @@ impl Fixture {
         });
     }
 
+    /// Time one UPDATE (`RibManager::bench_timed_update`).
+    fn timed(&mut self, update: RibUpdate) -> u64 {
+        perf_command("enable");
+        let ns = self.manager.bench_timed_update(update);
+        perf_command("disable");
+        ns
+    }
+
     /// Apply one message outside any timed cell.
     fn apply(&mut self, update: RibUpdate) {
         let _ = self.manager.bench_timed_update(update);
@@ -598,8 +640,11 @@ impl Run {
         let name = cell.name();
         let mut samples = Vec::with_capacity(self.reps);
         for rep in 0..self.warmup + self.reps {
-            let ns = repetition(rep);
             let warmup = rep < self.warmup;
+            if let Some(perf) = PERF.lock().expect("perf control lock").as_mut() {
+                perf.armed = !warmup && name.contains(perf.cells.as_str());
+            }
+            let ns = repetition(rep);
             writeln!(
                 self.out,
                 r#"{{"type":"sample","cell":"{name}","rep":{rep},"warmup":{warmup},"ns":{ns}}}"#
@@ -668,17 +713,13 @@ fn one_key(run: &mut Run, family: Family, stored: u32) {
     let next_best = (stored > 1).then_some(2);
 
     run.cell(&cell("replace_best_worse", count), |_| {
-        let ns = fixture
-            .manager
-            .bench_timed_update(update(family, 1, &[(key, 1)], Some(WORSE)));
+        let ns = fixture.timed(update(family, 1, &[(key, 1)], Some(WORSE)));
         fixture.check(family, count, key, next_best.or(Some(1)));
         fixture.apply(update(family, 1, &[(key, 1)], Some(BEST)));
         ns
     });
     run.cell(&cell("withdraw_best", count), |_| {
-        let ns = fixture
-            .manager
-            .bench_timed_update(update(family, 1, &[(key, 1)], None));
+        let ns = fixture.timed(update(family, 1, &[(key, 1)], None));
         fixture.check(family, count - 1, key, next_best);
         fixture.apply(update(family, 1, &[(key, 1)], Some(BEST)));
         ns
@@ -693,7 +734,7 @@ fn one_key(run: &mut Run, family: Family, stored: u32) {
     };
     fixture.check(family, count, key, Some(1));
     run.cell(&cell("replace_non_best", count), |rep| {
-        let ns = fixture.manager.bench_timed_update(update(
+        let ns = fixture.timed(update(
             family,
             1,
             &[(key, target)],
@@ -703,48 +744,58 @@ fn one_key(run: &mut Run, family: Family, stored: u32) {
         ns
     });
     run.cell(&cell("withdraw_non_best", count), |_| {
-        let ns = fixture
-            .manager
-            .bench_timed_update(update(family, 1, &[(key, target)], None));
+        let ns = fixture.timed(update(family, 1, &[(key, target)], None));
         fixture.check(family, count - 1, key, Some(1));
         fixture.apply(update(family, 1, &[(key, target)], Some(BASE)));
         ns
     });
 }
 
-/// One UPDATE filling 4,096 bytes, every key at the default cap.
-fn many_key(run: &mut Run, family: Family) {
+/// One UPDATE filling 4,096 bytes, every key at the default cap. The keys
+/// are filled one key at a time, or path by path across all keys when
+/// `interleaved` (report-only cells).
+fn many_key(run: &mut Run, family: Family, interleaved: bool) {
     let (announce_fit, _) = wire_fit(family, true);
     let (withdraw_fit, _) = wire_fit(family, false);
     assert!(announce_fit <= withdraw_fit);
     let keys = dense_keys(family, withdraw_fit);
     let mut fixture = Fixture::new();
     fixture.register(1, Vec::new());
-    for &key in &keys {
-        let rest: Vec<(Key, u32)> = (2..=DEFAULT_CAP).map(|path_id| (key, path_id)).collect();
-        fixture.apply(update(family, 1, &rest, Some(BASE)));
-    }
     let paths = |count: usize, path_id: u32| -> Vec<(Key, u32)> {
         keys[..count].iter().map(|&key| (key, path_id)).collect()
     };
+    if interleaved {
+        for path_id in 2..=DEFAULT_CAP {
+            fixture.apply(update(family, 1, &paths(withdraw_fit, path_id), Some(BASE)));
+        }
+    } else {
+        for &key in &keys {
+            let rest: Vec<(Key, u32)> = (2..=DEFAULT_CAP).map(|path_id| (key, path_id)).collect();
+            fixture.apply(update(family, 1, &rest, Some(BASE)));
+        }
+    }
     fixture.apply(update(family, 1, &paths(withdraw_fit, 1), Some(BEST)));
     let total = withdraw_fit * DEFAULT_CAP as usize;
     let (first, last) = (keys[0], keys[announce_fit - 1]);
     fixture.check(family, total, first, Some(1));
     fixture.check(family, total, last, Some(1));
     let target = DEFAULT_CAP / 2 + 1;
-    let cell = |kind, keys, ticket_cell| Cell {
-        group: "many_key",
+    let cell = |kind, keys, ticket_cell: bool| Cell {
+        group: if interleaved {
+            "many_key_interleaved"
+        } else {
+            "many_key"
+        },
         family,
         kind,
         stored_paths: DEFAULT_CAP as usize,
         keys,
         cycles: 0,
-        ticket_cell,
+        ticket_cell: ticket_cell && !interleaved,
     };
 
     run.cell(&cell("announce", announce_fit, true), |rep| {
-        let ns = fixture.manager.bench_timed_update(update(
+        let ns = fixture.timed(update(
             family,
             1,
             &paths(announce_fit, target),
@@ -754,32 +805,19 @@ fn many_key(run: &mut Run, family: Family) {
         ns
     });
     run.cell(&cell("withdraw", withdraw_fit, true), |_| {
-        let ns = fixture.manager.bench_timed_update(update(
-            family,
-            1,
-            &paths(withdraw_fit, target),
-            None,
-        ));
+        let ns = fixture.timed(update(family, 1, &paths(withdraw_fit, target), None));
         fixture.check(family, total - withdraw_fit, last, Some(1));
         fixture.apply(update(family, 1, &paths(withdraw_fit, target), Some(BASE)));
         ns
     });
     run.cell(&cell("announce_best_worse", announce_fit, false), |_| {
-        let ns = fixture.manager.bench_timed_update(update(
-            family,
-            1,
-            &paths(announce_fit, 1),
-            Some(WORSE),
-        ));
+        let ns = fixture.timed(update(family, 1, &paths(announce_fit, 1), Some(WORSE)));
         fixture.check(family, total, last, Some(2));
         fixture.apply(update(family, 1, &paths(announce_fit, 1), Some(BEST)));
         ns
     });
     run.cell(&cell("withdraw_best", withdraw_fit, false), |_| {
-        let ns =
-            fixture
-                .manager
-                .bench_timed_update(update(family, 1, &paths(withdraw_fit, 1), None));
+        let ns = fixture.timed(update(family, 1, &paths(withdraw_fit, 1), None));
         fixture.check(family, total - withdraw_fit, first, Some(2));
         fixture.apply(update(family, 1, &paths(withdraw_fit, 1), Some(BEST)));
         ns
@@ -837,12 +875,7 @@ fn llgr(run: &mut Run, family: Family, cycles: &[u64]) {
                 ticket_cell: true,
             };
             run.cell(&cell, |_| {
-                let ns = fixture.manager.bench_timed_update(update(
-                    family,
-                    session_id,
-                    &[(key, first)],
-                    Some(BASE),
-                ));
+                let ns = fixture.timed(update(family, session_id, &[(key, first)], Some(BASE)));
                 fixture.check(family, stored, key, Some(first));
                 ns
             });
@@ -897,6 +930,7 @@ fn main() {
     let mut stored: Vec<u32> = vec![1, 1024, 8192, 65_536];
     let mut cycles: Vec<u64> = vec![1, 8, 64];
     let mut label = String::from("unlabelled");
+    let (mut perf_ctl, mut perf_cells) = (None::<String>, None::<String>);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| panic!("{arg} needs a value"));
@@ -906,6 +940,8 @@ fn main() {
             "--stored" => stored = list(&value()),
             "--llgr-cycles" => cycles = list(&value()),
             "--label" => label = value(),
+            "--perf-ctl" => perf_ctl = Some(value()),
+            "--perf-cells" => perf_cells = Some(value()),
             // Cargo passes `--bench` to every bench target.
             "--bench" => {}
             other => panic!("unknown argument {other}"),
@@ -918,6 +954,18 @@ fn main() {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
         "--label takes letters, digits, '-' and '_'"
     );
+    if let Some(fifos) = perf_ctl {
+        let (ctl, ack) = fifos.split_once(',').expect("--perf-ctl takes CTL,ACK");
+        *PERF.lock().expect("perf control lock") = Some(PerfControl {
+            ctl: std::fs::OpenOptions::new()
+                .write(true)
+                .open(ctl)
+                .expect("open perf control FIFO"),
+            ack: std::io::BufReader::new(std::fs::File::open(ack).expect("open perf ack FIFO")),
+            cells: perf_cells.expect("--perf-ctl needs --perf-cells"),
+            armed: false,
+        });
+    }
     let started = std::time::Instant::now();
     let mut run = Run {
         reps,
@@ -957,10 +1005,13 @@ fn main() {
             }
         }
         for family in Family::ALL {
-            many_key(&mut run, family);
+            many_key(&mut run, family, false);
         }
         for family in Family::ALL {
             llgr(&mut run, family, &cycles);
+        }
+        for family in Family::ALL {
+            many_key(&mut run, family, true);
         }
     });
 

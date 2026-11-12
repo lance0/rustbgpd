@@ -6085,6 +6085,40 @@ async fn an_unacknowledged_gate_install_admits_no_bound_peer() {
     assert!(h.mgr.unnumbered_retry_at().is_some(), "retried");
 }
 
+/// The binding gate has no settlement owner, so a RIB that accepts the
+/// install and never answers costs the run loop `RIB_REPLY_TIMEOUT`, not an
+/// unbounded wait. The install may still land, so it is marked uncertain and
+/// reconciled.
+#[tokio::test(start_paused = true)]
+async fn a_binding_gate_install_without_a_reply_gives_up_at_the_reply_timeout() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
+    let (held_tx, mut held) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::InstallConditionalAdvertisements { reply, .. } = update {
+                // Accepted and never answered.
+                let _ = held_tx.send(reply);
+            }
+        }
+    });
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(Duration::from_mins(1), h.bind("swp1", Some(endpoint(2, 7))))
+        .await
+        .expect("the binding gate bounds its reply wait");
+    assert_eq!(started.elapsed(), crate::peer_manager::RIB_REPLY_TIMEOUT);
+    assert!(held.try_recv().is_ok(), "the install was dispatched");
+    assert_eq!(h.peers_at(ll(2)), [], "not admitted");
+    assert!(h.mgr.conditional_install_uncertain);
+    assert!(h.mgr.conditional_reconcile_pending);
+}
+
 /// A compensated mutation after a lost retirement acknowledgement restores
 /// the RIB to its capture and the cache to the stale set, which still names
 /// the endpoint. The doubt comes back with it, so a same-endpoint rebind
@@ -6117,7 +6151,11 @@ async fn a_compensated_restore_keeps_a_lost_acknowledgements_doubt() {
         .unwrap();
     let prior = h
         .mgr
-        .install_conditional_advertisements(set, &[])
+        .install_conditional_advertisements(
+            set,
+            &[],
+            crate::peer_manager::conditional::ConditionalReplyWait::Owned,
+        )
         .await
         .unwrap()
         .expect("an uncertain install is always sent");

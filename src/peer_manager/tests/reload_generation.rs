@@ -19,6 +19,9 @@ struct GenerationSessionCounters {
     runtime_config_updates: AtomicU32,
     runtime_knobs: Mutex<Vec<rustbgpd_transport::PeerRuntimeConfigUpdate>>,
     drop_runtime_reply: AtomicBool,
+    /// Install every runtime-config update but answer only this many
+    /// (0: all of them).
+    answer_runtime_updates: AtomicU32,
     runtime_remove_private_as: Mutex<Option<rustbgpd_transport::RemovePrivateAs>>,
     route_refreshes: AtomicU32,
     refresh_families: Mutex<Vec<(Afi, Safi)>>,
@@ -66,11 +69,15 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                 PeerCommand::UpdateRuntimeConfig { config, reply } => {
                     *in_task.runtime_remove_private_as.lock().unwrap() =
                         Some(config.remove_private_as);
-                    in_task
+                    let updates = in_task
                         .runtime_config_updates
-                        .fetch_add(1, Ordering::SeqCst);
+                        .fetch_add(1, Ordering::SeqCst)
+                        + 1;
                     in_task.runtime_knobs.lock().unwrap().push(*config);
-                    if !in_task.drop_runtime_reply.load(Ordering::SeqCst) {
+                    let answered = in_task.answer_runtime_updates.load(Ordering::SeqCst);
+                    if !in_task.drop_runtime_reply.load(Ordering::SeqCst)
+                        && (answered == 0 || updates <= answered)
+                    {
                         let _ = reply.send(Ok(false));
                     }
                 }
@@ -1154,8 +1161,12 @@ async fn assert_generation_operator_read_boundaries(
             PreparedDatasetGeneration::default(),
         )
     };
+    let hot_member = Arc::clone(&harness.counters[&"10.0.0.9".parse::<IpAddr>().unwrap()]);
     if failed_hot_restore {
         candidate.neighbors[2].remove_private_as = Some("all".to_string());
+        // The session installs its prior knobs on restore, but that
+        // acknowledgement is lost, so manager bookkeeping cannot advance.
+        hot_member.answer_runtime_updates.store(1, Ordering::SeqCst);
     }
     let (command_tx, command_rx) = mpsc::channel(16);
     harness.mgr.rx = command_rx;
@@ -1175,23 +1186,18 @@ async fn assert_generation_operator_read_boundaries(
         let mut saw_replace = false;
         let mut held_prepare = false;
         let mut held_replace = false;
-        let mut refreshes = 0;
+        // RIB work after the hot member's failed restore.
+        let restore_failed =
+            || failed_hot_restore && hot_member.runtime_config_updates.load(Ordering::SeqCst) >= 2;
         while let Some(update) = proxy_rx.recv().await {
-            if failed_hot_restore && matches!(update, RibUpdate::RefreshPeerOutbound { .. }) {
-                refreshes += 1;
-                if refreshes == 2 {
-                    // The session restored its prior knobs, but this lost RIB
-                    // reply prevents manager transport bookkeeping advancing.
-                    drop(update);
-                    continue;
-                }
-            }
             let hold = match &update {
-                RibUpdate::ReevaluatePeerExportPolicies { .. } if dataset && refreshes == 2 => true,
+                RibUpdate::ReevaluatePeerExportPolicies { .. } if dataset && restore_failed() => {
+                    true
+                }
                 RibUpdate::PrepareExportPolicyDestination { .. }
                     if !held_prepare
                         && ((!failed_hot_restore && (!compensate || saw_replace))
-                            || (failed_hot_restore && refreshes == 2)) =>
+                            || restore_failed()) =>
                 {
                     held_prepare = true;
                     true
@@ -1321,7 +1327,7 @@ async fn assert_generation_operator_read_boundaries(
                     .lock()
                     .unwrap(),
                 Some(rustbgpd_transport::RemovePrivateAs::Disabled),
-                "the prior session knobs were acknowledged before the restoring RIB reply was lost"
+                "the session installed its prior knobs before that acknowledgement was lost"
             );
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), &mut response)
@@ -1383,7 +1389,7 @@ async fn assert_generation_operator_read_boundaries(
         assert_eq!(
             managed.transport_config.remove_private_as,
             rustbgpd_transport::RemovePrivateAs::All,
-            "manager metadata still names candidate knobs although the session acknowledged its prior knobs"
+            "manager metadata still names candidate knobs although the session installed its prior knobs"
         );
         let state = managed
             .handle()
@@ -1815,8 +1821,12 @@ async fn generation_dynamic_hot_group_restores_transport_after_late_failure() {
     harness.shutdown().await;
 }
 
+/// The session's knob acknowledgement is the commit point of a hot update.
+/// Losing it is ambiguous; losing the RIB's reply to the forced refresh that
+/// follows is not, because the refresher replays with whatever knobs the
+/// session holds and no bookkeeping waits on it.
 #[tokio::test]
-async fn generation_dynamic_hot_group_ack_loss_never_claims_restoration() {
+async fn generation_dynamic_hot_group_ack_loss_is_classified_by_the_session_ack() {
     for drop_knob_reply in [false, true] {
         let fixture = RsFixture::new();
         let mut prior = fixture.load();
@@ -1841,16 +1851,26 @@ async fn generation_dynamic_hot_group_ack_loss_never_claims_restoration() {
             .unwrap()
             .remove_private_as = Some("all".into());
         let outcome = harness.apply(&candidate).await;
+        assert_eq!(harness.runtime_config_updates("10.9.0.2"), 1);
+        if !drop_knob_reply {
+            assert!(
+                matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                harness.mgr.peers[&peer].transport_config.remove_private_as,
+                rustbgpd_transport::RemovePrivateAs::All
+            );
+            harness.shutdown().await;
+            continue;
+        }
         let ReloadGenerationOutcome::CompensationAmbiguous(error) = outcome else {
             panic!("{outcome:?}")
         };
-        let expected = if drop_knob_reply {
-            "failed to hot-apply runtime knobs"
-        } else {
-            "RIB dropped reply"
-        };
-        assert!(error.contains(expected), "{error}");
-        assert_eq!(harness.runtime_config_updates("10.9.0.2"), 1);
+        assert!(
+            error.contains("failed to hot-apply runtime knobs"),
+            "{error}"
+        );
         assert_eq!(
             *harness.counters[&peer.address]
                 .runtime_remove_private_as
@@ -2090,7 +2110,7 @@ async fn hot_update_failure_fences_after_policy_effects() {
 }
 
 #[tokio::test]
-async fn hot_update_refresh_ack_loss_after_knob_ack_never_claims_restoration() {
+async fn hot_update_refresh_ack_loss_after_knob_ack_still_applies() {
     let fixture = RsFixture::new();
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
@@ -2105,10 +2125,10 @@ async fn hot_update_refresh_ack_loss_after_knob_ack_never_claims_restoration() {
         .unwrap()
         .remove_private_as = Some("all".to_string());
     let outcome = harness.apply(&candidate).await;
-    let ReloadGenerationOutcome::CompensationAmbiguous(error) = outcome else {
-        panic!("{outcome:?}");
-    };
-    assert!(error.contains("RIB dropped reply"), "{error}");
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "a lost refresh reply leaves no knob divergence: {outcome:?}"
+    );
     assert_eq!(
         harness.runtime_config_updates("10.0.0.2"),
         1,
@@ -2118,8 +2138,8 @@ async fn hot_update_refresh_ack_loss_after_knob_ack_never_claims_restoration() {
         harness.mgr.peers[&key("10.0.0.2".parse().unwrap())]
             .transport_config
             .remove_private_as,
-        rustbgpd_transport::RemovePrivateAs::Disabled,
-        "manager bookkeeping still holds prior knobs"
+        rustbgpd_transport::RemovePrivateAs::All,
+        "manager bookkeeping follows the session's acknowledgement"
     );
     harness.shutdown().await;
 }
@@ -5343,6 +5363,103 @@ async fn generation_holds_session_replacement_until_the_conditional_install_comm
     relay.abort();
 }
 
+/// A dispatched conditional install cannot be cancelled by the RIB, so the
+/// generation waits for its acknowledgement past `RIB_REPLY_TIMEOUT`, bounded
+/// only by the reload's settlement budget. A slow but live RIB applies the
+/// reload instead of fencing it as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn generation_conditional_install_waits_past_rib_reply_timeout() {
+    let fixture = RsFixture::new();
+    let prior = group_attachment(&fixture, "");
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (seen_tx, seen_rx) = oneshot::channel::<()>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let relay = tokio::spawn(async move {
+        let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
+        let real = tokio::spawn(
+            rustbgpd_rib::RibManager::new(
+                real_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                BgpMetrics::new(),
+            )
+            .run(),
+        );
+        let (mut seen_tx, mut release_rx) = (Some(seen_tx), Some(release_rx));
+        while let Some(command) = rx.recv().await {
+            if matches!(command, RibUpdate::InstallConditionalAdvertisements { .. }) {
+                if let Some(seen) = seen_tx.take() {
+                    let _ = seen.send(());
+                }
+                if let Some(release) = release_rx.take() {
+                    let _ = release.await;
+                }
+                let _ = real_tx.send(command).await;
+            } else if downstream.send(command).await.is_err() {
+                break;
+            }
+        }
+        drop(real_tx);
+        let _ = real.await;
+    });
+    let candidate = group_attachment(&fixture, "conditional_advertisements = [\"backup\"]\n");
+    let driver = async {
+        seen_rx.await.expect("the generation sends its install");
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        release_tx.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(harness.apply(&candidate), driver);
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert!(!harness.mgr.conditional_install_uncertain);
+    assert_eq!(
+        installed_attachments(&harness),
+        [
+            ("10.0.0.2".to_string(), vec!["backup".to_string()]),
+            ("2001:db8::3".to_string(), vec!["backup".to_string()]),
+        ]
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// A conditional install that never leaves a full RIB mailbox reached
+/// nothing: the generation rejects with no effect and the installed set
+/// stays certain, instead of fencing the daemon as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn generation_conditional_install_refused_before_dispatch_rejects_cleanly() {
+    let fixture = RsFixture::new();
+    let prior = group_attachment(&fixture, "");
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, _held_rx) = mpsc::channel::<RibUpdate>(1);
+    tx.try_send(RibUpdate::PeerDeleted {
+        peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into()),
+        label: None,
+        keep_series: false,
+    })
+    .unwrap();
+    harness.mgr.rib_tx = tx;
+    let installed = harness.mgr.conditional_advertisements.clone();
+    let candidate = group_attachment(&fixture, "conditional_advertisements = [\"backup\"]\n");
+    let started = tokio::time::Instant::now();
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(&outcome, ReloadGenerationOutcome::RejectedNoEffect(message)
+            if message.contains("before dispatch")),
+        "{outcome:?}"
+    );
+    assert_eq!(started.elapsed(), RIB_REPLY_TIMEOUT, "admission deadline");
+    assert!(!harness.mgr.conditional_install_uncertain);
+    assert_eq!(harness.mgr.conditional_advertisements, installed);
+    assert_eq!(harness.mgr.current_config, prior);
+    harness.shutdown().await;
+}
+
 /// ADR-0137: a generation that removes a gated neighbor keeps the gate
 /// installed until the neighbor's session is torn down, then prunes it.
 /// Dropping it at the config swap would let the RIB export what the gate
@@ -6497,4 +6614,387 @@ async fn generation_removal_failure_re_adds_the_neighbors_removed_before_it() {
         );
     }
     harness.shutdown().await;
+}
+
+// ── Group export-knob edits hand member refreshes to the refresher ───────
+
+type HeldRefresh = (
+    PeerId,
+    oneshot::Sender<Result<(), rustbgpd_rib::RibCommandError>>,
+);
+
+/// `members` static neighbors inheriting the `edge` group, which matches
+/// `edge_group_definition(Some(90))`.
+fn export_knob_group_config(members: u8) -> Config {
+    use std::fmt::Write as _;
+
+    let mut toml = String::from(
+        "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n\
+         [global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n\n\
+         [peer_groups.edge]\nhold_time = 90\n",
+    );
+    for member in 1..=members {
+        write!(
+            toml,
+            "\n[[neighbors]]\naddress = \"10.0.1.{member}\"\nremote_asn = {}\n\
+             peer_group = \"edge\"\n",
+            65_100 + u32::from(member)
+        )
+        .unwrap();
+    }
+    load_test_config(&toml)
+}
+
+fn remove_private_as_candidate(prior: &Config) -> Config {
+    let mut candidate = prior.clone();
+    candidate
+        .peer_groups
+        .get_mut("edge")
+        .unwrap()
+        .remove_private_as = Some("all".into());
+    candidate
+}
+
+/// Hand every `RefreshPeerOutbound` to the test, which holds its reply;
+/// forward all other RIB work to the harness stub.
+fn hold_outbound_refreshes(
+    harness: &mut GenerationHarness,
+) -> mpsc::UnboundedReceiver<HeldRefresh> {
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (held_tx, held_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(update) = rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                let _ = held_tx.send((peer, reply));
+            } else if downstream.send(update).await.is_err() {
+                break;
+            }
+        }
+    });
+    held_rx
+}
+
+/// Answer held refreshes in arrival order until none arrives for a second.
+/// Each one must be the only refresh in flight.
+async fn answer_refreshes(held: &mut mpsc::UnboundedReceiver<HeldRefresh>) -> Vec<PeerId> {
+    let mut refreshed = Vec::new();
+    while let Ok(Some((peer, reply))) =
+        tokio::time::timeout(Duration::from_secs(1), held.recv()).await
+    {
+        assert!(
+            held.try_recv().is_err(),
+            "the refresher keeps one refresh in flight"
+        );
+        refreshed.push(peer);
+        let _ = reply.send(Ok(()));
+    }
+    refreshed
+}
+
+/// Count what reached the RIB while the owner was still waiting, for the
+/// failure message.
+fn refreshes_sent(held: &mut mpsc::UnboundedReceiver<HeldRefresh>) -> usize {
+    std::iter::from_fn(|| held.try_recv().ok()).count()
+}
+
+fn rib_peers(harness: &GenerationHarness, members: &[PeerKey]) -> BTreeSet<PeerId> {
+    members
+        .iter()
+        .map(|peer| harness.mgr.rib_peer_of(peer))
+        .collect()
+}
+
+fn session_remove_private_as(
+    harness: &GenerationHarness,
+    peer: &PeerKey,
+) -> Option<rustbgpd_transport::RemovePrivateAs> {
+    *harness.counters[&peer.address]
+        .runtime_remove_private_as
+        .lock()
+        .unwrap()
+}
+
+/// A group `remove_private_as` edit used to hold the generation for one
+/// forced full-table RIB replay per member, sent one at a time. With every
+/// refresh reply held, the generation now applies before the RIB answers
+/// any of them, for 8 and 32 members alike; the refresher then replays each
+/// member once, one at a time.
+#[tokio::test(start_paused = true)]
+async fn group_export_knob_reload_does_not_wait_for_member_refreshes() {
+    use rustbgpd_transport::RemovePrivateAs;
+
+    let mut waiting = Vec::new();
+    for members in [8_u8, 32] {
+        let prior = export_knob_group_config(members);
+        let mut harness = GenerationHarness::new(&prior);
+        let mut held = hold_outbound_refreshes(&mut harness);
+        let candidate = remove_private_as_candidate(&prior);
+        let Ok(outcome) =
+            tokio::time::timeout(Duration::from_secs(1), harness.apply(&candidate)).await
+        else {
+            waiting.push(format!(
+                "{members} members: the generation still waits on the RIB after 1 s, \
+                 with {} of {members} member refreshes sent",
+                refreshes_sent(&mut held)
+            ));
+            continue;
+        };
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+            "{outcome:?}"
+        );
+        let peers: Vec<PeerKey> = harness.mgr.peers.keys().cloned().collect();
+        assert_eq!(peers.len(), usize::from(members));
+        for peer in &peers {
+            assert_eq!(
+                session_remove_private_as(&harness, peer),
+                Some(RemovePrivateAs::All)
+            );
+            assert_eq!(
+                harness.mgr.peers[peer].transport_config.remove_private_as,
+                RemovePrivateAs::All
+            );
+        }
+        let refreshed = answer_refreshes(&mut held).await;
+        assert_eq!(
+            refreshed.len(),
+            usize::from(members),
+            "one replay per member"
+        );
+        assert_eq!(
+            refreshed.into_iter().collect::<BTreeSet<_>>(),
+            rib_peers(&harness, &peers)
+        );
+        harness.shutdown().await;
+    }
+    assert!(waiting.is_empty(), "{waiting:#?}");
+}
+
+/// A member's refresh answered after the RIB reply deadline used to fail
+/// the generation as known divergence (a fence) although the session had
+/// acknowledged its knobs. The late answer now only delays that replay.
+#[tokio::test(start_paused = true)]
+async fn group_export_knob_reload_applies_when_a_refresh_answers_after_the_rib_deadline() {
+    let prior = export_knob_group_config(8);
+    let mut harness = GenerationHarness::new(&prior);
+    let mut held = hold_outbound_refreshes(&mut harness);
+    let candidate = remove_private_as_candidate(&prior);
+    let rib = async {
+        let (_, reply) = tokio::time::timeout(Duration::from_secs(30), held.recv())
+            .await
+            .expect("a member refresh reaches the RIB")
+            .unwrap();
+        tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+        let _ = reply.send(Ok(()));
+        answer_refreshes(&mut held).await.len() + 1
+    };
+    let (outcome, refreshed) = tokio::join!(harness.apply(&candidate), rib);
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(refreshed, 8);
+    harness.shutdown().await;
+}
+
+/// The unwind restores the hot members' prior knobs through the same path:
+/// a later step's failure compensates without waiting on any member's
+/// replay, and each restored member is replayed after its restore.
+#[tokio::test(start_paused = true)]
+async fn group_export_knob_reload_unwind_does_not_wait_for_member_refreshes() {
+    use rustbgpd_transport::RemovePrivateAs;
+
+    let prior = export_knob_group_config(8);
+    let mut harness = GenerationHarness::new(&prior);
+    let mut held = hold_outbound_refreshes(&mut harness);
+    let mut candidate = remove_private_as_candidate(&prior);
+    // The last member also edits a session-bound field, so it is replaced
+    // after the other seven hot-apply; that replacement fails.
+    let replaced = key("10.0.1.8".parse().unwrap());
+    candidate.neighbors[7].remote_asn = 65_200.into();
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(replaced.clone(), 0);
+    let Ok(outcome) = tokio::time::timeout(Duration::from_secs(1), harness.apply(&candidate)).await
+    else {
+        panic!(
+            "the generation still waits on the RIB after 1 s, with {} member refreshes sent",
+            refreshes_sent(&mut held)
+        );
+    };
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    let hot: Vec<PeerKey> = harness
+        .mgr
+        .peers
+        .keys()
+        .filter(|peer| **peer != replaced)
+        .cloned()
+        .collect();
+    assert_eq!(hot.len(), 7);
+    for peer in &hot {
+        assert_eq!(harness.runtime_config_updates(&peer.address.to_string()), 2);
+        assert_eq!(
+            session_remove_private_as(&harness, peer),
+            Some(RemovePrivateAs::Disabled)
+        );
+        assert_eq!(
+            harness.mgr.peers[peer].transport_config.remove_private_as,
+            RemovePrivateAs::Disabled
+        );
+    }
+    let refreshed = answer_refreshes(&mut held).await;
+    // A replay already in flight when its member was restored runs again.
+    assert!((7..=8).contains(&refreshed.len()), "{refreshed:?}");
+    assert_eq!(
+        refreshed.into_iter().collect::<BTreeSet<_>>(),
+        rib_peers(&harness, &hot)
+    );
+    harness.shutdown().await;
+}
+
+/// Answer every `RefreshPeerOutbound` at once, logging in arrival order the
+/// member it names and how many runtime-config updates that member's session
+/// had installed when it arrived.
+fn log_outbound_refreshes(harness: &mut GenerationHarness) -> Arc<Mutex<Vec<(IpAddr, u32)>>> {
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let counters = harness.counters.clone();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let in_task = Arc::clone(&log);
+    tokio::spawn(async move {
+        while let Some(update) = rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                let installs = counters[&peer.addr()]
+                    .runtime_config_updates
+                    .load(Ordering::SeqCst);
+                in_task.lock().unwrap().push((peer.addr(), installs));
+                let _ = reply.send(Ok(()));
+            } else if downstream.send(update).await.is_err() {
+                break;
+            }
+        }
+    });
+    log
+}
+
+/// A restore queues its own replay: with every refresh answered as it
+/// arrives, the forward replays are long done when the unwind restores the
+/// prior knobs, so each restored member's last replay must come after its
+/// session installed the restore (its second runtime-config update).
+#[tokio::test(start_paused = true)]
+async fn group_export_knob_reload_unwind_replays_each_member_after_its_restore() {
+    let prior = export_knob_group_config(8);
+    let mut harness = GenerationHarness::new(&prior);
+    let log = log_outbound_refreshes(&mut harness);
+    let mut candidate = remove_private_as_candidate(&prior);
+    let replaced = key("10.0.1.8".parse().unwrap());
+    candidate.neighbors[7].remote_asn = 65_200.into();
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(replaced.clone(), 0);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), harness.apply(&candidate))
+        .await
+        .expect("the generation finishes");
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    // Let the refresher drain.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let log = log.lock().unwrap().clone();
+    for peer in harness.mgr.peers.keys().filter(|peer| **peer != replaced) {
+        assert_eq!(harness.runtime_config_updates(&peer.address.to_string()), 2);
+        let last = log.iter().rev().find(|(addr, _)| *addr == peer.address);
+        assert_eq!(
+            last.map(|(_, installs)| *installs),
+            Some(2),
+            "{peer}: its last replay must follow its restore; log {log:?}"
+        );
+    }
+    harness.shutdown().await;
+}
+
+/// `SetPeerGroup` takes the same in-place path: the edit and, after a
+/// member fails, its rollback both finish before the RIB answers any
+/// member's replay, for 8 and 32 members alike.
+#[tokio::test(start_paused = true)]
+async fn set_peer_group_export_knob_edit_and_rollback_do_not_wait_for_member_refreshes() {
+    use rustbgpd_transport::RemovePrivateAs;
+
+    let mut waiting = Vec::new();
+    for (members, fail) in [(8_u8, false), (32, false), (8, true), (32, true)] {
+        let prior = export_knob_group_config(members);
+        let mut harness = GenerationHarness::new(&prior);
+        let mut held = hold_outbound_refreshes(&mut harness);
+        let peers: Vec<PeerKey> = harness.mgr.peers.keys().cloned().collect();
+        let failing = key("10.0.1.4".parse().unwrap());
+        if fail {
+            harness
+                .mgr
+                .inject_hot_update_failures
+                .insert(failing.clone(), 0);
+        }
+        let mut definition = super::peer_groups::edge_group_definition(Some(90));
+        definition.remove_private_as = Some("all".into());
+        let event = rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "edge".to_string(),
+            definition,
+            ack: None,
+        };
+        let Ok(result) = tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.mgr.apply_peer_group_change(event, peers.clone()),
+        )
+        .await
+        else {
+            waiting.push(format!(
+                "{members} members (failure: {fail}): SetPeerGroup still waits on the RIB \
+                 after 1 s, with {} of {members} member refreshes sent",
+                refreshes_sent(&mut held)
+            ));
+            continue;
+        };
+        let expected = if fail {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("prior peers restored"), "{error}");
+            RemovePrivateAs::Disabled
+        } else {
+            result.unwrap();
+            RemovePrivateAs::All
+        };
+        let mut moved = Vec::new();
+        for peer in &peers {
+            assert_eq!(
+                harness.mgr.peers[peer].transport_config.remove_private_as,
+                expected
+            );
+            if harness.runtime_config_updates(&peer.address.to_string()) > 0 {
+                assert_eq!(session_remove_private_as(&harness, peer), Some(expected));
+                moved.push(peer.clone());
+            }
+        }
+        if fail {
+            assert!(!moved.contains(&failing));
+        } else {
+            assert_eq!(moved.len(), peers.len());
+        }
+        let refreshed = answer_refreshes(&mut held).await;
+        assert!(
+            (moved.len()..=moved.len() + 1).contains(&refreshed.len()),
+            "{refreshed:?}"
+        );
+        assert_eq!(
+            refreshed.into_iter().collect::<BTreeSet<_>>(),
+            rib_peers(&harness, &moved)
+        );
+        harness.shutdown().await;
+    }
+    assert!(waiting.is_empty(), "{waiting:#?}");
 }

@@ -171,6 +171,17 @@
 //!   or any base withdrawal at a stable observer (`stable_withdrawn`)
 //!   fails the reload. Duplicate named withdrawals are counted and
 //!   published, not failed. Works with or without dual-stack.
+//!
+//! Remainder-walk extensions (heterogeneous export shape) — additive; the
+//! historical rows are unchanged:
+//! - `RELOADSTALL_EXPORT_PAIRS=G`: log the expected cohort/remainder split of
+//!   the generator's `GEN_EXPORT_PAIRS=G` shape (`export_split`).
+//! - `RELOADSTALL_DAEMON_LOG`: the daemon's JSON log; each reload reports its
+//!   first `reload_generation_phase` line in `reloadstall_actor_csv`.
+//! - Every native SIGHUP run records `bgp_rib_actor_slice_max_microseconds
+//!   {stage="actor_poll"}` from each scrape (it resets on every render) in
+//!   `reloadstall_actor_scrape_csv`, the reload-window max and SIGHUP outcome
+//!   in `reloadstall_actor_csv`, and the run max in `reloadstall_actor_run_csv`.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -547,14 +558,294 @@ fn reload_applied(before: [u64; 5], after: [u64; 5]) -> Result<bool, String> {
     Ok(after[0] > before[0])
 }
 
-async fn fetch_reload_outcomes(addr: SocketAddr, reload: u32) -> [u64; 5] {
-    let result = fetch_metrics(addr, Instant::now() + METRICS_DEADLINE)
+/// Longest single RIB actor poll since the previous `/metrics` render. Every
+/// render resets it, so the harness must record it on each scrape it makes.
+const ACTOR_POLL_SLICE_MAX: &str = "bgp_rib_actor_slice_max_microseconds{stage=\"actor_poll\"}";
+
+/// One settlement scrape: the SIGHUP outcome counters plus the actor-poll
+/// window max (`None` when the daemon predates the gauge; malformed or
+/// duplicated samples are errors).
+fn settlement_sample(body: &str) -> Result<([u64; 5], Option<u64>), String> {
+    Ok((
+        reload_outcomes(body)?,
+        optional_metric_value(body, ACTOR_POLL_SLICE_MAX)?,
+    ))
+}
+
+/// The outcome counter that moved since `before`: a non-`complete` outcome
+/// wins (it is what fails the reload), else `complete`, else `pending`.
+/// A rolled-back reload reports `rejected_no_effect`.
+fn reload_outcome_label(before: [u64; 5], after: [u64; 5]) -> &'static str {
+    (1..RELOAD_OUTCOMES.len())
+        .chain([0])
+        .find(|&index| after[index] > before[index])
+        .map_or("pending", |index| RELOAD_OUTCOMES[index])
+}
+
+async fn fetch_settlement_sample(addr: SocketAddr) -> Result<([u64; 5], Option<u64>), String> {
+    fetch_metrics(addr, Instant::now() + METRICS_DEADLINE)
         .await
-        .and_then(|body| reload_outcomes(&body));
-    result.unwrap_or_else(|error| {
-        eprintln!("FAIL: reload {reload} daemon settlement evidence: {error}");
+        .and_then(|body| settlement_sample(&body))
+        .map_err(|error| format!("daemon settlement evidence: {error}"))
+}
+
+/// A settlement scrape before the trigger: no reload window exists yet.
+async fn fetch_pre_trigger_sample(addr: SocketAddr, reload: u32) -> ([u64; 5], Option<u64>) {
+    fetch_settlement_sample(addr).await.unwrap_or_else(|error| {
+        eprintln!("FAIL: reload {reload} {error}");
         std::process::exit(1)
     })
+}
+
+/// Actor-turn evidence for one native reload (`reloadstall_actor_csv`).
+/// Two brackets precede the window and are reported but never counted:
+/// `pre_stage` (the outcome baseline, before the stage command) and
+/// `pre_trigger` (just before the SIGHUP; it covers staging and resets the
+/// gauge, so the window starts at the trigger). Later scrapes are the window.
+struct ActorWindow {
+    reload: u32,
+    trigger: Instant,
+    scrapes: u32,
+    pre_us: Option<u64>,
+    stage_us: Option<u64>,
+    max_us: Option<u64>,
+    /// Outcome counters at the `pre_stage` baseline and at the latest scrape.
+    before: [u64; 5],
+    last: [u64; 5],
+    /// `RELOADSTALL_DAEMON_LOG` and its length at the `pre_trigger` bracket.
+    daemon_log: Option<(PathBuf, u64)>,
+    reported: bool,
+}
+
+impl ActorWindow {
+    fn new(
+        reload: u32,
+        before: [u64; 5],
+        pre_us: Option<u64>,
+        stage_us: Option<u64>,
+        daemon_log: Option<(PathBuf, u64)>,
+    ) -> Self {
+        println!("{}", actor_scrape_row(reload, 0, "pre_stage", 0, pre_us));
+        println!(
+            "{}",
+            actor_scrape_row(reload, 0, "pre_trigger", 0, stage_us)
+        );
+        Self {
+            reload,
+            trigger: Instant::now(),
+            scrapes: 0,
+            pre_us,
+            stage_us,
+            max_us: None,
+            before,
+            last: before,
+            daemon_log,
+            reported: false,
+        }
+    }
+
+    fn record(&mut self, (outcomes, value): ([u64; 5], Option<u64>)) {
+        self.scrapes += 1;
+        self.max_us = self.max_us.max(value);
+        self.last = outcomes;
+        let since_ms = self.trigger.elapsed().as_millis();
+        println!(
+            "{}",
+            actor_scrape_row(self.reload, self.scrapes, "reload", since_ms, value)
+        );
+    }
+
+    /// This reload's `reloadstall_actor_csv` row, the first time only, plus a
+    /// daemon-log read error (the row then reports the phase as absent).
+    /// `attempts` bounds the wait for a lagging phase line: a failed reload
+    /// (a rejected policy parse never writes one) reads the log once.
+    async fn take_row(&mut self, attempts: u32) -> (Option<String>, Option<String>) {
+        if self.reported {
+            return (None, None);
+        }
+        self.reported = true;
+        let (phase, error) = match &self.daemon_log {
+            Some((path, offset)) => match read_phase_fields(path, *offset, attempts).await {
+                Ok(phase) => (phase, None),
+                Err(error) => (PhaseFields::default(), Some(error)),
+            },
+            None => (PhaseFields::default(), None),
+        };
+        let outcome = reload_outcome_label(self.before, self.last);
+        (Some(actor_row(self, outcome, &phase)), error)
+    }
+}
+
+/// Rows a reload prints before any failure exit after its trigger: its actor
+/// row (unless already printed) and the run max so far, so a failing sweep
+/// point never loses its turn max. A daemon-log error is already a failure,
+/// and the log is read once, without waiting for a phase line.
+async fn actor_failure_rows(window: &mut ActorWindow, run_max_us: Option<u64>) -> Vec<String> {
+    let (row, _) = window.take_row(1).await;
+    row.into_iter()
+        .chain([format!(
+            "reloadstall_actor_run_csv,{},{}",
+            window.reload,
+            or_absent(run_max_us.max(window.max_us))
+        )])
+        .collect()
+}
+
+/// A post-trigger failure's output in print order: the actor and run rows
+/// (none without a window: a command reload or no metrics address), then the
+/// marker. The soak runner stops the harness on `FAIL: reload`, so the rows
+/// must already be written when the marker appears.
+async fn failure_report(
+    window: Option<&mut ActorWindow>,
+    run_max_us: Option<u64>,
+    marker: Option<String>,
+) -> (Vec<String>, Option<String>) {
+    let rows = match window {
+        Some(window) => actor_failure_rows(window, run_max_us).await,
+        None => Vec::new(),
+    };
+    (rows, marker)
+}
+
+/// Print [`failure_report`] (rows on stdout, flushed, then the marker on
+/// stderr) and exit 1.
+async fn exit_after_actor_rows(
+    window: Option<&mut ActorWindow>,
+    run_max_us: Option<u64>,
+    marker: Option<String>,
+) -> ! {
+    use std::io::Write;
+    let (rows, marker) = failure_report(window, run_max_us, marker).await;
+    for row in rows {
+        println!("{row}");
+    }
+    let _ = std::io::stdout().flush();
+    if let Some(marker) = marker {
+        eprintln!("{marker}");
+    }
+    std::process::exit(1)
+}
+
+fn actor_scrape_row(
+    reload: u32,
+    seq: u32,
+    window: &str,
+    since_ms: u128,
+    value: Option<u64>,
+) -> String {
+    format!(
+        "reloadstall_actor_scrape_csv,{reload},{seq},{window},{since_ms},{}",
+        or_absent(value)
+    )
+}
+
+fn or_absent<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "absent".to_owned(), |value| value.to_string())
+}
+
+/// Fields of the first `reload_generation_phase` line in a daemon log tail
+/// (the forward apply; a later line is a generation compensation re-apply).
+#[derive(Debug, Default, PartialEq)]
+struct PhaseFields {
+    lines: usize,
+    outcome: Option<String>,
+    cohort_targets: Option<u64>,
+    remainder_targets: Option<u64>,
+    authoritative_remainder_apply_us: Option<u64>,
+    total_us: Option<u64>,
+}
+
+fn phase_fields(log_tail: &str) -> PhaseFields {
+    let mut lines = log_tail
+        .lines()
+        .filter(|line| line.contains("\"target\":\"reload_generation_phase\""));
+    let Some(first) = lines.next() else {
+        return PhaseFields::default();
+    };
+    let number = |key| json_raw_field(first, key).and_then(|value| value.parse().ok());
+    PhaseFields {
+        lines: 1 + lines.count(),
+        outcome: json_raw_field(first, "outcome")
+            .and_then(|value| value.strip_prefix('"')?.strip_suffix('"'))
+            .map(str::to_owned),
+        cohort_targets: number("cohort_targets"),
+        remainder_targets: number("remainder_targets"),
+        authoritative_remainder_apply_us: number("authoritative_remainder_apply_us"),
+        total_us: number("total_us"),
+    }
+}
+
+/// Raw scalar after `"key":` in a one-line JSON object (no nesting or
+/// escaped quotes in the value; enough for tracing's flat numeric fields).
+fn json_raw_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let start = line.find(&format!("\"{key}\":"))? + key.len() + 3;
+    let rest = &line[start..];
+    let end = if let Some(quoted) = rest.strip_prefix('"') {
+        quoted.find('"')? + 2
+    } else {
+        rest.find([',', '}'])?
+    };
+    Some(&rest[..end])
+}
+
+/// `RELOADSTALL_DAEMON_LOG`: the daemon's JSON log, read from `offset` (its
+/// length at the pre-trigger bracket, after staging). The phase line is
+/// written before the SIGHUP outcome counter moves; a buffered writer may
+/// still lag, so retry briefly.
+async fn read_phase_fields(path: &Path, offset: u64, attempts: u32) -> Result<PhaseFields, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    for attempt in 1..=attempts {
+        let mut tail = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|mut file| {
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_to_end(&mut tail)
+            })
+            .map_err(|error| format!("RELOADSTALL_DAEMON_LOG {}: {error}", path.display()))?;
+        let fields = phase_fields(&String::from_utf8_lossy(&tail));
+        if fields.lines > 0 || attempt == attempts {
+            return Ok(fields);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(PhaseFields::default())
+}
+
+fn daemon_log_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or_else(
+        |error| {
+            eprintln!("FAIL: RELOADSTALL_DAEMON_LOG {}: {error}", path.display());
+            std::process::exit(1)
+        },
+        |metadata| metadata.len(),
+    )
+}
+
+fn actor_row(window: &ActorWindow, outcome: &str, phase: &PhaseFields) -> String {
+    format!(
+        "reloadstall_actor_csv,{},{outcome},{},{},{},{},{},{},{},{},{},{}",
+        window.reload,
+        window.scrapes,
+        or_absent(window.pre_us),
+        or_absent(window.stage_us),
+        or_absent(window.max_us),
+        phase.lines,
+        or_absent(phase.outcome.as_deref()),
+        or_absent(phase.cohort_targets),
+        or_absent(phase.remainder_targets),
+        or_absent(phase.authoritative_remainder_apply_us),
+        or_absent(phase.total_us),
+    )
+}
+
+/// Changed peers the daemon batches as one cohort and applies one at a time
+/// for `RELOADSTALL_EXPORT_PAIRS=G` contiguous quotient/remainder groups:
+/// only the largest group (`ceil(changed / G)`) is batched, and only when it
+/// has at least two peers.
+fn export_split(changed: u32, pairs: u32) -> (u32, u32) {
+    let cohort = changed.div_ceil(pairs);
+    let cohort = if cohort >= 2 { cohort } else { 0 };
+    (cohort, changed - cohort)
 }
 
 async fn notification_checkpoint(
@@ -4220,6 +4511,30 @@ fn main() {
     // Dual-stack / filtering knobs; both absent reproduces the frozen contract.
     let dualstack_enabled = env_u64("RELOADSTALL_DUALSTACK", 0) != 0;
     let filter_count = u32::try_from(env_u64("RELOADSTALL_FILTER_COUNT", 0)).unwrap();
+    // Heterogeneous export shape (pairs with the generator's GEN_EXPORT_PAIRS);
+    // only logged here, since the receiver contract is the same for every pair.
+    let export_pairs = env_u64("RELOADSTALL_EXPORT_PAIRS", 0);
+    if export_pairs != 0 {
+        if a.len() < 11 || export_pairs > u64::from(changed_peers) {
+            eprintln!(
+                "RELOADSTALL_EXPORT_PAIRS requires an explicit changed_peers and 1..={changed_peers}, got {export_pairs}"
+            );
+            std::process::exit(2);
+        }
+        let (cohort, remainder) = export_split(changed_peers, export_pairs as u32);
+        println!(
+            "# export_shape pairs={export_pairs} changed_peers={changed_peers} \
+             expected_cohort={cohort} expected_remainder={remainder}"
+        );
+    }
+    let daemon_log = std::env::var_os("RELOADSTALL_DAEMON_LOG").map(PathBuf::from);
+    if let Some(path) = &daemon_log {
+        if reload_metrics_addr.is_none() {
+            eprintln!("RELOADSTALL_DAEMON_LOG requires native SIGHUP reloads");
+            std::process::exit(2);
+        }
+        daemon_log_len(path);
+    }
     if dualstack_enabled {
         DUALSTACK.store(true, Ordering::Relaxed);
     }
@@ -4863,6 +5178,18 @@ fn main() {
              changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,\
              rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors"
         );
+        if reload_metrics_addr.is_some() {
+            println!(
+                "reloadstall_actor_scrape_csv_header,reload,seq,window,since_trigger_ms,actor_poll_max_us"
+            );
+            println!(
+                "reloadstall_actor_csv_header,reload,outcome,scrapes,actor_poll_pre_us,\
+                 actor_poll_stage_us,actor_poll_max_us,phase_lines,phase_outcome,cohort_targets,remainder_targets,\
+                 authoritative_remainder_apply_us,phase_total_us"
+            );
+            println!("reloadstall_actor_run_csv_header,reloads,actor_poll_max_us");
+        }
+        let mut run_actor_max_us: Option<u64> = None;
         if trip_every > 0 {
             println!(
                 "trip_csv_header,trip,peers_total,teardown_s,withdraw_s,holddown_s,\
@@ -4893,9 +5220,12 @@ fn main() {
             // Snapshot before staging or timing the signal. Wire delivery may
             // finish before an apply acknowledgement fails and compensation
             // restores the prior generation; it is not a commit receipt.
-            let reload_before = match reload_metrics_addr {
-                Some(addr) => Some(fetch_reload_outcomes(addr, r).await),
-                None => None,
+            let (reload_before, actor_pre_us) = match reload_metrics_addr {
+                Some(addr) => {
+                    let (outcomes, actor) = fetch_pre_trigger_sample(addr, r).await;
+                    (Some(outcomes), actor)
+                }
+                None => (None, None),
             };
             let next = if r % 2 == 1 { &policy_b } else { &policy_a };
             let expected_community = if r % 2 == 1 {
@@ -4968,7 +5298,22 @@ fn main() {
                 println!("reload {r} reader_pacing count={paced_readers} pause_ms={} delay_ms={} bytes={}",
                     reader_pacing.pause.as_millis(), reader_pacing.delay.as_millis(), reader_pacing.bytes);
             }
+            // Close the staging window right before the trigger: this scrape
+            // resets the actor gauge, so staging work (a stage command waiting
+            // for a previous roster to settle) never lands in this reload.
+            let actor_stage_us = match reload_metrics_addr {
+                Some(addr) => fetch_pre_trigger_sample(addr, r).await.1,
+                None => None,
+            };
+            // The phase-line offset is taken here too, after staging, so a
+            // reload a stage command causes is never attributed to this one.
+            let daemon_log_at_trigger = daemon_log
+                .as_deref()
+                .map(|path| (path.to_owned(), daemon_log_len(path)));
             let t_hup = now_us(&ctx);
+            let mut actor_window = reload_before.map(|before| {
+                ActorWindow::new(r, before, actor_pre_us, actor_stage_us, daemon_log_at_trigger)
+            });
             for observer in ctx.obs.iter().take(changed_peers as usize) {
                 observer
                     .expected_community
@@ -4986,17 +5331,20 @@ fn main() {
                     .status();
                 if !matches!(&status, Ok(s) if s.success()) {
                     eprintln!("reload {r} reload_cmd failed: {status:?}");
+                    // Command reloads have no metrics window to report.
                     std::process::exit(1);
                 }
             } else {
                 println!("reload {r} SIGHUP wall_us={} policy={next}", wall_us());
                 let kill_rc = unsafe { libc::kill(pid, libc::SIGHUP) };
                 if kill_rc != 0 {
-                    eprintln!(
-                        "reload {r} failed to deliver SIGHUP: {}",
-                        std::io::Error::last_os_error()
-                    );
-                    std::process::exit(1);
+                    let error = std::io::Error::last_os_error();
+                    exit_after_actor_rows(
+                        actor_window.as_mut(),
+                        run_actor_max_us,
+                        Some(format!("reload {r} failed to deliver SIGHUP: {error}")),
+                    )
+                    .await;
                 }
             }
             // Completion is intentionally scoped to observers whose effective
@@ -5030,12 +5378,33 @@ fn main() {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if !applied && Instant::now() >= next_settlement_check {
-                    let after = fetch_reload_outcomes(reload_metrics_addr.unwrap(), r).await;
-                    applied = reload_applied(reload_before.unwrap(), after)
-                        .unwrap_or_else(|error| {
-                            eprintln!("FAIL: reload {r} {error}; see daemon log for rejection details");
-                            std::process::exit(1)
-                        });
+                    let sample = match fetch_settlement_sample(reload_metrics_addr.unwrap()).await {
+                        Ok(sample) => sample,
+                        Err(error) => {
+                            exit_after_actor_rows(
+                                actor_window.as_mut(),
+                                run_actor_max_us,
+                                Some(format!("FAIL: reload {r} {error}")),
+                            )
+                            .await
+                        }
+                    };
+                    let after = sample.0;
+                    actor_window.as_mut().unwrap().record(sample);
+                    let settled = reload_applied(reload_before.unwrap(), after);
+                    if let Err(error) = settled {
+                        // The failed reload's actor row carries its outcome
+                        // (a rollback is `rejected_no_effect`).
+                        exit_after_actor_rows(
+                            actor_window.as_mut(),
+                            run_actor_max_us,
+                            Some(format!(
+                                "FAIL: reload {r} {error}; see daemon log for rejection details"
+                            )),
+                        )
+                        .await
+                    }
+                    applied = settled.unwrap();
                     if applied {
                         println!("reload {r} daemon_applied complete_before={} complete_after={}", reload_before.unwrap()[0], after[0]);
                     }
@@ -5074,8 +5443,12 @@ fn main() {
                     last_progress = Instant::now();
                 } else if last_progress.elapsed() > window {
                     if done && !applied {
-                        eprintln!("FAIL: reload {r} receiver delivery completed but daemon SIGHUP settlement is missing");
-                        std::process::exit(1);
+                        exit_after_actor_rows(
+                            actor_window.as_mut(),
+                            run_actor_max_us,
+                            Some(format!("FAIL: reload {r} receiver delivery completed but daemon SIGHUP settlement is missing")),
+                        )
+                        .await;
                     }
                     println!(
                         "reload {r} STALLED: no re-advertisement progress for {}s",
@@ -5111,13 +5484,42 @@ fn main() {
                             );
                         }
                     }
-                    std::process::exit(1);
+                    // The STALLED line and diagnostics above are not `FAIL:`
+                    // markers, so the runner has not stopped the harness yet.
+                    exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us, None).await;
                 }
             }
             let reload_end_us = (0..changed_peers as usize)
                 .filter_map(|i| completion_us(&ctx, i))
                 .max()
                 .expect("changed_peers is non-zero and every observer completed");
+            // Close the actor window at receiver completion: settlement
+            // scrapes stop at the outcome, but RIB work can continue until the
+            // last changed observer has the new generation.
+            if let Some(window) = actor_window.as_mut() {
+                match fetch_settlement_sample(reload_metrics_addr.unwrap()).await {
+                    Ok(sample) => window.record(sample),
+                    Err(error) => {
+                        exit_after_actor_rows(
+                            Some(window),
+                            run_actor_max_us,
+                            Some(format!("FAIL: reload {r} {error}")),
+                        )
+                        .await
+                    }
+                }
+                let (row, log_error) = window.take_row(20).await;
+                println!("{}", row.expect("the window reports once, here"));
+                run_actor_max_us = run_actor_max_us.max(window.max_us);
+                if let Some(error) = log_error {
+                    exit_after_actor_rows(
+                        Some(window),
+                        run_actor_max_us,
+                        Some(format!("FAIL: reload {r} {error}")),
+                    )
+                    .await;
+                }
+            }
             if dualstack() {
                 let writes = ctx.churn_writes.lock().unwrap().take().unwrap();
                 let v4 = churn_window(&writes, FAMILY_V4, t_hup, reload_end_us);
@@ -5146,11 +5548,15 @@ fn main() {
                     last_stable = stable_marker_peers;
                     stable_progress = Instant::now();
                 } else if stable_progress.elapsed() > STALL_WINDOW {
-                    eprintln!(
-                        "reload {r} STALLED: no post-completion stable-marker progress for {}s: {stable_marker_peers}/{expected_stable}",
-                        STALL_WINDOW.as_secs()
-                    );
-                    std::process::exit(1);
+                    exit_after_actor_rows(
+                        actor_window.as_mut(),
+                        run_actor_max_us,
+                        Some(format!(
+                            "reload {r} STALLED: no post-completion stable-marker progress for {}s: {stable_marker_peers}/{expected_stable}",
+                            STALL_WINDOW.as_secs()
+                        )),
+                    )
+                    .await;
                 }
                 stable_ticks += 1;
                 if stable_ticks.is_multiple_of(20) {
@@ -5202,8 +5608,12 @@ fn main() {
                         .count();
                     println!("reload {r} stopped_readers_activated {activated}/{paced_readers}");
                     if activated != paced_readers {
-                        eprintln!("FAIL: reload {r} a stopped reader saw no current-generation UPDATE");
-                        std::process::exit(1);
+                        exit_after_actor_rows(
+                            actor_window.as_mut(),
+                            run_actor_max_us,
+                            Some(format!("FAIL: reload {r} a stopped reader saw no current-generation UPDATE")),
+                        )
+                        .await;
                     }
                 }
                 stats_line(&format!("reload {r} healthy_completion_s"),
@@ -5273,17 +5683,25 @@ fn main() {
                 || up != n_peers as usize
                 || parse_errors != 0
             {
-                eprintln!(
-                    "FAIL: reload {r} integrity check failed: stable_marker_peers={stable_marker_peers}/{expected_stable}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
-                );
-                std::process::exit(1);
+                exit_after_actor_rows(
+                    actor_window.as_mut(),
+                    run_actor_max_us,
+                    Some(format!(
+                        "FAIL: reload {r} integrity check failed: stable_marker_peers={stable_marker_peers}/{expected_stable}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+                    )),
+                )
+                .await;
             }
             if filtered_leaked != 0 || bystander_withdrawn != 0 || stable_withdrawn != 0 {
-                eprintln!(
-                    "FAIL: reload {r} policy-change integrity failed: filtered_leaked={filtered_leaked}, \
-                     bystander_withdrawn={bystander_withdrawn}, stable_withdrawn={stable_withdrawn}"
-                );
-                std::process::exit(1);
+                exit_after_actor_rows(
+                    actor_window.as_mut(),
+                    run_actor_max_us,
+                    Some(format!(
+                        "FAIL: reload {r} policy-change integrity failed: filtered_leaked={filtered_leaked}, \
+                         bystander_withdrawn={bystander_withdrawn}, stable_withdrawn={stable_withdrawn}"
+                    )),
+                )
+                .await;
             }
             println!(
                 "reloadstall_csv,{r},{n_peers},{changed_peers},{},{total_all},\
@@ -5375,6 +5793,9 @@ fn main() {
             // to self-pace the whole window).
             tokio::time::sleep(Duration::from_secs(cycle_quiesce_secs)).await;
             if is_trip_slot(r, trip_every) {
+                // This reload's actor row is already printed; a trip-cycle
+                // failure exits inside `run_trip_cycle` without the run row,
+                // which only the soak (never a sweep) runs.
                 run_trip_cycle(
                     &ctx,
                     &mut stubs,
@@ -5385,6 +5806,13 @@ fn main() {
                 )
                 .await;
             }
+        }
+
+        if reload_metrics_addr.is_some() {
+            println!(
+                "reloadstall_actor_run_csv,{reloads},{}",
+                or_absent(run_actor_max_us)
+            );
         }
 
         // Hold every session up after a final-cycle trip so the outer
@@ -6109,6 +6537,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn settlement_sample_reads_only_the_actor_poll_stage() {
+        let outcomes: String = RELOAD_OUTCOMES
+            .iter()
+            .map(|outcome| format!("bgp_sighup_reload_outcomes_total{{outcome=\"{outcome}\"}} 0\n"))
+            .collect();
+        let gauge = |stage: &str, value: &str| {
+            format!("bgp_rib_actor_slice_max_microseconds{{stage=\"{stage}\"}} {value}\n")
+        };
+        let body = format!(
+            "{outcomes}{}{}",
+            gauge("distribute_flush", "999999"),
+            gauge("actor_poll", "41250")
+        );
+        assert_eq!(settlement_sample(&body), Ok(([0; 5], Some(41_250))));
+        // A daemon without the gauge still settles; another stage alone is absent.
+        assert_eq!(settlement_sample(&outcomes), Ok(([0; 5], None)));
+        let other = format!("{outcomes}{}", gauge("distribute_flush", "7"));
+        assert_eq!(settlement_sample(&other), Ok(([0; 5], None)));
+        // Present but malformed or duplicated is an error, never a silent zero.
+        for value in ["-1", "4.5", "NaN", "1 123"] {
+            let broken = format!("{outcomes}{}", gauge("actor_poll", value));
+            assert!(settlement_sample(&broken).is_err(), "{value}");
+        }
+        let duplicate = format!("{body}{}", gauge("actor_poll", "1"));
+        assert!(settlement_sample(&duplicate).is_err());
+    }
+
+    #[test]
+    fn reload_outcome_label_prefers_the_failing_outcome() {
+        let before = [24, 0, 0, 0, 0];
+        assert_eq!(reload_outcome_label(before, before), "pending");
+        assert_eq!(reload_outcome_label(before, [25, 0, 0, 0, 0]), "complete");
+        assert_eq!(
+            reload_outcome_label(before, [24, 0, 1, 0, 0]),
+            "rejected_no_effect"
+        );
+        assert_eq!(
+            reload_outcome_label(before, [25, 1, 0, 0, 0]),
+            "known_partial"
+        );
+    }
+
+    #[test]
+    fn phase_fields_read_the_first_reload_generation_phase_line() {
+        let line = |total: u64, outcome: &str| {
+            format!(
+                "{{\"timestamp\":\"t\",\"level\":\"INFO\",\"fields\":{{\"message\":\"reload generation phase timing\",\
+                 \"target\":\"reload_generation_phase\",\"total_targets\":700,\"cohort_targets\":100,\
+                 \"remainder_targets\":600,\"outcome\":\"{outcome}\",\"authoritative_remainder_apply_us\":360000000,\
+                 \"total_us\":{total},\"unattributed_us\":3}},\"target\":\"rustbgpd::peer_manager::policy\"}}\n"
+            )
+        };
+        let noise = "{\"fields\":{\"message\":\"x\",\"total_us\":1},\"target\":\"other\"}\n";
+        let tail = format!(
+            "{noise}{}{noise}{}",
+            line(361_000_000, "failed"),
+            line(5, "committed")
+        );
+        assert_eq!(
+            phase_fields(&tail),
+            PhaseFields {
+                lines: 2,
+                outcome: Some("failed".to_owned()),
+                cohort_targets: Some(100),
+                remainder_targets: Some(600),
+                authoritative_remainder_apply_us: Some(360_000_000),
+                total_us: Some(361_000_000),
+            }
+        );
+        assert_eq!(phase_fields(noise), PhaseFields::default());
+        // A malformed value is absent, not zero or a neighbouring field.
+        let broken = line(9, "committed")
+            .replace("\"remainder_targets\":600", "\"remainder_targets\":\"6x\"");
+        let fields = phase_fields(&broken);
+        assert_eq!(fields.remainder_targets, None);
+        assert_eq!(fields.cohort_targets, Some(100));
+        assert_eq!(fields.total_us, Some(9));
+    }
+
+    #[test]
+    fn export_split_batches_only_the_largest_pair() {
+        // Single pair: the whole changed set is the cohort.
+        assert_eq!(export_split(600, 1), (600, 0));
+        // Grouped shape: 7 pairs of 100 leaves 600 in the remainder walk.
+        assert_eq!(export_split(700, 7), (100, 600));
+        // Uneven groups: the first pair holds the extra peer.
+        assert_eq!(export_split(10, 3), (4, 6));
+        // Distinct shape: no pair of two, so nothing is batched.
+        assert_eq!(export_split(300, 300), (0, 300));
+        assert_eq!(export_split(3, 2), (2, 1));
+    }
+
     fn evidence_test_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "reloadstall-{label}-{}-{}",
@@ -6318,6 +6839,154 @@ mod tests {
         let trigger = source[rss..].find("let t_hup = now_us(&ctx)").unwrap() + rss;
         assert!(copy < stage && stage < rss && rss < trigger);
         assert_eq!(source.matches("RELOADSTALL_STAGE_CMD").count(), 4);
+    }
+
+    #[test]
+    fn actor_window_starts_after_staging_at_the_trigger() {
+        // Split needles so this test's own text cannot satisfy the search.
+        let source = include_str!("main.rs");
+        let stage = source
+            .find(&[".env(\"RELOADSTALL_STAGE_", "GENERATION\", generation)"].concat())
+            .unwrap();
+        let bracket = source[stage..]
+            .find(&["let actor_stage_us = match reload_", "metrics_addr"].concat())
+            .expect("a pre-trigger actor scrape follows the stage hook")
+            + stage;
+        let trigger = source[stage..]
+            .find(&["let t_hup = now_us", "(&ctx)"].concat())
+            .unwrap()
+            + stage;
+        assert!(stage < bracket && bracket < trigger);
+        // Neither bracket counts toward the reload window or its max.
+        let mut window = ActorWindow::new(1, [0; 5], Some(70_000), Some(90_000), None);
+        assert_eq!(window.max_us, None);
+        window.record(([0; 5], Some(1_200)));
+        window.record(([1, 0, 0, 0, 0], None));
+        assert_eq!((window.scrapes, window.max_us), (2, Some(1_200)));
+        assert_eq!(
+            (window.pre_us, window.stage_us),
+            (Some(70_000), Some(90_000))
+        );
+        assert!(actor_row(&window, "complete", &PhaseFields::default())
+            .starts_with("reloadstall_actor_csv,1,complete,2,70000,90000,1200,0,"));
+    }
+
+    #[tokio::test]
+    async fn daemon_log_offset_is_taken_after_staging() {
+        // The offset is captured at the pre-trigger bracket, after the stage
+        // hook, never with the pre-stage outcome baseline.
+        let source = include_str!("main.rs");
+        let stage = source
+            .find(&[".env(\"RELOADSTALL_STAGE_", "GENERATION\", generation)"].concat())
+            .unwrap();
+        let capture = source
+            .find(&["(path.to_owned(), daemon_log_", "len(path))"].concat())
+            .expect("the daemon-log offset is captured in the reload loop");
+        let trigger = source[stage..]
+            .find(&["let t_hup = now_us", "(&ctx)"].concat())
+            .unwrap()
+            + stage;
+        assert!(
+            stage < capture && capture < trigger,
+            "offset captured before staging"
+        );
+        // A phase line a stage command causes lands before the offset and is
+        // not attributed to the triggered reload.
+        let log = evidence_test_dir("phase-offset");
+        let line = |cohort: u32| {
+            format!(
+                "{{\"fields\":{{\"target\":\"reload_generation_phase\",\"cohort_targets\":{cohort},\
+                 \"outcome\":\"committed\",\"total_us\":1}},\"target\":\"x\"}}\n"
+            )
+        };
+        std::fs::write(&log, line(77)).unwrap();
+        let offset = daemon_log_len(&log);
+        std::fs::write(&log, format!("{}{}", line(77), line(3))).unwrap();
+        let mut window = ActorWindow::new(1, [0; 5], None, None, Some((log.clone(), offset)));
+        let (row, error) = window.take_row(20).await;
+        std::fs::remove_file(&log).unwrap();
+        assert_eq!(error, None);
+        assert!(row.unwrap().contains(",1,committed,3,"));
+    }
+
+    #[tokio::test]
+    async fn failure_after_trigger_keeps_the_actor_and_run_rows() {
+        // Every failure exit between the trigger and the end of the reload's
+        // checks goes through `exit_after_actor_rows`; only a command reload,
+        // which has no metrics window, exits directly.
+        let source = include_str!("main.rs");
+        let start = source
+            .find(&["let t_hup = now_us", "(&ctx);"].concat())
+            .unwrap();
+        let end = source[start..]
+            .find(&["drain_cycle_events", "(&ctx.obs);"].concat())
+            .unwrap()
+            + start;
+        let exits = source[start..end].matches("std::process::exit(").count();
+        assert_eq!(
+            exits, 1,
+            "a post-trigger failure exits without the actor rows"
+        );
+        // A rejected reload before settlement whose daemon log has no phase
+        // line (a rejected policy parse writes none): the rows come first,
+        // then the marker, and the log is read once without waiting for it.
+        let log = evidence_test_dir("failure-no-phase");
+        std::fs::write(
+            &log,
+            "{\"fields\":{\"message\":\"policy parse rejected\"}}\n",
+        )
+        .unwrap();
+        let mut window = ActorWindow::new(
+            4,
+            [7, 0, 0, 0, 0],
+            Some(10),
+            Some(20),
+            Some((log.clone(), 0)),
+        );
+        window.record(([7, 0, 0, 0, 0], Some(55_000)));
+        let started = Instant::now();
+        let report = failure_report(
+            Some(&mut window),
+            Some(40_000),
+            Some("FAIL: reload 4 rejected".to_owned()),
+        )
+        .await;
+        let waited = started.elapsed();
+        std::fs::remove_file(&log).unwrap();
+        assert!(
+            waited < Duration::from_millis(500),
+            "waited {waited:?} for a phase line"
+        );
+        assert_eq!(
+            report,
+            (
+                vec![
+                    "reloadstall_actor_csv,4,pending,1,10,20,55000,0,absent,absent,absent,absent,absent"
+                        .to_owned(),
+                    "reloadstall_actor_run_csv,4,55000".to_owned(),
+                ],
+                Some("FAIL: reload 4 rejected".to_owned())
+            )
+        );
+        // The exit helper writes and flushes the rows before the marker.
+        let source = include_str!("main.rs");
+        let helper = source
+            .find(&["async fn exit_after_", "actor_rows("].concat())
+            .unwrap();
+        let body = &source[helper..helper + source[helper..].find("\n}\n").unwrap()];
+        let rows = body.find("println!(\"{row}\")").unwrap();
+        let flush = body.find("stdout().flush()").unwrap();
+        let marker = body.find("eprintln!(\"{marker}\")").unwrap();
+        assert!(
+            rows < flush && flush < marker,
+            "marker printed before the rows"
+        );
+        // After the reload's row was printed (a later integrity failure),
+        // only the run row is repeated.
+        assert_eq!(
+            actor_failure_rows(&mut window, Some(90_000)).await,
+            ["reloadstall_actor_run_csv,4,90000"]
+        );
     }
 
     #[test]
