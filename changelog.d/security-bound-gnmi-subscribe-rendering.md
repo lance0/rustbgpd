@@ -5,9 +5,11 @@
   65,536 leaf updates, as `Get` does. A subscription whose paths would render
   more than that against the current roster gets `RESOURCE_EXHAUSTED` before
   any update or `sync_response`, and a stream whose roster grows past the
-  bound ends with `RESOURCE_EXHAUSTED` at its next render. Renders above 1,024
-  updates run on the blocking pool and share `Get`'s four render slots per
-  listener.
+  bound ends with `RESOURCE_EXHAUSTED` at its next render. Large renders run
+  on the blocking pool and share `Get`'s four render slots per listener. A
+  dial-out target whose subscription ends with an error status before
+  delivering data now logs it at `warn` and backs off instead of reconnecting
+  every `backoff_initial`.
   Previously each sample tick rendered up to 16 paths against the whole
   roster on an async worker shared with BGP sessions, discarding duplicates
   only after rendering.

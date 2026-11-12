@@ -51,12 +51,16 @@ const MAX_GET_PATHS: usize = MAX_SUBSCRIPTIONS;
 /// it starts.
 const MAX_RENDER_UPDATES: usize = 65_536;
 /// Renders running at once, shared by `Get` and `Subscribe`. Further renders
-/// wait for a slot before taking a peer snapshot, which bounds the memory held
-/// by concurrent renders to this many [`MAX_RENDER_UPDATES`] responses.
+/// wait for a slot before taking a peer snapshot. This bounds the memory held
+/// by concurrent renders to this many [`MAX_RENDER_UPDATES`] responses, except
+/// for a `SAMPLE` stream with `suppress_redundant` or `heartbeat_interval`:
+/// it filters a copy of the shared render per due path, so one render can
+/// transiently hold up to [`MAX_SUBSCRIPTIONS`] times that.
 const RENDER_SLOTS: usize = 4;
-/// A `Subscribe` render planned at or below this many updates runs inline on
-/// its stream task; a larger one moves to the blocking pool, where the handoff
-/// costs less than the render.
+/// A `Subscribe` render whose work (see
+/// [`GnmiService::render_subscription_queries`]) is at most this many entries
+/// runs inline on its stream task; a larger one moves to the blocking pool,
+/// where the handoff costs less than the work.
 const INLINE_SUBSCRIBE_RENDER_UPDATES: usize = 1_024;
 
 /// Preserve a periodic path's monotonic phase while skipping every deadline
@@ -124,8 +128,7 @@ type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
 type SessionEventsFuture =
     Pin<Box<dyn Future<Output = Result<broadcast::Receiver<Arc<SessionEvent>>, Status>> + Send>>;
 type SessionEventsFn = Arc<dyn Fn() -> SessionEventsFuture + Send + Sync>;
-type HeartbeatSnapshotFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<gnmi::SubscribeResponse>, Status>> + Send + 'a>>;
+type HeartbeatSnapshotTask = tokio::task::JoinHandle<Result<Vec<gnmi::SubscribeResponse>, Status>>;
 
 fn due_heartbeat_indices(
     deadlines: &[Option<tokio::time::Instant>; MAX_SUBSCRIPTIONS],
@@ -142,14 +145,19 @@ fn due_heartbeat_indices(
         .collect()
 }
 
-fn render_heartbeat_snapshot<'a>(
-    service: &'a GnmiService,
-    plan: &'a SubscriptionPlan,
+/// Render a heartbeat in its own task. The stream loop may block on a slow
+/// client's send while the render is in flight; the task still finishes and
+/// frees its shared render slot instead of holding it until the loop polls.
+fn spawn_heartbeat_snapshot(
+    service: &GnmiService,
+    plan: &SubscriptionPlan,
     due: Vec<usize>,
-) -> HeartbeatSnapshotFuture<'a> {
-    Box::pin(async move {
+) -> HeartbeatSnapshotTask {
+    let service = service.clone();
+    let plan = plan.clone();
+    tokio::spawn(async move {
         service
-            .render_subscription_snapshot(plan, Some(&due), false)
+            .render_subscription_snapshot(&plan, Some(&due), false)
             .await
     })
 }
@@ -253,7 +261,11 @@ impl GnmiService {
     /// binds one.
     // ponytail: unbound interface-only neighbors are invisible to gNMI;
     // give them an interface key when gNMI learns that identity.
-    fn with_peer_snapshot<F, Fut>(asn: u32, router_id: impl Into<String>, peer_snapshot: F) -> Self
+    pub(crate) fn with_peer_snapshot<F, Fut>(
+        asn: u32,
+        router_id: impl Into<String>,
+        peer_snapshot: F,
+    ) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<PeerInfo>, Status>> + Send + 'static,
@@ -443,9 +455,13 @@ impl GnmiService {
     /// Render each of `queries` once for one `Subscribe` snapshot or tick, then
     /// hand the results, in `queries` order, to `finish`. The peer snapshot is
     /// taken once (global-only renders skip it) under a render slot, and the
-    /// render is refused past [`MAX_RENDER_UPDATES`]. A render planned above
-    /// [`INLINE_SUBSCRIBE_RENDER_UPDATES`] runs, with `finish`, on the
-    /// blocking pool.
+    /// render is refused past [`MAX_RENDER_UPDATES`].
+    ///
+    /// The render and `finish` run on the blocking pool when their work
+    /// exceeds [`INLINE_SUBSCRIBE_RENDER_UPDATES`]. That work counts the planned
+    /// updates once per due path that `finish` filters (`fan_out`), plus the
+    /// per-path state entries `finish` walks or drops (`retained`), which can
+    /// dwarf the render after the roster shrinks.
     ///
     /// The refusal ends the stream, as every render error does: on the
     /// initial snapshot it arrives before any update or `sync_response`, and on
@@ -456,6 +472,8 @@ impl GnmiService {
         &self,
         queries: Vec<SupportedPath>,
         encoding: gnmi::Encoding,
+        fan_out: usize,
+        retained: usize,
         finish: impl FnOnce(Vec<Vec<gnmi::Update>>) -> R + Send + 'static,
     ) -> Result<R, Status> {
         let permit = Arc::clone(&self.render_slots)
@@ -480,7 +498,7 @@ impl GnmiService {
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(finish(rendered))
         };
-        if planned <= INLINE_SUBSCRIBE_RENDER_UPDATES {
+        if subscription_render_inline(planned, fan_out, retained) {
             render()
         } else {
             tokio::task::spawn_blocking(render).await.map_err(|error| {
@@ -507,19 +525,28 @@ impl GnmiService {
             });
             // The per-path state moves to the render and back.
             let mut tracked = delivered.as_deref_mut().map(std::mem::take);
+            let (fan_out, retained) = tracked.as_deref().map_or((1, 0), |tracked| {
+                (due.len(), retained_sample_entries(&[], tracked))
+            });
             (updates, deletes, tracked) = self
-                .render_subscription_queries(queries, plan.encoding, move |rendered| {
-                    let mut deletes = Vec::new();
-                    if let Some(delivered) = tracked.as_mut() {
-                        for (index, query) in due {
-                            let source = &rendered[query];
-                            deletes.extend(delivered[index].track(source, source));
+                .render_subscription_queries(
+                    queries,
+                    plan.encoding,
+                    fan_out,
+                    retained,
+                    move |rendered| {
+                        let mut deletes = Vec::new();
+                        if let Some(delivered) = tracked.as_mut() {
+                            for (index, query) in due {
+                                let source = &rendered[query];
+                                deletes.extend(delivered[index].track(source, source));
+                            }
                         }
-                    }
-                    let updates =
-                        deduplicate_update_paths(rendered.into_iter().flatten().collect());
-                    (updates, deduplicate_paths(deletes), tracked)
-                })
+                        let updates =
+                            deduplicate_update_paths(rendered.into_iter().flatten().collect());
+                        (updates, deduplicate_paths(deletes), tracked)
+                    },
+                )
                 .await?;
             if let (Some(delivered), Some(tracked)) = (delivered, tracked) {
                 *delivered = tracked;
@@ -548,44 +575,55 @@ impl GnmiService {
         let force = *due;
         let (queries, due) = due_queries(plan, |index| force[index].is_some());
         // The per-path state moves to the render and back.
+        let retained = retained_sample_entries(caches, delivered);
+        let fan_out = due.len();
         let state = (std::mem::take(caches), std::mem::take(delivered));
         let (updates, deletes);
         (updates, deletes, *caches, *delivered) = self
-            .render_subscription_queries(queries, plan.encoding, move |rendered| {
-                let (mut caches, mut delivered) = state;
-                let mut updates = Vec::new();
-                let mut deletes = Vec::new();
-                // ponytail: each due path filters its own copy of a shared
-                // render, so a tick costs at most MAX_SUBSCRIPTIONS times the
-                // rendered bound; merge paths with identical controls if that
-                // ever matters.
-                for (index, query) in due {
-                    let source = &rendered[query];
-                    let force = force[index].expect("due path has a force flag");
-                    // A withheld rendering still seeds the cache, but delivers nothing.
-                    let mut sent =
-                        filter_sample_source_updates(source.clone(), force, caches[index].as_mut());
-                    if withhold_updates {
-                        sent.clear();
+            .render_subscription_queries(
+                queries,
+                plan.encoding,
+                fan_out,
+                retained,
+                move |rendered| {
+                    let (mut caches, mut delivered) = state;
+                    let mut updates = Vec::new();
+                    let mut deletes = Vec::new();
+                    // ponytail: each due path filters its own copy of a shared
+                    // render, so a tick costs at most MAX_SUBSCRIPTIONS times the
+                    // rendered bound; merge paths with identical controls if that
+                    // ever matters.
+                    for (index, query) in due {
+                        let source = &rendered[query];
+                        let force = force[index].expect("due path has a force flag");
+                        // A withheld rendering still seeds the cache, but delivers nothing.
+                        let mut sent = filter_sample_source_updates(
+                            source.clone(),
+                            force,
+                            caches[index].as_mut(),
+                        );
+                        if withhold_updates {
+                            sent.clear();
+                        }
+                        deletes.extend(delivered[index].track(source, &sent));
+                        updates.extend(sent);
                     }
-                    deletes.extend(delivered[index].track(source, &sent));
-                    updates.extend(sent);
-                }
-                let updates = deduplicate_update_paths(updates);
-                let deletes = deduplicate_paths(deletes);
-                // A delete clears the leaf from the collector for every subscription
-                // path: none may suppress its return as unchanged, nor delete it again.
-                for path in &deletes {
-                    let identity = CanonicalPath::from(path);
-                    for cache in caches.iter_mut().flatten() {
-                        cache.0.remove(&identity);
+                    let updates = deduplicate_update_paths(updates);
+                    let deletes = deduplicate_paths(deletes);
+                    // A delete clears the leaf from the collector for every subscription
+                    // path: none may suppress its return as unchanged, nor delete it again.
+                    for path in &deletes {
+                        let identity = CanonicalPath::from(path);
+                        for cache in caches.iter_mut().flatten() {
+                            cache.0.remove(&identity);
+                        }
+                        for delivered in &mut delivered {
+                            delivered.0.remove(&identity);
+                        }
                     }
-                    for delivered in &mut delivered {
-                        delivered.0.remove(&identity);
-                    }
-                }
-                (updates, deletes, caches, delivered)
-            })
+                    (updates, deletes, caches, delivered)
+                },
+            )
             .await?;
 
         let mut responses = Vec::new();
@@ -877,7 +915,7 @@ impl GnmiService {
 
         // Heartbeats anchor after sync; live events neither satisfy nor rearm them.
         let mut heartbeat_deadlines = initial_heartbeat_deadlines(&plan);
-        let mut heartbeat_snapshot: Option<HeartbeatSnapshotFuture<'_>> = None;
+        let mut heartbeat_snapshot: Option<HeartbeatSnapshotTask> = None;
         let mut heartbeat_due = Vec::new();
         loop {
             let heartbeat_deadline =
@@ -896,8 +934,9 @@ impl GnmiService {
                                 let identity = CanonicalPath::from(&path);
                                 if heartbeat_snapshot.is_some()
                                     && due_paths_cover(&plan, &heartbeat_due, &identity)
+                                    && let Some(superseded) = heartbeat_snapshot.take()
                                 {
-                                    heartbeat_snapshot = None;
+                                    superseded.abort();
                                 }
                                 let is_update = update.is_some();
                                 let response = match update {
@@ -939,8 +978,15 @@ impl GnmiService {
                 }, if heartbeat_snapshot.is_some() => {
                     heartbeat_snapshot = None;
                     let mut responses = match rendered {
-                        Ok(responses) => responses,
+                        Ok(Ok(responses)) => responses,
+                        Ok(Err(error)) => {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
                         Err(error) => {
+                            let error = Status::internal(format!(
+                                "gNMI heartbeat render failed: {error}"
+                            ));
                             let _ = tx.send(Err(error)).await;
                             return;
                         }
@@ -982,7 +1028,7 @@ impl GnmiService {
                     ).await;
                 }, if heartbeat_deadline.is_some() => {
                     heartbeat_due = due_heartbeat_indices(&heartbeat_deadlines);
-                    heartbeat_snapshot = Some(render_heartbeat_snapshot(
+                    heartbeat_snapshot = Some(spawn_heartbeat_snapshot(
                         &self,
                         &plan,
                         heartbeat_due.clone(),
@@ -1221,6 +1267,27 @@ fn check_render_budget(
         )));
     }
     Ok(planned)
+}
+
+/// Whether a `Subscribe` render stays on its stream task: the planned updates,
+/// filtered once per due path, plus the retained per-path state entries the
+/// render walks or drops, fit [`INLINE_SUBSCRIBE_RENDER_UPDATES`].
+fn subscription_render_inline(planned: usize, fan_out: usize, retained: usize) -> bool {
+    planned
+        .saturating_mul(fan_out.max(1))
+        .saturating_add(retained)
+        <= INLINE_SUBSCRIBE_RENDER_UPDATES
+}
+
+/// Entries a `SAMPLE` stream carries between renders: cached values and
+/// delivered `peer-as` leaves, across every subscription path.
+fn retained_sample_entries(
+    caches: &[Option<SampleValueCache>],
+    delivered: &[DeliveredPeerAs],
+) -> usize {
+    let values = caches.iter().flatten().map(|cache| cache.0.len());
+    let peer_as = delivered.iter().map(|path| path.0.len());
+    values.chain(peer_as).fold(0, usize::saturating_add)
 }
 
 /// The distinct queries among a plan's due paths, and each due path's index
@@ -6131,6 +6198,131 @@ mod tests {
         })
         .with_test_session_events(&events);
         (service, events)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn on_change_heartbeat_frees_its_render_slot_while_a_send_blocks() {
+        // Load-bearing break: polling the heartbeat render only from the
+        // stream loop leaves its shared render slot held for as long as the
+        // loop waits on a client that stopped reading.
+        use crate::peer_types::SessionLifecycleEventType::Lost;
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (snapshot_calls, snapshot_gate) = (Arc::clone(&calls), Arc::clone(&gate));
+        let events = broadcast::channel(64).0;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            // The initial snapshot answers; every later one waits on the gate.
+            let gated = snapshot_calls.fetch_add(1, Ordering::SeqCst) > 0;
+            let gate = Arc::clone(&snapshot_gate);
+            async move {
+                if gated {
+                    gate.acquire().await.unwrap().forget();
+                }
+                Ok(vec![
+                    test_peer("10.0.0.2".parse().unwrap()),
+                    test_peer("10.0.0.3".parse().unwrap()),
+                ])
+            }
+        })
+        .with_test_session_events(&events);
+        // A heartbeat path on 10.0.0.3, and a plain path on 10.0.0.2, the
+        // peer `session_event` names.
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.3"));
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let mut without_heartbeat = list.subscription[0].clone();
+        without_heartbeat.path = Some(neighbor_session_state_path("10.0.0.2"));
+        without_heartbeat.heartbeat_interval = 0;
+        list.subscription.push(without_heartbeat);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let stream = tokio::spawn(service.clone().run_on_change(plan, tx));
+        assert_eq!(
+            subscribe_updates(rx.recv().await.unwrap().unwrap()).len(),
+            2
+        );
+        assert_eq!(
+            rx.recv().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+
+        // The heartbeat render takes a slot and waits on its peer snapshot.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(service.render_slots.available_permits(), RENDER_SLOTS - 1);
+        // Events on the plain path fill the channel; the loop blocks in send.
+        for _ in 0..3 {
+            events
+                .send(session_event(Lost, Some(SessionState::Idle)))
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        gate.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(service.render_slots.available_permits(), RENDER_SLOTS);
+
+        drop(rx);
+        stream.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_sample_state_counts_toward_moving_a_render_off_the_runtime() {
+        // Load-bearing break: deciding on rendered updates alone keeps a tick
+        // that drops 176,000 retained entries on the stream task once the
+        // roster shrinks to nothing.
+        use std::sync::atomic::AtomicU32;
+
+        let neighbors = Arc::new(AtomicU32::new(1_000));
+        let roster = Arc::clone(&neighbors);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = numbered_roster(roster.load(Ordering::SeqCst));
+            async move { Ok(peers) }
+        });
+        let plan = parse_subscription_list(&repeated(
+            controlled_sample_list(all_neighbors_path(), true, 0, 0),
+            MAX_SUBSCRIPTIONS,
+        ))
+        .unwrap();
+        let mut caches = (0..MAX_SUBSCRIPTIONS)
+            .map(|_| Some(SampleValueCache::default()))
+            .collect::<Vec<_>>();
+        let mut delivered = vec![DeliveredPeerAs::default(); MAX_SUBSCRIPTIONS];
+        service
+            .render_controlled_sample_snapshot(
+                &plan,
+                &[Some(true); MAX_SUBSCRIPTIONS],
+                false,
+                true,
+                &mut caches,
+                &mut delivered,
+            )
+            .await
+            .unwrap();
+
+        // Ten cached leaves and one delivered `peer-as` per neighbor and path.
+        let retained = retained_sample_entries(&caches, &delivered);
+        assert_eq!(retained, MAX_SUBSCRIPTIONS * 11_000);
+        assert!(subscription_render_inline(0, MAX_SUBSCRIPTIONS, 0));
+        assert!(!subscription_render_inline(0, MAX_SUBSCRIPTIONS, retained));
+
+        // The shrink tick itself: every delivered `peer-as` is deleted once and
+        // the state comes back from the blocking pool empty.
+        neighbors.store(0, Ordering::SeqCst);
+        let shrunk = service
+            .render_controlled_sample_snapshot(
+                &plan,
+                &[Some(false); MAX_SUBSCRIPTIONS],
+                false,
+                false,
+                &mut caches,
+                &mut delivered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(subscribe_deletes(shrunk[0].clone()).len(), 1_000);
+        assert_eq!(retained_sample_entries(&caches, &delivered), 0);
+        assert_eq!(caches.len(), MAX_SUBSCRIPTIONS);
     }
 
     #[tokio::test]
