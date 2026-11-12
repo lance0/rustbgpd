@@ -1128,7 +1128,7 @@ async fn external_neighbor_rr_attributes_are_discarded_for_every_family() {
             } => announced
                 .first()
                 .map(|r| r.attributes.to_vec())
-                .or_else(|| flowspec_announced.first().map(|r| r.attributes.clone()))
+                .or_else(|| flowspec_announced.first().map(|r| r.attributes.to_vec()))
                 .or_else(|| evpn_announced.first().map(|r| r.attributes.to_vec())),
             RibUpdate::BgpLsRoutesReceived { announced, .. } => {
                 announced.first().map(|r| r.attributes.to_vec())
@@ -1316,4 +1316,381 @@ async fn modifying_import_shares_one_attribute_set_per_distinct_modification() {
         &by_prefix(1).attributes,
         &by_prefix(3).attributes
     ));
+}
+
+/// One `/16` destination-prefix `FlowSpec` rule per index: 5 bytes of NLRI.
+fn flowspec_dest_rule(index: usize) -> FlowSpecRule {
+    let [high, low] = u16::try_from(index).unwrap().to_be_bytes();
+    FlowSpecRule {
+        components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+            Ipv4Prefix::new(Ipv4Addr::new(10u8.wrapping_add(high), low, 0, 0), 16),
+        ))],
+    }
+}
+
+/// An IPv4 `FlowSpec` UPDATE carrying `rules` plus a COMMUNITIES attribute
+/// with `communities` values.
+fn flowspec_update_with(rules: usize, communities: u32) -> UpdateMessage {
+    let mut reach =
+        empty_nonunicast_reach(Afi::Ipv4, Safi::FlowSpec, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    reach.flowspec_announced = (0..rules).map(flowspec_dest_rule).collect();
+    let mut attrs = nonunicast_accepted_attrs();
+    attrs.push(PathAttribute::Communities(
+        (0..communities)
+            .map(|value| (64_512 << 16) | value)
+            .collect(),
+    ));
+    nonunicast_update(attrs, reach, None, false)
+}
+
+fn flowspec_test_session() -> (PeerSession, mpsc::Receiver<RibUpdate>) {
+    let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec)];
+    install_test_negotiated_session(&mut session, negotiated);
+    (session, rib_rx)
+}
+
+/// Encoded attribute bytes of each distinct allocation, so a per-rule copy
+/// counts once per copy.
+fn retained_attribute_bytes<'a>(sets: impl IntoIterator<Item = &'a Arc<AttrSet>>) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    sets.into_iter()
+        .filter(|set| seen.insert(Arc::as_ptr(set)))
+        .map(|set| {
+            let mut buf = Vec::new();
+            rustbgpd_wire::attribute::encode_path_attributes(set, &mut buf, true, false).unwrap();
+            buf.len()
+        })
+        .sum()
+}
+
+/// A maximum-size (65,535-byte) `FlowSpec` UPDATE with thousands of rules and a
+/// large COMMUNITIES attribute stores one attribute set, shared by every rule
+/// through ingest, the Adj-RIB-In and the Loc-RIB. A per-rule copy would
+/// retain the COMMUNITIES attribute once per rule (about 6,500 times the
+/// UPDATE's size).
+#[tokio::test]
+async fn flowspec_rules_from_one_max_size_update_share_one_attribute_set() {
+    const MAX_UPDATE: usize = 65_535;
+    const COMMUNITIES: u32 = 8_000;
+    // Fill the rest of the message with 5-byte rules.
+    let base = flowspec_update_with(1, COMMUNITIES).encoded_len();
+    let rules = 1 + (MAX_UPDATE - base) / 5;
+    let update = flowspec_update_with(rules, COMMUNITIES);
+    let wire_len = update.encoded_len();
+    assert!(
+        wire_len <= MAX_UPDATE && wire_len > MAX_UPDATE - 5,
+        "{wire_len}"
+    );
+    assert!(rules > 6_000, "{rules}");
+
+    let (mut session, mut session_rx) = flowspec_test_session();
+    session.process_update(update).await;
+    let ingest = session_rx.try_recv().unwrap();
+    let RibUpdate::RoutesReceived {
+        peer,
+        session_id,
+        ref flowspec_announced,
+        ..
+    } = ingest
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_announced.len(), rules);
+    let shared = Arc::clone(&flowspec_announced[0].attributes);
+    assert!(
+        flowspec_announced
+            .iter()
+            .all(|route| Arc::ptr_eq(&route.attributes, &shared)),
+        "every unmodified rule of one UPDATE shares one attribute set"
+    );
+    assert!(
+        retained_attribute_bytes(flowspec_announced.iter().map(|route| &route.attributes))
+            < wire_len,
+        "ingest retains the attributes once, not once per rule"
+    );
+
+    let (rib_tx, rib_rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let manager = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    register_test_source(&rib_tx, peer, session_id).await;
+    rib_tx.send(ingest).await.unwrap();
+
+    // The RIB stores the batch in chunks; wait until the Loc-RIB holds it.
+    let selected = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let (reply, response) = oneshot::channel();
+            query_tx
+                .send(RibUpdate::QueryFlowSpecRoutes {
+                    filter: None,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let rows = response.await.unwrap();
+            if rows.len() == rules {
+                break rows;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the Loc-RIB selects every rule");
+    let (reply, response) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryReceivedFlowSpecRoutes {
+            peer,
+            filter: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    let received = response.await.unwrap();
+    assert_eq!(received.len(), rules);
+
+    let stored: Vec<&Arc<AttrSet>> = received
+        .iter()
+        .map(|row| &row.route.attributes)
+        .chain(selected.iter().map(|route| &route.attributes))
+        .collect();
+    assert!(
+        stored.iter().all(|set| Arc::ptr_eq(set, &shared)),
+        "the Adj-RIB-In and Loc-RIB keep the ingest attribute set"
+    );
+    assert!(retained_attribute_bytes(stored) < wire_len);
+    manager.abort();
+}
+
+/// Import policy that modifies some `FlowSpec` rules gives each distinct
+/// modification its own set and leaves unmodified rules on the shared one.
+#[tokio::test]
+async fn flowspec_import_modifications_apply_per_rule() {
+    const FIRST: u32 = 0xFDE9_0001; // 65001:1
+    const SECOND: u32 = 0xFDE9_0002; // 65001:2
+    let (mut session, mut rib_rx) = flowspec_test_session();
+    // Rules 0 and 1 (10.0/16, 10.1/16) take FIRST; rule 2 (10.2/16) takes
+    // SECOND; rules 3 and 4 fall through to the unmodified default permit.
+    let mut first = retention_statement(
+        Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 15))),
+        PolicyAction::Permit,
+    );
+    first.ge = Some(16);
+    first.le = Some(16);
+    first.modifications.communities_add = vec![FIRST];
+    let mut second = retention_statement(
+        Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 16))),
+        PolicyAction::Permit,
+    );
+    second.modifications.communities_add = vec![SECOND];
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![first, second],
+        default_action: PolicyAction::Permit,
+    }])));
+    session.process_update(flowspec_update_with(5, 4)).await;
+    let RibUpdate::RoutesReceived {
+        flowspec_announced, ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected RoutesReceived");
+    };
+    let rule = |index: usize| {
+        flowspec_announced
+            .iter()
+            .find(|route| route.rule == flowspec_dest_rule(index))
+            .unwrap()
+    };
+    let communities = |index: usize| {
+        rule(index)
+            .attributes
+            .iter()
+            .find_map(PathAttribute::communities)
+            .unwrap()
+            .to_vec()
+    };
+    let base: Vec<u32> = (0..4).map(|value| (64_512 << 16) | value).collect();
+    for index in [0, 1] {
+        let mut expected = base.clone();
+        expected.push(FIRST);
+        assert_eq!(communities(index), expected, "rule {index}");
+    }
+    let mut expected = base.clone();
+    expected.push(SECOND);
+    assert_eq!(communities(2), expected);
+    for index in [3, 4] {
+        assert_eq!(communities(index), base, "rule {index}");
+    }
+    assert!(Arc::ptr_eq(&rule(0).attributes, &rule(1).attributes));
+    assert!(Arc::ptr_eq(&rule(3).attributes, &rule(4).attributes));
+    for (a, b) in [(0, 2), (0, 3), (2, 3)] {
+        assert!(
+            !Arc::ptr_eq(&rule(a).attributes, &rule(b).attributes),
+            "{a} {b}"
+        );
+    }
+}
+
+/// More distinct import outcomes in one UPDATE than the memo's fixed slots
+/// still share one set per outcome: the rules past the slots that receive
+/// the same modification share one allocation instead of one copy each.
+#[tokio::test]
+async fn import_outcomes_past_the_memo_slots_share_one_set_per_outcome() {
+    const DISTINCT: u16 = 9;
+    const RULES: usize = 200;
+    const BROAD: u32 = 0xFDE9_FFFF; // 65001:65535
+    let (mut session, mut rib_rx) = flowspec_test_session();
+    // Rules 0..9 (10.0/16 .. 10.8/16) each take their own community, which
+    // fills the memo's slots and overflows by one. Every later rule takes the
+    // broad statement's single community.
+    let mut entries: Vec<PolicyStatement> = (0..DISTINCT)
+        .map(|index| {
+            let mut statement = retention_statement(
+                Some(Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(10, u8::try_from(index).unwrap(), 0, 0),
+                    16,
+                ))),
+                PolicyAction::Permit,
+            );
+            statement.modifications.communities_add = vec![0xFDE9_0000 | u32::from(index)];
+            statement
+        })
+        .collect();
+    let mut broad = retention_statement(
+        Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        PolicyAction::Permit,
+    );
+    broad.ge = Some(16);
+    broad.le = Some(16);
+    broad.modifications.communities_add = vec![BROAD];
+    entries.push(broad);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries,
+        default_action: PolicyAction::Permit,
+    }])));
+    session
+        .process_update(flowspec_update_with(RULES, 64))
+        .await;
+    let RibUpdate::RoutesReceived {
+        flowspec_announced, ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_announced.len(), RULES);
+    let distinct: std::collections::HashSet<_> = flowspec_announced
+        .iter()
+        .map(|route| Arc::as_ptr(&route.attributes))
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        usize::from(DISTINCT) + 1,
+        "one attribute set per distinct import outcome"
+    );
+    let broad_set = &flowspec_announced
+        .iter()
+        .find(|route| route.rule == flowspec_dest_rule(usize::from(DISTINCT)))
+        .unwrap()
+        .attributes;
+    for (index, route) in flowspec_announced.iter().enumerate() {
+        let communities = route
+            .attributes
+            .iter()
+            .find_map(PathAttribute::communities)
+            .unwrap();
+        if index < usize::from(DISTINCT) {
+            assert_eq!(
+                communities.last(),
+                Some(&(0xFDE9_0000 | u32::try_from(index).unwrap()))
+            );
+        } else {
+            assert_eq!(communities.last(), Some(&BROAD));
+            assert!(Arc::ptr_eq(&route.attributes, broad_set));
+        }
+    }
+}
+
+/// The next-hop alignment memo has the same fixed slots. Body IPv4 routes
+/// whose `next-hop self` rewrite leaves the received `NEXT_HOP` stale share
+/// one aligned set per (outcome, next hop) past those slots too.
+#[tokio::test]
+async fn aligned_next_hops_past_the_memo_slots_share_one_set_per_outcome() {
+    const DISTINCT: u8 = 9;
+    const ROUTES: u8 = 60;
+    const BROAD: u32 = 0xFDE9_FFFF; // 65001:65535
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let prefix = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24);
+    let next_hop_self = |statement: &mut PolicyStatement, community: u32| {
+        statement.modifications.communities_add = vec![community];
+        statement.modifications.set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    };
+    // Routes 0..9 each take their own community, filling the alignment
+    // slots and overflowing by one; every later route takes the broad term.
+    let mut entries: Vec<PolicyStatement> = (0..DISTINCT)
+        .map(|octet| {
+            let mut statement =
+                retention_statement(Some(Prefix::V4(prefix(octet))), PolicyAction::Permit);
+            next_hop_self(&mut statement, 0xFDE9_0000 | u32::from(octet));
+            statement
+        })
+        .collect();
+    let mut broad = retention_statement(
+        Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 0, 0), 16))),
+        PolicyAction::Permit,
+    );
+    broad.ge = Some(24);
+    broad.le = Some(24);
+    next_hop_self(&mut broad, BROAD);
+    entries.push(broad);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries,
+        default_action: PolicyAction::Deny,
+    }])));
+    let nlri: Vec<Ipv4NlriEntry> = (0..ROUTES)
+        .map(|octet| Ipv4NlriEntry {
+            path_id: 0,
+            prefix: prefix(octet),
+        })
+        .collect();
+    let update = UpdateMessage::build(
+        &nlri,
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), usize::from(ROUTES));
+    let local = session.config.peer.local_router_id;
+    for route in &announced {
+        assert_eq!(route.next_hop, IpAddr::V4(local));
+        assert!(
+            route
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::NextHop(hop) if *hop == local)),
+            "the stored NEXT_HOP follows the resolved next hop"
+        );
+    }
+    let distinct: std::collections::HashSet<_> = announced
+        .iter()
+        .map(|route| Arc::as_ptr(&route.attributes))
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        usize::from(DISTINCT) + 1,
+        "one aligned set per distinct import outcome"
+    );
 }

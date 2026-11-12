@@ -4486,7 +4486,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let mut ipv6_extended_communities = Vec::new();
     let mut route_targets = Vec::new();
 
-    for attr in &route.attributes {
+    for attr in route.attributes.iter() {
         if let Some(values) = attr.communities() {
             communities.extend(values);
             continue;
@@ -9528,7 +9528,7 @@ mod tests {
                     afi,
                     rd: None,
                     peer: PeerId::from_addr("0.0.0.0".parse().unwrap()),
-                    attributes: vec![],
+                    attributes: AttrSet::new(vec![]),
                     received_at: Instant::now(),
                     origin_type: rustbgpd_rib::RouteOrigin::Local,
                     peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -9546,8 +9546,9 @@ mod tests {
                 assert!(!filter(&row));
                 row.afi = afi;
                 if afi == Afi::Ipv6 {
-                    row.attributes
-                        .push(PathAttribute::Communities(vec![(65000 << 16) | 0x002a]));
+                    AttrSet::edit(&mut row.attributes, |attrs| {
+                        attrs.push(PathAttribute::Communities(vec![(65000 << 16) | 0x002a]));
+                    });
                     reply.send(vec![row]).unwrap();
                 } else {
                     reply.send(Vec::new()).unwrap();
@@ -9662,7 +9663,7 @@ mod tests {
                     afi: Afi::Ipv4,
                     rd: None,
                     peer,
-                    attributes: Vec::new(),
+                    attributes: AttrSet::new(Vec::new()),
                     received_at: Instant::now(),
                     origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
                     peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -9743,7 +9744,7 @@ mod tests {
             afi: Afi::Ipv4,
             rd: None,
             peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-            attributes,
+            attributes: AttrSet::new(attributes),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 1),

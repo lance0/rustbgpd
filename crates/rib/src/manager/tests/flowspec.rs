@@ -274,9 +274,11 @@ async fn flowspec_gauge_tracks_gr_llgr_expiry_and_end_of_rib() {
             }
             let mut refreshed = routes[1].clone();
             let mut no_llgr = make_destless_flowspec_route(Afi::Ipv4, source, 17);
-            no_llgr.attributes.push(PathAttribute::Communities(vec![
-                rustbgpd_wire::COMMUNITY_NO_LLGR,
-            ]));
+            AttrSet::edit(&mut no_llgr.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_NO_LLGR,
+                ]));
+            });
             routes.push(no_llgr);
 
             register_test_peer(&mut manager, peer, 0);
@@ -402,7 +404,9 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                     for path_id in [0, 7, 19] {
                         let mut route = route.clone();
                         route.path_id = path_id;
-                        route.attributes.push(PathAttribute::LocalPref(200));
+                        AttrSet::edit(&mut route.attributes, |attrs| {
+                            attrs.push(PathAttribute::LocalPref(200));
+                        });
                         routes.push(route);
                     }
                 }
@@ -426,7 +430,9 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                 if fallback {
                     let mut route = make_destless_flowspec_route(omitted_afi, alternate_v4, 6);
                     route.path_id = 31;
-                    route.attributes.push(PathAttribute::LocalPref(100));
+                    AttrSet::edit(&mut route.attributes, |attrs| {
+                        attrs.push(PathAttribute::LocalPref(100));
+                    });
                     let alternate = peer_v4(alternate_v4);
 
                     register_test_peer(&mut manager, alternate, 0);
@@ -600,9 +606,13 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     tx.send(registering_peer_up(source_b, 0)).await.unwrap();
 
     let mut route_a = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
-    route_a.attributes.push(PathAttribute::LocalPref(200));
+    AttrSet::edit(&mut route_a.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
     let mut route_b = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 2));
-    route_b.attributes.push(PathAttribute::LocalPref(100));
+    AttrSet::edit(&mut route_b.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(100));
+    });
     let rule = route_a.rule.clone();
 
     tx.send(registering_peer_up(source_a, 0)).await.unwrap();
@@ -1185,12 +1195,12 @@ async fn flowspec_llgr_eor_sweeps_non_readvertised() {
 }
 
 fn with_flowspec_communities(mut route: FlowSpecRoute, communities: Vec<u32>) -> FlowSpecRoute {
-    route
-        .attributes
-        .retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
-    route
-        .attributes
-        .push(PathAttribute::Communities(communities));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+    });
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(communities));
+    });
     route
 }
 
@@ -1337,7 +1347,9 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     );
 
     let mut changed_scoped = first_scoped;
-    changed_scoped.attributes.push(PathAttribute::Med(41));
+    AttrSet::edit(&mut changed_scoped.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(41));
+    });
     replace_flowspec_routes(&tx, source, vec![changed_scoped]).await;
     assert!(
         out_rx.try_recv().is_err(),
@@ -1577,9 +1589,11 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     drain_eor(&mut out_rx).await;
 
     let mut victim = make_flowspec_route(source_addr);
-    victim.attributes.push(PathAttribute::AsPath(AsPath {
-        segments: vec![AsPathSegment::AsSequence(vec![65001])],
-    }));
+    AttrSet::edit(&mut victim.attributes, |attrs| {
+        attrs.push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65001])],
+        }));
+    });
     let victim_key = victim.selection_key();
     let sibling = make_flowspec_route_alt(source_addr);
     let sibling_key = sibling.selection_key();
@@ -1591,9 +1605,9 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     assert_eq!(first.flowspec_withdraw.len(), 0);
 
     let mut changed_scoped = scoped;
-    changed_scoped
-        .attributes
-        .push(PathAttribute::LocalPref(999));
+    AttrSet::edit(&mut changed_scoped.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(999));
+    });
     replace_flowspec_routes(&tx, source, vec![changed_scoped]).await;
     assert!(
         out_rx.try_recv().is_err(),
@@ -1634,7 +1648,9 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     assert_eq!(withdrawn.flowspec_withdraw, vec![victim_key.clone()]);
 
     let mut changed_again = rescoped;
-    changed_again.attributes.push(PathAttribute::Med(999));
+    AttrSet::edit(&mut changed_again.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(999));
+    });
     replace_flowspec_routes(&tx, source, vec![changed_again]).await;
     assert!(
         out_rx.try_recv().is_err(),
@@ -1693,7 +1709,9 @@ async fn local_flowspec_gauge_tracks_injected_intent() {
     // A received route wins for the first rule. Local intent must still count.
     let source = Ipv4Addr::new(198, 51, 100, 51);
     let mut received = make_flowspec_route(source);
-    received.attributes.push(PathAttribute::LocalPref(200));
+    AttrSet::edit(&mut received.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
     let peer = peer_v4(source);
     manager
         .ribs
@@ -1797,7 +1815,9 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
         .await
         .unwrap();
     let mut received = make_flowspec_route(source);
-    received.attributes.push(PathAttribute::LocalPref(200));
+    AttrSet::edit(&mut received.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
     replace_flowspec_routes(&tx, peer_v4(source), vec![received]).await;
     let update = out_rx.try_recv().expect("received rule takes over");
     assert_eq!(update.flowspec_announce.len(), 1);
@@ -1877,7 +1897,7 @@ fn flowspec_selection_reads_the_full_scan_candidates(
         let mut route = make_destless_flowspec_route(Afi::Ipv4, source, protocol);
         route.rd = rd;
         route.path_id = path_id;
-        route.attributes = vec![PathAttribute::LocalPref(local_pref)];
+        route.attributes = AttrSet::new(vec![PathAttribute::LocalPref(local_pref)]);
         route
     };
     let key = path(a, 6, 0, 0).selection_key();
@@ -2028,4 +2048,196 @@ fn flowspec_selection_reads_the_full_scan_candidates_vpn() {
     let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 41]);
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), false);
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), true);
+}
+
+/// Destination-less rules (one per protocol in `protocols`) from `source`,
+/// all carrying one shared attribute set.
+fn shared_flowspec_rules(
+    source: Ipv4Addr,
+    protocols: std::ops::Range<u8>,
+    attrs: &Arc<AttrSet>,
+) -> Vec<FlowSpecRoute> {
+    protocols
+        .map(|protocol| {
+            let mut route = make_destless_flowspec_route(Afi::Ipv4, source, protocol);
+            route.attributes = Arc::clone(attrs);
+            route
+        })
+        .collect()
+}
+
+fn receive_flowspec(manager: &mut RibManager, source: PeerId, routes: Vec<FlowSpecRoute>) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: routes,
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+const EXPORT_ADDED: u32 = 0xFDE9_0063; // 65001:99
+
+/// A manager with a registered `FlowSpec` source and `targets` whose export
+/// policy adds [`EXPORT_ADDED`] to every rule. The outbound receivers must
+/// stay alive for commits to land in the Adj-RIB-Out.
+fn flowspec_export_fixture(
+    source: PeerId,
+    targets: &[PeerId],
+) -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>) {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, source, 0);
+    let mut outbound = Vec::new();
+    for &target in targets {
+        let (out_tx, out_rx) = mpsc::channel(64);
+        outbound.push(out_rx);
+        manager.handle_update(RibUpdate::PeerUp {
+            supersedes: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: target,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(rustbgpd_policy::PolicyChain::new(vec![
+                rustbgpd_policy::Policy {
+                    entries: vec![rustbgpd_policy::PolicyStatement {
+                        match_community: vec![],
+                        ..flowspec_policy_statement(
+                            0,
+                            rustbgpd_policy::RouteModifications {
+                                communities_add: vec![EXPORT_ADDED],
+                                ..Default::default()
+                            },
+                        )
+                    }],
+                    default_action: rustbgpd_policy::PolicyAction::Permit,
+                },
+            ])),
+            sendable_families: ipv4_flowspec_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+    }
+    (manager, outbound)
+}
+
+/// Export policy that modifies every rule toward several peers keeps one
+/// modified attribute set per source set, shared across rules and peers,
+/// instead of one copy per (rule, peer). A second source set with the same
+/// modification gets its own modified set: the memo keys on the source.
+#[test]
+fn flowspec_export_modification_shares_one_set_across_rules_and_peers() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let targets = [2, 3].map(|octet| peer_v4(Ipv4Addr::new(10, 0, 0, octet)));
+    let (mut manager, _outbound) = flowspec_export_fixture(peer_v4(source), &targets);
+    let first = AttrSet::new(vec![PathAttribute::Communities(vec![1, 2, 3])]);
+    let second = AttrSet::new(vec![PathAttribute::Communities(vec![4, 5, 6])]);
+    let mut routes = shared_flowspec_rules(source, 0..16, &first);
+    routes.extend(shared_flowspec_rules(source, 16..24, &second));
+    receive_flowspec(&mut manager, peer_v4(source), routes);
+
+    let exported: Vec<&Arc<AttrSet>> = targets
+        .iter()
+        .flat_map(|target| manager.adj_ribs_out[target].iter_flowspec())
+        .map(|route| &route.attributes)
+        .collect();
+    assert_eq!(exported.len(), 48);
+    let from = |marker: u32| -> Vec<&Arc<AttrSet>> {
+        exported
+            .iter()
+            .copied()
+            .filter(|set| {
+                set.iter()
+                    .find_map(PathAttribute::communities)
+                    .is_some_and(|values| values.contains(&marker))
+            })
+            .collect()
+    };
+    let (from_first, from_second) = (from(1), from(4));
+    assert_eq!((from_first.len(), from_second.len()), (32, 16));
+    for (sets, source_set) in [(&from_first, &first), (&from_second, &second)] {
+        assert!(
+            sets[0]
+                .iter()
+                .find_map(PathAttribute::communities)
+                .is_some_and(|values| values.contains(&EXPORT_ADDED))
+        );
+        assert!(!Arc::ptr_eq(sets[0], source_set));
+        assert!(
+            sets.iter().all(|set| Arc::ptr_eq(set, sets[0])),
+            "one modified set across every rule and peer of one source set"
+        );
+    }
+    assert!(
+        !Arc::ptr_eq(from_first[0], from_second[0]),
+        "different source sets never share a modified set"
+    );
+}
+
+/// A `FlowSpec` route-refresh replay with a modifying export policy memoizes
+/// one entry per distinct source set, and retires that memo with a readiness
+/// checkpoint per entry.
+#[test]
+fn flowspec_refresh_retires_its_export_memo_per_entry() {
+    const RULES: u8 = 12;
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _outbound) = flowspec_export_fixture(peer_v4(source), &[target]);
+    let routes = (0..RULES)
+        .flat_map(|protocol| {
+            let attrs = AttrSet::new(vec![PathAttribute::Communities(vec![u32::from(protocol)])]);
+            shared_flowspec_rules(source, protocol..protocol + 1, &attrs)
+        })
+        .collect();
+    receive_flowspec(&mut manager, peer_v4(source), routes);
+
+    let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "refresh_flowspec_memo" {
+                visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }));
+    manager.send_route_refresh_response(target, Afi::Ipv4, Safi::FlowSpec);
+    manager.replacement_readiness_test_hook = None;
+    assert!(
+        visits.load(std::sync::atomic::Ordering::Relaxed) >= usize::from(RULES),
+        "every memo entry retires behind a checkpoint"
+    );
+}
+
+/// Equal attribute sets from separate UPDATEs share one allocation in the
+/// Adj-RIB-In through the global intern table, as the other families do.
+#[test]
+fn received_flowspec_attributes_are_interned_across_updates() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, peer_v4(source), 0);
+    let attrs = vec![PathAttribute::Communities(vec![1, 2, 3])];
+    let first = shared_flowspec_rules(source, 0..2, &AttrSet::new(attrs.clone()));
+    let second = shared_flowspec_rules(source, 2..4, &AttrSet::new(attrs));
+    receive_flowspec(&mut manager, peer_v4(source), first);
+    receive_flowspec(&mut manager, peer_v4(source), second);
+    let stored: Vec<&Arc<AttrSet>> = manager.ribs[&peer_v4(source)]
+        .iter_flowspec()
+        .map(|route| &route.attributes)
+        .collect();
+    assert_eq!(stored.len(), 4);
+    assert!(stored.iter().all(|set| Arc::ptr_eq(set, stored[0])));
 }

@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 use std::time::Instant;
 
 fn scoped_rows() -> Vec<FlowSpecRoute> {
@@ -27,11 +28,11 @@ fn scoped_rows() -> Vec<FlowSpecRoute> {
                     ])],
                 },
                 peer: PeerId::LOCAL,
-                attributes: vec![PathAttribute::ExtendedCommunities(vec![
+                attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                     rustbgpd_wire::ExtendedCommunity::new(0x0002_fde8_0000_0064),
                     rustbgpd_wire::ExtendedCommunity::new(0x0202_0000_fde8_0001),
                     rustbgpd_wire::ExtendedCommunity::new(0x4002_fde8_0000_0001),
-                ])],
+                ])]),
                 received_at: Instant::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Local,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,

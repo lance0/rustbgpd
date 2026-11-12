@@ -4,12 +4,14 @@ use crate::PeerId;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::Instant;
 
-use rustbgpd_wire::{Afi, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 
 use super::RibManager;
 use crate::adj_rib_in::AdjRibIn;
+use crate::attr_set::AttrSet;
 use crate::flowspec_validation::{self as feasibility, Feasibility, MoreSpecificCheck};
 use crate::loc_rib::LocRib;
 use crate::prefix_map::FamilyPrefixMap;
@@ -21,10 +23,11 @@ const DEPENDENCY_RULES_PER_TURN: usize = 16;
 
 type CandidateId = (FlowSpecKey, PeerId, u32);
 
-/// Retained payload copy: the Adj-RIB-In row is overwritten before this
+/// Retained payload: the Adj-RIB-In row is overwritten before this
 /// reconciliation runs, so an exact comparison needs the previous payload.
+/// The attributes are shared with the Adj-RIB-In row, not copied.
 struct Candidate {
-    attributes: Vec<PathAttribute>,
+    attributes: Arc<AttrSet>,
     origin: RouteOrigin,
     revision: u64,
     observed_unicast_revision: u64,
@@ -938,7 +941,7 @@ mod tests {
     use std::time::Duration;
 
     use rustbgpd_telemetry::BgpMetrics;
-    use rustbgpd_wire::{Afi, AsPath, AsPathSegment};
+    use rustbgpd_wire::{Afi, AsPath, AsPathSegment, PathAttribute};
     use tokio::sync::mpsc;
 
     use super::*;
@@ -959,7 +962,7 @@ mod tests {
             .with_flowspec_validation(65000);
         let peer = Ipv4Addr::new(198, 51, 100, 1);
         let mut flow = make_flowspec_route(peer);
-        flow.attributes = vec![path(65001)];
+        flow.attributes = AttrSet::new(vec![path(65001)]);
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), peer);
         cover.attributes = AttrSet::new(vec![path(65001)]);
         crate::manager::tests::register_test_peer(&mut manager, flow.peer, 0);
@@ -987,13 +990,13 @@ mod tests {
         let mut manager = RibManager::new(rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
             .with_flowspec_validation(65000);
         let mut flow = make_flowspec_route(Ipv4Addr::new(198, 51, 100, 1));
-        flow.attributes = vec![path(65001)];
+        flow.attributes = AttrSet::new(vec![path(65001)]);
         flow.rd = Some(rustbgpd_wire::RouteDistinguisher([
             0, 0, 0xad, 0x77, 0, 0, 0, 40,
         ]));
         // A global rule with the same components, from another peer.
         let mut global = make_flowspec_route(Ipv4Addr::new(198, 51, 100, 2));
-        global.attributes = vec![path(65002)];
+        global.attributes = AttrSet::new(vec![path(65002)]);
         for route in [&flow, &global] {
             manager
                 .ribs
@@ -1026,6 +1029,31 @@ mod tests {
                 .get_flowspec(&flow.selection_key())
                 .is_some()
         );
+    }
+
+    /// The retained candidate and the selected Loc-RIB row share the
+    /// Adj-RIB-In row's attribute set, so validation adds no per-rule copy.
+    ///
+    /// Break-to-red: storing a deep copy in `Candidate` fails the first
+    /// pointer comparison.
+    #[test]
+    fn flowspec_validation_candidate_shares_the_received_attributes() {
+        let (mut manager, _tx, flow, _cover) = fixture();
+        drain(&mut manager);
+        let key = flow.selection_key();
+        let stored = &manager.ribs[&flow.peer]
+            .get_flowspec(&flow.key())
+            .unwrap()
+            .attributes;
+        let candidate =
+            &manager.flowspec_validation.candidates[&key][&(flow.peer, flow.path_id)].attributes;
+        assert!(Arc::ptr_eq(stored, candidate));
+        assert!(selected(&manager, &flow));
+        assert!(Arc::ptr_eq(
+            stored,
+            &manager.loc_rib.get_flowspec(&key).unwrap().attributes
+        ));
+        assert!(Arc::ptr_eq(stored, &flow.attributes));
     }
 
     fn drain(manager: &mut RibManager) {
@@ -1108,7 +1136,7 @@ mod tests {
         let attributes = vec![path(65001), PathAttribute::OriginatorId(originator)];
         let mut flow = make_flowspec_route(flow_peer);
         flow.origin_type = RouteOrigin::Ibgp;
-        flow.attributes = attributes.clone();
+        flow.attributes = AttrSet::new(attributes.clone());
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), cover_peer);
         cover.origin_type = RouteOrigin::Ibgp;
         cover.attributes = AttrSet::new(attributes);
@@ -1225,9 +1253,9 @@ mod tests {
     fn flowspec_validation_replacement_never_inherits_previous_completed_verdict() {
         let (mut manager, _tx, mut flow, _cover) = fixture();
         drain(&mut manager);
-        flow.attributes = vec![PathAttribute::AsPath(AsPath {
+        flow.attributes = AttrSet::new(vec![PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65001, 65001])],
-        })];
+        })]);
         manager
             .ribs
             .get_mut(&flow.peer)

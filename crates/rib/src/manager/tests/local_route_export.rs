@@ -1370,13 +1370,14 @@ fn local_rule(communities: &[u32]) -> FlowSpecRoute {
     rule.peer = LOCAL_PEER;
     rule.origin_type = crate::route::RouteOrigin::Local;
     rule.peer_router_id = Ipv4Addr::UNSPECIFIED;
-    rule.attributes = vec![
+    rule.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-    ];
+    ]);
     if !communities.is_empty() {
-        rule.attributes
-            .push(PathAttribute::Communities(communities.to_vec()));
+        AttrSet::edit(&mut rule.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(communities.to_vec()));
+        });
     }
     rule
 }
@@ -1506,7 +1507,9 @@ fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
     inject_rule(&mut manager, rule);
     let mut received = crate::test_support::make_flowspec_route(source);
     received.origin_type = crate::route::RouteOrigin::Ibgp;
-    received.attributes.push(PathAttribute::LocalPref(200));
+    AttrSet::edit(&mut received.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -1600,7 +1603,9 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
     // with a key of its own.
     let mut same = crate::test_support::make_flowspec_route(source_addr);
     same.origin_type = crate::route::RouteOrigin::Ibgp;
-    same.attributes.push(PathAttribute::LocalPref(200));
+    AttrSet::edit(&mut same.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
     let mut other = crate::test_support::make_flowspec_route(source_addr);
     other.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
         rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),

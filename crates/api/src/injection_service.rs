@@ -1087,7 +1087,7 @@ fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRou
         afi,
         rd,
         peer: PeerId::LOCAL,
-        attributes,
+        attributes: AttrSet::new(attributes),
         received_at: std::time::Instant::now(),
         origin_type: RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5237,12 +5237,12 @@ mod tests {
                     afi: Afi::Ipv4,
                     rd: None,
                     peer: source,
-                    attributes: vec![
+                    attributes: AttrSet::new(vec![
                         PathAttribute::Origin(Origin::Igp),
                         PathAttribute::AsPath(AsPath { segments: vec![] }),
                         PathAttribute::LocalPref(200),
                         PathAttribute::ExtendedCommunities(rate_ec(5000.0)),
-                    ],
+                    ]),
                     received_at: std::time::Instant::now(),
                     origin_type: RouteOrigin::Ibgp,
                     peer_router_id: Ipv4Addr::new(10, 0, 0, 1),

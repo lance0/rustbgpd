@@ -365,7 +365,11 @@ impl RibManager {
                 let mut swept =
                     rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut sweep);
                 super::retire_vec(&mut swept, &mut sweep);
-                rib.clear_llgr_stale_flowspec_with_checkpoint(family, &mut sweep);
+                rib.clear_llgr_stale_flowspec_with_checkpoint(
+                    family,
+                    &mut self.attr_intern,
+                    &mut sweep,
+                );
             }
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
@@ -1312,6 +1316,7 @@ impl RibManager {
                 .filter(|route| route.family() == (afi, safi))
                 .map(FlowSpecRoute::selection_key)
                 .collect();
+            let mut export_memo = super::distribution::ExportMemo::default();
             if !flow_rules.is_empty() {
                 Self::stage_flowspec_rules_with_checkpoint(
                     loc_rib,
@@ -1333,12 +1338,22 @@ impl RibManager {
                     &target_peer_label,
                     &mut fs_announce,
                     &mut fs_withdraw,
+                    &mut export_memo,
                     &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     },
                 );
             }
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            // One memo entry per distinct source set: retire it entry by
+            // entry, as the unicast replay below does.
+            export_memo.retire_with(&mut || {
+                super::replacement_readiness_checkpoint_at(
+                    &self.replacement_readiness,
+                    "refresh_flowspec_memo",
+                    false,
+                );
+            });
             super::retire_hash_set(&mut flow_rules, &mut || {
                 super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
             });

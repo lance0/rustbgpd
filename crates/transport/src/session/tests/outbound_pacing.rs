@@ -421,11 +421,13 @@ impl QueuedInventory {
         let bgpls = make_bgpls_route(1);
         update.flowspec_announce = (0..per_family)
             .map(|_| FlowSpecRoute {
-                attributes: vec![PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
-                    flags: 0xc0,
-                    type_code: 250,
-                    data: self.marked(),
-                })],
+                attributes: AttrSet::new(vec![PathAttribute::Unknown(
+                    rustbgpd_wire::RawAttribute {
+                        flags: 0xc0,
+                        type_code: 250,
+                        data: self.marked(),
+                    },
+                )]),
                 ..make_flowspec_route()
             })
             .collect();
@@ -2405,17 +2407,19 @@ fn small_flowspec_route(index: usize, vpn_v6: bool, distinct: bool) -> FlowSpecR
             32,
         ))
     })];
-    route.attributes.extend([
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65_002, 64_600, 64_700])],
-        }),
-        PathAttribute::Communities(vec![100, 200]),
-        PathAttribute::Med(if distinct {
-            u32::try_from(index).unwrap()
-        } else {
-            0
-        }),
-    ]);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.extend([
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65_002, 64_600, 64_700])],
+            }),
+            PathAttribute::Communities(vec![100, 200]),
+            PathAttribute::Med(if distinct {
+                u32::try_from(index).unwrap()
+            } else {
+                0
+            }),
+        ]);
+    });
     route
 }
 

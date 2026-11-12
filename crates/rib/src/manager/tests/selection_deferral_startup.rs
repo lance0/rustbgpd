@@ -521,10 +521,10 @@ fn local_vpn_flowspec_is_eligible_during_selection_deferral() {
     route.rd = Some(rustbgpd_wire::RouteDistinguisher([
         0, 0, 0xad, 0x77, 0, 0, 0, 40,
     ]));
-    route.attributes = vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-    ];
+    ]);
     let (reply, mut response) = oneshot::channel();
     manager.handle_inject_flowspec(route.clone(), reply);
     response.try_recv().unwrap().unwrap();

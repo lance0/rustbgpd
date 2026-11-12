@@ -723,7 +723,8 @@ pub fn materialize_attrs(
 }
 /// Distinct modified attribute sets one UPDATE may memoize. The shipped
 /// RPKI-preference chain produces at most two; a chain that yields more
-/// distinct modifications per UPDATE falls back to per-route clones.
+/// distinct modifications per UPDATE computes each further outcome per
+/// route and shares equal results through a per-UPDATE intern table.
 const IMPORT_ATTR_MEMO_SLOTS: usize = 8;
 
 /// Per-UPDATE memo for [`materialize_attrs`]: every accepted NLRI of one
@@ -739,6 +740,10 @@ pub struct ImportAttrMemo {
     /// [`Self::align_next_hop`] results, bounded like `entries`: source set,
     /// resolved next hop, aligned set. Entries pin the source `Arc`.
     aligned: Vec<(Arc<AttrSet>, IpAddr, Arc<AttrSet>)>,
+    /// Content-keyed sharing for outcomes past the fixed slots, so one
+    /// UPDATE retains one set per distinct outcome however many routes carry
+    /// it. Created on the first overflow.
+    overflow: Option<rustbgpd_rib::AttrInternTable>,
 }
 
 /// Canonical source, modifications, and the resulting attributes and
@@ -807,11 +812,20 @@ impl ImportAttrMemo {
             }
             IpAddr::V6(_) => owned.retain(|attr| !matches!(attr, PathAttribute::NextHop(_))),
         }
-        let aligned = AttrSet::new(owned);
+        let mut aligned = AttrSet::new(owned);
         if self.aligned.len() < IMPORT_ATTR_MEMO_SLOTS {
             self.aligned.push((attrs, next_hop, Arc::clone(&aligned)));
+        } else {
+            self.share_overflow(&mut aligned);
         }
         aligned
+    }
+
+    /// Share `attrs` with an equal overflow outcome of this UPDATE.
+    fn share_overflow(&mut self, attrs: &mut Arc<AttrSet>) {
+        self.overflow
+            .get_or_insert_with(rustbgpd_rib::AttrInternTable::new)
+            .intern(attrs);
     }
 
     /// [`materialize_attrs`], sharing the result across equal modifications
@@ -829,7 +843,7 @@ impl ImportAttrMemo {
         }) {
             return (Arc::clone(attrs), nh.clone());
         }
-        let (attrs, nh) = materialize_attrs(canonical, mods);
+        let (mut attrs, nh) = materialize_attrs(canonical, mods);
         if self.entries.len() < IMPORT_ATTR_MEMO_SLOTS {
             self.entries.push((
                 Arc::clone(canonical),
@@ -837,6 +851,8 @@ impl ImportAttrMemo {
                 Arc::clone(&attrs),
                 nh.clone(),
             ));
+        } else {
+            self.share_overflow(&mut attrs);
         }
         (attrs, nh)
     }
@@ -3232,16 +3248,12 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                // FlowSpec stores an owned `Vec` (not `Arc`),
-                                // so it can't share — but still skip the no-op
-                                // apply when policy made no modifications.
-                                let mut attrs = attr_bundle.mp.to_vec();
-                                if !result.modifications.is_empty() {
-                                    let _ = rustbgpd_policy::apply_modifications(
-                                        &mut attrs,
-                                        &result.modifications,
-                                    );
-                                }
+                                // Every rule of this UPDATE that policy leaves
+                                // unmodified shares the canonical `mp` set; equal
+                                // modifications share one modified set. FlowSpec
+                                // has no next hop, so the policy action is unused.
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 flowspec_announced.push(FlowSpecRoute {
                                     rule: rule.clone(),
                                     afi: mp.afi,

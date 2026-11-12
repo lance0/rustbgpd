@@ -80,6 +80,8 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
+            self.defer_attr_gc(fs_affected.len());
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -95,6 +97,7 @@ impl RibManager {
             .unwrap_or_default();
         let mut fs_affected: HashSet<FlowSpecKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
+        let mut replaced = 0usize;
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -102,11 +105,12 @@ impl RibManager {
                 .get_mut(&peer)
                 .expect("peer rib must exist before chunk processing");
 
-            for route in flowspec_announced {
+            for mut route in flowspec_announced {
                 debug!(%peer, afi = ?route.afi, safi = ?route.family().1, rd = ?route.rd, rule = %route.rule, "flowspec announced");
                 let stale_key = route.key();
                 fs_affected.insert(route.selection_key());
-                rib.insert_flowspec(route);
+                self.attr_intern.intern(&mut route.attributes);
+                replaced += usize::from(rib.insert_flowspec(route));
                 if active_refresh.contains(&stale_key.family())
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                     && stale.remove(&stale_key).is_some()
@@ -138,6 +142,8 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
+            self.defer_attr_gc(replaced);
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -397,6 +403,7 @@ impl RibManager {
         target_peer_label: &str,
         fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
         fs_withdraw: &mut Vec<FlowSpecKey>,
+        memo: &mut super::ExportMemo,
         checkpoint: &mut impl FnMut(),
     ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
@@ -439,7 +446,7 @@ impl RibManager {
             checkpoint();
             record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                let modified = flowspec_export_modified(best, &result, checkpoint);
+                let modified = flowspec_export_modified(best, &result, memo, checkpoint);
                 if super::no_advertise_export_suppressed(modified.communities()) {
                     if rib_out.get_flowspec(key).is_some() {
                         fs_withdraw.push(key.clone());
@@ -508,7 +515,8 @@ impl RibManager {
                 ..stop(code, detail)
             });
         }
-        let modified = flowspec_export_modified(best, &result, &mut || {});
+        let modified =
+            flowspec_export_modified(best, &result, &mut super::ExportMemo::default(), &mut || {});
         if super::no_advertise_export_suppressed(modified.communities()) {
             return Err(stop(
                 "no_advertise_policy_suppressed",
@@ -707,6 +715,9 @@ impl RibManager {
             lens.flowspec_vpn,
         );
 
+        // Shares each modified attribute set across the rules and peers
+        // of this pass, as unicast and EVPN export do.
+        let mut export_memo = super::ExportMemo::default();
         // Distribute FlowSpec changes to outbound peers
         let peers: Vec<PeerId> = self
             .outbound_peers
@@ -797,6 +808,7 @@ impl RibManager {
                 &target_peer_label,
                 &mut fs_announce,
                 &mut fs_withdraw,
+                &mut export_memo,
                 &mut checkpoint,
             );
             crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
@@ -819,6 +831,7 @@ impl RibManager {
                 warn!(%peer, "outbound channel full — FlowSpec update deferred");
             }
         }
+        export_memo.retire_with(&mut checkpoint);
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
     }
 }
@@ -873,9 +886,12 @@ pub(in crate::manager) fn flowspec_export_context<'a>(
 }
 
 /// `best` as export policy's permit `result` modifies it for one peer.
+/// Rules that share a source attribute set and receive equal modifications
+/// share one modified set for the life of `memo`.
 pub(in crate::manager) fn flowspec_export_modified(
     best: &crate::route::FlowSpecRoute,
     result: &rustbgpd_policy::PolicyResult,
+    memo: &mut super::ExportMemo,
     checkpoint: &mut impl FnMut(),
 ) -> crate::route::FlowSpecRoute {
     let mut modified = best.clone();
@@ -887,8 +903,8 @@ pub(in crate::manager) fn flowspec_export_modified(
         modifications.set_next_hop = None;
         if !modifications.is_empty() {
             checkpoint();
-            let next_hop =
-                rustbgpd_policy::apply_modifications(&mut modified.attributes, &modifications);
+            let (attributes, next_hop) = memo.apply_attrs(&best.attributes, &modifications);
+            modified.attributes = attributes;
             checkpoint();
             debug_assert!(next_hop.is_none());
         }

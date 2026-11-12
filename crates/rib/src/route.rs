@@ -600,8 +600,9 @@ pub struct FlowSpecRoute {
     pub rd: Option<RouteDistinguisher>,
     /// The peer that advertised this route.
     pub peer: PeerId,
-    /// BGP path attributes.
-    pub attributes: Vec<PathAttribute>,
+    /// BGP path attributes, shared by every rule of one UPDATE that import
+    /// policy did not modify.
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or local).

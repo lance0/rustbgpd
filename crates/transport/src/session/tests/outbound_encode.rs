@@ -1311,7 +1311,7 @@ async fn extended_flowspec_chunks_fill_the_message_and_preserve_exact_order() {
             afi: Afi::Ipv6,
             rd: None,
             peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
-            attributes: vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
                     flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
@@ -1319,7 +1319,7 @@ async fn extended_flowspec_chunks_fill_the_message_and_preserve_exact_order() {
                     type_code: 99,
                     data: padding.clone(),
                 }),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1436,7 +1436,7 @@ async fn flowspec_chunks_follow_a_change_in_rule_size() {
             afi: Afi::Ipv6,
             rd: None,
             peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
-            attributes: vec![PathAttribute::Origin(Origin::Igp)],
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1510,7 +1510,7 @@ async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
         afi,
         rd: None,
         peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1617,7 +1617,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
                 afi,
                 rd: None,
                 peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
-                attributes: vec![PathAttribute::Origin(Origin::Igp)],
+                attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
                 received_at: Instant::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
