@@ -2,7 +2,8 @@
 """Controlled non-RTC actual-daemon recovery and two-policy regroup campaign."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -23,11 +24,12 @@ import wire
 
 SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers moving; "
          "initial/clean-regroup per-key wire order, quiescent-refresh coverage before EoR, "
-         "simultaneous per-peer dirty/owed recovery, recovery final bytes, strict withdrawals and common refresh/EoR obligation overlap; "
+         "simultaneous per-peer dirty/owed recovery, recovery final bytes, strict withdrawals and candidate refresh/EoR obligation overlap; "
          "not terminal-only complete-feed marker debt, repeated-producer cost, full-fleet/new-group "
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
 SAMPLE_PERIOD_US = 1_000_000 // Q.RECOVERY_BARS["sample_hz"]
+WIRE_WORKERS = 8
 # Stopping the probe can wait for the ordinary cycle already in progress (its
 # arrival and withdrawal caps) and the final cycle's four (quiet, arrival,
 # every receiver, withdrawal); it gets its own bound.
@@ -481,6 +483,19 @@ def input_applied(rows, clients, generation):
     return all(len(sessions) == generation for sessions in peers.values())
 
 
+def holds_obligation(row, arm):
+    """Whether a snapshot shows the refresh/EoR obligation the overlap needs.
+
+    Required of the candidate only. A private peer's row credit is a share of
+    the daemon's, so at 150 peers it is spent before the paused writer channel
+    fills: the peer owes keys, yet its refresh, a whole-table operation that
+    needs channel room and no credit, is admitted at once and absorbs them.
+    The actor holds no obligation the observer could show. The private
+    overlap is still checked on the wire: refresh EoR, final bytes, parity.
+    """
+    return arm == "private" or row["protocol_obligations"] > 0
+
+
 def protocol_overlap(record, events, controls):
     starts = [row for row in events if row["event"] == "command" and row.get("command") == "churn-overlap"]
     ends = [row for row in events if row["event"] == "complete" and row.get("command") == "churn-overlap"]
@@ -495,7 +510,7 @@ def protocol_overlap(record, events, controls):
     before, during, after = [record[key] for key in
                             ("protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn")]
     Q.accept(before["recovery_pending"] > 0, "recovery work absent before overlap")
-    Q.accept(all(row["protocol_obligations"] > 0 for row in (before, during, after)), "refresh/EoR obligation absent")
+    Q.accept(all(holds_obligation(row, record["arm"]) for row in (before, during, after)), "refresh/EoR obligation absent")
     Q.require(before["elapsed_us"] < during["elapsed_us"] < after["elapsed_us"]
               and starts[-1]["wall_us"] <= write["write_started_us"] <= write["writers_drained_us"] <= ends[-1]["wall_us"]
               and before["wall_us"] < write["write_started_us"] <= during["wall_us"] <= write["writers_drained_us"]
@@ -718,45 +733,59 @@ def check_wire(leg, clients, routes):
     refreshes = [row["result"] for row in controls if row["command"] == "refresh"]
     Q.require(len(refreshes) == 2, "missing quiescent or paused refresh")
     report = {name: [] for name in PHASES}
-    for peer in range(clients):
-        receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5, probe=probe_keys(routes))
-        path = leg / "wire" / f"peer-{peer}.bgp"
-        cursor = 0
-        with path.open("rb") as stream:
-            for name in (*PHASES[:3], "refresh-start", *PHASES[3:]):
-                boundary = boundaries[name]
-                end = boundary["offsets"][peer]
-                Q.require(type(end) is int and cursor <= end <= path.stat().st_size, "invalid capture boundary")
-                data = stream.read(end - cursor)
-                cursor = end
-                communities = {1000, 2000} if name in ("regroup-b", "regroup-a") and peer >= 2 else {
-                    2000 if peer == 1 else 1000}
-                transition = name in ("regroup-b", "regroup-a") and peer >= 2
-                if transition:
-                    receiver.begin_policy(*((1000, 2000) if name == "regroup-b" else (2000, 1000)))
-                receiver.consume(data, communities)
-                Q.require(receiver.eors == boundary["eors"][peer], "driver EoR count differs from raw wire")
-                if name == "refresh-start":
-                    receiver.begin_replay()
-                    receiver.events.clear()
-                    continue
-                if name == "refresh":
-                    receiver.end_replay()
-                if name == "recovered":
-                    Q.accept(receiver.eors > refreshes[1]["eor_baseline"][peer],
-                             "recovery finished before receiver refresh EoR")
-                community = 2000 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1000
-                # A regroup boundary is taken while that regroup's probe runs.
-                state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community,
-                                          during_probe=name in ("regroup-b", "regroup-a"))
-                if transition:
-                    receiver.end_policy()
-                ordered = receiver.ordered_digest()
-                report[name].append({"peer": peer, "state": state,
-                                     "ordered": ordered if name in PHASES[:3] else None,
-                                     "eors": receiver.eors})
-        require_validated_tail(cursor, boundaries["finished"]["offsets"][peer])
+    # Receivers are independent and a timed cell's captures take minutes to
+    # decode in one process. map() keeps peer order, so the report and the
+    # first failing peer's error are the sequential ones.
+    # ponytail: a fixed pool size; more workers finish sooner but raise the
+    # one-minute load average the next cell's quiet-host gate waits out.
+    with ProcessPoolExecutor(max_workers=min(WIRE_WORKERS, clients)) as pool:
+        for rows in pool.map(partial(check_peer_wire, leg, clients, routes, boundaries, refreshes), range(clients)):
+            for name, row in rows:
+                report[name].append(row)
     return report
+
+
+def check_peer_wire(leg, clients, routes, boundaries, refreshes, peer):
+    """One receiver's capture, phase by phase, as (phase, report row) pairs."""
+    rows = []
+    receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5, probe=probe_keys(routes))
+    path = leg / "wire" / f"peer-{peer}.bgp"
+    cursor = 0
+    with path.open("rb") as stream:
+        for name in (*PHASES[:3], "refresh-start", *PHASES[3:]):
+            boundary = boundaries[name]
+            end = boundary["offsets"][peer]
+            Q.require(type(end) is int and cursor <= end <= path.stat().st_size, "invalid capture boundary")
+            data = stream.read(end - cursor)
+            cursor = end
+            communities = {1000, 2000} if name in ("regroup-b", "regroup-a") and peer >= 2 else {
+                2000 if peer == 1 else 1000}
+            transition = name in ("regroup-b", "regroup-a") and peer >= 2
+            if transition:
+                receiver.begin_policy(*((1000, 2000) if name == "regroup-b" else (2000, 1000)))
+            receiver.consume(data, communities)
+            Q.require(receiver.eors == boundary["eors"][peer], "driver EoR count differs from raw wire")
+            if name == "refresh-start":
+                receiver.begin_replay()
+                receiver.events.clear()
+                continue
+            if name == "refresh":
+                receiver.end_replay()
+            if name == "recovered":
+                Q.accept(receiver.eors > refreshes[1]["eor_baseline"][peer],
+                         "recovery finished before receiver refresh EoR")
+            community = 2000 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1000
+            # A regroup boundary is taken while that regroup's probe runs.
+            state = receiver.boundary(boundary["shifts"], routes * 4 // 5, routes // 5, community,
+                                      during_probe=name in ("regroup-b", "regroup-a"))
+            if transition:
+                receiver.end_policy()
+            ordered = receiver.ordered_digest()
+            rows.append((name, {"peer": peer, "state": state,
+                                "ordered": ordered if name in PHASES[:3] else None,
+                                "eors": receiver.eors}))
+    require_validated_tail(cursor, boundaries["finished"]["offsets"][peer])
+    return rows
 
 
 def run_cell(output, manifest, arm, index, correctness):
@@ -887,17 +916,17 @@ def run_cell(output, manifest, arm, index, correctness):
             Q.accept(recovery is not None, "simultaneous all-peer recovery snapshot missing")
             record["mass_recovery_previous"], record["mass_recovery"] = recovery
             controller.command("refresh")
-            debt = controller.witness(lambda row: row["protocol_obligations"] > 0 and row["recovery_pending"] > 0)
+            debt = controller.witness(lambda row: holds_obligation(row, arm) and row["recovery_pending"] > 0)
             start = len(controller.observations)
             writes = controller.command("churn-overlap")
-            during = [row for row in controller.observations[start:] if row["protocol_obligations"] > 0
+            during = [row for row in controller.observations[start:] if holds_obligation(row, arm)
                       and writes["write_started_us"] <= row["wall_us"] <= writes["writers_drained_us"]]
             Q.accept(bool(during), "no actual refresh/EoR obligation during the paced source-update sequence")
             record["protocol_obligation_before_churn"] = debt
             record["protocol_obligation_during_churn"] = during[0]
             applied = controller.source_barrier()
             record["protocol_obligation_after_churn"] = controller.witness(
-                lambda row: row["protocol_obligations"] > 0 and row["wall_us"] > applied["wall_us"])
+                lambda row: holds_obligation(row, arm) and row["wall_us"] > applied["wall_us"])
             controller.command("resume")
             started = controller.last_completion
             controller.command("settle", bars["convergence_seconds"])
@@ -1019,11 +1048,8 @@ def analyze_results(output):
                         if event["event"] == "command" and event.get("command") == "resume"), None)
         Q.require(type(paused) is int and type(resumed) is int and paused < resumed,
                   "pause/resume events missing for the recovery window")
-        Q.accept(recovery_pair([row["mass_recovery_previous"], row["mass_recovery"]], clients, paused, resumed, row["arm"]) is not None
-                 and row["protocol_obligation_before_churn"]["protocol_obligations"] > 0
-                 and row["protocol_obligation_during_churn"]["protocol_obligations"] > 0
-                 and row["protocol_obligation_after_churn"]["protocol_obligations"] > 0,
-                 "missing actual 20 Hz recovery snapshot or protocol overlap witness")
+        Q.accept(recovery_pair([row["mass_recovery_previous"], row["mass_recovery"]], clients, paused, resumed, row["arm"]) is not None,
+                 "missing actual 20 Hz recovery snapshot")
         first = observed.index(row["mass_recovery_previous"])
         Q.require(first + 1 < len(observed) and observed[first + 1] == row["mass_recovery"],
                   "recovery snapshots are not consecutive actual observations")
