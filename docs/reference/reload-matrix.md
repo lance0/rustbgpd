@@ -492,8 +492,8 @@ that are stood up once at startup. Three fields are not restart-required:
 | `listen_port` | restart-required | The listen socket is created at startup. |
 | `listen_addresses` | restart-required | Exact passive-bind and active-open source endpoints are selected at startup. SIGHUP preserves the desired edit but pins the running endpoint set; a peer in a newly requested family is rejected before runtime mutation. |
 | `cluster_id` | restart-required | RFC 4456 cluster identity; affects every iBGP advertisement. |
-| `honor_graceful_shutdown` | live | Hot-applied by `reload.rs`. Re-evaluates the GShut LOCAL_PREF de-preference against existing Adj-RIB-In on toggle. |
-| `honor_blackhole` | live (with FIB-discard caveat) | Hot-applied when `[global] install_blackhole_discard` is false. When the FIB-discard reconciler is configured (`install_blackhole_discard = true` and the FIB table is set up), `honor_blackhole` is **restart-required** — toggling it would change the discard-spawn-gate decision made at startup. Logged as `ERROR` during reload in that case. |
+| `honor_graceful_shutdown` | live | Hot-applied by `reload.rs`. Re-evaluates the GShut LOCAL_PREF de-preference against existing Adj-RIB-In on toggle. Best-effort fan-out; see [Honor-knob partial apply](#honor-knob-partial-apply). |
+| `honor_blackhole` | live (with FIB-discard caveat) | Hot-applied when `[global] install_blackhole_discard` is false. When the FIB-discard reconciler is configured (`install_blackhole_discard = true` and the FIB table is set up), `honor_blackhole` is **restart-required** — toggling it would change the discard-spawn-gate decision made at startup. Logged as `ERROR` during reload in that case. Best-effort fan-out; see [Honor-knob partial apply](#honor-knob-partial-apply). |
 | `ebgp_requires_policy` | restart-required | ADR-0112/0119 RFC 8212 enforcement mode and raw-presence verdict. Pinned with `config_epoch` as one startup tuple: a SIGHUP reports value or representation drift in `--diff` and the v1 transaction rejection, logs an `ERROR`, and keeps the running import/export treatment and source verdict at startup. Exception: a SIGHUP of a file carrying exactly the canonical form of the running tuple (the explicit effective epoch and boolean the daemon writes after a runtime mutation) keeps the running tuple without logging an `ERROR`, because the effective posture did not change. A partial edit or a changed effective value is still pinned and logged. |
 | `install_blackhole_discard` | restart-required | The RFC 7999 kernel-discard reconciler spawns once at startup. |
 | `allow_blackhole_broad_prefixes` | restart-required | Same — feeds the discard-spawn gate. |
@@ -510,6 +510,38 @@ that are stood up once at startup. Three fields are not restart-required:
 | `warm_cache_checkpoint_on_shutdown` | restart-required | The shutdown checkpoint writer and its pinned runtime-state directory are selected at startup. |
 | `runtime_state_dir` | restart-required | File-system paths (`gr-restart.toml`, `fib-owned.json`, `grpc.sock`) are bound at startup. |
 | `[global.unnumbered]` (`router_advertisements`, `ra_interval_secs`) | restart-required | The discovery actor takes its Router Advertisement template and timing when it starts. SIGHUP pins the running values and logs an `ERROR`; interface-only neighbors themselves still reload. |
+
+### Honor-knob partial apply
+
+A `honor_graceful_shutdown` or `honor_blackhole` change recomputes the
+effective import and export chains of every EBGP peer. The fan-out is
+best-effort: the peer manager installs the new knob value even when some
+peers keep their prior chains, for example after a session-side policy update
+timeout, a failed Route Refresh, an RFC 8212 qualification failure or an
+unresolvable chain. The running config advances with it, so a later SIGHUP
+that reverts the knob still reaches every peer.
+
+The reload receipt reports that step as `known_partial`. The step's `[global]`
+target counts as applied, and each peer left on its prior chains is a failure
+and an unapplied identity named by its peer key, with the bucket
+`honor_graceful_shutdown.apply` or `honor_blackhole.apply`. Unlike other
+sequential-route failures, the reload continues with its remaining steps.
+
+Nothing retries such a peer on its own. A no-op SIGHUP, or one that changes
+only other sequential-route fields, does not touch it. These retarget it:
+
+- The next reload whose candidate takes the **generation** route (any change
+  in its row in [SIGHUP reload routes](#sighup-reload-routes): static
+  `[[neighbors]]`, `[peer_groups]`, inline policies, neighbor sets, global
+  chains, conditional advertisements, `.rpol` content, datasets, BFD member
+  attachments or outbound prefix maxima). The generation re-resolves every
+  live peer against the candidate and reapplies each one whose installed
+  chains differ, including a missing honor tail.
+- Reverting the knob and then setting it again, as two reloads.
+- A daemon restart.
+
+A sequential policy, peer-group or neighbor edit retargets only the peers it
+affects.
 
 `apply_bum_enforcement` is **restart-required** but is a top-level
 (document-root) key, **not** a `[global]` key — EVPN BUM-port enforcement is

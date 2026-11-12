@@ -5,9 +5,9 @@ use std::net::IpAddr;
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
-    CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency,
-    OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig,
-    PolicySnapshotApplyError, ResolvedPeerPolicy,
+    CatalogMutationError, ConfigEvent, DynamicRangeTarget, HonorKnobPartial,
+    ImportValidationDependency, OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerKey,
+    PeerManagerNeighborConfig, PolicySnapshotApplyError, ResolvedPeerPolicy,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_fsm::SessionState;
@@ -4944,7 +4944,7 @@ impl PeerManager {
     pub(super) async fn set_honor_graceful_shutdown(
         &mut self,
         enabled: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), HonorKnobPartial> {
         if self.current_config.global.honor_graceful_shutdown == enabled {
             return Ok(());
         }
@@ -4955,10 +4955,11 @@ impl PeerManager {
         // running with the new effective policy while `current_config`
         // still shows the old knob value — that drift is what the prior
         // `?`-shortcircuit shape produced and is hard to debug
-        // operationally. Failed peers will pick up the stale state on
-        // their next `update_runtime_policies` call thanks to the
-        // existing bail-and-carry plumbing (`pending_refresh` /
-        // `pending_export_apply` flags retry on the next policy edit).
+        // operationally. A failed peer keeps its installed chains (they
+        // advance only on session acknowledgement); the reply names it so
+        // the reload receipt is known-partial. Nothing retries it on its
+        // own: the next generation-route reload re-resolves every live
+        // peer and retargets those whose installed chains differ.
         //
         // Resolution failures are also non-fatal at the per-peer scope:
         // if a single neighbor's effective chain can't be resolved
@@ -4974,8 +4975,9 @@ impl PeerManager {
                 (managed.remote_asn != self.local_asn).then_some(peer.clone())
             })
             .collect();
+        let targeted = targets.len();
 
-        let mut failures: Vec<String> = Vec::new();
+        let mut failures: Vec<(PeerKey, String)> = Vec::new();
         // One absolute RIB budget for the whole fan-out, for the same reason
         // the authoritative snapshot walk has one.
         let mut rib_budget = LazyRibBudget::default();
@@ -4999,13 +5001,13 @@ impl PeerManager {
                         error = %e,
                         "honor_graceful_shutdown: failed to resolve effective chain — skipping peer"
                     );
-                    failures.push(format!("{address}: chain-resolve: {e}"));
+                    failures.push((peer_key, format!("chain-resolve: {e}")));
                     continue;
                 }
             };
             if let Err(e) = self
                 .update_runtime_policies_for_peer_key(
-                    peer_key,
+                    peer_key.clone(),
                     import_policy,
                     export_policy,
                     RefreshFailureHandling::Fatal,
@@ -5022,9 +5024,9 @@ impl PeerManager {
                     peer = %address,
                     error = %e,
                     "honor_graceful_shutdown: failed to hot-apply on peer — desired snapshot \
-                     advances anyway; bail-and-carry will retry on next policy edit"
+                     advances anyway; the next generation-route reload retargets it"
                 );
-                failures.push(format!("{address}: hot-apply: {e}"));
+                failures.push((peer_key, format!("hot-apply: {e}")));
             }
         }
 
@@ -5043,20 +5045,17 @@ impl PeerManager {
             );
             Ok(())
         } else {
-            Err(format!(
-                "honor_graceful_shutdown applied with {} of {} EBGP peers failing \
-                 (snapshot advanced anyway): {}",
-                failures.len(),
-                self.peers
-                    .values()
-                    .filter(|m| m.remote_asn != self.local_asn)
-                    .count(),
-                failures.join("; ")
-            ))
+            Err(HonorKnobPartial {
+                targeted,
+                failed: failures,
+            })
         }
     }
 
-    pub(super) async fn set_honor_blackhole(&mut self, enabled: bool) -> Result<(), String> {
+    pub(super) async fn set_honor_blackhole(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), HonorKnobPartial> {
         if self.current_config.global.honor_blackhole == enabled {
             return Ok(());
         }
@@ -5071,8 +5070,9 @@ impl PeerManager {
                 (managed.remote_asn != self.local_asn).then_some(peer.clone())
             })
             .collect();
+        let targeted = targets.len();
 
-        let mut failures: Vec<String> = Vec::new();
+        let mut failures: Vec<(PeerKey, String)> = Vec::new();
         // One absolute RIB budget for the whole fan-out, for the same reason
         // the authoritative snapshot walk has one.
         let mut rib_budget = LazyRibBudget::default();
@@ -5096,13 +5096,13 @@ impl PeerManager {
                         error = %e,
                         "honor_blackhole: failed to resolve effective chain — skipping peer"
                     );
-                    failures.push(format!("{address}: chain-resolve: {e}"));
+                    failures.push((peer_key, format!("chain-resolve: {e}")));
                     continue;
                 }
             };
             if let Err(e) = self
                 .update_runtime_policies_for_peer_key(
-                    peer_key,
+                    peer_key.clone(),
                     import_policy,
                     export_policy,
                     RefreshFailureHandling::Fatal,
@@ -5119,9 +5119,9 @@ impl PeerManager {
                     peer = %address,
                     error = %e,
                     "honor_blackhole: failed to hot-apply on peer — desired snapshot \
-                     advances anyway; bail-and-carry will retry on next policy edit"
+                     advances anyway; the next generation-route reload retargets it"
                 );
-                failures.push(format!("{address}: hot-apply: {e}"));
+                failures.push((peer_key, format!("hot-apply: {e}")));
             }
         }
 
@@ -5135,16 +5135,10 @@ impl PeerManager {
             );
             Ok(())
         } else {
-            Err(format!(
-                "honor_blackhole applied with {} of {} EBGP peers failing \
-                 (snapshot advanced anyway): {}",
-                failures.len(),
-                self.peers
-                    .values()
-                    .filter(|m| m.remote_asn != self.local_asn)
-                    .count(),
-                failures.join("; ")
-            ))
+            Err(HonorKnobPartial {
+                targeted,
+                failed: failures,
+            })
         }
     }
 

@@ -930,7 +930,12 @@ peer-manager snapshot, config bridge/persister, tracing projection, and gNMI
 dial-out targets all adopt that same complete or known-partial runtime state
 before the owner settles. The operator can then fix the failing TOML and
 reload again to converge. The generation route never produces a known-partial
-receipt: it settles the candidate or restores the prior generation. A command
+receipt: it settles the candidate or restores the prior generation. One
+sequential step does not halt: a `honor_graceful_shutdown` or
+`honor_blackhole` fan-out that leaves EBGP peers on their prior chains installs
+the knob, names each such peer as a failure, and lets the reload continue to a
+`known_partial` receipt. The next generation-route reload retargets those peers
+([Honor-knob partial apply](reload-matrix.md#honor-knob-partial-apply)). A command
 that was definitely not accepted before any prior effect is a clean rejection;
 an accepted reply loss or non-authoritative reconcile instead recovery-fences
 the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits

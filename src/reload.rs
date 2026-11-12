@@ -14,7 +14,7 @@ use rustbgpd_api::owner_publication::{
 };
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
-    OwnedCatalogMutation, OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome,
+    HonorKnobPartial, OwnedCatalogMutation, OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome,
     PeerManagerCommand, PeerManagerNeighborConfig, PeerReconcileAuthority, PeerReconcileEffect,
 };
 use rustbgpd_api::peer_types::{
@@ -482,6 +482,18 @@ impl<'a> SighupMutationProgress<'a> {
                 .lock()
                 .expect("SIGHUP trace poisoned")
                 .applied(bucket, target);
+        }
+    }
+
+    /// Record a step failure that leaves the reload running.
+    fn record_partial(&mut self, failure: ReloadStepFailure) {
+        match &mut self.completion {
+            SighupCompletion::Complete => {
+                self.completion = SighupCompletion::KnownPartial {
+                    failures: vec![failure],
+                };
+            }
+            SighupCompletion::KnownPartial { failures } => failures.push(failure),
         }
     }
 
@@ -4057,111 +4069,44 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     //    same live snapshot the rest of this reload has just shaped.
     if honor_graceful_shutdown_changed {
         let enabled = new_config.global.honor_graceful_shutdown;
-        match peer_step(peer_mgr_tx, &mut progress, |reply| {
+        let dispatch = dispatch_actor_mutation_step(peer_mgr_tx, &progress, |reply| {
             PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }
         })
-        .await
-        {
-            Ok(()) => {
-                progress.record_applied("honor_graceful_shutdown.apply", "[global]");
-                working_config.global.honor_graceful_shutdown = enabled;
-                info!(
-                    enabled,
-                    "reload: [global] honor_graceful_shutdown hot-applied"
-                );
-            }
-            Err(error @ ReloadStepError::AcknowledgementLost) => {
-                return fenced_reload_failure(
-                    &progress,
-                    "honor_graceful_shutdown.apply",
-                    error,
-                    RuntimeConfigFenceReason::AcknowledgementLost,
-                );
-            }
-            Err(error @ ReloadStepError::NotAccepted(_)) => {
-                return acknowledge_partial(
-                    &progress,
-                    working_config,
-                    &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "honor_graceful_shutdown.apply",
-                        target: "[global]".to_string(),
-                        error,
-                    },
-                );
-            }
-            Err(error) => {
-                // `set_honor_graceful_shutdown` is intentionally best-
-                // effort: on the peer-manager side it advances its own
-                // `current_config` *unconditionally* and applies to as
-                // many EBGP peers as it can, returning Err only to
-                // surface which peers failed. Halting the reload here
-                // would roll the daemon's `working_config` back to the
-                // old value while the peer manager's snapshot stays
-                // advanced — the same hard-to-debug drift the
-                // best-effort design exists to avoid. Mirror the
-                // peer-manager's snapshot advance in the daemon view,
-                // and surface the failure list as a warn rather than
-                // a halt. Failed peers retry on their next
-                // `update_runtime_policies` call via the existing
-                // bail-and-carry plumbing (`pending_refresh` /
-                // `pending_export_apply`).
-                warn!(
-                    enabled,
-                    error = %error,
-                    "reload: [global] honor_graceful_shutdown partial-apply — snapshot \
-                     advanced anyway; bail-and-carry will retry failed peers on next \
-                     policy edit"
-                );
-                progress.record_applied("honor_graceful_shutdown.apply", "[global]");
-                working_config.global.honor_graceful_shutdown = enabled;
-            }
-        }
+        .await;
+        working_config = match settle_honor_step(
+            &mut progress,
+            working_config,
+            &desired_snapshot,
+            "honor_graceful_shutdown.apply",
+            dispatch,
+        ) {
+            Ok(config) => config,
+            Err(outcome) => return *outcome,
+        };
+        working_config.global.honor_graceful_shutdown = enabled;
+        info!(
+            enabled,
+            "reload: [global] honor_graceful_shutdown hot-applied"
+        );
     }
     if honor_blackhole_changed {
         let enabled = new_config.global.honor_blackhole;
-        match peer_step(peer_mgr_tx, &mut progress, |reply| {
+        let dispatch = dispatch_actor_mutation_step(peer_mgr_tx, &progress, |reply| {
             PeerManagerCommand::SetHonorBlackhole { enabled, reply }
         })
-        .await
-        {
-            Ok(()) => {
-                progress.record_applied("honor_blackhole.apply", "[global]");
-                working_config.global.honor_blackhole = enabled;
-                info!(enabled, "reload: [global] honor_blackhole hot-applied");
-            }
-            Err(error @ ReloadStepError::AcknowledgementLost) => {
-                return fenced_reload_failure(
-                    &progress,
-                    "honor_blackhole.apply",
-                    error,
-                    RuntimeConfigFenceReason::AcknowledgementLost,
-                );
-            }
-            Err(error @ ReloadStepError::NotAccepted(_)) => {
-                return acknowledge_partial(
-                    &progress,
-                    working_config,
-                    &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "honor_blackhole.apply",
-                        target: "[global]".to_string(),
-                        error,
-                    },
-                );
-            }
-            Err(error) => {
-                warn!(
-                    enabled,
-                    error = %error,
-                    "reload: [global] honor_blackhole partial-apply — snapshot \
-                     advanced anyway; bail-and-carry will retry failed peers on next \
-                     policy edit"
-                );
-                progress.record_applied("honor_blackhole.apply", "[global]");
-                working_config.global.honor_blackhole = enabled;
-            }
-        }
+        .await;
+        working_config = match settle_honor_step(
+            &mut progress,
+            working_config,
+            &desired_snapshot,
+            "honor_blackhole.apply",
+            dispatch,
+        ) {
+            Ok(config) => config,
+            Err(outcome) => return *outcome,
+        };
+        working_config.global.honor_blackhole = enabled;
+        info!(enabled, "reload: [global] honor_blackhole hot-applied");
     }
 
     // 6b. [[fib_tables]] hot-apply. Unlike the honor knobs above, FIB programs
@@ -4829,6 +4774,66 @@ async fn reload_generation_route(
     }
 }
 
+/// Settle one honor-knob fan-out reply. The peer manager installs the knob in
+/// its snapshot even when some EBGP peers keep their prior chains, so a
+/// partial reply still advances the runtime view (the caller does that on
+/// `Ok`) and names each such peer in the known-partial receipt. The reload
+/// continues: the fan-out is best-effort by contract.
+fn settle_honor_step(
+    progress: &mut SighupMutationProgress<'_>,
+    working_config: Config,
+    desired_snapshot: &Arc<AcceptedConfigSnapshot>,
+    bucket: &'static str,
+    dispatch: ReloadDispatch<Result<(), HonorKnobPartial>, String>,
+) -> Result<Config, Box<SighupReloadOutcome>> {
+    match dispatch {
+        ReloadDispatch::Replied(Ok(())) => {
+            progress.record_applied(bucket, "[global]");
+            Ok(working_config)
+        }
+        ReloadDispatch::Replied(Err(partial)) => {
+            warn!(
+                bucket,
+                error = %partial,
+                "reload: [global] honor knob installed, but some EBGP peers kept their prior \
+                 chains; the next generation-route reload retargets them"
+            );
+            progress.record_applied(bucket, "[global]");
+            for (peer, reason) in partial.failed {
+                let target = peer.to_string();
+                if let Some(trace) = &progress.trace {
+                    trace
+                        .lock()
+                        .expect("SIGHUP trace poisoned")
+                        .plan(bucket, target.clone());
+                }
+                progress.record_partial(ReloadStepFailure {
+                    bucket,
+                    target,
+                    error: ReloadStepError::Rejected(reason),
+                });
+            }
+            Ok(working_config)
+        }
+        ReloadDispatch::AcknowledgementLost => Err(Box::new(fenced_reload_failure(
+            progress,
+            bucket,
+            ReloadStepError::AcknowledgementLost,
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        ))),
+        ReloadDispatch::NotAccepted(error) => Err(Box::new(acknowledge_partial(
+            progress,
+            working_config,
+            desired_snapshot,
+            ReloadStepFailure {
+                bucket,
+                target: "[global]".to_string(),
+                error: ReloadStepError::NotAccepted(error),
+            },
+        ))),
+    }
+}
+
 /// Record the terminal known SIGHUP step failure, retaining earlier failures,
 /// and return explicit known-partial authority. Composite finalization must acknowledge the same
 /// peer-manager snapshot, bridge/persister snapshot, tracing projection, and
@@ -4978,8 +4983,10 @@ log_format = "json"
             // +2: so does the excluded same-address pair reload test.
             // +3: the interface-only maxima test writes its prior, raise and
             // lowering.
-            (concat!("write_tier", "_test_config("), 45),
-            (concat!("load_tier", "_test_config("), 37),
+            // +2: the honor partial fan-out test writes its prior and candidate.
+            (concat!("write_tier", "_test_config("), 47),
+            // +1: the honor partial fan-out test loads its prior.
+            (concat!("load_tier", "_test_config("), 38),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),
@@ -7218,6 +7225,111 @@ hold_time = 90
                     .planned
                     .iter()
                     .any(|effect| effect.bucket == bucket)
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    /// A best-effort honor fan-out that leaves peers on their prior chains
+    /// still installs the knob, but the receipt is known-partial and names
+    /// each such peer instead of reporting the step applied.
+    #[tokio::test]
+    async fn honor_knob_partial_fan_out_is_receipted_known_partial() {
+        for (knob, bucket) in [
+            ("honor_graceful_shutdown", "honor_graceful_shutdown.apply"),
+            ("honor_blackhole", "honor_blackhole.apply"),
+        ] {
+            let path = unique_temp_path("reload-honor-partial-fan-out");
+            write_tier_test_config(&path, baseline_toml());
+            let initial = load_tier_test_config(&path);
+            write_tier_test_config(
+                &path,
+                &baseline_toml().replace("asn = 65001", &format!("asn = 65001\n{knob} = true")),
+            );
+            let failed = [
+                rustbgpd_api::peer_types::PeerKey::new("10.0.0.2".parse().unwrap(), None),
+                rustbgpd_api::peer_types::PeerKey::new("10.0.0.9".parse().unwrap(), None),
+            ];
+            let partial = HonorKnobPartial {
+                targeted: 3,
+                failed: failed
+                    .iter()
+                    .map(|peer| (peer.clone(), "hot-apply: session timed out".to_string()))
+                    .collect(),
+            };
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+            let actor = tokio::spawn(async move {
+                match peer_mgr_rx.recv().await.expect("honor command") {
+                    PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }
+                    | PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
+                        assert!(enabled);
+                        reply.send(Err(partial)).unwrap();
+                    }
+                    _ => panic!("unexpected command"),
+                }
+            });
+            let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+            let outcome = reload_config_recorded(
+                path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                None,
+                None,
+                Some(Arc::clone(&trace)),
+            )
+            .await;
+            actor.await.unwrap();
+            let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+                panic!("{knob}: an installed knob must settle with authority: {outcome:?}");
+            };
+            // The snapshot advance is unchanged: the runtime view mirrors the
+            // peer manager, which installed the knob.
+            assert!(if knob == "honor_blackhole" {
+                authority.runtime.global.honor_blackhole
+            } else {
+                authority.runtime.global.honor_graceful_shutdown
+            });
+            let SighupCompletion::KnownPartial { failures } = &authority.completion else {
+                panic!("{knob}: a partial fan-out must not be receipted complete");
+            };
+            assert_eq!(
+                failures
+                    .iter()
+                    .map(|failure| (failure.bucket, failure.target.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(bucket, "10.0.0.2"), (bucket, "10.0.0.9")],
+            );
+            assert!(
+                failures
+                    .iter()
+                    .all(|failure| matches!(failure.error, ReloadStepError::Rejected(_)))
+            );
+            let record = crate::last_sighup_record(
+                std::time::SystemTime::now(),
+                &Ok(Ok(authority.clone())),
+                &trace.lock().unwrap(),
+            );
+            assert_eq!(record.outcome, "known_partial");
+            assert_eq!(record.reason_code, "step_rejected");
+            assert_eq!(record.failure_bucket, bucket);
+            assert_eq!(record.failure_target, "10.0.0.2");
+            assert_eq!(
+                record
+                    .applied
+                    .iter()
+                    .map(|effect| (effect.bucket.as_str(), effect.target.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(bucket, "[global]")],
+            );
+            assert_eq!(
+                record
+                    .unapplied
+                    .iter()
+                    .map(|effect| (effect.bucket.as_str(), effect.target.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(bucket, "10.0.0.2"), (bucket, "10.0.0.9")],
             );
             std::fs::remove_file(path).unwrap();
         }
