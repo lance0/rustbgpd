@@ -252,11 +252,12 @@ const ROOT_EXAMPLES: &str = "Examples:
 
 const NEIGHBOR_EXAMPLES: &str = "Examples:
   # List peers, with optional summary columns
-  rbgp neighbor
   rbgp neighbor --wide
   # Inspect one peer; an IPv6 link-local peer always needs its interface
   rbgp neighbor 192.0.2.1
   rbgp neighbor fe80::1%eth0
+  # Act on an unnumbered (interface-only) peer by its interface name
+  rbgp neighbor swp1 delete
   # Compare two peers' live update-group membership
   rbgp neighbor 192.0.2.1 --compare 192.0.2.2";
 
@@ -338,8 +339,9 @@ enum Command {
     /// Manage BGP neighbors
     #[command(visible_alias = "summary", after_help = NEIGHBOR_EXAMPLES)]
     Neighbor {
-        /// Neighbor address (omit to list all)
-        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        /// Neighbor address, scoped link-local address (fe80::1%eth0), or the
+        /// interface name of an unnumbered peer (omit to list all)
+        #[arg(value_parser = commands::neighbor::parse_neighbor_selector)]
         address: Option<String>,
 
         #[command(subcommand)]
@@ -7921,6 +7923,83 @@ printf '%s\n' "${COMPREPLY[@]}"
                 assert_eq!(parsed, address);
             }
         }
+    }
+
+    #[test]
+    fn neighbor_positional_takes_an_interface_name_but_not_a_command_word() {
+        let cli = Cli::try_parse_from(["rbgp", "neighbor", "swp1", "delete"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Neighbor { address: Some(ref address), action: Some(NeighborAction::Delete), .. }
+                if address == "swp1"
+        ));
+        for token in ["lst", "list", "fe80::1%"] {
+            let Err(error) = Cli::try_parse_from(["rbgp", "neighbor", token]) else {
+                panic!("`rbgp neighbor {token}` must be a usage error");
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(
+                error.to_string().contains("rbgp neighbor swp1 delete"),
+                "{error}"
+            );
+        }
+    }
+
+    /// Every `rbgp neighbor` action name and alias is reserved, so a typo of
+    /// one is a usage error rather than an interface lookup.
+    #[test]
+    fn neighbor_reserved_words_cover_every_action() {
+        use clap::CommandFactory as _;
+        let command = Cli::command();
+        let neighbor = command.find_subcommand("neighbor").unwrap();
+        for action in neighbor.get_subcommands() {
+            for name in std::iter::once(action.get_name()).chain(action.get_all_aliases()) {
+                assert!(
+                    commands::neighbor::NEIGHBOR_RESERVED_WORDS.contains(&name),
+                    "`{name}` is missing from NEIGHBOR_RESERVED_WORDS"
+                );
+            }
+        }
+    }
+
+    /// Load-bearing request shape: an interface name selects the
+    /// interface-only neighbor with an empty address, for every action.
+    #[tokio::test]
+    async fn neighbor_interface_name_actions_send_empty_address_and_interface() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        for action in ["delete", "reset", "disable", "enable"] {
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "--addr",
+                server.addr.as_str(),
+                "neighbor",
+                "swp1",
+                action,
+            ])
+            .unwrap();
+            run(cli, "rbgp").await.unwrap();
+        }
+        let state = &server.state;
+        let delete = state.last_delete_neighbor.lock().await.clone().unwrap();
+        assert_eq!(
+            (delete.address.as_str(), delete.interface.as_str()),
+            ("", "swp1")
+        );
+        let reset = state.last_reset_neighbor.lock().await.clone().unwrap();
+        assert_eq!(
+            (reset.address.as_str(), reset.interface.as_str()),
+            ("", "swp1")
+        );
+        let disable = state.last_disable_neighbor.lock().await.clone().unwrap();
+        assert_eq!(
+            (disable.address.as_str(), disable.interface.as_str()),
+            ("", "swp1")
+        );
+        let enable = state.last_enable_neighbor.lock().await.clone().unwrap();
+        assert_eq!(
+            (enable.address.as_str(), enable.interface.as_str()),
+            ("", "swp1")
+        );
     }
 
     #[test]

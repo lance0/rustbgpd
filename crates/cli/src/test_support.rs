@@ -235,6 +235,9 @@ pub(crate) struct MockState {
     pub(crate) replay_outbound_declined: AtomicBool,
     pub(crate) replay_outbound_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_reset_neighbor: Mutex<Option<server_proto::ResetNeighborRequest>>,
+    pub(crate) last_delete_neighbor: Mutex<Option<server_proto::DeleteNeighborRequest>>,
+    pub(crate) last_enable_neighbor: Mutex<Option<server_proto::EnableNeighborRequest>>,
+    pub(crate) last_disable_neighbor: Mutex<Option<server_proto::DisableNeighborRequest>>,
     pub(crate) refresh_outbound_calls: AtomicUsize,
     pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
@@ -1292,8 +1295,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
 
     async fn delete_neighbor(
         &self,
-        _request: Request<server_proto::DeleteNeighborRequest>,
+        request: Request<server_proto::DeleteNeighborRequest>,
     ) -> Result<Response<server_proto::DeleteNeighborResponse>, Status> {
+        *self.state.last_delete_neighbor.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::DeleteNeighborResponse {}))
     }
 
@@ -1453,15 +1457,17 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
 
     async fn enable_neighbor(
         &self,
-        _request: Request<server_proto::EnableNeighborRequest>,
+        request: Request<server_proto::EnableNeighborRequest>,
     ) -> Result<Response<server_proto::EnableNeighborResponse>, Status> {
+        *self.state.last_enable_neighbor.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::EnableNeighborResponse {}))
     }
 
     async fn disable_neighbor(
         &self,
-        _request: Request<server_proto::DisableNeighborRequest>,
+        request: Request<server_proto::DisableNeighborRequest>,
     ) -> Result<Response<server_proto::DisableNeighborResponse>, Status> {
+        *self.state.last_disable_neighbor.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::DisableNeighborResponse {}))
     }
 
