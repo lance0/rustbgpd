@@ -1529,13 +1529,21 @@ pub async fn add(
         address,
         &format!("Neighbor {address} added"),
     )?;
-    output::print_next_step(
-        json,
-        &format!(
-            "watch the session establish: rbgp watch {address} (or check: rbgp neighbor {address})"
-        ),
-    );
+    output::print_next_step(json, &add_next_step(address));
     Ok(())
+}
+
+/// The follow-up after `add`. `rbgp watch` takes only an IP or scoped
+/// address, so an interface-only neighbor is checked through
+/// `rbgp neighbor`, which shows its discovery state and session.
+fn add_next_step(address: &str) -> String {
+    if split_scoped_address(address).0.is_empty() {
+        format!("check discovery and the session: rbgp neighbor {address}")
+    } else {
+        format!(
+            "watch the session establish: rbgp watch {address} (or check: rbgp neighbor {address})"
+        )
+    }
 }
 
 pub async fn delete(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
@@ -1921,6 +1929,25 @@ mod tests {
             assert!(
                 error.starts_with("expected a peer IP address or interface name"),
                 "{value:?}: {error}"
+            );
+        }
+    }
+
+    /// `rbgp watch` rejects an interface name, so only address selectors
+    /// are pointed at it after `add`.
+    #[test]
+    fn add_next_step_suggests_watch_only_for_address_selectors() {
+        assert_eq!(
+            add_next_step("swp1"),
+            "check discovery and the session: rbgp neighbor swp1"
+        );
+        for address in ["192.0.2.1", "fe80::2%swp1"] {
+            assert_eq!(
+                add_next_step(address),
+                format!(
+                    "watch the session establish: rbgp watch {address} \
+                     (or check: rbgp neighbor {address})"
+                )
             );
         }
     }
