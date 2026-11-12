@@ -3253,14 +3253,15 @@ fn stall_state(command: &PeerCommand, _: usize) -> SessionAction {
     }
 }
 
-/// Advance to just before the owner's five-second deadline, then admit a
-/// single-peer read whose stalled session query carries the owner past it.
+/// Advance to just before the owner's `deadline`, then admit a single-peer
+/// read whose stalled session query carries the owner past it.
 /// `GetPeerState` is always served in place, unlike a detached `ListPeers`.
 async fn admit_snapshot_across_deadline(
     operator_tx: &mpsc::Sender<EnqueuedOperatorQuery>,
     peer: IpAddr,
+    deadline: Duration,
 ) -> oneshot::Receiver<Option<PeerInfo>> {
-    tokio::time::advance(RIB_REPLY_TIMEOUT.saturating_sub(PEER_QUERY_TIMEOUT / 2)).await;
+    tokio::time::advance(deadline.saturating_sub(PEER_QUERY_TIMEOUT / 2)).await;
     let (reply, infos) = oneshot::channel();
     operator_tx
         .send(
@@ -3279,14 +3280,24 @@ async fn admit_snapshot_across_deadline(
     infos
 }
 
+/// The retained-stale proof and the export replacement have a capacity
+/// deadline only as steps of a policy walk, whose shared budget bounds them;
+/// their single-peer step runs inside an owned hot update and waits for
+/// capacity instead
+/// (`inline_capacity_wait_outlives_rib_reply_timeout_and_then_dispatches`).
+#[derive(Clone, Copy)]
+enum CapacityStep {
+    RetainedStale,
+    ExportReplacement,
+    DatasetExport,
+}
+
 #[tokio::test(start_paused = true)]
 async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch() {
-    for drive_kind in [
-        Drive::RetainedStaleCapacity,
-        Drive::ExportReplacementCapacity,
-        Drive::DatasetExportCapacity {
-            failed_restore: false,
-        },
+    for step in [
+        CapacityStep::RetainedStale,
+        CapacityStep::ExportReplacement,
+        CapacityStep::DatasetExport,
     ] {
         let peer = PeerId::from_addr("10.39.3.1".parse::<IpAddr>().unwrap());
         let gate = Gate::new();
@@ -3302,13 +3313,47 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
         let (handle, _) = spawn_session(peer.addr(), true, gate.clone(), stall_state, false);
         insert_test_managed_peer(&mut manager, peer.addr(), handle, false);
         let transaction = tokio::spawn(async move {
-            let result = drive(&mut manager, drive_kind, [peer.addr(), peer.addr()]).await;
+            let target = key(peer.addr());
+            let mut walk = super::super::policy::LazyRibBudget::default();
+            let reads = OperatorReadAdmission::Served;
+            let result = match step {
+                CapacityStep::RetainedStale => manager
+                    .query_peer_retained_stale(&target, Some(&mut walk), reads)
+                    .await
+                    .map(drop)
+                    .map_err(|error| error.to_string()),
+                CapacityStep::ExportReplacement => manager
+                    .replace_peer_export_policy_in_rib(
+                        &target,
+                        Some(deny_policy_chain()),
+                        Some(&mut walk),
+                        reads,
+                    )
+                    .await
+                    .map_err(|error| error.to_string()),
+                CapacityStep::DatasetExport => {
+                    drive(
+                        &mut manager,
+                        Drive::DatasetExportCapacity {
+                            failed_restore: false,
+                        },
+                        [peer.addr(), peer.addr()],
+                    )
+                    .await
+                }
+            };
             (manager, result)
         });
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
-        let infos = admit_snapshot_across_deadline(&operator_tx, peer.addr()).await;
+        let deadline = match step {
+            CapacityStep::DatasetExport => RIB_REPLY_TIMEOUT,
+            CapacityStep::RetainedStale | CapacityStep::ExportReplacement => {
+                RIB_BATCH_REPLY_TIMEOUT
+            }
+        };
+        let infos = admit_snapshot_across_deadline(&operator_tx, peer.addr(), deadline).await;
         assert!(
             !transaction.is_finished(),
             "owner expiry must not abandon an admitted read"
@@ -3322,7 +3367,10 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
             .unwrap()
             .unwrap();
         assert!(matches!(infos, Some(ref info) if info.stale));
-        let (mut manager, result) = transaction.await.unwrap();
+        let (mut manager, result) = tokio::time::timeout(Duration::from_mins(5), transaction)
+            .await
+            .expect("an expired capacity wait returns")
+            .unwrap();
         assert!(
             result.is_err(),
             "expired capacity must reject before dispatch"
@@ -3334,6 +3382,94 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
         for (_, managed) in manager.peers.drain() {
             managed.into_parts().0.shutdown().await.unwrap().unwrap();
         }
+    }
+}
+
+/// The single-peer export replacement runs only inside an owned hot update,
+/// whose settlement owner bounds it, and a miss there fences. So with no
+/// walk budget it waits for capacity past `RIB_REPLY_TIMEOUT` rather than
+/// refusing, and dispatches once the mailbox drains.
+#[tokio::test(start_paused = true)]
+async fn inline_capacity_wait_outlives_rib_reply_timeout_and_then_dispatches() {
+    let peer = "10.39.3.3".parse::<IpAddr>().unwrap();
+    let gate = Gate::new();
+    let (mut manager, _) = rfc8212_status_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let (reply, _response) = oneshot::channel();
+    rib_tx
+        .try_send(RibUpdate::QueryPeerRetainedStale {
+            peer: PeerId::from_addr(peer),
+            reply,
+        })
+        .unwrap();
+    manager.rib_tx = rib_tx;
+    let (handle, _) = spawn_session(peer, true, gate.clone(), stall_state, false);
+    insert_test_managed_peer(&mut manager, peer, handle, false);
+    let transaction = tokio::spawn(async move {
+        let result = manager
+            .replace_peer_export_policy_in_rib(
+                &key(peer),
+                Some(deny_policy_chain()),
+                None,
+                OperatorReadAdmission::Served,
+            )
+            .await;
+        (manager, result)
+    });
+    tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+    assert!(
+        !transaction.is_finished(),
+        "the owned step still waits for capacity"
+    );
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::QueryPeerRetainedStale { .. })
+    ));
+    let Some(RibUpdate::ReplacePeerExportPolicy { reply, .. }) = rib_rx.recv().await else {
+        panic!("the replacement dispatches once capacity returns");
+    };
+    reply.send(Ok(())).unwrap();
+    let (mut manager, result) = tokio::time::timeout(Duration::from_mins(1), transaction)
+        .await
+        .expect("the replacement completes once the RIB answers")
+        .unwrap();
+    result.unwrap();
+    for (_, managed) in manager.peers.drain() {
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
+    }
+}
+
+/// The single-peer retained-stale proof (an owned hot update's RFC 8212
+/// qualification) waits for the RIB's answer past `RIB_REPLY_TIMEOUT`
+/// instead of failing the update, which would fence its owner.
+#[tokio::test(start_paused = true)]
+async fn inline_retained_stale_proof_waits_past_rib_reply_timeout() {
+    let peer = "10.39.3.4".parse::<IpAddr>().unwrap();
+    let gate = Gate::new();
+    let (mut manager, _) = rfc8212_status_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    manager.rib_tx = rib_tx;
+    let (handle, _) = spawn_session(peer, true, gate.clone(), stall_state, false);
+    insert_test_managed_peer(&mut manager, peer, handle, false);
+    let transaction = tokio::spawn(async move {
+        let result = manager
+            .query_peer_retained_stale(&key(peer), None, OperatorReadAdmission::Served)
+            .await
+            .map_err(|error| error.to_string());
+        (manager, result)
+    });
+    let Some(RibUpdate::QueryPeerRetainedStale { reply, .. }) = rib_rx.recv().await else {
+        panic!("the proof dispatches");
+    };
+    tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+    let _ = reply.send(3);
+    let (mut manager, result) = tokio::time::timeout(Duration::from_mins(1), transaction)
+        .await
+        .expect("the proof completes once the RIB answers")
+        .unwrap();
+    assert_eq!(result, Ok(3));
+    for (_, managed) in manager.peers.drain() {
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
 }
 
@@ -3360,7 +3496,7 @@ async fn dataset_reply_waits_for_completion_past_rib_reply_timeout() {
     let RibUpdate::ReevaluatePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap() else {
         panic!("expected actual dataset reevaluation dispatch")
     };
-    let infos = admit_snapshot_across_deadline(&operator_tx, peer).await;
+    let infos = admit_snapshot_across_deadline(&operator_tx, peer, RIB_REPLY_TIMEOUT).await;
     assert!(
         tokio::time::timeout(PEER_QUERY_TIMEOUT, infos)
             .await

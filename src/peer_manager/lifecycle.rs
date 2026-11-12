@@ -1777,6 +1777,9 @@ impl PeerManager {
                         reason: "session knobs changed but manager metadata awaits unlock confirmation",
                     },
                     true,
+                    // Every production caller is settlement-owned, and a
+                    // miss here fences: wait for the RIB.
+                    None,
                 )
                 .await
             {
@@ -3259,23 +3262,30 @@ impl PeerManager {
             .map_err(|failure| failure.error)
     }
 
-    /// Refresh admission and acknowledgement share one absolute deadline.
-    /// Finish an already-admitted read before returning, even if that deadline
-    /// expires meanwhile. Keep transport failures separate from the RIB's
-    /// result: callers retain their existing partial-effect semantics.
+    /// With `bound`, refresh admission and acknowledgement share one absolute
+    /// deadline. Finish an already-admitted read before returning, even if
+    /// that deadline expires meanwhile. Without it, both halves wait for the
+    /// RIB: the caller's settlement owner bounds the operation, and a timer
+    /// here could only turn a slow but live RIB into a fence. Either way both
+    /// halves run under `await_with_readiness`, so readiness is served while
+    /// the mailbox is full or the reply is pending. Keep transport failures
+    /// separate from the RIB's result: callers retain their existing
+    /// partial-effect semantics.
     async fn refresh_peer_outbound_in_rib(
         &mut self,
         peer: &PeerKey,
         admission: OperatorReadAdmission,
         confirm_unlock: bool,
+        bound: Option<std::time::Duration>,
     ) -> Result<Result<(), RibCommandError>, String> {
-        let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
+        let deadline = bound.map(|bound| tokio::time::Instant::now() + bound);
         let rib_peer = self.rib_peer_of(peer);
         let session_id = self.peers.get(peer).map_or(0, ManagedPeer::session_id);
+        // Only reachable with a bound.
         let timed_out = || {
             format!(
                 "outbound refresh for peer {peer} timed out after {:?}",
-                super::RIB_REPLY_TIMEOUT
+                bound.unwrap_or_default()
             )
         };
         let rib_tx = self.rib_tx.clone();
@@ -3285,7 +3295,7 @@ impl PeerManager {
             })?;
             // Never admit after the absolute deadline when capacity returns
             // during read servicing.
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 return Err(timed_out());
             }
             let (reply, response) = oneshot::channel();
@@ -3306,6 +3316,9 @@ impl PeerManager {
                 .map_err(|_| format!("RIB dropped reply for outbound refresh of peer {peer}"))
         };
         let bounded = async {
+            let Some(deadline) = deadline else {
+                return round_trip.await;
+            };
             tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(deadline) => Err(timed_out()),
@@ -3338,7 +3351,12 @@ impl PeerManager {
         }
 
         match self
-            .refresh_peer_outbound_in_rib(&peer, OperatorReadAdmission::Served, false)
+            .refresh_peer_outbound_in_rib(
+                &peer,
+                OperatorReadAdmission::Served,
+                false,
+                Some(super::RIB_REPLY_TIMEOUT),
+            )
             .await
             .map_err(OutboundRefreshError::Internal)?
         {

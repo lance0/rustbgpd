@@ -1080,6 +1080,122 @@ async fn ipv6_unlock_waits_for_rib_confirmation_before_bookkeeping() {
     );
 }
 
+/// An owned hot update whose session queued an IPv6 unlock, with the RIB's
+/// mailbox full behind that unlock. Returns the manager's readiness lane.
+fn owned_unlock_fixture(
+    rib_capacity: usize,
+) -> (
+    PeerManager,
+    mpsc::Receiver<RibUpdate>,
+    mpsc::Sender<PeerManagerReadinessQuery>,
+    PeerManagerNeighborConfig,
+) {
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let mut mgr = test_peer_manager().with_readiness_queries(readiness_rx);
+    let (rib_tx, rib_rx) = mpsc::channel(rib_capacity);
+    mgr.rib_tx = rib_tx.clone();
+    let (commands, mut command_rx) = mpsc::channel(8);
+    let addr: IpAddr = "10.0.0.93".parse().unwrap();
+    let peer = PeerId::from_addr(addr);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if let PeerCommand::UpdateRuntimeConfig { reply, .. } = command {
+                rib_tx
+                    .send(RibUpdate::PeerFamilySendable {
+                        peer,
+                        session_id: 1,
+                        family: (Afi::Ipv6, Safi::Unicast),
+                        add_path_send_limit: None,
+                    })
+                    .await
+                    .unwrap();
+                let _ = reply.send(Ok(true));
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(commands, task),
+        false,
+    );
+    let mut updated = make_config(addr, 65002);
+    updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    (mgr, rib_rx, readiness_tx, updated)
+}
+
+/// Every production caller of the unlock confirmation is settlement-owned
+/// and a miss fences, so a RIB that answers after `RIB_REPLY_TIMEOUT`
+/// still completes the hot update instead of reporting divergence.
+#[tokio::test(start_paused = true)]
+async fn owned_ipv6_unlock_confirmation_waits_past_rib_reply_timeout() {
+    use rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome;
+
+    let (mut mgr, mut rib_rx, _readiness, updated) = owned_unlock_fixture(8);
+    let (outcome, ()) = tokio::join!(mgr.hot_update_peer_owned(updated), async {
+        assert!(matches!(
+            rib_rx.recv().await,
+            Some(RibUpdate::PeerFamilySendable { .. })
+        ));
+        let Some(RibUpdate::ConfirmPeerOutbound { reply, .. }) = rib_rx.recv().await else {
+            panic!("unlock must await the ordered RIB confirmation");
+        };
+        tokio::time::sleep(crate::peer_manager::RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        let _ = reply.send(Ok(()));
+    });
+    assert!(
+        matches!(outcome, OwnedHotUpdatePeerOutcome::Success),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        mgr.peers[&key("10.0.0.93".parse().unwrap())]
+            .transport_config
+            .local_ipv6_nexthop,
+        Some("2001:db8::1".parse().unwrap())
+    );
+}
+
+/// The owned unlock confirmation waits for mailbox space without a
+/// deadline of its own, and readiness is served throughout that wait.
+#[tokio::test(start_paused = true)]
+async fn owned_ipv6_unlock_confirmation_serves_readiness_on_a_full_rib_mailbox() {
+    use rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome;
+
+    // The session's unlock takes the only slot, so the confirmation parks
+    // on admission.
+    let (mut mgr, mut rib_rx, readiness, updated) = owned_unlock_fixture(1);
+    let driver = async {
+        tokio::time::sleep(crate::peer_manager::RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        let (reply, pong) = oneshot::channel();
+        readiness
+            .send(PeerManagerReadinessQuery::Ping { reply })
+            .await
+            .unwrap();
+        pong.await
+            .expect("readiness is served while the confirmation waits for mailbox space");
+        assert!(matches!(
+            rib_rx.recv().await,
+            Some(RibUpdate::PeerFamilySendable { .. })
+        ));
+        let Some(RibUpdate::ConfirmPeerOutbound { reply, .. }) = rib_rx.recv().await else {
+            panic!("the confirmation is admitted once the mailbox drains");
+        };
+        reply.send(Ok(())).unwrap();
+    };
+    // An early outcome leaves the driver's handshake unanswered; the outer
+    // bound turns that into a failure instead of a hang.
+    let (outcome, ()) = tokio::time::timeout(Duration::from_mins(1), async {
+        tokio::join!(mgr.hot_update_peer_owned(updated), driver)
+    })
+    .await
+    .expect("the confirmation waits for mailbox space and readiness is served meanwhile");
+    assert!(
+        matches!(outcome, OwnedHotUpdatePeerOutcome::Success),
+        "{outcome:?}"
+    );
+}
+
 #[tokio::test]
 async fn hot_update_peer_skips_outbound_refresh_when_export_knobs_unchanged() {
     let (_tx, rx) = mpsc::channel(16);
