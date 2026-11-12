@@ -3385,6 +3385,40 @@ async fn inline_capacity_wait_outlives_rib_reply_timeout_and_then_dispatches() {
     }
 }
 
+/// The single-peer retained-stale proof (an owned hot update's RFC 8212
+/// qualification) waits for the RIB's answer past `RIB_REPLY_TIMEOUT`
+/// instead of failing the update, which would fence its owner.
+#[tokio::test(start_paused = true)]
+async fn inline_retained_stale_proof_waits_past_rib_reply_timeout() {
+    let peer = "10.39.3.4".parse::<IpAddr>().unwrap();
+    let gate = Gate::new();
+    let (mut manager, _) = rfc8212_status_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    manager.rib_tx = rib_tx;
+    let (handle, _) = spawn_session(peer, true, gate.clone(), stall_state, false);
+    insert_test_managed_peer(&mut manager, peer, handle, false);
+    let transaction = tokio::spawn(async move {
+        let result = manager
+            .query_peer_retained_stale(&key(peer), None, OperatorReadAdmission::Served)
+            .await
+            .map_err(|error| error.to_string());
+        (manager, result)
+    });
+    let Some(RibUpdate::QueryPeerRetainedStale { reply, .. }) = rib_rx.recv().await else {
+        panic!("the proof dispatches");
+    };
+    tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+    let _ = reply.send(3);
+    let (mut manager, result) = tokio::time::timeout(Duration::from_mins(1), transaction)
+        .await
+        .expect("the proof completes once the RIB answers")
+        .unwrap();
+    assert_eq!(result, Ok(3));
+    for (_, managed) in manager.peers.drain() {
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
+    }
+}
+
 /// A dispatched dataset re-evaluation is uncancellable RIB work. Its reply
 /// is awaited to completion while reads are served, however long the
 /// full-table work takes; no five-second timer may report it ambiguous.
