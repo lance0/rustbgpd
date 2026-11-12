@@ -30,6 +30,7 @@ use crate::config::{
 };
 use crate::policy_admin;
 
+use super::conditional::{ConditionalReplyWait, ConditionalRequestError};
 use super::lifecycle::PeerReshapeSnapshotOutcome;
 use super::policy::{DatasetDependent, DatasetRefreshFailure, PolicySnapshotFailureKind};
 use super::{OperatorReadAdmission, PeerManager};
@@ -364,14 +365,26 @@ impl PeerManager {
         //    candidate chains and prior gates. A changed definition that
         //    reads a dataset this generation swaps keeps its prior applied
         //    state until the re-observation, since the dataset handles still
-        //    hold the prior contents. An unacknowledged install is
-        //    ambiguous: the RIB may have committed it.
+        //    hold the prior contents. Nothing precedes this step, so an
+        //    install that never left the mailbox rejects the generation with
+        //    no effect. An unacknowledged install is ambiguous: the RIB may
+        //    have committed it. The reply has no deadline of its own; the
+        //    reload's settlement budget bounds it.
         match self
-            .install_conditional_advertisements(conditional, &changed_datasets)
+            .install_conditional_advertisements(
+                conditional,
+                &changed_datasets,
+                ConditionalReplyWait::Owned,
+            )
             .await
         {
             Ok(prior) => applied.conditional_prior = prior,
-            Err(error) => {
+            Err(error @ ConditionalRequestError::NotDispatched(_)) => {
+                return ReloadGenerationOutcome::RejectedNoEffect(format!(
+                    "conditional advertisements: {error}"
+                ));
+            }
+            Err(error @ ConditionalRequestError::Unacknowledged(_)) => {
                 return ReloadGenerationOutcome::CompensationAmbiguous(format!(
                     "conditional advertisements: {error}"
                 ));
@@ -450,9 +463,11 @@ impl PeerManager {
         // re-observe under the ordinary debounce. A definition step 0 added
         // or changed was held rather than evaluated against the prior
         // contents, so it is evaluated now, immediately (ADR-0137 Decision
-        // 6). An
-        // unacknowledged request is ambiguous: the RIB may have re-observed
-        // against the candidate dataset, and no capture exists to undo it.
+        // 6). Any failure is ambiguous. An unacknowledged request may have
+        // re-observed against the candidate dataset, and no capture exists
+        // to undo it. Even a request that never left the mailbox does not
+        // prove the trackers unchanged: route churn evaluated while it
+        // waited reads the already-published candidate dataset.
         // The unwind restores a successful re-observation's capture after
         // the dataset rollback; an earlier install capture already predates
         // it.

@@ -1668,8 +1668,13 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
                 attachments: BTreeMap::from([(peers[0].into(), vec![Arc::from("backup")])]),
             };
             let prior = manager
-                .install_conditional_advertisements(set.clone(), &[])
-                .await?;
+                .install_conditional_advertisements(
+                    set.clone(),
+                    &[],
+                    crate::peer_manager::conditional::ConditionalReplyWait::Owned,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             assert!(prior.is_some());
             assert_eq!(manager.conditional_advertisements, set);
             Ok(())
