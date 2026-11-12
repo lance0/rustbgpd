@@ -852,7 +852,8 @@ mixed shape has a single changed pair, so that per-peer walk stays empty.
   the changed peers into `G` contiguous groups; the first `changed % G` groups
   get one extra peer. Group 0 keeps the global `member-out`; group `k >= 1`
   gets a per-neighbor `member-out-k` chain that adds the generation marker plus
-  the constant community `65401:k`. The daemon batches group 0
+  the constant community `65401:k`; with `GEN_FILTER_COUNT`, generation B
+  rejects the named set in every pair chain. The daemon batches group 0
   (`ceil(changed / G)` peers, when at least 2) and walks the other
   `changed - ceil(changed / G)` one at a time. `G = changed` is the distinct
   shape: no cohort, every changed peer in the walk. Seven pairs at 700 changed
@@ -870,20 +871,26 @@ mixed shape has a single changed pair, so that per-peer walk stays empty.
 Every native SIGHUP run prints three new records; existing rows are unchanged.
 Each `/metrics` render resets `bgp_rib_actor_slice_max_microseconds`, so the
 harness records `{stage="actor_poll"}` from every scrape it makes: the
-pre-trigger outcome snapshot, each one-second settlement check, and one
-closing scrape at receiver completion. Another `/metrics` reader during the
+outcome baseline before staging, one scrape just before the SIGHUP, each
+one-second settlement check, and one closing scrape at receiver completion.
+The scrape before the SIGHUP resets the gauge, so work during staging (for
+example a stage command that waits for a previous roster to settle) stays out
+of the reload window. Another `/metrics` reader during the
 reload also resets the gauge and hides part of the window from these records.
 
-- `reloadstall_actor_scrape_csv,reload,seq,since_trigger_ms,actor_poll_max_us`:
-  one row per scrape. `seq` 0 is the pre-trigger snapshot. It covers the time
-  since the previous scrape and is not counted in the reload window.
-- `reloadstall_actor_csv,reload,outcome,scrapes,actor_poll_pre_us,actor_poll_max_us,
+- `reloadstall_actor_scrape_csv,reload,seq,window,since_trigger_ms,actor_poll_max_us`:
+  one row per scrape. `window` is `pre_stage` (the outcome baseline, covering
+  the time since the previous scrape), `pre_trigger` (covering staging), or
+  `reload`. The two bracket rows have `seq` 0 and are not counted in the
+  reload window; reload-window scrapes are numbered from 1.
+- `reloadstall_actor_csv,reload,outcome,scrapes,actor_poll_pre_us,actor_poll_stage_us,actor_poll_max_us,
   phase_lines,phase_outcome,cohort_targets,remainder_targets,
   authoritative_remainder_apply_us,phase_total_us`: one row per reload.
   `outcome` is the `bgp_sighup_reload_outcomes_total` label that moved
   (`complete`, or `rejected_no_effect` for a rolled-back reload). The run still
-  fails on a non-complete outcome, after printing this row. `actor_poll_max_us`
-  is the max over seq ≥ 1. The `phase_*` and target columns come from
+  fails on a non-complete outcome, after printing this row. `actor_poll_pre_us`
+  and `actor_poll_stage_us` are the two bracket values; `actor_poll_max_us` is
+  the max over the reload window only. The `phase_*` and target columns come from
   `RELOADSTALL_DAEMON_LOG`; `phase_lines` above 1 means a generation
   compensation re-applied the prior policy.
 - `reloadstall_actor_run_csv,reloads,actor_poll_max_us`: the max over every

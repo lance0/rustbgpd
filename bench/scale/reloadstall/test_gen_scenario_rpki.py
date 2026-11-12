@@ -221,10 +221,12 @@ class EvpnScenarioTests(unittest.TestCase):
 
 
 class ExportPairsScenarioTests(unittest.TestCase):
-    def generate(self, directory: Path, changed: int | None, pairs: str | None):
+    def generate(self, directory: Path, changed: int | None, pairs: str | None,
+                 extra_env: dict[str, str] | None = None):
         env = {key: value for key, value in os.environ.items() if not key.startswith("GEN_")}
         if pairs is not None:
             env["GEN_EXPORT_PAIRS"] = pairs
+        env.update(extra_env or {})
         args = [sys.executable, str(GENERATOR), "8", str(directory), "1790"]
         if changed is not None:
             args.append(str(changed))
@@ -256,6 +258,20 @@ class ExportPairsScenarioTests(unittest.TestCase):
                     self.assertIn(f"policy member-out-{pair} {{\n    term tag {{ add community "
                                   f"{community}; add community 65401:{pair}; accept }}", policy)
                 self.assertNotIn("member-out-3", policy)
+
+    def test_filtering_generation_rejects_the_named_set_in_every_pair(self):
+        with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
+            out = Path(tmp) / "scenario"
+            result = self.generate(out, 7, "3", {"GEN_FILTER_COUNT": "1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            drop = "    term drop-filtered { if route.prefix in filtered { reject } }\n"
+            gen_b = (out / "gen-b.rpol").read_text()
+            for chain, tag in [("member-out", "add community 65400:2000; accept"),
+                               ("member-out-1", "add community 65400:2000; add community 65401:1"),
+                               ("member-out-2", "add community 65400:2000; add community 65401:2")]:
+                self.assertIn(f"policy {chain} {{\n{drop}    term tag {{ {tag}", gen_b)
+            self.assertEqual(gen_b.count(drop), 3)
+            self.assertNotIn("drop-filtered", (out / "gen-a.rpol").read_text())
 
     def test_pairs_reject_invalid_and_non_mixed_shapes(self):
         with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:

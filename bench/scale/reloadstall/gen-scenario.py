@@ -256,10 +256,20 @@ for fname, reject_prefix, community in GENERATIONS:
 # announced 20.0.0.0-26.x base table), so the import chain is content-real:
 # reinstalled per peer, Route Refreshes fire, and routes re-enter the new chain.
 # member-out tags every advertised route with the generation community."""
+    # Filtering generation (B only): reject the named set before tagging, so
+    # observers must see those prefixes withdrawn and everything else re-tagged.
+    filtering = fname == "gen-b.rpol" and filter_count > 0
+    filter_set = (
+        f"prefix-set filtered {{ {', '.join(filtered_prefixes)} }}\n\n" if filtering else ""
+    )
+    filter_term = (
+        "    term drop-filtered { if route.prefix in filtered { reject } }\n" if filtering else ""
+    )
+    # Every changed pair rejects the filtered set, like member-out.
     pair_policies = "".join(
         f"""
 policy member-out-{k} {{
-    term tag {{ add community {community}; add community 65401:{k}; accept }}
+{filter_term}    term tag {{ add community {community}; add community 65401:{k}; accept }}
 }}
 """
         for k in range(1, export_pairs)
@@ -270,15 +280,6 @@ policy stable-out {
     term tag { add community 65400:9000; accept }
 }
 """ if mixed_export_only else ""
-    # Filtering generation (B only): reject the named set before tagging, so
-    # observers must see those prefixes withdrawn and everything else re-tagged.
-    filtering = fname == "gen-b.rpol" and filter_count > 0
-    filter_set = (
-        f"prefix-set filtered {{ {', '.join(filtered_prefixes)} }}\n\n" if filtering else ""
-    )
-    filter_term = (
-        "    term drop-filtered { if route.prefix in filtered { reject } }\n" if filtering else ""
-    )
     rpki_term = (
         "    term reject-rpki-invalid { if route.rpki == invalid { reject } }\n"
         if rpki_cache is not None else ""

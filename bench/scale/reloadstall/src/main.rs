@@ -593,24 +593,32 @@ async fn fetch_settlement_sample(addr: SocketAddr, reload: u32) -> ([u64; 5], Op
 }
 
 /// Actor-turn evidence for one native reload (`reloadstall_actor_csv`).
-/// Scrape 0 is the pre-trigger bracket: it closes the previous window and is
-/// reported but not counted. Later scrapes cover the reload window.
+/// Two brackets precede the window and are reported but never counted:
+/// `pre_stage` (the outcome baseline, before the stage command) and
+/// `pre_trigger` (just before the SIGHUP; it covers staging and resets the
+/// gauge, so the window starts at the trigger). Later scrapes are the window.
 struct ActorWindow {
     reload: u32,
     trigger: Instant,
     scrapes: u32,
     pre_us: Option<u64>,
+    stage_us: Option<u64>,
     max_us: Option<u64>,
 }
 
 impl ActorWindow {
-    fn new(reload: u32, pre_us: Option<u64>) -> Self {
-        println!("{}", actor_scrape_row(reload, 0, 0, pre_us));
+    fn new(reload: u32, pre_us: Option<u64>, stage_us: Option<u64>) -> Self {
+        println!("{}", actor_scrape_row(reload, 0, "pre_stage", 0, pre_us));
+        println!(
+            "{}",
+            actor_scrape_row(reload, 0, "pre_trigger", 0, stage_us)
+        );
         Self {
             reload,
             trigger: Instant::now(),
             scrapes: 0,
             pre_us,
+            stage_us,
             max_us: None,
         }
     }
@@ -621,14 +629,20 @@ impl ActorWindow {
         let since_ms = self.trigger.elapsed().as_millis();
         println!(
             "{}",
-            actor_scrape_row(self.reload, self.scrapes, since_ms, value)
+            actor_scrape_row(self.reload, self.scrapes, "reload", since_ms, value)
         );
     }
 }
 
-fn actor_scrape_row(reload: u32, seq: u32, since_ms: u128, value: Option<u64>) -> String {
+fn actor_scrape_row(
+    reload: u32,
+    seq: u32,
+    window: &str,
+    since_ms: u128,
+    value: Option<u64>,
+) -> String {
     format!(
-        "reloadstall_actor_scrape_csv,{reload},{seq},{since_ms},{}",
+        "reloadstall_actor_scrape_csv,{reload},{seq},{window},{since_ms},{}",
         or_absent(value)
     )
 }
@@ -718,10 +732,11 @@ fn daemon_log_len(path: &Path) -> u64 {
 
 fn actor_row(window: &ActorWindow, outcome: &str, phase: &PhaseFields) -> String {
     format!(
-        "reloadstall_actor_csv,{},{outcome},{},{},{},{},{},{},{},{},{}",
+        "reloadstall_actor_csv,{},{outcome},{},{},{},{},{},{},{},{},{},{}",
         window.reload,
         window.scrapes,
         or_absent(window.pre_us),
+        or_absent(window.stage_us),
         or_absent(window.max_us),
         phase.lines,
         or_absent(phase.outcome.as_deref()),
@@ -5074,11 +5089,11 @@ fn main() {
         );
         if reload_metrics_addr.is_some() {
             println!(
-                "reloadstall_actor_scrape_csv_header,reload,seq,since_trigger_ms,actor_poll_max_us"
+                "reloadstall_actor_scrape_csv_header,reload,seq,window,since_trigger_ms,actor_poll_max_us"
             );
             println!(
                 "reloadstall_actor_csv_header,reload,outcome,scrapes,actor_poll_pre_us,\
-                 actor_poll_max_us,phase_lines,phase_outcome,cohort_targets,remainder_targets,\
+                 actor_poll_stage_us,actor_poll_max_us,phase_lines,phase_outcome,cohort_targets,remainder_targets,\
                  authoritative_remainder_apply_us,phase_total_us"
             );
             println!("reloadstall_actor_run_csv_header,reloads,actor_poll_max_us");
@@ -5193,8 +5208,16 @@ fn main() {
                 println!("reload {r} reader_pacing count={paced_readers} pause_ms={} delay_ms={} bytes={}",
                     reader_pacing.pause.as_millis(), reader_pacing.delay.as_millis(), reader_pacing.bytes);
             }
+            // Close the staging window right before the trigger: this scrape
+            // resets the actor gauge, so staging work (a stage command waiting
+            // for a previous roster to settle) never lands in this reload.
+            let actor_stage_us = match reload_metrics_addr {
+                Some(addr) => fetch_settlement_sample(addr, r).await.1,
+                None => None,
+            };
             let t_hup = now_us(&ctx);
-            let mut actor_window = reload_before.map(|_| ActorWindow::new(r, actor_pre_us));
+            let mut actor_window =
+                reload_before.map(|_| ActorWindow::new(r, actor_pre_us, actor_stage_us));
             for observer in ctx.obs.iter().take(changed_peers as usize) {
                 observer
                     .expected_community
@@ -6674,6 +6697,36 @@ mod tests {
         let trigger = source[rss..].find("let t_hup = now_us(&ctx)").unwrap() + rss;
         assert!(copy < stage && stage < rss && rss < trigger);
         assert_eq!(source.matches("RELOADSTALL_STAGE_CMD").count(), 4);
+    }
+
+    #[test]
+    fn actor_window_starts_after_staging_at_the_trigger() {
+        // Split needles so this test's own text cannot satisfy the search.
+        let source = include_str!("main.rs");
+        let stage = source
+            .find(&[".env(\"RELOADSTALL_STAGE_", "GENERATION\", generation)"].concat())
+            .unwrap();
+        let bracket = source[stage..]
+            .find(&["let actor_stage_us = match reload_", "metrics_addr"].concat())
+            .expect("a pre-trigger actor scrape follows the stage hook")
+            + stage;
+        let trigger = source[stage..]
+            .find(&["let t_hup = now_us", "(&ctx)"].concat())
+            .unwrap()
+            + stage;
+        assert!(stage < bracket && bracket < trigger);
+        // Neither bracket counts toward the reload window or its max.
+        let mut window = ActorWindow::new(1, Some(70_000), Some(90_000));
+        assert_eq!(window.max_us, None);
+        window.record(Some(1_200));
+        window.record(None);
+        assert_eq!((window.scrapes, window.max_us), (2, Some(1_200)));
+        assert_eq!(
+            (window.pre_us, window.stage_us),
+            (Some(70_000), Some(90_000))
+        );
+        assert!(actor_row(&window, "complete", &PhaseFields::default())
+            .starts_with("reloadstall_actor_csv,1,complete,2,70000,90000,1200,0,"));
     }
 
     #[test]
