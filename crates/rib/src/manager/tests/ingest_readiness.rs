@@ -26,7 +26,7 @@ fn answered(counts: &BTreeMap<&'static str, usize>, stage: &str) -> usize {
 /// an unanswered query stays outstanding, because the send path also calls
 /// the observer at marks that are not checkpoints. `PRE_QUEUED` counts a
 /// query queued before `work` and answered inside it.
-fn count_answered_readiness(
+pub(super) fn count_answered_readiness(
     manager: &mut RibManager,
     readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
     work: impl FnOnce(&mut RibManager),
