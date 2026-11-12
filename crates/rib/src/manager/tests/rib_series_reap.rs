@@ -273,23 +273,65 @@ fn pub_fns(source: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// The RIB's non-test sources under `dir`, concatenated.
-fn rib_sources(dir: &std::path::Path, out: &mut String) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        let text = path.to_string_lossy();
-        if path.is_dir() {
-            if !text.ends_with("/tests") {
-                rib_sources(&path, out);
+/// The RIB's non-test sources under `crate_dir`'s `src/`, concatenated. The
+/// skips read the path below `crate_dir`, so a checkout under a directory
+/// named like `bench-x` or `tests` still yields every source.
+fn rib_sources(crate_dir: &std::path::Path) -> String {
+    fn walk(crate_dir: &std::path::Path, dir: &std::path::Path, out: &mut String) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = path.strip_prefix(crate_dir).unwrap().to_string_lossy();
+            if path.is_dir() {
+                if !text.ends_with("/tests") {
+                    walk(crate_dir, &path, out);
+                }
+            } else if text.ends_with(".rs")
+                && !text.ends_with("tests.rs")
+                && !text.contains("test_support")
+                && !text.contains("bench")
+            {
+                out.push_str(&std::fs::read_to_string(&path).unwrap());
             }
-        } else if text.ends_with(".rs")
-            && !text.ends_with("tests.rs")
-            && !text.contains("test_support")
-            && !text.contains("bench")
-        {
-            out.push_str(&std::fs::read_to_string(&path).unwrap());
         }
     }
+    let mut out = String::new();
+    walk(crate_dir, &crate_dir.join("src"), &mut out);
+    out
+}
+
+/// A crate checked out under a path containing `bench`, `tests` and
+/// `test_support` still has its writers found, and its own bench, test and
+/// test-support files are still skipped. Red proof: matching the skips
+/// against the absolute path finds no writers.
+#[test]
+fn rib_sources_skips_by_crate_relative_path() {
+    let crate_dir = std::env::temp_dir()
+        .join(format!("bench-reap-{}", std::process::id()))
+        .join("tests/test_support/crates/rib");
+    let files = [
+        ("src/lib.rs", "metrics.lib_writer("),
+        ("src/manager/mod.rs", "metrics.manager_writer("),
+        ("src/manager/bench_support.rs", "metrics.bench_writer("),
+        ("src/manager/tests.rs", "metrics.tests_rs_writer("),
+        ("src/manager/tests/census.rs", "metrics.tests_dir_writer("),
+        ("src/test_support.rs", "metrics.support_writer("),
+    ];
+    for (file, text) in files {
+        let path = crate_dir.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let found = rib_sources(&crate_dir);
+    std::fs::remove_dir_all(crate_dir.ancestors().nth(4).unwrap()).unwrap();
+    let found: BTreeSet<_> = files
+        .iter()
+        .map(|(_, text)| *text)
+        .filter(|text| found.contains(text))
+        .collect();
+    assert_eq!(
+        found,
+        BTreeSet::from(["metrics.lib_writer(", "metrics.manager_writer("])
+    );
 }
 
 /// The static census. Maps every public `BgpMetrics` method to the
@@ -316,8 +358,7 @@ fn the_rib_reap_list_is_the_families_the_rib_writes() {
     };
     let listed = fields_of(body_of("reap_rib_peer_series"));
     let peer_labelled = peer_labelled_vecs(metrics);
-    let mut rib = String::new();
-    rib_sources(&crate_dir.join("src"), &mut rib);
+    let rib = rib_sources(crate_dir);
     let written: BTreeSet<_> = fns
         .iter()
         .filter(|(name, _)| !name.starts_with("reap") && rib.contains(&format!(".{name}(")))
