@@ -256,6 +256,10 @@ fn is_outbound_refresh(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::RefreshPeerOutbound { .. })
 }
 
+fn is_outbound_confirm(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::ConfirmPeerOutbound { .. })
+}
+
 fn is_prestage(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::PrepareExportPolicyDestination { .. })
 }
@@ -770,15 +774,15 @@ const WAIT_SITES: &[WaitSite] = &[
     },
     WaitSite {
         site: "lifecycle.rs::refresh_peer_outbound_in_rib",
-        awaits: "RibUpdate::RefreshPeerOutbound after acknowledged export-knob update",
+        awaits: "RibUpdate::ConfirmPeerOutbound after the session acknowledged an IPv6 unlock",
         drive: Drive::HotExportKnobs,
-        rib: RibHold::Reply(is_outbound_refresh),
+        rib: RibHold::Reply(is_outbound_confirm),
         session: answer_all,
         additional_entry: Some("hot_update_peer_in_place"),
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "the session has candidate knobs while manager metadata retains prior \
-                     values until refresh succeeds; reads would mix the two",
+                     values until the RIB confirms the unlock; reads would mix the two",
         },
         completion: Completion::Finished,
     },
@@ -1043,6 +1047,7 @@ fn answer_rib(
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
         | RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }
+        | RibUpdate::ConfirmPeerOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
             let _ = reply.send(Ok(()));
         }
@@ -1216,13 +1221,15 @@ fn answer_session(command: PeerCommand, addr: IpAddr, established: bool, fail: b
         | PeerCommand::SendRouteRefresh { reply, .. } => {
             let _ = reply.send(if fail { failed() } else { Ok(()) });
         }
-        PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+        PeerCommand::UpdateRuntimeConfig { config, reply } => {
+            // A newly configured IPv6 next hop unlocks the withheld family,
+            // which the session itself re-emits.
             let _ = reply.send(if fail {
                 Err(rustbgpd_transport::PeerCommandError::CommandFailed(
                     "test: injected failure".to_string(),
                 ))
             } else {
-                Ok(false)
+                Ok(config.local_ipv6_nexthop.is_some())
             });
         }
         PeerCommand::RevalidateImport { reply, .. } => {
@@ -1622,7 +1629,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::HotExportKnobs => {
             let peer = key(peers[0]);
             let mut config = PeerManager::removed_peer_config(&peer, &manager.peers[&peer]);
-            config.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
+            config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
             manager
                 .hot_update_peer_in_place(config)
                 .await

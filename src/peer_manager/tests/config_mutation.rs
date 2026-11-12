@@ -716,9 +716,25 @@ async fn adding_restart_duration_does_not_arm_indefinite_latch() {
     assert!(!mgr.peers[&key(addr)].enabled);
 }
 
+/// A session that reports every runtime-config update as an IPv6 unlock it
+/// re-emitted itself, so the hot update must confirm it with the RIB.
+fn ipv6_unlocking_handle() -> PeerHandle {
+    let (commands, mut command_rx) = mpsc::channel(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if let PeerCommand::UpdateRuntimeConfig { reply, .. } = command {
+                let _ = reply.send(Ok(true));
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
 /// Load-bearing rejected-replacement proof: moving countdown invalidation
-/// ahead of the fallible RIB refresh cancels the armed timer even though the
-/// export-knob replacement returns `Err`, making both identity assertions red.
+/// ahead of the fallible RIB unlock confirmation cancels the armed timer even
+/// though the export-knob replacement returns `Err`, making both identity
+/// assertions red.
 #[tokio::test(start_paused = true)]
 async fn rejected_hot_update_preserves_old_restart_countdown() {
     let (_tx, rx) = mpsc::channel(16);
@@ -734,10 +750,10 @@ async fn rejected_hot_update_preserves_old_restart_countdown() {
         None,
     );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 77));
-    let mut initial = make_config(addr, 65002);
-    initial.max_prefix_restart_seconds = Some(30);
-    mgr.add_peer(initial, false).await.unwrap();
-    mgr.disable_peer(key(addr), None).await.unwrap();
+    insert_test_managed_peer(&mut mgr, addr, ipv6_unlocking_handle(), false);
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.enabled = false;
+    managed.max_prefix_restart_seconds = Some(30);
     mgr.install_max_prefix_latch(key(addr), 1, "original".to_string(), Some(30));
     let original_generation = mgr.max_prefix_latches[&key(addr)].generation;
     let original_deadline = mgr.max_prefix_latches[&key(addr)].deadline;
@@ -769,10 +785,12 @@ async fn owned_hot_update_classifies_precheck_and_post_effect_failure() {
         OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::NotFound(_))
     ));
 
+    // The session unlocks IPv6 with the new next hop; with the RIB gone the
+    // unlock cannot be confirmed after the session already applied it.
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 89));
     let (rib_tx, rib_rx) = mpsc::channel(1);
     mgr.rib_tx = rib_tx;
-    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    insert_test_managed_peer(&mut mgr, addr, ipv6_unlocking_handle(), false);
     drop(rib_rx);
     let mut update = make_config(addr, 65002);
     update.local_ipv6_nexthop = Some("2001:db8::89".parse().unwrap());
@@ -820,9 +838,11 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
     updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     mgr.hot_update_peer(updated).await.unwrap();
     // The neighbor's allocated RIB handle, not one derived from its address.
+    // The refresher sends it after the apply returned.
     assert_eq!(
-        seen_rx
-            .try_recv()
+        tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+            .await
+            .unwrap()
             .expect("hot-applying local_ipv6_nexthop must force an outbound refresh"),
         mgr.rib_peer_of(&PeerKey::new(addr.addr(), None))
     );
@@ -833,8 +853,9 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
     updated.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
     mgr.hot_update_peer(updated).await.unwrap();
     assert_eq!(
-        seen_rx
-            .try_recv()
+        tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+            .await
+            .unwrap()
             .expect("hot-applying remove_private_as must force an outbound refresh"),
         mgr.rib_peer_of(&PeerKey::new(addr.addr(), None))
     );
@@ -921,10 +942,11 @@ async fn ipv6_unlock_queues_one_table_walk_unless_other_export_knobs_change() {
         let mut counts = [0, 0];
         let mut seen = Vec::new();
         let confirmations = usize::from(unlocked && !remove_private_as);
+        // A forced refresh comes from the refresher, after the apply returned.
+        let next = Duration::from_secs(5);
         for _ in 0..expected.iter().sum::<usize>() + confirmations {
-            let event = events_rx
-                .try_recv()
-                .expect("RIB work request before apply reply");
+            let event = tokio::time::timeout(next, events_rx.recv()).await.unwrap();
+            let event = event.expect("RIB work request");
             seen.push(event);
             match event {
                 "unlock" => counts[0] += 1,
@@ -937,10 +959,8 @@ async fn ipv6_unlock_queues_one_table_walk_unless_other_export_knobs_change() {
         if confirmations == 1 {
             assert_eq!(seen, ["unlock", "confirm"]);
         }
-        assert!(
-            events_rx.try_recv().is_err(),
-            "unexpected second table walk"
-        );
+        let quiet = tokio::time::timeout(Duration::from_millis(50), events_rx.recv()).await;
+        assert!(quiet.is_err(), "unexpected second table walk");
     }
 }
 

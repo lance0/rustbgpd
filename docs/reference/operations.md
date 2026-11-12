@@ -4598,11 +4598,13 @@ session that could not is reported as a failure; it picks the toggle up when
 it next starts). The re-emission of routes already in `AdjRibOut`, which puts
 the change on the wire without waiting for an unrelated RIB event, follows in
 the background: one peer at a time, each after the RIB finished the previous
-one, so the peers' own route updates are not held behind every replay. Each
-time that queue empties the daemon logs `graceful-shutdown outbound refreshes
-complete` with `refreshed`, `skipped` (peers not Established) and `failed`
-counts; a failed refresh also logs a warning naming the peer. Receiver-side
-verification is still required to prove delivery.
+one, so the peers' own route updates are not held behind every replay. A reload
+or `SetPeerGroup` that changes `remove_private_as` or `local_ipv6_nexthop`
+queues its peers' re-emission on the same queue once each session accepts the
+new value. Each time that queue empties the daemon logs `forced outbound
+refreshes complete` with `refreshed`, `skipped` (peers not Established) and
+`failed` counts; a failed refresh also logs a warning naming the peer.
+Receiver-side verification is still required to prove delivery.
 
 `rbgp neighbor <peer>` always reports the local desired state as
 `GShut Advertise Intent: true|false|unknown`; `unknown` means the CLI is

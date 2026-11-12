@@ -1,6 +1,8 @@
 use super::*;
 
-fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::PeerGroupDefinition {
+pub(super) fn edge_group_definition(
+    hold_time: Option<u16>,
+) -> rustbgpd_api::peer_types::PeerGroupDefinition {
     rustbgpd_api::peer_types::PeerGroupDefinition {
         min_hold_time: None,
         hold_time,
