@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 pub use rustbgpd_rib::update::{MrtPeerEntry, MrtSnapshotData};
@@ -13,4 +14,6 @@ pub struct MrtWriterConfig {
     pub compress: bool,
     /// Nonempty filename component for dump files; no separators, NUL, `.` or `..`.
     pub file_prefix: String,
+    /// Keep at most this many of this writer's dumps; `None` keeps all.
+    pub max_files: Option<NonZeroU32>,
 }

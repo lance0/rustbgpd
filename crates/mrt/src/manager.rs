@@ -285,6 +285,7 @@ mod tests {
             dump_interval: 86400,
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         }
     }
 
@@ -316,6 +317,7 @@ mod tests {
             dump_interval: 86400, // long interval, won't fire
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let (rib_tx, _rib_rx) = mpsc::channel(16);
@@ -345,6 +347,7 @@ mod tests {
             dump_interval: 86400,
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
@@ -429,6 +432,7 @@ mod tests {
             dump_interval: 86400,
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let (rib_tx, mut rib_rx) = mpsc::channel(16);

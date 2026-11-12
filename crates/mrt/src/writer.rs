@@ -1,10 +1,12 @@
 //! Atomic file writer for MRT dumps with optional gzip compression.
 
 use std::io::Write;
+use std::num::NonZeroU32;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::types::MrtWriterConfig;
 
@@ -24,14 +26,119 @@ pub fn validate_file_prefix(prefix: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Ensure the configured output path exists as a directory.
+/// Ensure the configured output path exists as a directory the daemon owns.
+///
+/// Missing directories are created 0700. An existing directory must be owned
+/// by the effective UID and writable by no other user: not world-writable
+/// (sticky or not), and group-writable only by the daemon's own group, as
+/// the runtime-state ancestor check trusts it. Retention deletes the oldest
+/// names here, so another user who could plant newer-named files could make
+/// it delete real dumps. A group- or other-readable directory is only warned
+/// about; it is an operator-chosen path that may be shared, so it is never
+/// chmodded. Dump files themselves are 0600.
 ///
 /// The manager calls this before asking the RIB actor to materialize a
 /// snapshot. `write_dump` repeats the check so direct library callers retain
 /// the same lazy-directory-creation contract.
 pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()> {
     validate_file_prefix(&config.file_prefix)?;
-    std::fs::create_dir_all(&config.output_dir)
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&config.output_dir)?;
+    let metadata = std::fs::metadata(&config.output_dir)?;
+    let mode = metadata.mode() & 0o7777;
+    if !output_dir_owner_and_mode_safe(
+        metadata.uid(),
+        metadata.gid(),
+        mode,
+        nix::unistd::geteuid().as_raw(),
+        nix::unistd::getegid().as_raw(),
+    ) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "MRT output_dir {} must be owned by the daemon user and writable by no \
+                 other user (uid={}, gid={}, mode={mode:o})",
+                config.output_dir.display(),
+                metadata.uid(),
+                metadata.gid(),
+            ),
+        ));
+    }
+    if mode & 0o077 != 0 {
+        warn!(
+            output_dir = %config.output_dir.display(),
+            mode = format_args!("{mode:o}"),
+            "MRT output_dir is accessible to group or other; dump files are 0600 but their names are listable"
+        );
+    }
+    Ok(())
+}
+
+fn output_dir_owner_and_mode_safe(
+    owner: u32,
+    group: u32,
+    mode: u32,
+    daemon_user: u32,
+    daemon_group: u32,
+) -> bool {
+    let foreign_group_write = mode & 0o020 != 0 && group != daemon_group;
+    owner == daemon_user && mode & 0o002 == 0 && !foreign_group_write
+}
+
+/// Parse `<prefix>.<YYYYMMDD>.<HHMMSS>.<nanos>.mrt[.gz]` and return the
+/// fixed-width timestamp part, which sorts chronologically.
+fn dump_timestamp<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = name.strip_prefix(prefix)?.strip_prefix('.')?;
+    let stamp = rest
+        .strip_suffix(".mrt.gz")
+        .or_else(|| rest.strip_suffix(".mrt"))?;
+    let bytes = stamp.as_bytes();
+    let shape_ok = bytes.len() == 8 + 1 + 6 + 1 + 9
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 15 => *byte == b'.',
+            _ => byte.is_ascii_digit(),
+        });
+    shape_ok.then_some(stamp)
+}
+
+/// Delete this writer's oldest dumps so at most `keep` remain, never
+/// `published`. Only regular files whose whole name matches the writer's
+/// own pattern are considered.
+fn prune_old_dumps(
+    output_dir: &Path,
+    prefix: &str,
+    keep: NonZeroU32,
+    published: &Path,
+) -> std::io::Result<()> {
+    let published = published.file_name();
+    let mut dumps = Vec::new();
+    for entry in std::fs::read_dir(output_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if Some(name.as_os_str()) == published || !entry.file_type()?.is_file() {
+            continue;
+        }
+        if let Some(stamp) = name.to_str().and_then(|name| dump_timestamp(name, prefix)) {
+            dumps.push((stamp.to_owned(), entry.path()));
+        }
+    }
+    // The published dump counts toward `keep`; retain the newest others.
+    let keep_others = usize::try_from(keep.get() - 1).unwrap_or(usize::MAX);
+    if dumps.len() <= keep_others {
+        return Ok(());
+    }
+    dumps.sort_unstable();
+    let excess = dumps.len() - keep_others;
+    for (_, path) in dumps.drain(..excess) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => debug!(path = %path.display(), "pruned old MRT dump"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Sync MRT data before atomic rename, then sync its parent directory.
@@ -65,6 +172,19 @@ pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<Path
         "MRT dump written"
     );
 
+    // Retention runs only after the new dump is durably published, and a
+    // pruning failure never fails the dump that already succeeded.
+    if let Some(keep) = config.max_files
+        && let Err(error) =
+            prune_old_dumps(&config.output_dir, &config.file_prefix, keep, &final_path)
+    {
+        warn!(
+            output_dir = %config.output_dir.display(),
+            error = %error,
+            "MRT dump retention failed; older dumps were kept"
+        );
+    }
+
     Ok(final_path)
 }
 
@@ -83,6 +203,7 @@ fn write_atomic(
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(tmp_path)?;
     let result = (|| -> std::io::Result<()> {
         if compress {
@@ -127,6 +248,7 @@ mod tests {
             dump_interval: 3600,
             compress: false,
             file_prefix: escaped_prefix.to_str().unwrap().to_string(),
+            max_files: None,
         };
         let result = write_dump(&config, b"must stay inside dumps");
         assert!(result.is_err(), "published outside output_dir: {result:?}");
@@ -146,6 +268,7 @@ mod tests {
                 dump_interval: 3600,
                 compress: false,
                 file_prefix: prefix.to_string(),
+                max_files: None,
             };
             let error = write_dump(&config, b"no dump").unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{prefix:?}");
@@ -161,6 +284,7 @@ mod tests {
             dump_interval: 3600,
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let data = b"hello mrt";
@@ -180,6 +304,7 @@ mod tests {
             dump_interval: 3600,
             compress: true,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let data = b"hello mrt compressed";
@@ -203,6 +328,7 @@ mod tests {
             dump_interval: 3600,
             compress: false,
             file_prefix: "empty".to_string(),
+            max_files: None,
         };
 
         let path = write_dump(&config, &[]).unwrap();
@@ -255,6 +381,7 @@ mod tests {
             dump_interval: 3600,
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let path = write_dump(&config, b"test").unwrap();
@@ -270,6 +397,7 @@ mod tests {
             dump_interval: 3600,
             compress: false,
             file_prefix: "rib".to_string(),
+            max_files: None,
         };
 
         let first = write_dump(&config, b"first").unwrap();
@@ -280,5 +408,200 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.exists());
         assert!(second.exists());
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path).unwrap().mode() & 0o7777
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn retaining(output_dir: &Path, max_files: u32) -> MrtWriterConfig {
+        MrtWriterConfig {
+            output_dir: output_dir.to_path_buf(),
+            dump_interval: 3600,
+            compress: false,
+            file_prefix: "rib".to_string(),
+            max_files: NonZeroU32::new(max_files),
+        }
+    }
+
+    #[test]
+    fn dumps_and_created_dirs_are_owner_only_under_umask_022() {
+        use nix::sys::stat::{Mode, umask};
+
+        const CHILD_ENV: &str = "RUSTBGPD_MRT_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // umask is process-wide: change it only in a dedicated child
+            // invocation running this one test.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "writer::tests::dumps_and_created_dirs_are_owner_only_under_umask_022",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        umask(Mode::from_bits_truncate(0o022));
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("state");
+        let output_dir = parent.join("mrt");
+        for compress in [false, true] {
+            let config = MrtWriterConfig {
+                compress,
+                ..retaining(&output_dir, 10)
+            };
+            let path = write_dump(&config, b"routes").unwrap();
+            assert_eq!(mode_of(&path), 0o600, "{}", path.display());
+        }
+        assert_eq!(mode_of(&parent), 0o700);
+        assert_eq!(mode_of(&output_dir), 0o700);
+    }
+
+    #[test]
+    fn existing_output_dir_writable_by_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = retaining(dir.path(), 10);
+        for mode in [0o757, 0o777, 0o1777] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = write_dump(&config, b"refused").unwrap_err();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{mode:o}"
+            );
+            assert!(file_names(dir.path()).is_empty(), "{mode:o}");
+        }
+        // Readable by others, or writable only by the daemon's own group:
+        // warned about, never chmodded.
+        for mode in [0o755, 0o770] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            write_dump(&config, b"allowed").unwrap();
+            assert_eq!(mode_of(dir.path()), mode);
+        }
+    }
+
+    #[test]
+    fn output_dir_owner_and_mode_rule() {
+        let (me, my_group, other) = (1000, 1000, 2000);
+        assert!(output_dir_owner_and_mode_safe(
+            me, my_group, 0o700, me, my_group
+        ));
+        assert!(output_dir_owner_and_mode_safe(
+            me, other, 0o750, me, my_group
+        ));
+        assert!(output_dir_owner_and_mode_safe(
+            me, my_group, 0o770, me, my_group
+        ));
+        // Another user owns it, a foreign group can write it, or anyone can.
+        assert!(!output_dir_owner_and_mode_safe(
+            other, my_group, 0o700, me, my_group
+        ));
+        assert!(!output_dir_owner_and_mode_safe(
+            me, other, 0o770, me, my_group
+        ));
+        assert!(!output_dir_owner_and_mode_safe(
+            me, my_group, 0o702, me, my_group
+        ));
+        assert!(!output_dir_owner_and_mode_safe(
+            me, my_group, 0o1777, me, my_group
+        ));
+    }
+
+    #[test]
+    fn retention_keeps_the_newest_max_files_dumps() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = 3;
+        let mut published = Vec::new();
+        for index in 0..keep + 2 {
+            let config = MrtWriterConfig {
+                // Both extensions belong to the writer and count together.
+                compress: index % 2 == 1,
+                ..retaining(dir.path(), keep)
+            };
+            published.push(write_dump(&config, b"dump").unwrap());
+        }
+        let expected: Vec<String> = published[2..]
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(file_names(dir.path()), expected);
+    }
+
+    #[test]
+    fn retention_unset_keeps_every_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = retaining(dir.path(), 0);
+        assert_eq!(config.max_files, None);
+        for _ in 0..4 {
+            write_dump(&config, b"dump").unwrap();
+        }
+        assert_eq!(file_names(dir.path()).len(), 4);
+    }
+
+    #[test]
+    fn retention_leaves_files_outside_the_writer_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamp = "20000101.000000.000000000";
+        let unrelated = [
+            "notes.txt".to_string(),
+            "rib.mrt".to_string(),
+            format!("rib.{stamp}.mrt.tmp"),
+            format!(".rib.{stamp}.mrt.tmp"),
+            format!("rib.v6.{stamp}.mrt"),
+            format!("ribs.{stamp}.mrt"),
+            format!("other.{stamp}.mrt.gz"),
+            format!("rib.{stamp}.mrt.bz2"),
+            "rib.20000101.000000.00000000x.mrt".to_string(),
+        ];
+        for name in &unrelated {
+            std::fs::write(dir.path().join(name), "keep").unwrap();
+        }
+        // In-pattern but not a regular file: never removed.
+        std::fs::create_dir(dir.path().join(format!("rib.{stamp}.mrt"))).unwrap();
+        // In-pattern and older than every new dump: pruned.
+        std::fs::write(dir.path().join(format!("rib.{stamp}.mrt.gz")), "old").unwrap();
+
+        let config = retaining(dir.path(), 1);
+        write_dump(&config, b"first").unwrap();
+        let newest = write_dump(&config, b"second").unwrap();
+
+        let mut expected: Vec<String> = unrelated.to_vec();
+        expected.push(format!("rib.{stamp}.mrt"));
+        expected.push(newest.file_name().unwrap().to_str().unwrap().to_string());
+        expected.sort();
+        assert_eq!(file_names(dir.path()), expected);
+    }
+
+    #[test]
+    fn retention_never_removes_the_just_published_dump() {
+        // A clock step backwards can give the new dump the oldest name.
+        let dir = tempfile::tempdir().unwrap();
+        let published = dir.path().join("rib.20000101.000000.000000000.mrt");
+        let newer = dir.path().join("rib.20300101.000000.000000000.mrt");
+        std::fs::write(&published, "new").unwrap();
+        std::fs::write(&newer, "newer name").unwrap();
+
+        prune_old_dumps(dir.path(), "rib", NonZeroU32::new(1).unwrap(), &published).unwrap();
+        assert!(published.exists());
+        assert!(!newer.exists());
     }
 }

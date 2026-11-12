@@ -5687,6 +5687,8 @@ async fn run<T>(
                 dump_interval: mrt_config.dump_interval,
                 compress: mrt_config.compress,
                 file_prefix: mrt_config.file_prefix.clone(),
+                // Validation rejects 0, so unset is the only `None`.
+                max_files: mrt_config.max_files.and_then(std::num::NonZeroU32::new),
             };
             let (trigger_tx, trigger_rx) = mpsc::channel(16);
             let mgr = rustbgpd_mrt::MrtManager::new(
