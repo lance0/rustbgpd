@@ -15,13 +15,27 @@ case "$1" in
     *) exit 0 ;; # deb abort-upgrade, abort-remove, ...
 esac
 
-if [ -n "$upgrade" ] && systemctl is-active --quiet rustbgpd.service \
-        'rustbgpd@*.service' 2>/dev/null; then
+active=
+if [ -n "$upgrade" ] && [ -d /run/systemd/system ]; then
+    active=$(systemctl list-units --plain --no-legend --state=active \
+        rustbgpd.service 'rustbgpd@*.service' 2>/dev/null | awk '{ print $1 }')
+fi
+
+if [ -n "$active" ]; then
     # Deliberate: the package never restarts a routing daemon.
-    echo "rustbgpd upgraded, but the running daemon was not restarted and still"
-    echo "runs the old binary: restart required to load the new binary. Check the"
-    echo "config with 'rustbgpd --check --strict', then: systemctl restart rustbgpd"
-    echo "('rbgp health' reports the running version)."
+    echo "rustbgpd upgraded, but these units were not restarted and still run the"
+    echo "old binary; restart required to load the new binary. For each unit, check"
+    echo "the config it runs, then restart that unit:"
+    for unit in $active; do
+        # The config is the last argument of the unit's ExecStart.
+        config=$(systemctl show -P ExecStart "$unit" 2>/dev/null |
+            sed -n 's/.*argv\[\]=\([^;]*\) ;.*/\1/p' | awk '{ print $NF }')
+        echo "  $unit:"
+        echo "    /usr/bin/rustbgpd --check --strict ${config:-<its config>}"
+        echo "    systemctl restart $unit"
+    done
+    echo "Then check that 'rbgp health' on each unit's API (--addr for a template"
+    echo "instance) reports the package version."
 elif [ -n "$upgrade" ]; then
     echo "rustbgpd upgraded. It is not running; start it with: systemctl start rustbgpd"
 else

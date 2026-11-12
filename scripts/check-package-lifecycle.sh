@@ -60,20 +60,28 @@ systemctl enable --now rustbgpd.service
 systemctl enable rustbgpd@lifecycle.service
 pid=$(systemctl show -P MainPID rustbgpd.service)
 [ "$pid" -gt 0 ] || fail "rustbgpd did not start"
+invocation=$(systemctl show -P InvocationID rustbgpd.service)
+[ -n "$invocation" ] || fail "rustbgpd has no invocation ID"
 
 echo "== journald priority"
 journalctl --sync
-unit_log() { journalctl --no-pager -q -o cat _SYSTEMD_UNIT=rustbgpd.service "$@"; }
+# This start only: an earlier install on the same host must not satisfy it.
+unit_log() {
+    journalctl --no-pager -q -o cat _SYSTEMD_INVOCATION_ID="$invocation" "$@"
+}
 [ -n "$(unit_log -p 7..7)" ] || fail "no daemon line stored at PRIORITY=7 (debug)"
 [ -n "$(unit_log -p 6..6)" ] || fail "no daemon line stored at PRIORITY=6 (info)"
-if unit_log | grep -q '^<[0-7]>'; then
-    fail "journald kept a <N> prefix in MESSAGE"
-fi
+# grep reads the whole stream: an early exit could fail journalctl with
+# SIGPIPE under pipefail and hide the match.
+prefixed=$(unit_log | grep -c '^<[0-7]>' || true)
+[ "$prefixed" -eq 0 ] || fail "journald kept a <N> prefix in $prefixed MESSAGE(s)"
 
 echo "== upgrade to $new"
 out=$(pkg_install "$new" 2>&1) || { echo "$out"; fail "upgrade failed"; }
 echo "$out"
 grep -q 'restart required' <<<"$out" || fail "upgrade printed no restart notice"
+grep -qx '    systemctl restart rustbgpd.service' <<<"$out" \
+    || fail "upgrade notice did not name the running unit"
 systemctl is-active --quiet rustbgpd.service || fail "upgrade stopped rustbgpd"
 [ "$(systemctl show -P MainPID rustbgpd.service)" = "$pid" ] \
     || fail "upgrade restarted rustbgpd"

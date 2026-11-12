@@ -349,7 +349,8 @@ fn stdout_is_journal() -> bool {
     journal_stream_matches(value.to_str(), meta.dev(), meta.ino())
 }
 
-/// A writer that starts each record with its level's journald priority.
+/// A writer that starts every line of a record with its level's journald
+/// priority.
 struct JournalPrefix<M>(M);
 
 impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for JournalPrefix<M> {
@@ -359,6 +360,7 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for JournalPrefix<M> {
         Prefixed {
             inner: self.0.make_writer(),
             prefix: b"",
+            line_start: true,
         }
     }
 
@@ -366,21 +368,34 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for JournalPrefix<M> {
         Prefixed {
             inner: self.0.make_writer_for(meta),
             prefix: journal_priority(*meta.level()),
+            line_start: true,
         }
     }
 }
 
-/// `fmt` writes one record per writer, so the prefix goes out once, before
-/// its first byte.
+/// `fmt` makes one writer per record. journald reads the priority per
+/// physical line, so a text record whose message spans lines repeats the
+/// record's prefix on each of them; JSON escapes newlines and stays on one.
 struct Prefixed<W> {
     inner: W,
     prefix: &'static [u8],
+    /// The next byte starts a physical line.
+    line_start: bool,
 }
 
 impl<W: std::io::Write> std::io::Write for Prefixed<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write_all(std::mem::take(&mut self.prefix))?;
-        self.inner.write(buf)
+        if self.prefix.is_empty() {
+            return self.inner.write(buf);
+        }
+        for line in buf.split_inclusive(|&byte| byte == b'\n') {
+            if self.line_start {
+                self.inner.write_all(self.prefix)?;
+            }
+            self.inner.write_all(line)?;
+            self.line_start = line.ends_with(b"\n");
+        }
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -921,6 +936,44 @@ mod tests {
                 if json {
                     assert!(rest.starts_with('{'), "{line}");
                 }
+            }
+        }
+    }
+
+    /// A multi-line text message carries its priority on every physical
+    /// line, so `journalctl -p` keeps the continuation lines; JSON escapes
+    /// the newline and stays one line per record.
+    #[test]
+    fn journal_writer_prefixes_every_line_of_a_record() {
+        for json in [false, true] {
+            let buffer = Buffer::default();
+            let live = Arc::new(RwLock::new(PeerLevels::default()));
+            let subscriber = tracing_subscriber::registry().with(output_layer(
+                json,
+                false,
+                JournalPrefix(buffer.clone()),
+                EnvFilter::new("info"),
+                live,
+            ));
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::warn!("rejected:\n  first reason\n  second reason");
+                tracing::info!("after");
+            });
+            let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            let expected = if json {
+                vec!["<4>", "<6>"]
+            } else {
+                vec!["<4>", "<4>", "<4>", "<6>"]
+            };
+            assert_eq!(lines.len(), expected.len(), "{text}");
+            for (line, prefix) in lines.iter().zip(expected) {
+                assert!(line.starts_with(prefix), "{line}");
+                assert!(!line[prefix.len()..].starts_with('<'), "{line}");
+            }
+            if !json {
+                assert_eq!(lines[1], "<4>  first reason");
+                assert_eq!(lines[2], "<4>  second reason");
             }
         }
     }
