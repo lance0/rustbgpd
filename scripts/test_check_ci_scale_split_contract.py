@@ -627,8 +627,6 @@ class ScaleSplitContractTests(unittest.TestCase):
             ('cargo test --locked --workspace "${selectors[@]}"', "true"),
             ('cargo test --locked --workspace "${selectors[@]}"', 'cargo test --locked --workspace "${selectors[@]}"\n          cargo test --locked --workspace "${selectors[@]}"'),
             ('python3 scripts/check_ci_test_shards.py check "$RUNNER_TEMP/workspace-tests.jsonl"', "true"),
-            ("        shard: [1, 2]\n", "        shard: [1]\n"),
-            ("      fail-fast: false\n      matrix:\n        shard: [1, 2]", "      matrix:\n        shard: [1, 2]"),
             ("- name: Smoke benchmark targets without dedicated checks\n        run: bash bench/smoke-benches.sh --locked", "- name: Smoke benchmark targets without dedicated checks\n        run: true"),
             ("--bench selection_deferral_release -- --self-test", "--bench selection_deferral_release"),
             ("-- diagnostic --candidate --smoke", "-- diagnostic --candidate"),
@@ -676,6 +674,36 @@ class ScaleSplitContractTests(unittest.TestCase):
         )
         for old, new in cases:
             with self.subTest(seam=old):
+                self.mutate(old, new)
+
+    def test_sharded_jobs_fail_closed(self) -> None:
+        # Occurrence 0 is bench_smoke, occurrence 1 is core_tests.
+        for occurrence in (0, 1):
+            for old, new in (
+                ("        shard: [1, 2]\n", "        shard: [1]\n"),
+                ("      fail-fast: false\n      matrix:\n        shard: [1, 2]", "      matrix:\n        shard: [1, 2]"),
+            ):
+                with self.subTest(occurrence=occurrence, seam=old):
+                    self.mutate(old, new, occurrence)
+        sharded = '--shard "${{ matrix.shard }}"'
+        cases = (
+            # Unsharded, the script would run every target in both shards.
+            (sharded, ""),
+            (sharded, "--shard 1"),
+            # The step itself must not be confined to one shard.
+            (
+                "      - name: Smoke benchmark targets without dedicated checks\n",
+                "      - name: Smoke benchmark targets without dedicated checks\n        if: matrix.shard == 1\n",
+            ),
+            # The dedicated smokes must run exactly once: shard 2 only.
+            ("        if: matrix.shard == 2\n        run: cargo test --locked -p rustbgpd-rib", "        run: cargo test --locked -p rustbgpd-rib"),
+            ("        if: matrix.shard == 2\n        run: |\n          cargo test --locked -p rustbgpd-mrt", "        run: |\n          cargo test --locked -p rustbgpd-mrt"),
+            ("        if: matrix.shard == 2\n        run: |\n          cargo test --locked -p rustbgpd-mrt", "        if: matrix.shard == 1 || matrix.shard == 2\n        run: |\n          cargo test --locked -p rustbgpd-mrt"),
+            # The partition proof must stay.
+            (contract.BENCH_SMOKE_PARTITION, "true"),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old, new=new):
                 self.mutate(old, new)
 
     def test_aggregate_shell_truth_table(self) -> None:
