@@ -28,17 +28,25 @@ their original order ahead of any session end.
 Grouped unicast output services session-state and import-counter queries
 between encoding slices, between bounded chunk batches, and while waiting for
 shared chunks. A queued mutation keeps its place before later reads and waits
-for the current envelope to finish. This does not impose a wall-clock bound on
-initial sorting, an individual encoding slice, or other session work.
+for the current envelope to finish. An encoding member stops publishing at the
+next slice when it reads a Stop, BFD-down or other session close, or when
+another command queues behind a held one; the group then falls back to
+per-member encoding. This does not impose a wall-clock bound on initial
+sorting, an individual encoding slice, or other session work.
 Abandoned read-only snapshots are discarded, including deferred diagnostics
 whose callers leave while shared chunks are pending. Losing a mutation's
 acknowledgement receiver does not cancel that mutation or let later reads pass it.
 
 Explicit outbound replay scheduling also services state and import-counter
 snapshots while waiting for BMP queue admission, collector enrollment, or RIB
-queue admission. Deferred commands retain the same FIFO rules. These waits share
-one five-second replay deadline; the session resumes general input and timer
+queue admission. Any other command ends the replay with a retryable refusal and
+runs next, so a Stop behind it is not hidden. These waits share one
+five-second replay deadline; the session resumes general input and timer
 handling after admission finishes or is canceled.
+
+An inbound ORF ROUTE-REFRESH that finds the RIB mailbox full is held like peer
+input, followed by a plain refresh request, instead of waiting for capacity.
+One the mailbox takes at once waits at most 500 ms for the RIB's reply.
 
 The transport layer intercepts UPDATEs (parse, validate, apply policy)
 before forwarding to the RIB — the FSM sees only payloadless events.

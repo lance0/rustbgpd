@@ -109,6 +109,8 @@ impl PeerSession {
 
     /// Keep each admission future's queue position and the operation's original
     /// deadline while serving only snapshots that cannot change replay state.
+    /// Any other command ends the wait and the replay: the run loop runs it
+    /// next and keeps reading, so a Stop behind it is not hidden.
     async fn await_replay_admission<T>(
         &mut self,
         admission: impl std::future::Future<Output = T>,
@@ -128,17 +130,15 @@ impl PeerSession {
                     operation: "replay_outbound",
                     deadline: REPLAY_TIMEOUT,
                 }),
-                () = async {
-                    match self.deferred_command.as_mut() {
-                        Some(command) => command.read_canceled().await,
-                        None => std::future::pending().await,
-                    }
-                } => self.deferred_command = None,
-                command = self.commands.recv(),
-                    if commands_open && self.deferred_command.is_none() => {
+                command = self.commands.recv(), if commands_open => {
                     match command {
                         Some(command) => self.handle_read_during_wait(command),
                         None => commands_open = false,
+                    }
+                    if self.deferred_command.is_some() {
+                        return Err(PeerCommandError::ReplayUnavailable(
+                            "a session command arrived before replay admission; retry".into(),
+                        ));
                     }
                 }
             }

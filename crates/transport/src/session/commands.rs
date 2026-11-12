@@ -1833,17 +1833,16 @@ impl PeerSession {
                 // The reply follows RIB admission of the accepting session's
                 // replay state; the peer manager still owns the outbound
                 // commit. A full mailbox holds the message like peer input,
-                // so the run loop keeps reading commands meanwhile.
-                self.export_policy = policy.map(|policy| *policy);
+                // so the run loop keeps reading commands meanwhile. A RIB
+                // that is gone first restores the previous policy and fails.
+                let previous = std::mem::replace(&mut self.export_policy, policy.map(|p| *p));
                 let _ = self.send_to_rib_then(
                     RibUpdate::SetPeerSessionExportPolicy {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         export_policy: self.export_policy.clone(),
                     },
-                    super::inbound::OnRibAdmission::Acknowledge(Box::new(move || {
-                        let _ = reply.send(Ok(()));
-                    })),
+                    super::inbound::OnRibAdmission::ExportPolicy { previous, reply },
                 );
                 ControlFlow::Continue(())
             }

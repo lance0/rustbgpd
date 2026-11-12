@@ -237,6 +237,54 @@ async fn export_policy_holds_for_a_contended_mailbox_and_acks_on_admission() {
     ));
 }
 
+/// With the RIB gone, an export update fails explicitly and leaves the
+/// session's policy unchanged: at once on a closed mailbox, and when the RIB
+/// closes while the update is held.
+#[tokio::test]
+async fn export_policy_fails_and_keeps_the_old_policy_when_the_rib_is_gone() {
+    async fn update(session: &mut PeerSession) -> oneshot::Receiver<Result<(), PeerCommandError>> {
+        let (reply, accepted) = oneshot::channel();
+        let _ = session
+            .handle_command(PeerCommand::UpdateExportPolicy {
+                policy: None,
+                reply,
+            })
+            .await;
+        accepted
+    }
+    let old = export_chain(PolicyAction::Deny);
+
+    let (mut session, rx) = make_test_session_with_rib(65001, 65002);
+    session.export_policy = Some(old.clone());
+    drop(rx);
+    assert!(matches!(
+        update(&mut session).await.await,
+        Ok(Err(PeerCommandError::CommandFailed(_)))
+    ));
+    assert_eq!(session.export_policy, Some(old.clone()));
+
+    let (mut session, _rx) = make_test_session_with_rib(65001, 65002);
+    session.export_policy = Some(old.clone());
+    let (tx, rx) = mpsc::channel(1);
+    tx.try_send(RibUpdate::PeerDown {
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))),
+        session_id: 99,
+    })
+    .unwrap();
+    session.rib_tx = tx;
+    let held = update(&mut session).await;
+    assert_eq!(session.rib_backlog.len(), 1, "the update is held");
+    assert_eq!(session.export_policy, None, "held updates apply locally");
+    drop(rx);
+    session.flush_rib_backlog().await;
+    assert!(matches!(
+        held.await,
+        Ok(Err(PeerCommandError::CommandFailed(_)))
+    ));
+    assert_eq!(session.export_policy, Some(old));
+    assert!(session.rib_backlog.is_empty());
+}
+
 /// An export policy that sets an IPv6 next hop rewrites the RIB route's
 /// next hop before export but leaves an injected route's stored
 /// `NEXT_HOP 0.0.0.0`. Toward a peer without Extended Next Hop the override

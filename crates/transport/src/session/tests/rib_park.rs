@@ -949,6 +949,104 @@ async fn rib_park_refuses_mutation_and_observes_following_bfd_down() {
     parked_mutation_then_close(PeerCommand::BfdDown, cease_subcode::BFD_DOWN).await;
 }
 
+/// An ORF ROUTE-REFRESH that meets a full mailbox is held in session order
+/// like peer input, with its plain-refresh fallback behind it, instead of
+/// waiting for capacity: a mutation and a Stop sent meanwhile are observed,
+/// and the RIB later receives every message in its original order.
+#[tokio::test]
+async fn rib_park_holds_orf_update_and_observes_following_stop() {
+    let RibPark {
+        mut session,
+        commands,
+        mut rib_rx,
+        mut server,
+        fillers,
+        ..
+    } = rib_park().await;
+    let mut negotiated = (**session.negotiated.as_ref().unwrap()).clone();
+    negotiated.peer_route_refresh = true;
+    negotiated.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let orf = Message::RouteRefresh(orf_rr(OrfType::AddressPrefix, one_permit_entry()));
+    session
+        .read_buf
+        .buf
+        .extend_from_slice(&rustbgpd_wire::encode_message(&orf).unwrap());
+    tokio::time::timeout(Duration::from_secs(5), session.process_read_buffer())
+        .await
+        .expect("the ORF update must not wait for RIB capacity");
+    assert!(
+        matches!(
+            session
+                .rib_backlog
+                .iter()
+                .map(|(update, _)| update)
+                .collect::<Vec<_>>()[..],
+            [
+                RibUpdate::PeerOrfUpdate { .. },
+                RibUpdate::RouteRefreshRequest { .. }
+            ]
+        ),
+        "the ORF update and its fallback are held in order"
+    );
+
+    let (reply, mut accepted) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::UpdateGracefulShutdown {
+            enabled: true,
+            reply,
+        })
+        .unwrap();
+    commands
+        .try_send(PeerCommand::Stop { reason: None })
+        .unwrap();
+    {
+        let run = session.run();
+        let close = async {
+            let frame = next_frame_after_handshake(&mut server).await;
+            let Some(Message::Notification(notification)) = frame else {
+                panic!("the Stop behind a held ORF update must reach the wire: {frame:?}");
+            };
+            assert_eq!(notification.code, NotificationCode::Cease);
+            assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
+        };
+        tokio::select! {
+            result = run => panic!("run() ended before the RIB drained: {result:?}"),
+            () = close => {}
+        }
+    }
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(matches!(
+        accepted.try_recv(),
+        Ok(Err(PeerCommandError::CommandFailed(_)))
+    ));
+    assert_eq!(rib_rx.len(), fillers, "the Stop did not wait for the RIB");
+
+    let drain = async {
+        for _ in 0..fillers {
+            assert_eq!(announced_v4(&rib_rx.recv().await.unwrap()), []);
+        }
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::PeerOrfUpdate { .. }
+        ));
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::RouteRefreshRequest { .. }
+        ));
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::PeerDown { .. }
+        ));
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(session.flush_rib_backlog(), drain);
+    })
+    .await
+    .expect("held messages are admitted in order before the session end");
+    assert!(rib_rx.try_recv().is_err());
+}
+
 enum ParkedRetirement {
     UnlessEstablished,
     UnlessConnected,

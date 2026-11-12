@@ -959,9 +959,94 @@ async fn shared_group_elected_encoder_yields_for_new_reads() {
     assert_eq!(stream.test_snapshot().1, Some(StreamTerminal::Complete));
 }
 
-/// A yield must not let a later read pass the first deferred policy mutation.
+/// A close read during the encode, alone or behind a held mutation, stops it
+/// at the next slice instead of after the whole inventory; the group falls
+/// back to per-member encoding. A held mutation alone lets it complete.
+#[tokio::test]
+async fn shared_group_elected_encoder_stops_for_a_close() {
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for (mutation_first, close) in [(false, true), (true, true), (true, false)] {
+        let (mut member, commands, _frames) = shared_fairness_member();
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let update = shared_group_envelope(
+            &member,
+            &shared,
+            Ipv4Addr::new(10, 44, 0, 2),
+            &Arc::new(shared_fairness_routes()),
+        );
+        let mut delivery = Box::pin(member.handle_outbound_route_update(update));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(delivery.as_mut().poll(&mut cx).is_pending());
+        let mut mutation = None;
+        if mutation_first {
+            let (reply, ack) = oneshot::channel();
+            mutation = Some(ack);
+            commands
+                .try_send(PeerCommand::UpdateImportPolicy {
+                    policy: None,
+                    reply,
+                })
+                .unwrap();
+        }
+        if close {
+            commands.try_send(PeerCommand::BfdDown).unwrap();
+        }
+        let case = (mutation_first, close);
+        let stream = shared
+            .cell
+            .get()
+            .unwrap()
+            .downcast_ref::<ProgressiveGroupEncode>()
+            .unwrap();
+        if close {
+            assert!(delivery.as_mut().poll(&mut cx).is_ready(), "{case:?}");
+            assert_eq!(
+                stream.test_snapshot(),
+                (
+                    2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES,
+                    Some(StreamTerminal::Failed)
+                ),
+                "{case:?}: stopped at the next slice"
+            );
+        } else {
+            while delivery.as_mut().poll(&mut cx).is_pending() {}
+            assert_eq!(
+                stream.test_snapshot().1,
+                Some(StreamTerminal::Complete),
+                "{case:?}"
+            );
+        }
+        drop(delivery);
+        {
+            let actor = member.run();
+            tokio::pin!(actor);
+            let (reply, state) = oneshot::channel();
+            commands
+                .try_send(PeerCommand::QueryState { reply })
+                .unwrap();
+            tokio::select! {
+                state = state => { state.unwrap(); }
+                stopped = &mut actor => panic!("{case:?}: actor stopped: {stopped:?}"),
+            }
+        }
+        assert_eq!(member.stop_requested, close, "{case:?}: close observed");
+        if let Some(mut mutation) = mutation {
+            mutation
+                .try_recv()
+                .expect("held mutation runs first")
+                .unwrap();
+        }
+    }
+}
+
+/// A read queued behind a held policy mutation ends the encode, since the
+/// encoder cannot tell it from a close; the read still follows the mutation.
 #[tokio::test]
 async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     use std::future::Future;
     use std::task::{Context, Waker};
 
@@ -991,17 +1076,21 @@ async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
     commands
         .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
         .unwrap();
-    assert!(delivery.as_mut().poll(&mut cx).is_pending());
-    assert!(matches!(
-        response.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
+    assert!(delivery.as_mut().poll(&mut cx).is_ready());
+    drop(delivery);
+    let stream = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<ProgressiveGroupEncode>()
+        .unwrap();
+    let (published, terminal) = stream.test_snapshot();
+    assert_eq!(published, 2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+    assert_eq!(terminal, Some(StreamTerminal::Failed));
     assert!(matches!(
         mutation.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
-    assert!(delivery.as_mut().poll(&mut cx).is_ready());
-    drop(delivery);
     assert!(matches!(
         response.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)

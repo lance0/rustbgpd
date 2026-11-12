@@ -718,7 +718,10 @@ impl PeerSession {
     }
 
     /// One command per checkpoint bounds work under a continuous read stream.
-    fn poll_shared_group_command(&mut self) {
+    /// Returns `false` when the encode must stop so the run loop can act:
+    /// the held command closes the session, or another command is queued
+    /// behind it and may.
+    fn poll_shared_group_command(&mut self) -> bool {
         if self
             .deferred_command
             .as_ref()
@@ -731,6 +734,9 @@ impl PeerSession {
         {
             self.handle_read_during_wait(command);
         }
+        self.deferred_command
+            .as_ref()
+            .is_none_or(|held| !held.closes_session() && self.commands.is_empty())
     }
 
     /// Elect synchronously, then publish with cooperative slice boundaries.
@@ -826,7 +832,12 @@ impl PeerSession {
         let mut sent: u64 = 0;
         let mut idx = 0;
         while idx < order.len() {
-            self.poll_shared_group_command();
+            if !self.poll_shared_group_command() {
+                // The guard fails the stream: every member, this one
+                // included, falls back to its own encoding.
+                debug!(peer = %self.peer_label, "shared encode stopped for a session command");
+                return None;
+            }
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
             let chunks = if evpn {
                 encode_shared_evpn_slice(export, &update.evpn_announce, &order[idx..end])

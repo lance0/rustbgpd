@@ -98,8 +98,10 @@ impl PeerSession {
     /// filter, lifts the §6 initial-advertisement gate, and re-floods. Returns
     /// `false` for a plain refresh, an ORF whose groups are all un-negotiated
     /// types (incl. the legacy type 128, which rustbgpd never advertises), or
-    /// any RIB-side rejection/drop/timeout; the caller then takes the normal
-    /// re-advertise path.
+    /// any RIB-side rejection/drop/timeout, or an update held for RIB
+    /// admission; the caller then takes the normal re-advertise path. Only an
+    /// update the mailbox takes at once waits for its reply, for at most
+    /// `ORF_RIB_REPLY_TIMEOUT`.
     pub(super) async fn process_inbound_orf(
         &mut self,
         afi: rustbgpd_wire::Afi,
@@ -159,7 +161,7 @@ impl PeerSession {
         }
         let (reply, rx) = oneshot::channel();
         if self
-            .send_to_rib_admitted(RibUpdate::PeerOrfUpdate {
+            .send_to_rib(RibUpdate::PeerOrfUpdate {
                 peer: self.rib_peer(),
                 session_id: self.session_identity.id,
                 afi,
@@ -168,10 +170,17 @@ impl PeerSession {
                 groups,
                 reply,
             })
-            .await
             .is_err()
         {
             warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
+            return false;
+        }
+        if !self.rib_backlog.is_empty() {
+            // Held behind a full mailbox like peer input, so the run loop
+            // keeps reading commands. The RIB applies it in session order.
+            // As for a reply timeout, the outcome is unknown here, so the
+            // plain refresh queued behind it covers a rejection.
+            debug!(peer = %self.peer_label, ?afi, ?safi, "ORF update held for RIB admission");
             return false;
         }
         match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {

@@ -867,17 +867,18 @@ impl PeerCommand {
         }
     }
 
-    /// Wake shared-output consumers when their deferred snapshot is abandoned.
-    /// Commands outside the snapshot allowlist remain owned until execution.
-    pub(crate) async fn read_canceled(&mut self) {
-        match self {
-            Self::QueryState { reply } => reply.closed().await,
-            Self::QueryWarmCheckpointState { reply } => reply.closed().await,
-            Self::ExplainImportPolicy { reply, .. } => reply.closed().await,
-            Self::ListRejectedRoutes { reply } => reply.closed().await,
-            Self::QueryImportPolicyTermHits { reply } => reply.closed().await,
-            _ => std::future::pending().await,
-        }
+    /// Commands that tear the session down or reset it. Owned output work
+    /// must not make them wait.
+    pub(crate) fn closes_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Stop { .. }
+                | Self::BfdDown
+                | Self::Shutdown
+                | Self::PurgeReset
+                | Self::AdministrativeReset { .. }
+                | Self::CollisionDump
+        )
     }
 }
 

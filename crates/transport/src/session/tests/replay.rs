@@ -24,11 +24,11 @@ async fn replay_live_rib_admission_serves_bounded_reads() {
     exercise_live_replay_admission(ReplayAdmissionWait::Rib).await;
 }
 
+/// A replay retained by an earlier owned wait still ends its own wait on the
+/// next mutation: the replay is refused, the mutation runs, and the snapshot
+/// behind it observes the mutation.
 #[tokio::test(start_paused = true)]
-async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-
+async fn deferred_replay_ends_on_a_nested_mutation_before_its_snapshot() {
     let (mut session, mut rib_rx, mut old_bmp_rx) =
         make_test_session_with_rib_and_bmp(65001, 65002);
     session.config.bmp_rib_out = true;
@@ -63,43 +63,24 @@ async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
             reply,
         })
         .unwrap();
-    let snapshot;
-    {
+    let (reply, response) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let snapshot = {
         let actor = session.run();
         tokio::pin!(actor);
-        assert!(
-            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-        // The owned replay wait consumed the mutation but has not run it.
-        assert_eq!(commands.capacity(), commands.max_capacity());
-        assert!(matches!(
-            mutation.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert!(matches!(
-            replay_response.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert_eq!(bmp_tx.capacity(), 0);
-
-        let (reply, response) = oneshot::channel();
-        commands
-            .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
-            .unwrap();
-        assert!(
-            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-        assert_eq!(commands.capacity(), commands.max_capacity() - 1);
-        drop(replay_response);
-        snapshot = tokio::select! {
+        tokio::select! {
             result = response => result.unwrap(),
             stopped = &mut actor => panic!("actor stopped before nested FIFO snapshot: {stopped:?}"),
-        };
-    }
+        }
+    };
+    assert_eq!(
+        tokio::time::Instant::now(),
+        started,
+        "the mutation ended the replay wait"
+    );
     let writer = session.writer_join.take().unwrap();
     writer.abort();
     let _ = writer.await;
@@ -108,6 +89,10 @@ async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
         .try_recv()
         .expect("retained mutation acknowledged before its snapshot")
         .unwrap();
+    assert!(matches!(
+        replay_response.try_recv(),
+        Ok(Err(PeerCommandError::ReplayUnavailable(_)))
+    ));
     assert!(session.pending_replay.is_none());
     assert!(session.deferred_command.is_none());
     assert!(matches!(
@@ -285,7 +270,7 @@ async fn replay_read_pair(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "real actor fixture retains all three held stages, diagnostic cancellation, mutation FIFO and cleanup"
+    reason = "real actor fixture retains all three held stages, read service, the close behind a mutation and cleanup"
 )]
 async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
     use std::future::{Future, poll_fn};
@@ -326,9 +311,23 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
     commands
         .try_send(PeerCommand::ReplayOutbound { reply })
         .unwrap();
+    // The Bmp fixture keeps the BMP channel full, and a close's reliable BMP
+    // PeerDown would wait on it; there the read behind the mutation is the probe.
+    let close = match wait {
+        ReplayAdmissionWait::Bmp => None,
+        ReplayAdmissionWait::Enrollment => Some(PeerCommand::BfdDown),
+        ReplayAdmissionWait::Rib => Some(PeerCommand::Stop { reason: None }),
+    };
+    let closed_state = if close.is_some() {
+        SessionState::Idle
+    } else {
+        SessionState::Established
+    };
+    let started = tokio::time::Instant::now();
     let mut manager = None;
-    let mut outcomes = Vec::new();
-    let mut after_mutation = None;
+    let reads;
+    let after_close;
+    let mut mutation = None;
     {
         let actor = session.run();
         tokio::pin!(actor);
@@ -351,129 +350,46 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
             }
         }
 
-        for cancel_after_deferral in [false, true] {
-            let (reply, diagnostic) = oneshot::channel();
-            let mut diagnostic = Some(diagnostic);
-            if !cancel_after_deferral {
-                drop(diagnostic.take());
-            }
-            commands
-                .try_send(PeerCommand::ListRejectedRoutes { reply })
-                .unwrap();
-            let reads = replay_read_pair(&commands);
-            tokio::pin!(reads);
-            assert!(
-                poll_fn(|cx| Poll::Ready(reads.as_mut().poll(cx)))
-                    .await
-                    .is_pending()
-            );
-            if cancel_after_deferral {
-                assert!(
-                    poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
-                        .await
-                        .is_pending()
-                );
-                assert_eq!(
-                    commands.capacity(),
-                    commands.max_capacity() - 2,
-                    "live diagnostic holds both later snapshots in the FIFO"
-                );
-                assert!(
-                    poll_fn(|cx| Poll::Ready(reads.as_mut().poll(cx)))
-                        .await
-                        .is_pending()
-                );
-                drop(diagnostic.take());
-            }
-            let result = tokio::select! {
-                result = &mut reads => result,
-                stopped = &mut actor => panic!("actor stopped during held admission: {stopped:?}"),
-            };
-            let success = matches!(
-                &result,
-                (
-                    crate::StateQueryOutcome::State(_),
-                    crate::SessionQueryOutcome::Reply(Some(_))
-                )
-            );
-            outcomes.push(result);
-            assert!(
-                matches!(
-                    replay_response.try_recv(),
-                    Err(oneshot::error::TryRecvError::Empty)
-                ),
-                "live replay stays pending while reads complete"
-            );
-            assert_eq!(rib_tx.capacity(), 0, "RIB pressure remains held");
-            if !success {
-                break; // Preserve cleanup before the baseline failure assertion.
-            }
-        }
+        // Small snapshots are answered while the replay keeps waiting.
+        reads = tokio::select! {
+            result = replay_read_pair(&commands) => result,
+            stopped = &mut actor => panic!("actor stopped during held admission: {stopped:?}"),
+        };
+        assert!(
+            matches!(
+                replay_response.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "live replay stays pending while reads complete"
+        );
+        assert_eq!(rib_tx.capacity(), 0, "RIB pressure remains held");
 
-        if outcomes.len() == 2 {
-            let (reply, mutation) = oneshot::channel();
-            let mut mutation = Some(mutation);
-            if wait != ReplayAdmissionWait::Enrollment {
-                drop(mutation.take()); // Lost acknowledgement never cancels a mutation.
-            }
-            commands
-                .try_send(PeerCommand::UpdateImportPolicy {
-                    policy: Some(Box::new(rustbgpd_policy::PolicyChain::new(vec![]))),
-                    reply,
-                })
-                .unwrap();
-            let reads = replay_read_pair(&commands);
-            tokio::pin!(reads);
-            assert!(
-                poll_fn(|cx| Poll::Ready(reads.as_mut().poll(cx)))
-                    .await
-                    .is_pending()
-            );
-            assert!(
-                poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
-                    .await
-                    .is_pending()
-            );
-            assert_eq!(
-                commands.capacity(),
-                commands.max_capacity() - 2,
-                "mutation is retained and its later reads cannot bypass it"
-            );
-            assert!(
-                poll_fn(|cx| Poll::Ready(reads.as_mut().poll(cx)))
-                    .await
-                    .is_pending()
-            );
-            if let Some(mutation) = mutation.as_mut() {
-                assert!(matches!(
-                    mutation.try_recv(),
-                    Err(oneshot::error::TryRecvError::Empty)
-                ));
-            }
-            drop(replay_response);
-            after_mutation = Some(tokio::select! {
-                result = &mut reads => result,
-                stopped = &mut actor => panic!("actor stopped before FIFO control: {stopped:?}"),
-            });
-            if let Some(mutation) = mutation.as_mut() {
-                mutation
-                    .try_recv()
-                    .expect("mutation acknowledged after cancellation")
-                    .unwrap();
-            }
-        } else {
-            drop(replay_response);
-            assert!(
-                poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
-                    .await
-                    .is_pending()
-            );
+        // A mutation ends the replay wait, so the close queued behind it is
+        // read at once rather than after the five-second replay window.
+        let (reply, ack) = oneshot::channel();
+        if wait != ReplayAdmissionWait::Bmp {
+            mutation = Some(ack); // Bmp: a lost acknowledgement never cancels a mutation.
         }
+        commands
+            .try_send(PeerCommand::UpdateImportPolicy {
+                policy: Some(Box::new(rustbgpd_policy::PolicyChain::new(vec![]))),
+                reply,
+            })
+            .unwrap();
+        if let Some(close) = close {
+            commands.try_send(close).unwrap();
+        }
+        after_close = tokio::select! {
+            result = replay_read_pair(&commands) => result,
+            stopped = &mut actor => panic!("actor stopped before FIFO control: {stopped:?}"),
+        };
     }
-    assert!(session.pending_replay.is_none());
-    let writer = session.writer_join.take().unwrap();
-    writer.abort();
-    let _ = writer.await;
+    let elapsed = tokio::time::Instant::now() - started;
+    let replay_ended = session.pending_replay.is_none();
+    if let Some(writer) = session.writer_join.take() {
+        writer.abort();
+        let _ = writer.await;
+    }
     if let Some((control, manager, _collector)) = manager {
         control
             .send(rustbgpd_bmp::BmpControlEvent::Shutdown)
@@ -487,32 +403,42 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
     ));
     assert!(
         rib_rx.try_recv().is_err(),
-        "canceled replay is not admitted later"
+        "ended replay is not admitted later"
     );
-    assert_eq!(
-        outcomes.len(),
-        2,
-        "{wait:?}: live admission exhausted a snapshot budget"
-    );
-    for (state, counters) in outcomes {
-        let crate::StateQueryOutcome::State(state) = state else {
-            panic!("{wait:?}: live admission exhausted the state budget: {state:?}");
-        };
-        assert_eq!(state.fsm_state, SessionState::Established);
-        let crate::SessionQueryOutcome::Reply(Some(counters)) = counters else {
-            panic!("{wait:?}: live admission exhausted the import budget: {counters:?}");
-        };
-        assert_eq!(counters.generation, generation);
-        assert_eq!(counters.evals, 0);
+    if let Some(mut mutation) = mutation {
+        mutation
+            .try_recv()
+            .expect("mutation acknowledged before the close")
+            .unwrap();
     }
     let (crate::StateQueryOutcome::State(state), crate::SessionQueryOutcome::Reply(Some(counters))) =
-        after_mutation.expect("mutation control completed")
+        reads
     else {
-        panic!("FIFO control lost snapshots")
+        panic!("{wait:?}: live admission exhausted a snapshot budget: {reads:?}");
     };
     assert_eq!(state.fsm_state, SessionState::Established);
-    assert_eq!(counters.generation, generation + 1);
+    assert_eq!(counters.generation, generation);
     assert_eq!(counters.evals, 0);
+    let (crate::StateQueryOutcome::State(state), crate::SessionQueryOutcome::Reply(Some(counters))) =
+        after_close
+    else {
+        panic!("{wait:?}: the close behind the mutation was hidden: {after_close:?}");
+    };
+    assert_eq!(state.fsm_state, closed_state, "{wait:?}: close observed");
+    assert_eq!(counters.generation, generation + 1, "mutation ran first");
+    assert_eq!(
+        elapsed,
+        Duration::ZERO,
+        "{wait:?}: no replay deadline or read budget elapsed"
+    );
+    assert!(
+        matches!(
+            replay_response.try_recv(),
+            Ok(Err(PeerCommandError::ReplayUnavailable(_)))
+        ),
+        "{wait:?}: the mutation ends the replay with a retryable refusal"
+    );
+    assert!(replay_ended);
 }
 
 #[tokio::test(start_paused = true)]
