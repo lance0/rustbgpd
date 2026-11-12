@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_telemetry::{LOG_THROTTLE_INTERVAL, LogThrottle};
 
 pub(super) async fn localhost_inbound_stream() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -1442,4 +1443,49 @@ async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
     assert!(managed.pending_inbound.is_none());
     assert_eq!(candidate.activate.load(Ordering::SeqCst), 0);
     assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+}
+
+/// Inbound drops a remote can repeat at will log one line per interval:
+/// five drops of each class in one interval emit one line, and the next
+/// line carries the other four as `suppressed`. Every drop is still
+/// counted. Red proof: logging each drop of a class leaves its throttle
+/// untouched, so its next line reports none suppressed.
+#[tokio::test(start_paused = true)]
+async fn repeated_inbound_drop_logs_are_throttled() {
+    type Throttle = fn(&mut PeerManager) -> &mut LogThrottle;
+    let unknown = sock(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+    let link_local = SocketAddr::V6(std::net::SocketAddrV6::new(
+        "fe80::1".parse().unwrap(),
+        179,
+        0,
+        7,
+    ));
+    let in_range = sock(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)));
+    let cases: [(SocketAddr, &str, Throttle); 3] = [
+        (unknown, "unconfigured", |mgr| &mut mgr.unknown_peer_log),
+        (link_local, "unconfigured", |mgr| {
+            &mut mgr.link_local_unmatched_log
+        }),
+        (in_range, "dynamic_limit", |mgr| &mut mgr.dynamic_limit_log),
+    ];
+    for (peer_addr, reason, throttle) in cases {
+        let mut mgr = dynamic_test_manager();
+        mgr.dynamic_neighbor_limit = 0;
+        let metrics = mgr.metrics.clone();
+        let started = tokio::time::Instant::now();
+        for _ in 0..5 {
+            let (server_stream, _client_stream) = localhost_inbound_stream().await;
+            mgr.handle_inbound(server_stream, peer_addr, None, None)
+                .await;
+        }
+        assert!(started.elapsed() < LOG_THROTTLE_INTERVAL, "{peer_addr}");
+        assert!(mgr.peers.is_empty(), "{peer_addr}");
+        assert_eq!(
+            inbound_drop_metric(&metrics, reason),
+            Some(5.0),
+            "{peer_addr}"
+        );
+        tokio::time::advance(LOG_THROTTLE_INTERVAL).await;
+        assert_eq!(throttle(&mut mgr).should_log(), Some(4), "{peer_addr}");
+    }
 }

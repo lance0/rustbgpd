@@ -17,7 +17,7 @@ use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
-use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::{BgpMetrics, LogThrottle};
 use rustbgpd_transport::SessionNotification;
 use rustbgpd_transport::{
     PeerHandle, SessionLifecycleNotification,
@@ -1017,7 +1017,14 @@ pub struct PeerManager {
     inbound_admission: Option<admission::InboundAdmission>,
     /// Throttles the log line for inbound connections held by a neighbor's
     /// NOTIFICATION reconnect backoff.
-    notification_backoff_log: admission::LogThrottle,
+    notification_backoff_log: LogThrottle,
+    /// Throttle the log lines of inbound connections dropped from a source
+    /// that matches no neighbor or dynamic range, from an unmatched IPv6
+    /// link-local source, and at the dynamic neighbor limit: a scan or a
+    /// misconfigured remote repeats each at will.
+    unknown_peer_log: LogThrottle,
+    link_local_unmatched_log: LogThrottle,
+    dynamic_limit_log: LogThrottle,
     /// Dead-lettered hot-apply / Route Refresh / `GShut` intent from dynamic
     /// peers auto-removed by `BackToIdle`. Restored on the next inbound
     /// from the same address. Bounded at `dynamic_neighbor_limit` so a
@@ -1977,7 +1984,10 @@ impl PeerManager {
             inbound_admission: admission::InboundAdmission::from_config(
                 &current_config.inbound_admission,
             ),
-            notification_backoff_log: admission::LogThrottle::default(),
+            notification_backoff_log: LogThrottle::default(),
+            unknown_peer_log: LogThrottle::default(),
+            link_local_unmatched_log: LogThrottle::default(),
+            dynamic_limit_log: LogThrottle::default(),
             dead_lettered_pending: HashMap::new(),
             dead_lettered_pending_order: VecDeque::new(),
             next_session_id: 1,
