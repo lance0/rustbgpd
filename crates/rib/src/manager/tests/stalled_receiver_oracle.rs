@@ -465,6 +465,9 @@ struct Wire {
     /// First producing operation a flap discarded an envelope for, by
     /// (session, prefix). Earlier clean operations still compare exactly.
     discarded_from: BTreeMap<(u64, Nlri), usize>,
+    /// Per (session, prefix), the history length when the prefix's family
+    /// got its first `EoR` on the session; absent when nothing preceded it.
+    eor_position: BTreeMap<(u64, Nlri), usize>,
     /// Known-defect signatures this wire tolerated.
     tolerated: BTreeSet<&'static str>,
 }
@@ -739,7 +742,7 @@ impl Wire {
             } else {
                 "initial EoR"
             };
-            self.eor.insert(family);
+            let first = self.eor.insert(family);
             let stale: Vec<Key> = self
                 .gr_stale
                 .iter()
@@ -751,6 +754,13 @@ impl Wire {
             }
             self.purge(stale);
             barrier(self, family, kind);
+            if first {
+                for (key, events) in &self.history {
+                    if key.0 == session && key.1.0 == family {
+                        self.eor_position.insert(key.clone(), events.len());
+                    }
+                }
+            }
         }
         self.commit(op);
         Ok(())
@@ -1481,7 +1491,14 @@ impl Harness {
     /// compared: the later arm's first `EoR` for the key's family on the
     /// session, moved to the close of a deferral holding it. `None` while
     /// either arm lacks that `EoR`, or when a flap ends the deferral first.
-    fn carried_cut(&self, peer: usize, key: &(u64, Nlri), intervals: &[Deferral]) -> Option<usize> {
+    /// The flag is set when both arms' first `EoR` fall in that operation
+    /// outside any deferral, so each arm can cut at its marker's position.
+    fn carried_cut(
+        &self,
+        peer: usize,
+        key: &(u64, Nlri),
+        intervals: &[Deferral],
+    ) -> Option<(usize, bool)> {
         let first_eor = |arm| {
             self.barriers
                 .iter()
@@ -1495,13 +1512,14 @@ impl Harness {
                 .map(|barrier| barrier.op)
                 .min()
         };
-        let cut = first_eor(REFERENCE)?.max(first_eor(SUBJECT)?);
+        let (reference, subject) = (first_eor(REFERENCE)?, first_eor(SUBJECT)?);
+        let cut = reference.max(subject);
         match intervals
             .iter()
             .find(|interval| (interval.start..=interval.end).contains(&cut))
         {
-            Some(interval) => interval.settled.then_some(interval.end),
-            None => Some(cut),
+            Some(interval) => interval.settled.then_some((interval.end, false)),
+            None => Some((cut, reference == subject)),
         }
     }
 
@@ -1616,24 +1634,37 @@ impl Harness {
                     // only once the family's first EoR purged the stale
                     // rows in both arms (or the deferral holding that EoR
                     // settled). Each arm restarts from its state there.
-                    let Some(cut) = self.carried_cut(peer, key, &intervals) else {
+                    let Some((cut, positional)) = self.carried_cut(peer, key, &intervals) else {
                         continue;
                     };
                     if discarded_from.is_some_and(|op| op <= cut) {
                         continue;
                     }
-                    let from_cut = |events: &[HistoryEvent], initial: Option<&Vec<Value>>| {
-                        let state = events
-                            .iter()
-                            .take_while(|(op, _)| *op <= cut)
-                            .last()
-                            .map_or_else(|| initial.cloned().unwrap_or_default(), |e| e.1.clone());
-                        std::iter::once((cut, state))
-                            .chain(events.iter().filter(|(op, _)| *op > cut).cloned())
-                            .collect::<Vec<_>>()
-                    };
-                    expected = from_cut(&expected, reference.initial.get(key));
-                    actual = from_cut(&actual, subject.initial.get(key));
+                    // One operation can enqueue several envelopes, so when
+                    // both first EoRs fall in the cut operation, each arm
+                    // keeps that operation's events after its own marker.
+                    // Otherwise same-op order cannot be aligned across the
+                    // arms, and the whole cut operation folds into the
+                    // starting state: a moved cut closes a deferral, which
+                    // relaxes same-op order for every key anyway, and first
+                    // EoRs in different ops mean the subject owed its EoR.
+                    let from_cut =
+                        |events: &[HistoryEvent], initial: Option<&Vec<Value>>, wire: &Wire| {
+                            let at = if positional {
+                                wire.eor_position.get(key).copied().unwrap_or(0)
+                            } else {
+                                events.partition_point(|(op, _)| *op <= cut)
+                            };
+                            let state = at.checked_sub(1).map_or_else(
+                                || initial.cloned().unwrap_or_default(),
+                                |last| events[last].1.clone(),
+                            );
+                            std::iter::once((cut, state))
+                                .chain(events[at..].iter().cloned())
+                                .collect::<Vec<_>>()
+                        };
+                    expected = from_cut(&expected, reference.initial.get(key), reference);
+                    actual = from_cut(&actual, subject.initial.get(key), subject);
                     initial = &[];
                 }
                 let verdict =
@@ -2733,6 +2764,23 @@ fn rekeyed_gr_paths_compare_from_the_eor() {
         .expect("P4 must check a rekeyed prefix after its EoR");
         assert!(reason.starts_with("P4: peer 2 session 2"), "{reason}");
     }
+    // A transient cycle after the EoR but in the EoR's own operation (7):
+    // each arm cuts at its marker, not at the operation's end.
+    let reason = run_seeded(config, &ops, |harness| {
+        let key = (2, rekeyed_prefix());
+        assert_eq!(
+            harness.carried_cut(2, &key, &harness.deferrals(2, &key)),
+            Some((7, true))
+        );
+        let wire = &mut harness.arms[SUBJECT].wire[2];
+        let at = wire.eor_position.get(&key).copied().unwrap_or(0);
+        let held = wire.initial[&key].clone();
+        let history = wire.history.get_mut(&key).unwrap();
+        history.splice(at..at, [(7, vec!["transient".into()]), (7, held)]);
+    })
+    .err()
+    .expect("P4 must check a same-operation change after the EoR");
+    assert!(reason.starts_with("P4: peer 2 session 2"), "{reason}");
 }
 
 /// A gated restarted session never sends its IPv4 `EoR`, so the rekeyed
