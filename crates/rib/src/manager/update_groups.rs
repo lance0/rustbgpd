@@ -3349,8 +3349,8 @@ impl RibManager {
             }
             changed.push((Arc::clone(&swap.prior), current));
         }
+        // The walks below checkpoint once per visited slot or route.
         let differs = |prefix: Prefix, as_path: Option<&rustbgpd_wire::AsPath>| {
-            checkpoint();
             let origin = as_path.and_then(rustbgpd_wire::AsPath::origin_asn);
             changed.iter().any(|(prior, current)| {
                 prior
@@ -3364,9 +3364,17 @@ impl RibManager {
             let route_differs = |route: &&Route| differs(route.prefix, route.as_path());
             let vpn_differs = |route: &&VpnRibRoute| differs(route.inner_prefix(), route.as_path());
             for rib in self.ribs.values() {
-                prefixes.extend(rib.iter().filter(route_differs).map(|route| route.prefix));
+                prefixes.extend(
+                    rib.iter_slots()
+                        .inspect(|_| checkpoint())
+                        .flatten()
+                        .filter(route_differs)
+                        .map(|route| route.prefix),
+                );
                 vpn.extend(
-                    rib.iter_vpn()
+                    rib.iter_vpn_slots()
+                        .inspect(|_| checkpoint())
+                        .flatten()
                         .filter(vpn_differs)
                         .map(|route| route.key().nlri_key),
                 );
@@ -3374,12 +3382,14 @@ impl RibManager {
             prefixes.extend(
                 self.loc_rib
                     .iter()
+                    .inspect(|_| checkpoint())
                     .filter(route_differs)
                     .map(|route| route.prefix),
             );
             vpn.extend(
                 self.loc_rib
                     .iter_vpn()
+                    .inspect(|_| checkpoint())
                     .filter(vpn_differs)
                     .map(|route| route.key().nlri_key),
             );
