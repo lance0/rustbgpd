@@ -310,6 +310,84 @@ where
     with_peer_levels(output, env, peers).boxed()
 }
 
+/// The `<N>` syslog priority prefix journald strips from a stdout line and
+/// stores as its `PRIORITY` (sd-daemon(3)).
+fn journal_priority(level: tracing::Level) -> &'static [u8] {
+    match level {
+        tracing::Level::ERROR => b"<3>",
+        tracing::Level::WARN => b"<4>",
+        tracing::Level::INFO => b"<6>",
+        _ => b"<7>",
+    }
+}
+
+/// Whether a `JOURNAL_STREAM` value (`<device>:<inode>`, which systemd sets
+/// when a service's stdout or stderr is a journal stream) names the file
+/// with this device and inode.
+fn journal_stream_matches(journal_stream: Option<&str>, dev: u64, ino: u64) -> bool {
+    journal_stream
+        .and_then(|value| value.split_once(':'))
+        .is_some_and(|(d, i)| d.parse() == Ok(dev) && i.parse() == Ok(ino))
+}
+
+/// Whether stdout itself is connected to the journal, per systemd.exec(5):
+/// matching `JOURNAL_STREAM` against stdout's device and inode, so a
+/// redirected stdout under a journal-attached stderr gets no prefix.
+fn stdout_is_journal() -> bool {
+    use std::os::fd::AsFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Some(value) = std::env::var_os("JOURNAL_STREAM") else {
+        return false;
+    };
+    let Ok(fd) = std::io::stdout().as_fd().try_clone_to_owned() else {
+        return false;
+    };
+    let Ok(meta) = std::fs::File::from(fd).metadata() else {
+        return false;
+    };
+    journal_stream_matches(value.to_str(), meta.dev(), meta.ino())
+}
+
+/// A writer that starts each record with its level's journald priority.
+struct JournalPrefix<M>(M);
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for JournalPrefix<M> {
+    type Writer = Prefixed<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        Prefixed {
+            inner: self.0.make_writer(),
+            prefix: b"",
+        }
+    }
+
+    fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
+        Prefixed {
+            inner: self.0.make_writer_for(meta),
+            prefix: journal_priority(*meta.level()),
+        }
+    }
+}
+
+/// `fmt` writes one record per writer, so the prefix goes out once, before
+/// its first byte.
+struct Prefixed<W> {
+    inner: W,
+    prefix: &'static [u8],
+}
+
+impl<W: std::io::Write> std::io::Write for Prefixed<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write_all(std::mem::take(&mut self.prefix))?;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Initialize the global tracing subscriber with JSON output (or
 /// human-readable text when `json` is false) and `RUST_LOG` env-filter.
 ///
@@ -339,14 +417,15 @@ pub fn init_logging(peer_levels: &[(String, String)], json: bool) -> Result<(), 
         eprintln!("warning: {report}");
     }
     let ansi = std::io::stdout().is_terminal();
+    let output = if stdout_is_journal() {
+        // The lock keeps the prefix and its record together.
+        let stdout = || std::io::stdout().lock();
+        output_layer(json, ansi, JournalPrefix(stdout), env, Arc::clone(&peers))
+    } else {
+        output_layer(json, ansi, std::io::stdout, env, Arc::clone(&peers))
+    };
     tracing_subscriber::registry()
-        .with(output_layer(
-            json,
-            ansi,
-            std::io::stdout,
-            env,
-            Arc::clone(&peers),
-        ))
+        .with(output)
         .try_init()
         .map_err(|e| LoggingError::AlreadyInitialized(e.to_string()))?;
     // Only publish after the subscriber actually installed, so a failed
@@ -801,5 +880,65 @@ mod tests {
                 && report.contains("`peer{peer_addr=10.0.0.1}=debug`: "),
             "{report}"
         );
+    }
+
+    /// Under a journal stream every record, JSON or text, starts with its
+    /// level's syslog priority, once, and the rest of the line is unchanged.
+    #[test]
+    fn journal_writer_prefixes_each_record_with_its_priority() {
+        for json in [true, false] {
+            let buffer = Buffer::default();
+            let live = Arc::new(RwLock::new(PeerLevels::default()));
+            let subscriber = tracing_subscriber::registry().with(output_layer(
+                json,
+                false,
+                JournalPrefix(buffer.clone()),
+                EnvFilter::new("trace"),
+                live,
+            ));
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::error!("e");
+                tracing::warn!("w");
+                tracing::info!("i");
+                tracing::debug!("d");
+                tracing::trace!("t");
+            });
+            let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 5, "{text}");
+            for (line, (prefix, level)) in lines.iter().zip([
+                ("<3>", "ERROR"),
+                ("<4>", "WARN"),
+                ("<6>", "INFO"),
+                ("<7>", "DEBUG"),
+                ("<7>", "TRACE"),
+            ]) {
+                let rest = line
+                    .strip_prefix(prefix)
+                    .unwrap_or_else(|| panic!("{line}"));
+                assert!(!rest.starts_with('<'), "prefixed twice: {line}");
+                assert!(rest.contains(level), "{line}");
+                if json {
+                    assert!(rest.starts_with('{'), "{line}");
+                }
+            }
+        }
+    }
+
+    /// Only a `JOURNAL_STREAM` naming stdout's own device and inode turns
+    /// the prefix on; absent, mismatched or malformed values leave it off.
+    #[test]
+    fn journal_stream_must_name_stdout() {
+        assert!(journal_stream_matches(Some("8:12345"), 8, 12345));
+        for value in [
+            None,
+            Some("8:12346"),
+            Some("9:12345"),
+            Some(""),
+            Some("8"),
+            Some("x:y"),
+        ] {
+            assert!(!journal_stream_matches(value, 8, 12345), "{value:?}");
+        }
     }
 }

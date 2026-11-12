@@ -851,6 +851,9 @@ pub struct JsonHealth {
     pub uptime_seconds: u64,
     pub active_peers: u32,
     pub total_routes: u32,
+    /// The running daemon's version; `null` from a daemon that does not
+    /// report one.
+    pub daemon_version: Option<String>,
 }
 
 #[derive(Serialize)]

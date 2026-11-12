@@ -29,6 +29,11 @@ on:
       - .github/workflows/release.yml
       - packaging/install.sh
       - packaging/nfpm.yaml
+      - packaging/preinstall.sh
+      - packaging/postinstall.sh
+      - packaging/preremove.sh
+      - packaging/postremove.sh
+      - scripts/check-package-lifecycle.sh
       - scripts/build-packages.sh
       - scripts/check_release_install_contract.py
       - scripts/test_check_release_install_contract.py
@@ -63,6 +68,11 @@ on:
       - .github/workflows/release.yml
       - packaging/install.sh
       - packaging/nfpm.yaml
+      - packaging/preinstall.sh
+      - packaging/postinstall.sh
+      - packaging/preremove.sh
+      - packaging/postremove.sh
+      - scripts/check-package-lifecycle.sh
       - scripts/build-packages.sh
       - scripts/check_release_install_contract.py
       - scripts/test_check_release_install_contract.py
@@ -118,6 +128,14 @@ jobs:
           tar -C /tmp -xzf /tmp/nfpm.tgz nfpm
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           scripts/build-packages.sh staging amd64 "$version" dist /tmp/nfpm
+      - name: Exercise the deb lifecycle under the runner's systemd
+        run: |
+          set -euo pipefail
+          scripts/build-packages.sh staging amd64 0.0.1 dist-old /tmp/nfpm
+          old="$(find dist-old -maxdepth 1 -name '*.deb' -print -quit)"
+          new="$(find dist -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$old" && test -n "$new"
+          sudo scripts/check-package-lifecycle.sh "$old" "$new"
       - name: Assert real native package payloads
         run: |
           set -euo pipefail

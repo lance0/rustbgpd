@@ -853,8 +853,9 @@ Birdwatcher's `rejected_routes_retained`. Peer-group detail counts inline
 policies, omits the raw Paths-Limit preference and never prints `md5_password`;
 `has_md5_password` is the presence indicator. Global status omits the API's
 policy-load timestamp, which remains available through the API and metrics;
-health omits the daemon version used by doctor. Explain views preserve their
-existing outer identity and outcome-dependent null/omitted fields. Rejected
+health reports the running daemon's `daemon_version` (`null` when the daemon
+reports none). Explain views preserve their existing outer identity and
+outcome-dependent null/omitted fields. Rejected
 routes retain formatted prefix identity without a separate `afi_safi` key.
 
 Mutation acknowledgments reuse the common result document. Effective-config
