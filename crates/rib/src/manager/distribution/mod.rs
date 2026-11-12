@@ -6192,23 +6192,47 @@ impl RibManager {
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerId>, RibCommandError> {
-        self.discard_refused_cohort_destinations();
         self.apply_export_policy_replacements(replacements, ResidualMode::DeferSenders)
             .map(|outcome| outcome.deferred)
     }
 
     /// Discard every recorded refused-cohort destination that no member
-    /// joined, unless a destination prestage now owns that group.
+    /// joined, unless a destination prestage now owns that group. Callers
+    /// run inside a replacement readiness scope, so retiring a large table
+    /// keeps answering readiness and summary queries.
     fn discard_refused_cohort_destinations(&mut self) {
-        for gid in std::mem::take(&mut self.refused_cohort_destinations) {
-            let prestaged = self.prepared_destination == Some(gid)
-                || self
-                    .pending_destination_prestage
-                    .as_ref()
-                    .is_some_and(|prestage| prestage.destination == gid);
-            if !prestaged {
-                let _ = self.discard_uncommitted_policy_transition_group(gid);
-            }
+        for (gid, _) in std::mem::take(&mut self.refused_cohort_destinations) {
+            self.discard_refused_cohort_destination(gid);
+        }
+    }
+
+    fn discard_refused_cohort_destination(&mut self, gid: usize) {
+        let prestaged = self.prepared_destination == Some(gid)
+            || self
+                .pending_destination_prestage
+                .as_ref()
+                .is_some_and(|prestage| prestage.destination == gid);
+        if !prestaged {
+            let _ = self.discard_uncommitted_policy_transition_group(gid);
+        }
+    }
+
+    /// After a paced command: a refused destination whose movers have all
+    /// been applied or skipped has seen its whole walk. Retire it now if no
+    /// member joined (every mover left the RIB, or moved elsewhere), rather
+    /// than staging route updates into it until the next batch or restore.
+    fn settle_refused_cohort_destinations(&mut self, applied: &[PeerId], skipped: &[PeerId]) {
+        let mut settled = Vec::new();
+        self.refused_cohort_destinations
+            .retain_mut(|(gid, movers)| {
+                movers.retain(|peer| !applied.contains(peer) && !skipped.contains(peer));
+                if movers.is_empty() {
+                    settled.push(*gid);
+                }
+                !movers.is_empty()
+            });
+        for gid in settled {
+            self.discard_refused_cohort_destination(gid);
         }
     }
 
@@ -6443,6 +6467,11 @@ impl RibManager {
             prestage.retire_with(&mut || checkpoint());
             self.replacement_checkpoint(true);
         }
+        // A new forward batch starts a new walk: an earlier walk's refused
+        // destination that no member joined is retired here, in this scope.
+        if matches!(mode, ResidualMode::DeferSenders) {
+            self.discard_refused_cohort_destinations();
+        }
 
         let phase = std::time::Instant::now();
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
@@ -6634,7 +6663,8 @@ impl RibManager {
                     .get(&destination)
                     .is_some_and(|group| group.members.is_empty());
                 if memberless && matches!(mode, ResidualMode::DeferSenders) {
-                    self.refused_cohort_destinations.push(destination);
+                    self.refused_cohort_destinations
+                        .push((destination, members.clone()));
                 }
                 residual.extend(members);
             }
@@ -6747,6 +6777,9 @@ impl RibManager {
                 Some(applied_peers.iter().map(|&peer| (peer, None)).collect());
         }
         self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
+        if matches!(mode, ResidualMode::Paced { .. }) {
+            self.settle_refused_cohort_destinations(&applied_peers, &skipped);
+        }
         let member_costs = self.paced_member_costs.take();
         receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         let pass_max = member_costs.and_then(|costs| costs.into_values().flatten().max());

@@ -10697,7 +10697,7 @@ async fn queued_refresh_preserves_member_prefix_limit_and_recovery() {
     assert_eq!(manager.grouped_advertised_routes(limited).unwrap().len(), 2);
 }
 
-fn queue_replacement_readiness(
+pub(super) fn queue_replacement_readiness(
     tx: &mpsc::Sender<crate::update::RibReadinessQuery>,
 ) -> oneshot::Receiver<Result<usize, crate::update::RibReadinessError>> {
     let (reply, response) = oneshot::channel();
@@ -18826,18 +18826,28 @@ struct MixedFamilyFleet {
 /// Leading members of a [`mixed_family_fleet`] that send the private family.
 const MIXED_MEMBERS: usize = 2;
 
-/// A non-member source announcing one unicast route and one `private` route.
-fn seed_mixed_family_source(manager: &mut RibManager, private: Safi) {
+/// A non-member source announcing one IPv4 unicast route, one IPv6 unicast
+/// route when `ipv6`, and one `private` route.
+fn seed_mixed_family_source(manager: &mut RibManager, private: Safi, ipv6: bool) {
     let source_addr = Ipv4Addr::new(10, 41, 9, 9);
     let source = peer_v4(source_addr);
     register_test_peer(manager, source, 0);
+    let mut announced = vec![crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        source_addr,
+    )];
+    if ipv6 {
+        let mut route = crate::test_support::make_v6_route(
+            Ipv6Prefix::new("2001:db8:41::".parse().unwrap(), 48),
+            "2001:db8::9".parse().unwrap(),
+        );
+        crate::test_support::set_peer(&mut route, source);
+        announced.push(route);
+    }
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
-        announced: vec![crate::test_support::make_route(
-            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
-            source_addr,
-        )],
+        announced,
         withdrawn: vec![],
         flowspec_announced: if private == Safi::FlowSpec {
             vec![make_flowspec_route(source_addr)]
@@ -18952,7 +18962,11 @@ fn mixed_family_fleet_sending(
     for &peer in &members {
         assert_eq!(manager.grouped_member_of(peer), group, "setup: one group");
     }
-    seed_mixed_family_source(&mut manager, private.1);
+    seed_mixed_family_source(
+        &mut manager,
+        private.1,
+        unicast.contains(&(Afi::Ipv6, Safi::Unicast)),
+    );
     drain_route_chunks(&mut manager);
     for receiver in &mut receivers {
         while receiver.try_recv().is_ok() {}
@@ -19210,9 +19224,13 @@ fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi), unicast: &
         // Per family, its one row's last event: the announced communities,
         // or `None` once withdrawn. An envelope withdraws before it announces.
         let mut last: HashMap<&'static str, Option<Vec<u32>>> = HashMap::new();
+        let unicast_family = |prefix: &Prefix| match prefix {
+            Prefix::V4(_) => "ipv4 unicast",
+            Prefix::V6(_) => "ipv6 unicast",
+        };
         while let Ok(update) = receiver.try_recv().map(delivered) {
-            if update.unicast_withdrawals().next().is_some() {
-                last.insert("unicast", None);
+            for (prefix, _) in update.unicast_withdrawals() {
+                last.insert(unicast_family(prefix), None);
             }
             if !update.evpn_withdraw.is_empty()
                 || !update.vpn_withdraw.is_empty()
@@ -19226,7 +19244,7 @@ fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi), unicast: &
                 last.insert(family, Some(communities.to_vec()));
             };
             for route in update.announce.iter() {
-                record("unicast", route.communities());
+                record(unicast_family(&route.prefix), route.communities());
             }
             for route in update.evpn_announce.iter() {
                 record("private", route.communities());
@@ -19244,12 +19262,14 @@ fn assert_batched_cohort_reexports_every_family(private: (Afi, Safi), unicast: &
                 record("private", route.communities());
             }
         }
-        let families: &[&str] = if index < MIXED_MEMBERS {
-            &["unicast", "private"]
-        } else {
-            &["unicast"]
-        };
-        for family in families {
+        let mut families = vec!["ipv4 unicast"];
+        if unicast.contains(&(Afi::Ipv6, Safi::Unicast)) {
+            families.push("ipv6 unicast");
+        }
+        if index < MIXED_MEMBERS {
+            families.push("private");
+        }
+        for family in &families {
             match last.get(family) {
                 None => panic!("{private:?} with {unicast:?} {peer}: {family} row not re-exported"),
                 Some(None) => {

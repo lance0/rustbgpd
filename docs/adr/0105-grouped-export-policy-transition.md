@@ -215,9 +215,10 @@ its commands (queued UPDATEs, route chunks, timers), which the former single
 turn kept waiting instead. A cohort fallback that fitted the budget as one
 long turn can therefore run out of it under load and roll back, and that
 rollback pays the one-turn restore below. A destination the batch built for
-a shared cohort it then refused is adopted by the walk's first mover; the
-rollback restore, and the next forward batch, discard it if no member
-joined. The first limit above (rollback is one turn over the whole list) remains, and
+a shared cohort it then refused is adopted by the walk's first mover. If no
+member joined it, it is retired, inside the command's readiness scope, by the
+paced command that applies or skips its last mover, by the rollback restore,
+or by the next forward batch, whichever comes first. The first limit above (rollback is one turn over the whole list) remains, and
 so does the remainder's one-member-per-command walk under its own budget.
 
 ## Context

@@ -832,13 +832,69 @@ fn memberless_groups(manager: &RibManager) -> usize {
         .count()
 }
 
+/// How the paced walk over a refused cohort ends.
+#[derive(Clone, Copy, Debug)]
+enum WalkEnd {
+    /// The walk fails before its first command; the peer manager restores.
+    Restored,
+    /// Every mover is applied and joins the destination.
+    Completed,
+    /// Every mover leaves the RIB first, so each paced command skips it.
+    EveryMoverLeft,
+}
+
+/// Count the `retirement` checkpoints the replacement readiness owner
+/// observes, and whether a readiness query queued at the first one is
+/// answered by a later one. Returns (visits, answered during retirement).
+fn observe_retirement_readiness(
+    manager: &mut RibManager,
+) -> (
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let visits = Arc::new(AtomicUsize::new(0));
+    let answered = Arc::new(AtomicBool::new(false));
+    let pending = std::sync::Mutex::new(None);
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let (visits, answered) = (Arc::clone(&visits), Arc::clone(&answered));
+        move |observed| {
+            if observed != "retirement" {
+                return;
+            }
+            let mut pending = pending.lock().unwrap();
+            if visits.fetch_add(1, Ordering::Relaxed) == 0 {
+                *pending = Some(super::update_groups::queue_replacement_readiness(
+                    &readiness_tx,
+                ));
+            } else if pending
+                .as_mut()
+                .is_some_and(|response: &mut oneshot::Receiver<_>| response.try_recv().is_ok())
+            {
+                answered.store(true, Ordering::Relaxed);
+            }
+        }
+    }));
+    (visits, answered)
+}
+
 /// A shared cohort the forward batch refuses after building its destination
 /// (an action-only next-hop change refuses the shared inventory) hands its
-/// members to the paced walk. If the walk fails before any member joins, the
-/// restore must discard that destination; if the walk completes, the members
-/// join it. Either way no memberless group survives, as on the inline path.
+/// members to the paced walk, which adopts the destination through its first
+/// mover. However the walk ends, no memberless destination outlives it:
+/// a restore retires it, and so does the paced command that skips the last
+/// mover when every mover left the RIB. That retirement, [`RESIDUAL_ROWS`]
+/// staged rows, runs under the replacement readiness owner and answers a
+/// readiness query part-way through.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture follows each way the walk can end through the destination's retirement"
+)]
 fn refused_cohort_destination_never_outlives_the_walk_memberless() {
+    use std::sync::atomic::Ordering;
     const OLD: u32 = 0xFC00_0001;
     const SIZE: usize = 4;
     let arm = ResidualArm::MixedDestinations;
@@ -857,7 +913,11 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
             })
             .collect::<Vec<_>>()
     };
-    for walk_completes in [false, true] {
+    for end in [
+        WalkEnd::Restored,
+        WalkEnd::Completed,
+        WalkEnd::EveryMoverLeft,
+    ] {
         let (_tx, mut manager) = manager();
         manager.paced_elapsed_for_test = Some(Duration::ZERO);
         let _receivers: Vec<_> = (0..SIZE)
@@ -896,48 +956,82 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
             "the cohort built its destination and was refused"
         );
         assert_eq!(memberless_groups(&manager), 1, "the built destination");
-        if walk_completes {
-            while !pending.is_empty() {
+        let (destination, staged) = manager
+            .group_ribs
+            .iter()
+            .find(|(_, group)| group.members.is_empty())
+            .map(|(gid, group)| (*gid, group.table.len()))
+            .unwrap();
+        assert!(staged >= RESIDUAL_ROWS, "{end:?}: staged {staged} rows");
+        if matches!(end, WalkEnd::EveryMoverLeft) {
+            for &peer in &all {
+                manager.handle_update(RibUpdate::PeerDown {
+                    peer,
+                    session_id: 1,
+                });
+            }
+            drain_route_chunks(&mut manager);
+        }
+        let (visits, answered) = observe_retirement_readiness(&mut manager);
+        match end {
+            WalkEnd::Restored => {
                 let (reply, mut response) = oneshot::channel();
-                manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
-                    replacements: replacements(&next, &pending),
-                    cost: Some(TWO_PER_COMMAND),
+                manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements: replacements(&old, &all),
                     reply,
                 });
-                pending = response.try_recv().unwrap().unwrap().pending;
+                response.try_recv().unwrap().unwrap();
+                assert!(
+                    all.iter()
+                        .all(|peer| manager.grouped_member_of(*peer) == Some(source)),
+                    "every member is back in its source group"
+                );
             }
-            let destination = manager.grouped_member_of(all[0]).unwrap();
-            assert_ne!(destination, source);
+            WalkEnd::Completed | WalkEnd::EveryMoverLeft => {
+                while !pending.is_empty() {
+                    let (reply, mut response) = oneshot::channel();
+                    manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+                        replacements: replacements(&next, &pending),
+                        cost: Some(TWO_PER_COMMAND),
+                        reply,
+                    });
+                    let outcome = response.try_recv().unwrap().unwrap();
+                    if matches!(end, WalkEnd::EveryMoverLeft) {
+                        assert_eq!(outcome.applied, 0, "every mover is skipped");
+                    }
+                    pending = outcome.pending;
+                }
+            }
+        }
+        manager.replacement_readiness_test_hook = None;
+        if matches!(end, WalkEnd::Completed) {
             assert!(
                 all.iter()
                     .all(|peer| manager.grouped_member_of(*peer) == Some(destination)),
                 "every mover joined the destination"
             );
         } else {
-            // The walk fails before its first command: the peer manager
-            // restores every prior.
-            let (reply, mut response) = oneshot::channel();
-            manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
-                replacements: replacements(&old, &all),
-                reply,
-            });
-            response.try_recv().unwrap().unwrap();
             assert!(
-                all.iter()
-                    .all(|peer| manager.grouped_member_of(*peer) == Some(source)),
-                "every member is back in its source group"
+                !manager.group_ribs.contains_key(&destination),
+                "{end:?}: the unadopted destination survived the walk's last command"
+            );
+            assert!(
+                visits.load(Ordering::Relaxed) >= 2 && answered.load(Ordering::Relaxed),
+                "{end:?}: retiring {staged} staged rows answered no readiness query \
+                 ({} retirement checkpoints observed under a readiness owner)",
+                visits.load(Ordering::Relaxed)
             );
         }
-        drain_route_chunks(&mut manager);
-        assert_eq!(
-            memberless_groups(&manager),
-            0,
-            "walk_completes={walk_completes}: a memberless destination survived"
-        );
-        // Later churn stages no orphan.
+        assert_eq!(memberless_groups(&manager), 0, "{end:?}");
+        // Later churn finds no orphan to stage into.
         manager.handle_update(routes_from(external(), 0, 9, 4));
         drain_route_chunks(&mut manager);
-        assert_eq!(memberless_groups(&manager), 0, "after churn");
+        assert_eq!(memberless_groups(&manager), 0, "{end:?}: after churn");
+        assert_eq!(
+            manager.group_ribs.contains_key(&destination),
+            matches!(end, WalkEnd::Completed),
+            "{end:?}: after churn"
+        );
     }
 }
 
