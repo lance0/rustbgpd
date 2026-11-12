@@ -1550,8 +1550,14 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .await
             .map(drop)
             .map_err(|error| error.to_string()),
-        Drive::HonorGracefulShutdown => manager.set_honor_graceful_shutdown(true).await,
-        Drive::HonorBlackhole => manager.set_honor_blackhole(true).await,
+        Drive::HonorGracefulShutdown => manager
+            .set_honor_graceful_shutdown(true)
+            .await
+            .map_err(|error| error.to_string()),
+        Drive::HonorBlackhole => manager
+            .set_honor_blackhole(true)
+            .await
+            .map_err(|error| error.to_string()),
         Drive::CatalogPolicyRefresh => {
             use rustbgpd_api::peer_types::{
                 ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,

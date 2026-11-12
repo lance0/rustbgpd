@@ -404,6 +404,32 @@ pub enum OwnedDampeningControlOutcome {
     Ambiguous(PeerLifecycleError),
 }
 
+/// A best-effort honor-knob fan-out that installed the new knob value in the
+/// peer manager's snapshot but left some EBGP peers on their prior chains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HonorKnobPartial {
+    /// EBGP peers the fan-out targeted.
+    pub targeted: usize,
+    /// Each peer whose effective chains were not updated, with the reason.
+    pub failed: Vec<(PeerKey, String)>,
+}
+
+impl std::fmt::Display for HonorKnobPartial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} of {} EBGP peers failing (snapshot advanced anyway)",
+            self.failed.len(),
+            self.targeted
+        )?;
+        for (index, (peer, reason)) in self.failed.iter().enumerate() {
+            f.write_str(if index == 0 { ": " } else { "; " })?;
+            write!(f, "{peer}: {reason}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Typed failure for runtime catalog mutations.
 ///
 /// These commands are surfaced by gRPC services. Keeping the failure class in
@@ -1509,16 +1535,16 @@ pub enum PeerManagerCommand {
     SetHonorGracefulShutdown {
         /// Whether RFC 8326 receiver behavior is enabled.
         enabled: bool,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Reply channel: success, or the peers left on their prior chains.
+        reply: oneshot::Sender<Result<(), HonorKnobPartial>>,
     },
     /// Hot-apply `[global] honor_blackhole` by recomputing effective runtime
     /// policies for EBGP peers.
     SetHonorBlackhole {
         /// Whether RFC 7999 receiver scoping behavior is enabled.
         enabled: bool,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Reply channel: success, or the peers left on their prior chains.
+        reply: oneshot::Sender<Result<(), HonorKnobPartial>>,
     },
     /// Query per-neighbor named import/export chains.
     GetNeighborPolicyChains {

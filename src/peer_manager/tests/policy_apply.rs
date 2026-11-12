@@ -1074,7 +1074,13 @@ async fn actor_hot_update_reaps_only_successful_policy_identity_changes() {
 
 #[tokio::test]
 async fn actor_honor_toggle_reaps_clean_success_but_retains_partial_batch_history() {
-    async fn run_case(partial: bool) -> (Result<(), String>, BgpMetrics, IpAddr) {
+    async fn run_case(
+        partial: bool,
+    ) -> (
+        Result<(), rustbgpd_api::peer_types::HonorKnobPartial>,
+        BgpMetrics,
+        IpAddr,
+    ) {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let metrics = BgpMetrics::new();
