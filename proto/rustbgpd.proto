@@ -3889,12 +3889,16 @@ service InjectionService {
   // ListFlowSpecExportDispositions over a list of local FlowSpec rule keys
   // in one paged walk, with the key bound, duplicate check, page entries,
   // key order, found flag and ABORTED and INVALID_ARGUMENT contract of
-  // BatchListPathExportDispositions. Keys may mix global and VPN families
-  // and RDs. Two keys are the same when ListFlowSpecExportDispositions
-  // would name the same rule. A malformed key returns INVALID_ARGUMENT
-  // naming its index before any rule is read; a key with no local rule is
-  // listed with found false. Each page reads all its keys in one RIB turn.
-  // This diagnostic RPC is outside v1.
+  // BatchListPathExportDispositions, except for malformed keys. Keys may mix
+  // global and VPN families and RDs. A key that ListFlowSpecExportDispositions
+  // would refuse as malformed does not fail the call: it keeps its place in
+  // the walk as one entry with found false, no rows and error set. A key
+  // with no local rule is listed with found false and no error. Two parsed
+  // keys are the same when ListFlowSpecExportDispositions would name the same
+  // rule; a key named twice is INVALID_ARGUMENT, but malformed keys are never
+  // duplicates, even of each other. An empty key list, more than 1000 keys,
+  // a duplicate key or a foreign page token is INVALID_ARGUMENT. Each page
+  // reads all its keys in one RIB turn. This diagnostic RPC is outside v1.
   rpc BatchListFlowSpecExportDispositions(BatchListFlowSpecExportDispositionsRequest) returns (BatchListFlowSpecExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an upsert
   // keyed on (afi_safi, components): repeating an identical request is
@@ -4311,8 +4315,8 @@ message BatchListPathExportDispositionsResponse {
 
 message BatchListFlowSpecExportDispositionsRequest {
   // The local rules' AddFlowSpec keys, in walk order: 1 to 1000 keys per
-  // walk, none named twice. rd is required for VPN FlowSpec and empty for
-  // global FlowSpec.
+  // walk, no parsed key named twice. rd is required for VPN FlowSpec and
+  // empty for global FlowSpec; a key that breaks this is reported per key.
   repeated LeasedFlowSpecKey keys = 1;
   // As BatchListPathExportDispositionsRequest.page_size, page_token and
   // include_configured.
@@ -4325,11 +4329,24 @@ message BatchListFlowSpecExportDispositionsRequest {
 message FlowSpecExportDispositions {
   // The key as the request named it.
   LeasedFlowSpecKey key = 1;
-  // As PathExportDispositions.found, for a local rule.
+  // As PathExportDispositions.found, for a local rule. false for a key
+  // with error set.
   bool found = 2;
   // One row per peer, as ListFlowSpecExportDispositions lists them; the
   // key's remaining peers continue on the next page when it ends mid-key.
   repeated PathExportDispositionEntry peers = 3;
+  // Set when the key is malformed; such a key lists no rows.
+  FlowSpecKeyError error = 4;
+}
+
+// Why one requested FlowSpec key could not be read.
+message FlowSpecKeyError {
+  // Bounded code: invalid_key, a key AddFlowSpec would refuse (family, RD or
+  // components). New codes may be added.
+  string code = 1;
+  // Human-readable detail that starts with the key's index, as keys[i]:
+  // followed by the reason; not a stable string.
+  string message = 2;
 }
 
 message BatchListFlowSpecExportDispositionsResponse {

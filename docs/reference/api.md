@@ -3848,30 +3848,40 @@ echoes the key as requested, with its rows as
 `ListFlowSpecExportDispositions` lists them. This diagnostic RPC is outside
 v1. Daemons that predate it return `UNIMPLEMENTED`.
 
-The contract is that of the unicast batch:
+The contract is that of the unicast batch, except for malformed keys:
 
 - A key with no local rule is listed with `found = false` and no rows; the
   call does not fail with `NOT_FOUND`.
-- A request names 1 to 1000 keys. An empty list, more than 1000 keys, a
-  key named twice, or a malformed key returns `INVALID_ARGUMENT` naming the
-  first offending index (`keys[i]`) before any rule is read. Two keys are the
-  same when they name the same family, RD and components.
+- A malformed key does not fail the call either. A key that
+  `ListFlowSpecExportDispositions` would refuse with `INVALID_ARGUMENT`, such
+  as a non-FlowSpec family, a VPN key without an RD, a global key with one,
+  or invalid or out-of-order components, keeps its place as one entry with
+  `found = false`, no rows and `error` set: `code` is `invalid_key` and
+  `message` begins with `keys[i]:`. The unicast batch still fails the call on
+  a malformed key.
+- A request names 1 to 1000 keys. An empty list, more than 1000 keys, or a
+  key named twice returns `INVALID_ARGUMENT` naming the offending index
+  (`keys[i]`) before any rule is read. Two parsed keys are the same when they
+  name the same family, RD and components. Malformed keys are never
+  duplicates, even of each other: each is reported at its own index.
 - `page_size` counts entries: each peer row is one, and so is a key listed
-  with no rows. A key whose rows do not fit continues at the start of the
-  next page.
+  with no rows, including a malformed key. A key whose rows do not fit
+  continues at the start of the next page.
 - Every page re-reads the rule of each named key. A resumed page returns
   `ABORTED` when any key's rule content (its path attributes), or whether it
   has a rule, differs from the first page, or on the peer, policy and
-  managed-set changes `ListPathExportDispositions` checks.
-- The `next_page_token` is bound to the key list in order,
+  managed-set changes `ListPathExportDispositions` checks. A malformed key
+  never has a rule, so it never aborts a walk.
+- The `next_page_token` is bound to the keys exactly as sent, in order,
   `include_configured` and the daemon process. A token from another key list
   or from another export-disposition RPC returns `INVALID_ARGUMENT`.
 
 Each page reads all its keys in one RIB turn, so the rows on one page
 describe one RIB state. Across pages, the `ABORTED` check above keeps every
-key's rule and the peer and policy inputs as they were on the first page;
-inputs `ListPathExportDispositions` reads live, such as outbound delivery
-progress, may move between pages.
+key's rule and the peer and policy inputs as they were on the first page.
+Loc-RIB selection, which decides `not_selected` when a received rule with the
+same key wins, and outbound delivery progress are read live on each page and
+are not fenced, so a later page can reflect a change to them.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

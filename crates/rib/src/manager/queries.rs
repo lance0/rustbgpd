@@ -2142,7 +2142,7 @@ impl RibManager {
     /// Answer [`crate::update::RibUpdate::QueryLocalFlowSpecExport`].
     pub(super) fn handle_query_local_flowspec_export(
         &mut self,
-        keys: &[crate::route::FlowSpecKey],
+        keys: &[Option<crate::route::FlowSpecKey>],
         managed: Option<Vec<ExportDestination>>,
         resume: Option<(RouteExportCursor, RouteExportVersion)>,
         page_size: usize,
@@ -2152,8 +2152,9 @@ impl RibManager {
         let rules: Vec<_> = keys
             .iter()
             .map(|key| {
-                local
-                    .and_then(|rib| {
+                key.as_ref()
+                    .zip(local)
+                    .and_then(|(key, rib)| {
                         rib.get_flowspec(&crate::route::FlowSpecRouteKey {
                             afi: key.afi,
                             rd: key.rd,
