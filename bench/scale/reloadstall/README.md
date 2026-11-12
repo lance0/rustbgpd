@@ -865,8 +865,9 @@ mixed shape has a single changed pair, so that per-peer walk stays empty.
   generator's `G`.
 - `RELOADSTALL_DAEMON_LOG=<path>` (native SIGHUP only): the daemon's JSON log.
   For each reload the harness reads the first `reload_generation_phase` line
-  written after the trigger and reports its fields below. A missing line
-  reports `absent`; an unreadable file fails the run.
+  written after the pre-trigger scrape (after staging, so a reload a stage
+  command causes is not attributed) and reports its fields below. A missing
+  line reports `absent`; an unreadable file fails the run.
 
 Every native SIGHUP run prints three new records; existing rows are unchanged.
 Each `/metrics` render resets `bgp_rib_actor_slice_max_microseconds`, so the
@@ -887,14 +888,17 @@ reload also resets the gauge and hides part of the window from these records.
   phase_lines,phase_outcome,cohort_targets,remainder_targets,
   authoritative_remainder_apply_us,phase_total_us`: one row per reload.
   `outcome` is the `bgp_sighup_reload_outcomes_total` label that moved
-  (`complete`, or `rejected_no_effect` for a rolled-back reload). The run still
-  fails on a non-complete outcome, after printing this row. `actor_poll_pre_us`
+  (`complete`, `rejected_no_effect` for a rolled-back reload, or `pending`
+  when the reload failed before it settled). Every failure exit after the
+  trigger (a non-complete outcome, a failed scrape, a delivery watchdog stall,
+  or an integrity check) prints this row and the run row before the run fails
+  as before. Command reloads have no metrics window. `actor_poll_pre_us`
   and `actor_poll_stage_us` are the two bracket values; `actor_poll_max_us` is
   the max over the reload window only. The `phase_*` and target columns come from
   `RELOADSTALL_DAEMON_LOG`; `phase_lines` above 1 means a generation
   compensation re-applied the prior policy.
 - `reloadstall_actor_run_csv,reloads,actor_poll_max_us`: the max over every
-  reload window in the run, also printed before a failed reload exits.
+  reload window in the run so far, also printed before any failure exit.
 
 Remainder sweep shape (heavy, quiet host): 700 peers × 400,400 routes, with
 `GEN_EXPORT_PAIRS` and `RELOADSTALL_EXPORT_PAIRS` set to the same `G`, and
