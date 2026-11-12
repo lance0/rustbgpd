@@ -502,8 +502,8 @@ fn follow_up_runs_after_a_rejected_reload_and_rbgp_reload_waits_for_it() {
 
 /// Load-bearing: without the boot-time SIGHUP block, the HUP the daemon sends
 /// itself after config load and logging init takes the default action and
-/// the fixture never serves. With it, the held signal runs one reload. The
-/// startup line names the config and state dir, and readiness is logged once.
+/// the fixture never serves. With it, the held signal runs one reload.
+/// Readiness is logged once.
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -513,17 +513,6 @@ fn sighup_during_startup_is_held_until_the_handler_and_runs_one_reload() {
     let mut fixture = Fixture::start_with_env(false, &[("RUSTBGPD_TEST_SIGHUP_BEFORE_RUN", "1")]);
     wait_for_outcome_count(&mut fixture.daemon, fixture.metrics, "complete", 1);
     let log = fixture.daemon.log();
-    let runtime_dir = fixture.dir.path().join("runtime");
-    for field in [
-        format!("\"config\":\"{}\"", fixture.config_path.display()),
-        format!("\"runtime_state_dir\":\"{}\"", runtime_dir.display()),
-    ] {
-        assert!(
-            log.lines()
-                .any(|line| line.contains("starting rustbgpd") && line.contains(&field)),
-            "startup line lacks {field}\n{log}"
-        );
-    }
     assert_eq!(fixture.daemon.log_count("rustbgpd ready:"), 1, "{log}");
 
     request_shutdown(&fixture.grpc_addr);

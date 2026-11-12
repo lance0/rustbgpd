@@ -4929,8 +4929,6 @@ async fn run<T>(
         router_id = %config.global.router_id,
         neighbors = config.neighbors.len(),
         dynamic_neighbor_ranges = config.dynamic_neighbors.len(),
-        config = %launch_identity.config_path().display(),
-        runtime_state_dir = %config.runtime_state_dir().display(),
         "starting rustbgpd"
     );
     // The same set `--check` frames, logged here because this is the first

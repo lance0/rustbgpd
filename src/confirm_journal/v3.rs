@@ -101,11 +101,6 @@ impl LaunchIdentity {
         self
     }
 
-    /// The absolute, lexically normalized config path the daemon launched with.
-    pub(crate) fn config_path(&self) -> &Path {
-        &self.lexical_config
-    }
-
     pub(crate) fn normalized_prior_limit_bytes(&self) -> usize {
         self.max_raw_bytes
     }
