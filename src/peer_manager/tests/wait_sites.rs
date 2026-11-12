@@ -1359,7 +1359,7 @@ fn spawn_session(
     )
 }
 
-fn dataset_policy_chain() -> PolicyChain {
+pub(super) fn dataset_policy_chain() -> PolicyChain {
     use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
     use rustbgpd_policy::rpol::RpolFile;
     use rustbgpd_policy::sets::{AsnSet, SetStore};

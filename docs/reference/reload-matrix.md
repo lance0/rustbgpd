@@ -521,7 +521,8 @@ is left behind when:
 
 - its chains could not be resolved;
 - its session did not acknowledge the new chains (a policy update timeout or
-  a departed session task), so it keeps its prior chains; or
+  a departed session task), so the daemon keeps recording its prior chains;
+  or
 - it took the new chains but still owes follow-up work: the RIB rejected its
   new export chain, or the Route Refresh that re-evaluates its `Adj-RIB-In`
   was rejected or withheld because its session state query was not
@@ -560,7 +561,8 @@ These also retarget a left-behind peer:
   TCP-AO rotation or listener MD5/GTSM edit, which move the reload to the
   sequential route ([SIGHUP reload routes](#sighup-reload-routes)). The
   generation resolves each live peer against the candidate and reapplies
-  each one whose installed chains differ or that still owes a refresh. A
+  each one whose installed chains differ or are unknown, or that still owes
+  a refresh. A
   dynamic peer whose chains still cannot be resolved keeps its prior chains.
   The generation requires every reapplied peer to converge cleanly, so while
   a left-behind peer still does not answer, it rejects the operator's
@@ -568,15 +570,15 @@ These also retarget a left-behind peer:
 - A later per-peer policy apply that reaches the peer: a sequential policy,
   peer-group or neighbor edit or a runtime policy mutation that touches it,
   or a full validation-state refresh, which delivers an owed Route Refresh.
-- Reverting the knob and then setting it again, as two reloads.
+- A later change to the knob, including reverting it.
 - A daemon restart.
 
-Reverting the knob alone does not guarantee that a left-behind peer drops the
-new tail. If the session installed the new chain after its acknowledgement
-timed out, the daemon still records the prior chain for that peer. A revert
-then sends it no policy update, and the receipt reports `complete` while the
-peer keeps the honored chain. Set the knob again or restart to bring it back
-in line.
+A session that did not acknowledge a policy update may still have installed
+it after the deadline. The daemon keeps recording the prior chain for that
+peer but treats the session's installed chain as unknown, so the next apply
+that reaches the peer, such as a revert of the knob, resends its chain and
+refreshes even when the chain matches the record. A later acknowledged
+update clears that state.
 
 `apply_bum_enforcement` is **restart-required** but is a top-level
 (document-root) key, **not** a `[global]` key — EVPN BUM-port enforcement is
