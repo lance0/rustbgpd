@@ -1540,10 +1540,11 @@ While scheduling waits, readiness and operator reads remain admitted. If the
 five-second scheduling budget expires or its caller disconnects, an already
 admitted read finishes under its own deadline before the peer manager moves
 on to later mutations. These reads report live state; a session that cannot
-answer still has the read's normal timeout and failure behavior. Any other
-command that reaches the session while scheduling waits, including a BFD-down,
-a stop, or a rejected-route or explain read, ends the replay with
-`FAILED_PRECONDITION` so the command runs at once; retry the replay.
+answer still has the read's normal timeout and failure behavior. Other
+commands that reach the session while scheduling waits are queued and run
+after it. A stop, BFD-down or other session close, or more than a few queued
+commands, ends the replay with `FAILED_PRECONDITION` so they run at once;
+retry the replay.
 
 Unknown peers return `NOT_FOUND`. Unavailable sessions, another active replay,
 an empty or mixed-family session, a duplicate managed peer IP address,

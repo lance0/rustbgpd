@@ -247,3 +247,32 @@ async fn inbound_orf_rib_reply_timeout_falls_through_to_plain_refresh() {
         "RIB reply timeout must not silently suppress plain Route Refresh fallback"
     );
 }
+
+/// RFC 5291: an unanswered DEFER update is still applied in order by the RIB
+/// and must not turn into a plain refresh that re-advertises early.
+#[tokio::test(start_paused = true)]
+async fn inbound_orf_defer_reply_timeout_takes_no_plain_refresh() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(neg));
+    let rr = orf_rr_with_when(
+        WhenToRefresh::Defer,
+        OrfType::AddressPrefix,
+        one_permit_entry(),
+    );
+    let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
+    tokio::pin!(process);
+    let msg = tokio::select! {
+        msg = rib_rx.recv() => msg.expect("PeerOrfUpdate should be emitted"),
+        handled = &mut process => panic!("process_inbound_orf returned before RIB reply: {handled}"),
+    };
+    let RibUpdate::PeerOrfUpdate { reply, .. } = msg else {
+        panic!("expected RibUpdate::PeerOrfUpdate");
+    };
+    let _keep_reply_open = reply;
+    assert!(
+        process.await,
+        "an unanswered DEFER update must not fall back to a plain refresh"
+    );
+}

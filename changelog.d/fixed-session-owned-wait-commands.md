@@ -1,13 +1,14 @@
 ### Fixed
 
-- Keep Stop and BFD-down prompt while a session is busy with its own work. An
-  explicit outbound replay waiting for BMP or RIB admission now ends with a
-  retryable refusal when any command other than a state or import-counter
-  read arrives, so a Stop queued behind it no longer waits up to the
-  five-second replay window. A shared update-group encode stops at the next
-  slice for a session close, or when a second command queues behind a held
-  one, and the group falls back to per-member encoding. An inbound ORF
-  ROUTE-REFRESH that finds the RIB mailbox full is held in order with a plain
-  refresh request behind it instead of blocking the session until the RIB
-  drains. An export-policy update that finds the RIB gone now fails with an
-  explicit error and keeps the previous policy.
+- Keep Stop and BFD-down prompt while a session is busy with its own work.
+  Commands that arrive during an explicit outbound replay's admission wait or
+  a shared update-group encode now wait in a small ordered queue instead of
+  stopping the session from reading further commands. A queued session close,
+  or a full queue, ends the replay with a retryable refusal or stops the
+  encode at the next slice, where the group falls back to per-member
+  encoding; routine commands no longer cost either. An inbound ORF
+  ROUTE-REFRESH that finds the RIB mailbox full is held in order instead of
+  blocking the session until the RIB drains, and a DEFER update is never
+  turned into a plain refresh, so re-advertisement still waits for the
+  peer's own refresh (RFC 5291). An export-policy update that finds the RIB
+  gone now fails with an explicit error and keeps the previous policy.

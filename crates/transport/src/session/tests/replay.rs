@@ -24,11 +24,11 @@ async fn replay_live_rib_admission_serves_bounded_reads() {
     exercise_live_replay_admission(ReplayAdmissionWait::Rib).await;
 }
 
-/// A replay retained by an earlier owned wait still ends its own wait on the
-/// next mutation: the replay is refused, the mutation runs, and the snapshot
-/// behind it observes the mutation.
 #[tokio::test(start_paused = true)]
-async fn deferred_replay_ends_on_a_nested_mutation_before_its_snapshot() {
+async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
     let (mut session, mut rib_rx, mut old_bmp_rx) =
         make_test_session_with_rib_and_bmp(65001, 65002);
     session.config.bmp_rib_out = true;
@@ -53,7 +53,7 @@ async fn deferred_replay_ends_on_a_nested_mutation_before_its_snapshot() {
     let (reply, mut replay_response) = oneshot::channel();
     session.handle_read_during_wait(PeerCommand::ReplayOutbound { reply });
     assert!(matches!(
-        session.deferred_command,
+        session.deferred_commands.front(),
         Some(PeerCommand::ReplayOutbound { .. })
     ));
     let (reply, mut mutation) = oneshot::channel();
@@ -63,24 +63,48 @@ async fn deferred_replay_ends_on_a_nested_mutation_before_its_snapshot() {
             reply,
         })
         .unwrap();
-    let (reply, response) = oneshot::channel();
-    commands
-        .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
-        .unwrap();
-    let started = tokio::time::Instant::now();
-    let snapshot = {
+    let snapshot;
+    {
         let actor = session.run();
         tokio::pin!(actor);
-        tokio::select! {
-            result = response => result.unwrap(),
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        // The owned replay wait consumed the mutation but has not run it.
+        assert_eq!(commands.capacity(), commands.max_capacity());
+        assert!(matches!(
+            mutation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            replay_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(bmp_tx.capacity(), 0);
+
+        let (reply, mut response) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+            .unwrap();
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        // Queued behind the mutation, not answered ahead of it.
+        assert_eq!(commands.capacity(), commands.max_capacity());
+        assert!(matches!(
+            response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        drop(replay_response);
+        snapshot = tokio::select! {
+            result = &mut response => result.unwrap(),
             stopped = &mut actor => panic!("actor stopped before nested FIFO snapshot: {stopped:?}"),
-        }
-    };
-    assert_eq!(
-        tokio::time::Instant::now(),
-        started,
-        "the mutation ended the replay wait"
-    );
+        };
+    }
     let writer = session.writer_join.take().unwrap();
     writer.abort();
     let _ = writer.await;
@@ -89,12 +113,8 @@ async fn deferred_replay_ends_on_a_nested_mutation_before_its_snapshot() {
         .try_recv()
         .expect("retained mutation acknowledged before its snapshot")
         .unwrap();
-    assert!(matches!(
-        replay_response.try_recv(),
-        Ok(Err(PeerCommandError::ReplayUnavailable(_)))
-    ));
     assert!(session.pending_replay.is_none());
-    assert!(session.deferred_command.is_none());
+    assert!(session.deferred_commands.is_empty());
     assert!(matches!(
         bmp_rx.try_recv().unwrap(),
         BmpEvent::RouteMonitoring { .. }
@@ -311,17 +331,9 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
     commands
         .try_send(PeerCommand::ReplayOutbound { reply })
         .unwrap();
-    // The Bmp fixture keeps the BMP channel full, and a close's reliable BMP
-    // PeerDown would wait on it; there the read behind the mutation is the probe.
     let close = match wait {
-        ReplayAdmissionWait::Bmp => None,
-        ReplayAdmissionWait::Enrollment => Some(PeerCommand::BfdDown),
-        ReplayAdmissionWait::Rib => Some(PeerCommand::Stop { reason: None }),
-    };
-    let closed_state = if close.is_some() {
-        SessionState::Idle
-    } else {
-        SessionState::Established
+        ReplayAdmissionWait::Enrollment => PeerCommand::BfdDown,
+        _ => PeerCommand::Stop { reason: None },
     };
     let started = tokio::time::Instant::now();
     let mut manager = None;
@@ -364,8 +376,9 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
         );
         assert_eq!(rib_tx.capacity(), 0, "RIB pressure remains held");
 
-        // A mutation ends the replay wait, so the close queued behind it is
-        // read at once rather than after the five-second replay window.
+        // A mutation queues and the replay keeps waiting; the close queued
+        // behind it ends the wait at once rather than after the five-second
+        // replay window, and both run in order.
         let (reply, ack) = oneshot::channel();
         if wait != ReplayAdmissionWait::Bmp {
             mutation = Some(ack); // Bmp: a lost acknowledgement never cancels a mutation.
@@ -376,12 +389,26 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
                 reply,
             })
             .unwrap();
-        if let Some(close) = close {
-            commands.try_send(close).unwrap();
-        }
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(commands.capacity(), commands.max_capacity());
+        assert!(
+            matches!(
+                replay_response.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "{wait:?}: a queued mutation does not end the replay"
+        );
+        commands.try_send(close).unwrap();
+        // The close's reliable BMP Peer Down needs room the Bmp fixture holds.
+        let drain_bmp = async { while bmp_rx.recv().await.is_some() {} };
         after_close = tokio::select! {
             result = replay_read_pair(&commands) => result,
             stopped = &mut actor => panic!("actor stopped before FIFO control: {stopped:?}"),
+            () = drain_bmp => panic!("BMP channel closed"),
         };
     }
     let elapsed = tokio::time::Instant::now() - started;
@@ -424,7 +451,11 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
     else {
         panic!("{wait:?}: the close behind the mutation was hidden: {after_close:?}");
     };
-    assert_eq!(state.fsm_state, closed_state, "{wait:?}: close observed");
+    assert_eq!(
+        state.fsm_state,
+        SessionState::Idle,
+        "{wait:?}: close observed"
+    );
     assert_eq!(counters.generation, generation + 1, "mutation ran first");
     assert_eq!(
         elapsed,
@@ -436,7 +467,7 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
             replay_response.try_recv(),
             Ok(Err(PeerCommandError::ReplayUnavailable(_)))
         ),
-        "{wait:?}: the mutation ends the replay with a retryable refusal"
+        "{wait:?}: the close ends the replay with a retryable refusal"
     );
     assert!(replay_ended);
 }

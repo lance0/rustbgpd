@@ -878,6 +878,8 @@ impl PeerCommand {
                 | Self::PurgeReset
                 | Self::AdministrativeReset { .. }
                 | Self::CollisionDump
+                | Self::ResetTcpAoAfterFailedMutation { .. }
+                | Self::ResetEvpnRecoverySession { .. }
         )
     }
 }
