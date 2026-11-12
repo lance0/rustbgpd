@@ -114,11 +114,20 @@ assert counts["peak_delta_requested_bytes"] >= allocation[
     "query"]["actor_snapshot_lower_bound_bytes"]
 PY
 
+# Ask Cargo for the bench executable; its directory under target/ is not stable
+# across Cargo versions.
+timing_bin=$(cargo bench --manifest-path "$repo_root/Cargo.toml" \
+  -p rustbgpd-api --bench vpn_query_timing --features bench-internals \
+  --no-run --message-format=json-render-diagnostics |
+  python3 -c '
+import json, sys
+paths = {m["executable"] for m in map(json.loads, sys.stdin)
+         if m.get("reason") == "compiler-artifact" and m.get("executable")
+         and m["target"]["name"] == "vpn_query_timing"}
+assert len(paths) == 1, paths
+print(*paths)')
 set +e
-mapfile -t timing_bins < <(find "$repo_root/target/release/deps" -maxdepth 1 \
-  -type f -perm -0100 -name 'vpn_query_timing-*')
-[[ ${#timing_bins[@]} -eq 1 ]]
-taskset -c "$declared_cpu" env RUSTBGPD_VPN_QUERY_FORCE_CENSOR=1 "${timing_bins[0]}" \
+taskset -c "$declared_cpu" env RUSTBGPD_VPN_QUERY_FORCE_CENSOR=1 "$timing_bin" \
   smoke U "$tmp_dir/censor.json" "$declared_cpu" >/dev/null 2>&1
 censor_status=$?
 set -e

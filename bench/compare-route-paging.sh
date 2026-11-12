@@ -594,23 +594,28 @@ prebuild_variant() {
 prebuild_variant baseline "$base_tree" "$base_target_dir"
 prebuild_variant optimized "$head_tree" "$head_target_dir"
 
+# Ask Cargo for the prebuilt executable (a fresh no-op build); its directory
+# under the target dir is not stable across Cargo versions.
 locate_benchmark_binary() {
-  local target_dir=$1
-  local -a candidates
-  mapfile -t candidates < <(
-    find "$target_dir/release/deps" -maxdepth 1 -type f -perm -u+x \
-      -name 'route_paging-*' -print | sort
-  )
-  [[ ${#candidates[@]} -eq 1 ]] || {
-    printf 'expected one prebuilt route_paging executable under %s, found %s\n' \
-      "$target_dir/release/deps" "${#candidates[@]}" >&2
-    return 1
-  }
-  printf '%s\n' "${candidates[0]}"
+  local tree=$1 target_dir=$2
+  (
+    cd "$tree"
+    CARGO_TARGET_DIR="$target_dir" \
+      cargo bench -p rustbgpd-rib --features bench-internals \
+        --bench route_paging --locked --no-run --jobs 1 \
+        --message-format=json-render-diagnostics
+  ) | python3 -c '
+import json, sys
+paths = {m["executable"] for m in map(json.loads, sys.stdin)
+         if m.get("reason") == "compiler-artifact" and m.get("executable")
+         and m["target"]["name"] == "route_paging"}
+if len(paths) != 1:
+    sys.exit(f"expected one prebuilt route_paging executable under {sys.argv[1]}, found {len(paths)}")
+print(*paths)' "$target_dir"
 }
 
-base_benchmark_binary=$(locate_benchmark_binary "$base_target_dir")
-head_benchmark_binary=$(locate_benchmark_binary "$head_target_dir")
+base_benchmark_binary=$(locate_benchmark_binary "$base_tree" "$base_target_dir")
+head_benchmark_binary=$(locate_benchmark_binary "$head_tree" "$head_target_dir")
 base_benchmark_binary_sha256=$(sha256sum "$base_benchmark_binary" | awk '{print $1}')
 head_benchmark_binary_sha256=$(sha256sum "$head_benchmark_binary" | awk '{print $1}')
 {

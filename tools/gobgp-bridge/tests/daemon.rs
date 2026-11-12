@@ -36,16 +36,23 @@ impl Drop for Killed {
 }
 
 fn daemon_binary() -> PathBuf {
-    // target/<profile>/deps/<this test> -> target/<profile>/rustbgpd
+    // The daemon is another package's binary, so Cargo provides no
+    // CARGO_BIN_EXE_ path. Its final artifact is target/<profile>/rustbgpd,
+    // and this test executable sits below target/<profile>/ at a depth that
+    // depends on the Cargo version (deps/ before 1.100, build/<pkg>/<hash>/out/
+    // from 1.100), so search upward for the nearest profile directory.
     let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().unwrap().parent().unwrap().join("rustbgpd");
-    assert!(
-        path.is_file(),
-        "missing {}; build it with cargo build --locked -p rustbgpd --bin rustbgpd \
-         (cargo test --workspace builds it)",
-        path.display()
-    );
-    path
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join("rustbgpd"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "missing rustbgpd above {}; build it with cargo build --locked -p rustbgpd \
+                 --bin rustbgpd (cargo test --workspace builds it)",
+                exe.display()
+            )
+        })
 }
 
 fn write_config(dir: &Path) -> PathBuf {

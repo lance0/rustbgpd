@@ -2178,8 +2178,8 @@ mod tests {
             batch_size: 80,
         };
         let mut inventory = Inventory::for_dataset(shape);
-        for family in 0..2 {
-            for index in 0..shape.counts[family] {
+        for (family, &count) in shape.counts.iter().enumerate() {
+            for index in 0..count {
                 inventory
                     .dataset_event(family, index, COMMUNITY_GEN_A)
                     .unwrap();

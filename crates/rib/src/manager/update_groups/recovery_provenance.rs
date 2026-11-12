@@ -928,25 +928,23 @@ impl EvpnRecoveryProvenance {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::unused_self,
-            reason = "Only test builds read the ledger-owned allocation fault hook"
-        )
-    )]
+    #[cfg(test)]
     fn allocation_permitted(&mut self) -> bool {
-        #[cfg(test)]
         if let Some(remaining) = self.allocation_countdown {
             self.allocation_countdown = remaining.checked_sub(1);
             if remaining == 0 {
                 return false;
             }
         }
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_allocation) {
-            return false;
-        }
+        !std::mem::take(&mut self.fail_next_allocation)
+    }
+
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "Only test builds read the ledger-owned allocation fault hook"
+    )]
+    fn allocation_permitted(&mut self) -> bool {
         true
     }
 

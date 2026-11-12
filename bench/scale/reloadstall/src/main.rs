@@ -3071,8 +3071,8 @@ async fn wait_rejoin_completion(ctx: &Ctx, first: u32, end: u32, round: u32) -> 
     loop {
         let mut values = Vec::with_capacity((end - first) as usize);
         let mut unique = 0;
-        for i in first as usize..end as usize {
-            let guard = ctx.obs[i].rejoin.lock().unwrap();
+        for (i, obs) in (first..).zip(&ctx.obs[first as usize..end as usize]) {
+            let guard = obs.rejoin.lock().unwrap();
             let rejoin = guard.as_ref().expect("rejoin armed before reader");
             unique += rejoin.table.unique;
             if let Some(complete) = rejoin.complete_us {
@@ -5647,10 +5647,10 @@ fn main() {
             let mut filtered_leaked = 0u64;
             let mut bystander_withdrawn = 0u64;
             let mut duplicate_withdrawn = 0u64;
-            for i in 0..changed_peers as usize {
+            for obs in &ctx.obs[..changed_peers as usize] {
                 let trackers = [
-                    Some(ctx.obs[i].generation.lock().unwrap()),
-                    dualstack().then(|| ctx.obs[i].generation6.lock().unwrap()),
+                    Some(obs.generation.lock().unwrap()),
+                    dualstack().then(|| obs.generation6.lock().unwrap()),
                 ];
                 for (family, tracker) in trackers.into_iter().enumerate() {
                     let Some(g) = tracker else { continue };
