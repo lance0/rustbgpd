@@ -2954,3 +2954,99 @@ async fn resync_tick_due_inside_a_bgpls_burst_waits_for_the_orr_rebuild() {
         "the client was staged from the pre-burst cache: {next_hops:?}"
     );
 }
+
+/// A seeded feed of the fixture's BGP-LS changes: the A→X and B→Y links
+/// moved to a new metric, withdrawn, re-announced unchanged, or both moved
+/// in one UPDATE.
+fn seeded_bgpls_feed(seed: u64, len: usize) -> Vec<RibUpdate> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            match (state >> 33) % 7 {
+                0 => feed_update(vec![a_x_link(1)], vec![]),
+                1 => feed_update(vec![a_x_link(100)], vec![]),
+                2 => feed_update(vec![b_y_link(1)], vec![]),
+                3 => feed_update(vec![b_y_link(50)], vec![]),
+                4 => feed_update(vec![], vec![a_x_link(1).key()]),
+                5 => feed_update(vec![], vec![b_y_link(1).key()]),
+                _ => feed_update(vec![a_x_link(5), b_y_link(2)], vec![]),
+            }
+        })
+        .collect()
+}
+
+impl OrrClientBurst {
+    /// The client's Adj-RIB-Out, sorted.
+    fn exports(&self) -> Vec<(Prefix, IpAddr)> {
+        let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut exports: Vec<_> = self.manager.adj_ribs_out[&client]
+            .iter()
+            .map(|route| (route.prefix, route.next_hop))
+            .collect();
+        exports.sort_unstable();
+        exports
+    }
+
+    fn spf_runs(&self) -> f64 {
+        counter_metric_value(&self.manager.metrics, "bgp_orr_spf_runs_total")
+    }
+}
+
+/// Coalescing oracle: the same seeded BGP-LS UPDATEs, queued as one burst
+/// or dispatched one per turn, leave the ORR-bound client with the same
+/// exports and the ORR cache with the same signatures, and the client's last
+/// announcement in either stream matches its exports. The burst pays at
+/// most one SPF set; one-per-turn pays one per changing UPDATE.
+#[test]
+fn queued_bgpls_burst_exports_equal_one_update_per_turn() {
+    let (mut moved, mut coalesced) = (0, 0);
+    for seed in 0..64 {
+        let len = 2 + usize::try_from(seed % 11).unwrap();
+        let mut burst = OrrClientBurst::new(256);
+        let mut alone = OrrClientBurst::new(256);
+        let initial = burst.exports();
+        assert_eq!(initial, alone.exports());
+        let _ = (burst.announced_next_hops(), alone.announced_next_hops());
+
+        let (burst_before, alone_before) = (burst.spf_runs(), alone.spf_runs());
+        let (owed, burst_sent) = burst.dispatch_queued(seeded_bgpls_feed(seed, len));
+        assert_eq!(owed.len(), len, "seed {seed}: one burst");
+        let mut alone_sent = Vec::new();
+        for update in seeded_bgpls_feed(seed, len) {
+            alone_sent.extend(alone.dispatch_queued(vec![update]).1);
+        }
+        let burst_spf = burst.spf_runs() - burst_before;
+        let alone_spf = alone.spf_runs() - alone_before;
+
+        assert_eq!(burst.exports(), alone.exports(), "seed {seed}: exports");
+        assert_eq!(
+            burst.manager.orr.signatures, alone.manager.orr.signatures,
+            "seed {seed}: ORR cache"
+        );
+        for (sent, client) in [(&burst_sent, &burst), (&alone_sent, &alone)] {
+            if let Some(last) = sent.last() {
+                assert!(
+                    client
+                        .exports()
+                        .contains(&(Prefix::V4(orr_prefix()), *last)),
+                    "seed {seed}: last announcement {last} is not exported"
+                );
+            }
+        }
+        // One vantage: an SPF set is one run. The burst's single rebuild
+        // runs none when the vantage ends unresolved.
+        assert!(
+            burst_spf <= 1.0 && burst_spf <= alone_spf,
+            "seed {seed}: {burst_spf} SPF sets in the burst, {alone_spf} one per turn"
+        );
+        moved += usize::from(burst.exports() != initial);
+        coalesced += usize::from(burst_spf > 0.0 && alone_spf > 1.0);
+    }
+    assert!(
+        moved > 0 && coalesced > 0,
+        "the feed never moved the client ({moved}) or never coalesced ({coalesced})"
+    );
+}

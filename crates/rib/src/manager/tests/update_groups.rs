@@ -11756,9 +11756,11 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
             .iter()
             .map(|r| r.kind)
             .collect::<Vec<_>>(),
+        // The detached owners: Adj-RIB-Out retirement, then the group leave.
         [
             super::super::ReadinessOwnerKind::PeerTeardown,
             super::super::ReadinessOwnerKind::Replacement,
+            super::super::ReadinessOwnerKind::Ingest,
         ],
         "changing-count teardown ends before detached retirement begins"
     );
@@ -19203,4 +19205,111 @@ fn shared_policy_transition_member_ready_requires_unicast_only_families() {
     }
     manager.peer_sendable_families.insert(peer, Vec::new());
     assert!(!manager.shared_policy_transition_member_ready(peer));
+}
+
+/// The lone member of an update group over `routes` Loc-RIB routes takes
+/// `work`, which drops it from the group, with readiness queries wired.
+/// Returns the queries each stage answered inside `work`.
+fn lone_member_leaves_group(
+    routes: usize,
+    work: impl FnOnce(&mut RibManager, PeerId),
+) -> BTreeMap<&'static str, usize> {
+    let (readiness_tx, readiness_rx) = mpsc::channel(2);
+    let (mut manager, peers, _receivers) =
+        direct_clean_transition_manager(1, routes, Some(readiness_rx));
+    let peer = peers[0];
+    let gid = manager.grouped_member_of(peer).unwrap();
+    assert_eq!(manager.group_ribs[&gid].members.len(), 1);
+    assert_eq!(manager.group_ribs[&gid].table.len(), routes);
+    manager.replacement_readiness_receipts.clear();
+    let answered =
+        super::ingest_readiness::count_answered_readiness(&mut manager, readiness_tx, |manager| {
+            work(manager, peer);
+        });
+    assert!(
+        !manager.group_ribs.contains_key(&gid),
+        "the last member's group table is retired"
+    );
+    // No policy transition is pending, so the group's owner is the ingest
+    // one, never the replacement fence.
+    assert_eq!(
+        manager
+            .replacement_readiness_receipts
+            .last()
+            .map(|receipt| receipt.kind),
+        Some(super::super::ReadinessOwnerKind::Ingest)
+    );
+    answered
+}
+
+fn assert_group_retirement_answered(case: &str, routes: usize, answered: &BTreeMap<&str, usize>) {
+    let retired = answered.get("retirement").copied().unwrap_or(0);
+    assert!(
+        retired >= routes,
+        "{case}: retiring a {routes}-route group table answered {retired}: {answered:?}"
+    );
+}
+
+/// A slow-peer flag moves the lone member of a group to the per-peer path,
+/// retiring the group table in that turn: the retirement answers readiness
+/// at every row.
+#[test]
+fn slow_peer_regroup_answers_readiness_while_retiring_the_group_table() {
+    let routes = 256;
+    let answered = lone_member_leaves_group(routes, |manager, peer| {
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 0,
+            slow: true,
+        });
+        assert!(manager.grouped_member_of(peer).is_none());
+    });
+    assert_group_retirement_answered("slow peer", routes, &answered);
+}
+
+/// Attaching a conditional advertisement regroups the lone member of a
+/// group, retiring the group table in that turn: the retirement answers
+/// readiness at every row.
+#[test]
+fn conditional_attachment_regroup_answers_readiness_while_retiring_the_group_table() {
+    let routes = 256;
+    let answered = lone_member_leaves_group(routes, |manager, peer| {
+        let (reply, mut capture) = oneshot::channel();
+        manager.handle_update(RibUpdate::InstallConditionalAdvertisements {
+            set: crate::ConditionalAdvertisementSet {
+                definitions: vec![crate::ConditionalAdvertisement {
+                    name: Arc::from("backup"),
+                    advertise_policy: community_chain(0xFDE8_2103),
+                    advertise_if: crate::ConditionalAdvertiseIf::Present,
+                    condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(
+                        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32)),
+                    )],
+                    condition_policy: None,
+                    settle_time: Duration::ZERO,
+                    retiring: false,
+                }],
+                attachments: [(peer.addr().into(), vec![Arc::from("backup")])]
+                    .into_iter()
+                    .collect(),
+            },
+            swapping_datasets: vec![],
+            reply,
+        });
+        capture.try_recv().unwrap();
+    });
+    assert_group_retirement_answered("conditional attachment", routes, &answered);
+}
+
+/// The lone member's session going down retires its group table in the
+/// teardown turn: the retirement answers readiness at every row.
+#[test]
+fn peer_down_answers_readiness_while_retiring_the_last_members_group() {
+    let routes = 256;
+    let answered = lone_member_leaves_group(routes, |manager, peer| {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 0,
+        });
+    });
+    assert_group_retirement_answered("peer down", routes, &answered);
 }

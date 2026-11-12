@@ -1911,8 +1911,12 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
-        self.release_group_admitted_keys(peer);
-        self.remove_update_group_member(peer);
+        // The last member's leave retires the group table, so it takes the
+        // readiness lane (with the executor handoff).
+        self.with_ingest_readiness(|manager| {
+            manager.release_group_admitted_keys(peer);
+            manager.remove_update_group_member(peer);
+        });
         if keeps_label {
             self.metrics.remove_peer_update_group(&peer_label);
         }

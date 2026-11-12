@@ -4647,8 +4647,14 @@ impl RibManager {
                         .cloned()
                         .map(ExactExportKey::BgpLs)
                         .collect::<Vec<_>>();
-                    self.handle_bgpls_routes_received(peer, announced, withdrawn);
-                    self.retire_exact_export_rejections(retired);
+                    // Selection reads every Adj-RIB-In per key, and retiring
+                    // a rejected withdrawn identity can walk every BGP-LS
+                    // table, so the turn takes the readiness lane. The owed
+                    // ORR rebuild is settled after dispatch, under its own.
+                    self.with_ingest_readiness(|manager| {
+                        manager.handle_bgpls_routes_received(peer, announced, withdrawn);
+                        manager.retire_exact_export_rejections(retired);
+                    });
                 }
             }
             RibUpdate::VpnRoutesReceived {
@@ -6032,32 +6038,40 @@ impl RibManager {
             }
         }
         let walk = unresolved;
-        let mut settle = |identity: ExactExportKey| {
-            #[cfg(test)]
-            reads.set(reads.get() + 1);
-            checkpoint();
-            if let Some(found) = live.get_mut(&identity) {
-                *found = true;
-            }
-        };
         if walk.contains(&true) {
-            for rib in self.ribs.values() {
-                if walk[0] {
-                    for route in rib.iter_flowspec() {
-                        settle(ExactExportKey::FlowSpec(route.selection_key()));
+            // The walk is table-sized, so it takes the readiness lane.
+            self.with_ingest_readiness(|manager| {
+                let readiness = manager.replacement_readiness.clone();
+                let mut settle = |identity: ExactExportKey| {
+                    #[cfg(test)]
+                    reads.set(reads.get() + 1);
+                    replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "exact_rejection_retirement",
+                        false,
+                    );
+                    if let Some(found) = live.get_mut(&identity) {
+                        *found = true;
+                    }
+                };
+                for rib in manager.ribs.values() {
+                    if walk[0] {
+                        for route in rib.iter_flowspec() {
+                            settle(ExactExportKey::FlowSpec(route.selection_key()));
+                        }
+                    }
+                    if walk[1] {
+                        for route in rib.iter_bgpls() {
+                            settle(ExactExportKey::BgpLs(route.key()).nlri_identity());
+                        }
+                    }
+                    if walk[2] {
+                        for route in rib.iter_rtc() {
+                            settle(ExactExportKey::Rtc(route.key()).nlri_identity());
+                        }
                     }
                 }
-                if walk[1] {
-                    for route in rib.iter_bgpls() {
-                        settle(ExactExportKey::BgpLs(route.key()).nlri_identity());
-                    }
-                }
-                if walk[2] {
-                    for route in rib.iter_rtc() {
-                        settle(ExactExportKey::Rtc(route.key()).nlri_identity());
-                    }
-                }
-            }
+            });
         }
         overlay.retain(|_, rejected| {
             checkpoint();
@@ -6256,6 +6270,35 @@ impl RibManager {
             retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
             return;
         }
+        // A FlowSpec, BGP-LS or RT-Constrain identity missing at path id 0
+        // is confirmed gone by walking that family's rows in every
+        // Adj-RIB-In, so then the rest takes the readiness lane. The other
+        // families' liveness is indexed and needs no owner.
+        if rejected_withdrawn.iter().any(|identity| {
+            matches!(
+                identity,
+                ExactExportKey::FlowSpec(_) | ExactExportKey::BgpLs(_) | ExactExportKey::Rtc(_)
+            )
+        }) {
+            self.with_ingest_readiness(|manager| {
+                manager.retire_withdrawn_rejections(withdrawn, rejected_withdrawn);
+            });
+        } else {
+            self.retire_withdrawn_rejections(withdrawn, rejected_withdrawn);
+        }
+    }
+
+    /// [`Self::retire_exact_export_rejections`] for the withdrawn identities
+    /// that hold a rejection.
+    fn retire_withdrawn_rejections(
+        &mut self,
+        mut withdrawn: HashSet<ExactExportKey>,
+        mut rejected_withdrawn: HashSet<ExactExportKey>,
+    ) {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            replacement_readiness_checkpoint_at(&readiness, "exact_rejection_retirement", false);
+        };
         #[cfg(test)]
         let reads = std::cell::Cell::new(0_u64);
         let mut live = rejected_withdrawn

@@ -26,7 +26,7 @@ fn answered(counts: &BTreeMap<&'static str, usize>, stage: &str) -> usize {
 /// an unanswered query stays outstanding, because the send path also calls
 /// the observer at marks that are not checkpoints. `PRE_QUEUED` counts a
 /// query queued before `work` and answered inside it.
-fn count_answered_readiness(
+pub(super) fn count_answered_readiness(
     manager: &mut RibManager,
     readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
     work: impl FnOnce(&mut RibManager),
@@ -516,4 +516,157 @@ fn identical_bgpls_reannouncement_owes_no_orr_rebuild() {
         2,
         "a changed link metric must rebuild"
     );
+}
+
+/// A BGP-LS UPDATE reselects every key it carries against every
+/// Adj-RIB-In, and a withdrawal whose identity holds an exact-export
+/// rejection walks every stored BGP-LS route to confirm the identity is
+/// gone. With no ORR vantage bound there is no rebuild, yet the turn still
+/// answers a probe queued before it and one per selected key and per stored
+/// route walked.
+#[test]
+fn bgpls_update_answers_readiness_in_selection_and_rejection_retirement() {
+    let (mut manager, readiness_tx) = readiness_manager();
+    register_test_peer(&mut manager, peer_v4(FEED), 0);
+    let topology = chain_topology(FEED, 64);
+    let routes = topology.len();
+    let withdrawn_key = topology[0].key();
+    let announced = count_answered_readiness(&mut manager, readiness_tx.clone(), |manager| {
+        manager.handle_update(bgpls_update(0, topology));
+    });
+    assert_eq!(manager.loc_rib.family_lens().bgpls[0], routes);
+
+    manager
+        .peer_unexportable
+        .entry(peer_v4(CLIENT))
+        .or_default()
+        .insert(ExactExportKey::BgpLs(withdrawn_key.clone()));
+    let withdrawn = count_answered_readiness(&mut manager, readiness_tx, |manager| {
+        manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer: peer_v4(FEED),
+            announced: Vec::new(),
+            withdrawn: vec![withdrawn_key],
+        });
+    });
+    assert!(
+        manager.peer_unexportable.is_empty(),
+        "the rejection of a withdrawn identity is retired"
+    );
+    assert!(
+        answered(&announced, PRE_QUEUED) == 1
+            && answered(&announced, "selection_bgpls") >= routes
+            && answered(&withdrawn, PRE_QUEUED) == 1
+            && answered(&withdrawn, "exact_rejection_retirement") >= routes - 1,
+        "{routes} routes: announce answered {announced:?}; withdraw answered {withdrawn:?}"
+    );
+}
+
+/// Withdrawing an RT-Constrain route whose identity holds an exact-export
+/// rejection confirms the identity is gone by walking every stored
+/// RT-Constrain route. The walk answers readiness at every route.
+#[test]
+fn rtc_withdrawal_answers_readiness_while_retiring_its_rejection() {
+    let (mut manager, readiness_tx) = readiness_manager();
+    register_test_peer(&mut manager, peer_v4(SOURCE), 0);
+    let routes = 512;
+    manager.handle_update(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: (0..routes)
+            .map(|admin| make_rtc_rib_route(SOURCE, admin, 100))
+            .collect(),
+        withdrawn: Vec::new(),
+    });
+    let withdrawn_key = make_rtc_rib_route(SOURCE, 0, 100).key();
+    manager
+        .peer_unexportable
+        .entry(peer_v4(CLIENT))
+        .or_default()
+        .insert(ExactExportKey::Rtc(withdrawn_key.clone()));
+    let counts = count_answered_readiness(&mut manager, readiness_tx, |manager| {
+        manager.handle_update(RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer: peer_v4(SOURCE),
+            announced: Vec::new(),
+            withdrawn: vec![withdrawn_key],
+        });
+    });
+    assert!(manager.peer_unexportable.is_empty());
+    let walked = answered(&counts, "exact_rejection_retirement");
+    assert!(
+        walked >= usize::from(routes) - 1,
+        "{routes} routes: the retirement walk answered {walked}: {counts:?}"
+    );
+}
+
+/// An End-of-RIB prunes the rejection overlay. A rejected BGP-LS identity
+/// that no longer exists is confirmed gone by walking every stored BGP-LS
+/// route, and the walk answers readiness at every route.
+#[test]
+fn end_of_rib_prune_answers_readiness_while_walking_bgpls_routes() {
+    let (mut manager, readiness_tx) = readiness_manager();
+    register_test_peer(&mut manager, peer_v4(FEED), 0);
+    let topology = chain_topology(FEED, 64);
+    let routes = topology.len();
+    manager.handle_update(bgpls_update(0, topology));
+    let dead =
+        crate::orr::fixtures::prefix_route(FEED, 200, Ipv4Addr::new(172, 16, 200, 0), 24, Some(1));
+    manager
+        .peer_unexportable
+        .entry(peer_v4(CLIENT))
+        .or_default()
+        .insert(ExactExportKey::BgpLs(dead.key()));
+    let counts = count_answered_readiness(&mut manager, readiness_tx, |manager| {
+        manager.handle_update(RibUpdate::EndOfRib {
+            session_id: 0,
+            peer: peer_v4(FEED),
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+        });
+    });
+    assert!(
+        manager.peer_unexportable.is_empty(),
+        "the dead identity is pruned"
+    );
+    let walked = answered(&counts, "exact_rejection_retirement");
+    assert!(
+        walked >= routes,
+        "{routes} routes: the prune walk answered {walked}: {counts:?}"
+    );
+}
+
+/// Retiring a withdrawn Unicast identity's rejection checks liveness through
+/// the prefix index, so it takes no readiness owner; a withdrawn BGP-LS
+/// identity, whose liveness check can walk the family, takes one.
+#[test]
+fn indexed_rejection_retirement_takes_no_readiness_owner() {
+    let (mut manager, _readiness_tx) = readiness_manager();
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let bgpls = chain_topology(FEED, 1)[0].key();
+    let rejected = [
+        ExactExportKey::Unicast(prefix, 0),
+        ExactExportKey::BgpLs(bgpls.clone()),
+    ];
+    manager
+        .peer_unexportable
+        .insert(peer_v4(CLIENT), rejected.iter().cloned().collect());
+    manager.replacement_readiness_receipts.clear();
+
+    manager.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, 0)]);
+    assert!(
+        manager.replacement_readiness_receipts.is_empty(),
+        "a Unicast retirement took an owner: {:?}",
+        manager.replacement_readiness_receipts
+    );
+    manager.retire_exact_export_rejections([ExactExportKey::BgpLs(bgpls)]);
+    assert_eq!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .map(|receipt| receipt.kind)
+            .collect::<Vec<_>>(),
+        [ReadinessOwnerKind::Ingest]
+    );
+    assert!(manager.peer_unexportable.is_empty(), "both were retired");
 }

@@ -4162,16 +4162,21 @@ impl RibManager {
             slow,
             "slow-peer isolation: recomputing update-group membership"
         );
-        let before = self.grouped_member_of(peer);
-        let mut evpn_feed = self.recompute_update_group(peer);
-        let key_stable = before.is_some() && before == self.grouped_member_of(peer);
-        if !key_stable {
-            self.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
-        }
-        self.distribute_changes_with_evpn_feeds(
-            evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
-            true,
-        );
+        // The regroup can retire the old group table or build a new one
+        // from the whole Loc-RIB, so it takes the readiness lane (with the
+        // executor handoff). No policy transition is pending: ingest owner.
+        self.with_ingest_readiness(|manager| {
+            let before = manager.grouped_member_of(peer);
+            let mut evpn_feed = manager.recompute_update_group(peer);
+            let key_stable = before.is_some() && before == manager.grouped_member_of(peer);
+            if !key_stable {
+                manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
+            }
+            manager.distribute_changes_with_evpn_feeds(
+                evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
+                true,
+            );
+        });
     }
 
     /// Start exporting a family the session withheld at `PeerUp`

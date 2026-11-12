@@ -1173,17 +1173,22 @@ impl RibManager {
         set: ConditionalAdvertisementSet,
         swapping: &[String],
     ) -> ConditionalAdvertisementCapture {
-        let prior_attachments = self.conditional_advertisements.attachments.clone();
-        let prior_definitions = self.conditional_definition_contents();
-        let (capture, transitions) =
-            self.install_conditional_advertisements_holding(set.definitions, swapping);
-        self.conditional_advertisements.attachments = set.attachments;
-        self.settle_conditional_advertisement_change(
-            &prior_attachments,
-            &prior_definitions,
-            &transitions,
-        );
-        capture
+        // A changed attachment regroups its peers, which can retire a group
+        // table or build one from the whole Loc-RIB, so the install takes the
+        // readiness lane (with the executor handoff).
+        self.with_ingest_readiness(|manager| {
+            let prior_attachments = manager.conditional_advertisements.attachments.clone();
+            let prior_definitions = manager.conditional_definition_contents();
+            let (capture, transitions) =
+                manager.install_conditional_advertisements_holding(set.definitions, swapping);
+            manager.conditional_advertisements.attachments = set.attachments;
+            manager.settle_conditional_advertisement_change(
+                &prior_attachments,
+                &prior_definitions,
+                &transitions,
+            );
+            capture
+        })
     }
 
     /// Reinstate a captured install, respecting current selection holds;
