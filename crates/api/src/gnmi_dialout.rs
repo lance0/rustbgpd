@@ -588,31 +588,39 @@ async fn publish_session(
     // finishing (e.g. a subscription error above), on which returning
     // immediately hands control to the caller's reconnect loop for the
     // fresh-snapshot resync.
+    //
+    // Every ending reports a recorded subscription failure. A collector that
+    // closes its response stream at request EOF makes the inbound end ready
+    // alongside `ended_rx`, and either branch may win.
+    let session_end = || match failure
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
+        Some(status) => Err(SessionError::Ended {
+            status,
+            published: published.load(Ordering::Relaxed),
+        }),
+        None => Ok(()),
+    };
     loop {
         tokio::select! {
             _ = queue_observation.tick() => {
                 series.write(|metrics, name| refresh_queue_depth(metrics, name, &queue_probe));
             }
             _ = &mut ended_rx => {
-                let failure = failure.lock().unwrap_or_else(PoisonError::into_inner).take();
-                if let Some(status) = failure {
-                    return Err(SessionError::Ended {
-                        status,
-                        published: published.load(Ordering::Relaxed),
-                    });
-                }
                 debug!(
                     target = %target.name,
                     "gNMI dial-out outbound stream ended; reconnecting to resync"
                 );
-                return Ok(());
+                return session_end();
             }
             message = inbound.message() => match message {
                 Ok(Some(_flow_control)) => {}
-                Ok(None) => return Ok(()),
+                Ok(None) => return session_end(),
                 Err(status) => {
                     debug!(target = %target.name, error = %status, "gNMI dial-out stream error");
-                    return Ok(());
+                    return session_end();
                 }
             },
         }
@@ -1211,11 +1219,9 @@ mod tests {
         ))));
     }
 
-    #[tokio::test]
-    async fn over_bound_subscription_ends_the_session_as_a_failure() {
-        // Load-bearing break: reporting the refused stream as a clean
-        // disconnect (`Ok`) restarts backoff, so the target reconnects,
-        // handshakes and snapshots the roster every `backoff_initial`.
+    /// A service whose roster puts a full-state all-neighbors subscription
+    /// over the render bound, and a target subscribing to exactly that.
+    fn over_bound_service_and_target(addr: SocketAddr) -> (GnmiService, DialoutTarget) {
         let roster = (0..6_554_u32)
             .map(|index| {
                 crate::test_support::peer_info(std::net::IpAddr::from(std::net::Ipv4Addr::from(
@@ -1227,8 +1233,6 @@ mod tests {
             let peers = roster.clone();
             async move { Ok(peers) }
         });
-        let (reservation, addr) = reserve_port(None);
-        let (_server, mut received) = spawn_stub_collector(reservation);
         let mut target = test_target("collector-over-bound", addr);
         target.subscriptions = build_subscription_list(
             &[
@@ -1240,6 +1244,17 @@ mod tests {
             Duration::from_secs(10),
         )
         .expect("valid subscription");
+        (service, target)
+    }
+
+    #[tokio::test]
+    async fn over_bound_subscription_ends_the_session_as_a_failure() {
+        // Load-bearing break: reporting the refused stream as a clean
+        // disconnect (`Ok`) restarts backoff, so the target reconnects,
+        // handshakes and snapshots the roster every `backoff_initial`.
+        let (reservation, addr) = reserve_port(None);
+        let (_server, mut received) = spawn_stub_collector(reservation);
+        let (service, target) = over_bound_service_and_target(addr);
         let series = TargetSeries::new(BgpMetrics::new(), &target.name);
 
         let outcome = tokio::time::timeout(
@@ -1255,6 +1270,84 @@ mod tests {
         assert!(!published);
         assert!(!session_restarts_backoff(&outcome));
         assert!(received.try_recv().is_err());
+    }
+
+    /// Closes its response stream once the client's request stream ends,
+    /// and reports when it accepted a session and when it closed.
+    struct EofClosingCollector {
+        events: mpsc::Sender<&'static str>,
+    }
+
+    #[tonic::async_trait]
+    impl GnmiDialout for EofClosingCollector {
+        type PublishStream =
+            Pin<Box<dyn Stream<Item = Result<PublishResponse, Status>> + Send + 'static>>;
+
+        async fn publish(
+            &self,
+            request: Request<Streaming<gnmi::SubscribeResponse>>,
+        ) -> Result<Response<Self::PublishStream>, Status> {
+            let inbound = request.into_inner();
+            let events = self.events.clone();
+            let _ = events.send("accepted").await;
+            let stream = futures::stream::unfold(Some((inbound, events)), |state| async move {
+                let (mut inbound, events) = state?;
+                while let Ok(Some(_)) = inbound.message().await {}
+                let _ = events.send("closed").await;
+                None::<(Result<PublishResponse, Status>, _)>
+            });
+            Ok(Response::new(Box::pin(stream)))
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_is_a_failure_when_the_collector_closes_at_request_eof() {
+        // Load-bearing break: ending the session `Ok` when the collector's
+        // close wins the race against `ended_rx` restarts backoff and drops
+        // the warning. Each round leaves the session unpolled until both
+        // endings are ready, so `select!` picks between them at random; with
+        // the break, sixteen rounds all pass with probability 2^-16.
+        let (reservation, addr) = reserve_port(None);
+        let listener = reservation.listen(1024).expect("serve collector");
+        let (events_tx, mut events) = mpsc::channel(4);
+        let _server = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(GnmiDialoutServer::new(EofClosingCollector {
+                    events: events_tx,
+                }))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+        let (service, target) = over_bound_service_and_target(addr);
+
+        for _ in 0..16 {
+            let series = TargetSeries::new(BgpMetrics::new(), &target.name);
+            let mut warnings = Vec::new();
+            let mut session =
+                std::pin::pin!(publish_session(&service, &series, &target, &mut warnings));
+            tokio::select! {
+                outcome = &mut session => panic!("session ended before it was accepted: {outcome:?}"),
+                event = events.recv() => assert_eq!(event, Some("accepted")),
+            }
+            // The refusal, the request EOF and the collector's close all run in
+            // other tasks; the session is not polled until they are done.
+            let closed = tokio::time::timeout(Duration::from_secs(10), events.recv()).await;
+            assert_eq!(closed.expect("collector closes"), Some("closed"));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let outcome = tokio::time::timeout(Duration::from_secs(10), session)
+                .await
+                .expect("refused session ends");
+            assert!(
+                matches!(
+                    &outcome,
+                    Err(SessionError::Ended {
+                        published: false,
+                        ..
+                    })
+                ),
+                "expected a failed subscription, got {outcome:?}"
+            );
+        }
     }
 
     #[tokio::test]

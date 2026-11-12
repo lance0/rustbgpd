@@ -128,7 +128,16 @@ type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
 type SessionEventsFuture =
     Pin<Box<dyn Future<Output = Result<broadcast::Receiver<Arc<SessionEvent>>, Status>> + Send>>;
 type SessionEventsFn = Arc<dyn Fn() -> SessionEventsFuture + Send + Sync>;
-type HeartbeatSnapshotTask = tokio::task::JoinHandle<Result<Vec<gnmi::SubscribeResponse>, Status>>;
+/// A heartbeat render running in its own task. Dropping it aborts the task,
+/// so a stream that ends (client gone, lag, failed send) leaves no render-slot
+/// waiter or render behind for a collector that is no longer there.
+struct HeartbeatSnapshotTask(tokio::task::JoinHandle<Result<Vec<gnmi::SubscribeResponse>, Status>>);
+
+impl Drop for HeartbeatSnapshotTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 fn due_heartbeat_indices(
     deadlines: &[Option<tokio::time::Instant>; MAX_SUBSCRIPTIONS],
@@ -148,6 +157,7 @@ fn due_heartbeat_indices(
 /// Render a heartbeat in its own task. The stream loop may block on a slow
 /// client's send while the render is in flight; the task still finishes and
 /// frees its shared render slot instead of holding it until the loop polls.
+/// The returned guard aborts the task when the stream drops it.
 fn spawn_heartbeat_snapshot(
     service: &GnmiService,
     plan: &SubscriptionPlan,
@@ -155,11 +165,11 @@ fn spawn_heartbeat_snapshot(
 ) -> HeartbeatSnapshotTask {
     let service = service.clone();
     let plan = plan.clone();
-    tokio::spawn(async move {
+    HeartbeatSnapshotTask(tokio::spawn(async move {
         service
             .render_subscription_snapshot(&plan, Some(&due), false)
             .await
-    })
+    }))
 }
 
 /// gNMI target for the supported `OpenConfig` telemetry and Set subset.
@@ -459,9 +469,11 @@ impl GnmiService {
     ///
     /// The render and `finish` run on the blocking pool when their work
     /// exceeds [`INLINE_SUBSCRIBE_RENDER_UPDATES`]. That work counts the planned
-    /// updates once per due path that `finish` filters (`fan_out`), plus the
+    /// updates once per due path that `finish` filters (`fan_out`), the
     /// per-path state entries `finish` walks or drops (`retained`), which can
-    /// dwarf the render after the roster shrinks.
+    /// dwarf the render after the roster shrinks, and the roster traversal:
+    /// sorting the snapshot and searching it once per concrete-neighbor path,
+    /// which costs a whole roster even when a path renders ten updates.
     ///
     /// The refusal ends the stream, as every render error does: on the
     /// initial snapshot it arrives before any update or `sync_response`, and on
@@ -481,24 +493,28 @@ impl GnmiService {
             .await
             .map_err(|_| Status::unavailable("gNMI render slots closed"))?;
         let peers = if queries.iter().any(SupportedPath::needs_peers) {
-            let mut peers = (self.peer_snapshot)().await?;
-            peers.sort_by_key(|peer| peer.address);
-            Some(peers)
+            Some((self.peer_snapshot)().await?)
         } else {
             None
         };
-        let planned =
-            check_render_budget("Subscribe", &queries, peers.as_ref().map_or(0, Vec::len))?;
+        let roster = peers.as_ref().map_or(0, Vec::len);
+        let planned = check_render_budget("Subscribe", &queries, roster)?;
+        let traversed = roster_traversal(&queries, roster);
         let service = self.clone();
         let render = move || {
             let _permit = permit;
+            // Sorted here so an offloaded render sorts on the blocking pool.
+            let peers = peers.map(|mut peers| {
+                peers.sort_by_key(|peer| peer.address);
+                peers
+            });
             let rendered = queries
                 .iter()
                 .map(|query| service.render_subscription_query(query, peers.as_deref(), encoding))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(finish(rendered))
         };
-        if subscription_render_inline(planned, fan_out, retained) {
+        if subscription_render_inline(planned, fan_out, retained.saturating_add(traversed)) {
             render()
         } else {
             tokio::task::spawn_blocking(render).await.map_err(|error| {
@@ -934,9 +950,9 @@ impl GnmiService {
                                 let identity = CanonicalPath::from(&path);
                                 if heartbeat_snapshot.is_some()
                                     && due_paths_cover(&plan, &heartbeat_due, &identity)
-                                    && let Some(superseded) = heartbeat_snapshot.take()
                                 {
-                                    superseded.abort();
+                                    // Dropping the guard aborts the superseded render.
+                                    heartbeat_snapshot = None;
                                 }
                                 let is_update = update.is_some();
                                 let response = match update {
@@ -971,9 +987,10 @@ impl GnmiService {
                     Err(RecvError::Closed) => return,
                 },
                 rendered = async {
-                    heartbeat_snapshot
+                    (&mut heartbeat_snapshot
                         .as_mut()
                         .expect("heartbeat snapshot arm is guarded")
+                        .0)
                         .await
                 }, if heartbeat_snapshot.is_some() => {
                     heartbeat_snapshot = None;
@@ -1270,13 +1287,25 @@ fn check_render_budget(
 }
 
 /// Whether a `Subscribe` render stays on its stream task: the planned updates,
-/// filtered once per due path, plus the retained per-path state entries the
-/// render walks or drops, fit [`INLINE_SUBSCRIBE_RENDER_UPDATES`].
-fn subscription_render_inline(planned: usize, fan_out: usize, retained: usize) -> bool {
+/// filtered once per due path, plus the other entries the render walks
+/// (retained per-path state, roster traversal), fit
+/// [`INLINE_SUBSCRIBE_RENDER_UPDATES`].
+fn subscription_render_inline(planned: usize, fan_out: usize, walked: usize) -> bool {
     planned
         .saturating_mul(fan_out.max(1))
-        .saturating_add(retained)
+        .saturating_add(walked)
         <= INLINE_SUBSCRIBE_RENDER_UPDATES
+}
+
+/// Roster entries a render visits outside the planned updates: one pass to
+/// sort the snapshot, and one search per distinct path. Approximates each
+/// path as a full pass, which is exact for concrete-neighbor paths.
+fn roster_traversal(queries: &[SupportedPath], roster: usize) -> usize {
+    if queries.iter().any(SupportedPath::needs_peers) {
+        roster.saturating_mul(queries.len().saturating_add(1))
+    } else {
+        0
+    }
 }
 
 /// Entries a `SAMPLE` stream carries between renders: cached values and
@@ -6264,6 +6293,81 @@ mod tests {
 
         drop(rx);
         stream.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ended_on_change_stream_leaves_no_heartbeat_render_behind() {
+        // Load-bearing break: a detached heartbeat task outlives its stream,
+        // waits for a render slot, and then renders a snapshot for a client
+        // that is gone.
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let events = broadcast::channel(64).0;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(vec![test_peer("10.0.0.2".parse().unwrap())]) }
+        })
+        .with_test_session_events(&events);
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.2"));
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let stream = tokio::spawn(service.clone().run_on_change(plan, tx));
+        assert_eq!(
+            subscribe_updates(rx.recv().await.unwrap().unwrap()).len(),
+            1
+        );
+        assert_eq!(
+            rx.recv().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Every slot is busy, so the heartbeat render queues for one.
+        let held = Arc::clone(&service.render_slots)
+            .acquire_many_owned(u32::try_from(RENDER_SLOTS).unwrap())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        // The client goes away and the stream ends.
+        drop(rx);
+        stream.await.unwrap();
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.render_slots.available_permits(), RENDER_SLOTS);
+    }
+
+    #[test]
+    fn concrete_neighbor_paths_count_their_roster_search() {
+        // Load-bearing break: counting only the planned updates keeps sixteen
+        // searches of a 65,536-neighbor roster (one update each) inline.
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.1.0"));
+        list.subscription = (0..MAX_SUBSCRIPTIONS)
+            .map(|index| gnmi::Subscription {
+                path: Some(neighbor_session_state_path(&format!("10.0.1.{index}"))),
+                ..list.subscription[0].clone()
+            })
+            .collect();
+        let plan = parse_subscription_list(&list).unwrap();
+        let (queries, _) = due_queries(&plan, |_| true);
+        let planned = check_render_budget("Subscribe", &queries, 65_536).unwrap();
+        assert_eq!(planned, MAX_SUBSCRIPTIONS);
+        assert!(subscription_render_inline(planned, 1, 0));
+        let traversed = roster_traversal(&queries, 65_536);
+        assert_eq!(traversed, 65_536 * (MAX_SUBSCRIPTIONS + 1));
+        assert!(!subscription_render_inline(planned, 1, traversed));
+
+        let global = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            mounted_path(&[pe("bgp"), pe("global"), pe("state")]),
+        ))
+        .unwrap();
+        assert_eq!(roster_traversal(&global.paths, 65_536), 0);
     }
 
     #[tokio::test]
