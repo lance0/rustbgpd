@@ -36,7 +36,8 @@
 //!   seen an `EoR` for) equals the reference arm's. Each prefix is compared
 //!   as its set of paths, since RFC 7911 path IDs are opaque. Stale paths a
 //!   graceful end carried in with different values are compared only once
-//!   their family's `EoR` has arrived.
+//!   their family's `EoR` has arrived; the same paths carried in under
+//!   different path IDs are compared throughout.
 //! - P2, no spurious withdrawal: never a withdrawal of a key the receiver
 //!   does not hold.
 //! - P3, barriers: no `BoRR` before the session's initial `EoR` for that
@@ -60,8 +61,10 @@
 //!   subsequence of the reference's and match its state at the interval's
 //!   close; outside every interval they match exactly. A key a graceful end
 //!   carried into the session with a different value, or the same paths
-//!   under different path IDs, has no common starting point; P1-P3 still
-//!   apply to it.
+//!   under different path IDs, has no common starting point until its
+//!   family's first `EoR` purges the stale paths in both arms. It is
+//!   compared from there, starting from each arm's state at that `EoR` (or
+//!   at the close of a deferral holding it); P1-P3 apply throughout.
 //! - P5, bounded retention: the peak queued envelopes per receiver stay
 //!   within [`retention_bound`]. Peak queued rows are recorded too, so a
 //!   later bound can pin them.
@@ -976,9 +979,12 @@ struct Harness {
     snapshots: Vec<Vec<(u64, Table)>>,
     /// Subject dirty after each operation.
     dirty: Vec<[bool; PEERS]>,
-    /// Subject (peer, session, prefix) a graceful end carried in with rows
-    /// (paths or their path IDs) different from the reference's.
+    /// Subject (peer, session, prefix) a graceful end carried in with a
+    /// path set different from the reference's.
     carried: BTreeSet<(usize, u64, Nlri)>,
+    /// Subject (peer, session, prefix) a graceful end carried in with the
+    /// reference's paths under different path IDs.
+    rekeyed: BTreeSet<(usize, u64, Nlri)>,
     peak_envelopes: [usize; PEERS],
     /// Subject queue depth after the previous operation.
     depths: [usize; PEERS],
@@ -1012,6 +1018,7 @@ impl Harness {
             snapshots: Vec::new(),
             dirty: Vec::new(),
             carried: BTreeSet::new(),
+            rekeyed: BTreeSet::new(),
             peak_envelopes: [0; PEERS],
             depths: [0; PEERS],
             refresh_owed: Vec::new(),
@@ -1049,10 +1056,12 @@ impl Harness {
         // announcement replaces a retained stale path only on the same ID
         // (RFC 7911 §3); any other stale row stays until the EoR (RFC 4724
         // §4.2), so the arms' sequences diverge until then.
-        let carried = retain.then(|| {
+        if retain {
             let reference = &self.arms[REFERENCE].wire[peer].held;
             let subject = &self.arms[SUBJECT].wire[peer].held;
-            reference
+            let (reference_sets, subject_sets) =
+                (path_sets(reference, None), path_sets(subject, None));
+            let differing = reference
                 .iter()
                 .filter(|(key, value)| subject.get(*key) != Some(*value))
                 .chain(
@@ -1060,11 +1069,14 @@ impl Harness {
                         .iter()
                         .filter(|(key, value)| reference.get(*key) != Some(*value)),
                 )
-                .map(|(key, _)| nlri(key))
-                .collect::<Vec<_>>()
-        });
-        for carried in carried.into_iter().flatten() {
-            self.carried.insert((peer, session_id, carried));
+                .map(|(key, _)| nlri(key));
+            for prefix in differing {
+                if reference_sets.get(&prefix) == subject_sets.get(&prefix) {
+                    self.rekeyed.insert((peer, session_id, prefix));
+                } else {
+                    self.carried.insert((peer, session_id, prefix));
+                }
+            }
         }
         for (index, arm) in self.arms.iter_mut().enumerate() {
             arm.send(RibUpdate::SetPeerGracefulRestartContext {
@@ -1465,6 +1477,34 @@ impl Harness {
         )
     }
 
+    /// The operation from which a carried or rekeyed key of `peer` is
+    /// compared: the later arm's first `EoR` for the key's family on the
+    /// session, moved to the close of a deferral holding it. `None` while
+    /// either arm lacks that `EoR`, or when a flap ends the deferral first.
+    fn carried_cut(&self, peer: usize, key: &(u64, Nlri), intervals: &[Deferral]) -> Option<usize> {
+        let first_eor = |arm| {
+            self.barriers
+                .iter()
+                .filter(|barrier| {
+                    barrier.arm == arm
+                        && barrier.peer == peer
+                        && barrier.session == key.0
+                        && barrier.family == key.1.0
+                        && barrier.kind != "EoRR"
+                })
+                .map(|barrier| barrier.op)
+                .min()
+        };
+        let cut = first_eor(REFERENCE)?.max(first_eor(SUBJECT)?);
+        match intervals
+            .iter()
+            .find(|interval| (interval.start..=interval.end).contains(&cut))
+        {
+            Some(interval) => interval.settled.then_some(interval.end),
+            None => Some(cut),
+        }
+    }
+
     /// Ops in which `peer` was dirty or ran the resync that cleaned it.
     fn deferred_ops(&self, peer: usize) -> BTreeSet<usize> {
         (0..self.dirty.len())
@@ -1527,10 +1567,10 @@ impl Harness {
         for peer in 0..PEERS {
             let reference = &self.arms[REFERENCE].wire[peer];
             let subject = &self.arms[SUBJECT].wire[peer];
-            // A prefix a graceful end carried in with different stale rows
-            // (the subject lost queued envelopes at the end, or keyed equal
-            // paths differently) converges only at the family's End-of-RIB
-            // on the new session.
+            // A prefix a graceful end carried in with different stale paths
+            // (the subject lost queued envelopes at the end) converges only
+            // at the family's End-of-RIB on the new session. Equal paths
+            // under different path IDs hold equal sets throughout.
             let settled = |sets: PathSets| -> PathSets {
                 sets.into_iter()
                     .filter(|(prefix, _)| {
@@ -1563,23 +1603,41 @@ impl Harness {
                 .collect();
             let empty = Vec::new();
             for key in keys {
-                let expected = reference.history.get(key).unwrap_or(&empty);
-                let actual = subject.history.get(key).unwrap_or(&empty);
-                // The two wires entered this session from different held
-                // values, so their sequences have no common start.
-                if self.carried.contains(&(peer, key.0, key.1.clone())) {
-                    continue;
-                }
+                let mut expected = reference.history.get(key).unwrap_or(&empty).clone();
+                let mut actual = subject.history.get(key).unwrap_or(&empty).clone();
                 // Only envelopes the queue actually discarded bound this suffix.
                 let discarded_from = subject.discarded_from.get(key).copied();
-                let initial = reference.initial.get(key).map_or(&[][..], Vec::as_slice);
-                let verdict = compare_in_deferrals(
-                    expected,
-                    actual,
-                    initial,
-                    &self.deferrals(peer, key),
-                    discarded_from,
-                );
+                let mut initial = reference.initial.get(key).map_or(&[][..], Vec::as_slice);
+                let intervals = self.deferrals(peer, key);
+                let entry = (peer, key.0, key.1.clone());
+                if self.carried.contains(&entry) || self.rekeyed.contains(&entry) {
+                    // The two wires entered this session from different
+                    // held rows, so their sequences have a common start
+                    // only once the family's first EoR purged the stale
+                    // rows in both arms (or the deferral holding that EoR
+                    // settled). Each arm restarts from its state there.
+                    let Some(cut) = self.carried_cut(peer, key, &intervals) else {
+                        continue;
+                    };
+                    if discarded_from.is_some_and(|op| op <= cut) {
+                        continue;
+                    }
+                    let from_cut = |events: &[HistoryEvent], initial: Option<&Vec<Value>>| {
+                        let state = events
+                            .iter()
+                            .take_while(|(op, _)| *op <= cut)
+                            .last()
+                            .map_or_else(|| initial.cloned().unwrap_or_default(), |e| e.1.clone());
+                        std::iter::once((cut, state))
+                            .chain(events.iter().filter(|(op, _)| *op > cut).cloned())
+                            .collect::<Vec<_>>()
+                    };
+                    expected = from_cut(&expected, reference.initial.get(key));
+                    actual = from_cut(&actual, subject.initial.get(key));
+                    initial = &[];
+                }
+                let verdict =
+                    compare_in_deferrals(&expected, &actual, initial, &intervals, discarded_from);
                 if let Err(reason) = verdict {
                     return Err(format!(
                         "P4: peer {peer} session {} key {:?}: {reason}\n reference: \
@@ -2595,45 +2653,131 @@ fn discarded_orf_eor_preserves_the_clean_event_boundary() {
 /// a two-envelope channel. Its full channel misses peer 0's path (key 2 in
 /// the reference) and the withdrawal of peer 3's path (key 1), so the dirty
 /// resync puts peer 0's path on the freed key 1 in place. After the graceful
-/// restart both arms announce it on key 1: it replaces the subject's stale
-/// row, while the reference's stale key-2 row stays until the `EoR`. Both
-/// wires are valid (RFC 7911 path IDs are opaque, RFC 4724 §4.2), so the
-/// prefix counts as carried and P4 skips it; P1-P3 still apply.
-#[test]
-fn gr_retained_paths_on_different_path_ids_are_carried() {
+/// restart (op 7) both arms announce it on key 1: it replaces the subject's
+/// stale row, while the reference's stale key-2 row stays until the `EoR`.
+/// Both wires are valid (RFC 7911 path IDs are opaque, RFC 4724 §4.2), so
+/// the prefix is rekeyed and P4 compares it from that `EoR` on; op 9 is a
+/// clean change after it. With `orf`, a prefix ORF first lifts the initial
+/// gate; the restarted session's gate then holds both its IPv4 routes and
+/// its IPv4 `EoR` (RFC 5291 §6), so the rekeyed paths stay stale to the end.
+fn rekeyed_gr_case(orf: bool) -> ([PeerConfig; PEERS], Vec<Op>) {
     let mut config = livelock_config();
     config[2] = PeerConfig {
         capacity: 2,
         add_path: 2,
         gr: true,
+        orf,
         ..config[2]
     };
-    let announce = |src| Op::Announce {
+    let announce = |src, variant| Op::Announce {
         src,
         family: Fam::V4,
         index: 2,
-        variant: 0,
+        variant,
     };
-    let ops = [
-        announce(3),
-        announce(0),
+    let drain = Op::Drain { peer: 2, k: None };
+    let mut ops = Vec::new();
+    if orf {
+        ops.push(Op::Orf { peer: 2, deny: 0 });
+    }
+    ops.extend([
+        announce(3, 0),
+        announce(0, 0),
         Op::Flap { peer: 3 },
-        Op::Drain { peer: 2, k: None },
+        drain.clone(),
         Op::Tick,
-        Op::Drain { peer: 2, k: None },
+        drain.clone(),
         Op::GrRestart { peer: 2 },
-    ];
+        drain,
+        announce(0, 1),
+    ]);
+    (config, ops)
+}
+
+fn rekeyed_prefix() -> Nlri {
+    (V4, v4_prefix(2).to_string())
+}
+
+/// P1 and P4 still check a rekeyed prefix: losing it at the end, or losing
+/// or adding a clean change after its `EoR`, fails.
+#[test]
+fn rekeyed_gr_paths_compare_from_the_eor() {
+    let (config, ops) = rekeyed_gr_case(false);
     assert_clean(&config, &ops);
     let reason = run_seeded(config, &ops, |harness| {
-        let prefix = (V4, v4_prefix(2).to_string());
-        assert!(harness.carried.contains(&(2, 2, prefix.clone())));
+        assert!(harness.rekeyed.contains(&(2, 2, rekeyed_prefix())));
         harness.arms[SUBJECT].wire[2]
             .held
-            .retain(|key, _| nlri(key) != prefix);
+            .retain(|key, _| nlri(key) != rekeyed_prefix());
     })
     .err()
-    .expect("P1 must still check a carried prefix once its EoR arrived");
+    .expect("P1 must check a rekeyed prefix");
     assert!(reason.starts_with("P1: peer 2"), "{reason}");
+    for extra in [false, true] {
+        let reason = run_seeded(config, &ops, |harness| {
+            let history = harness.arms[SUBJECT].wire[2]
+                .history
+                .get_mut(&(2, rekeyed_prefix()))
+                .unwrap();
+            let at = history
+                .iter()
+                .position(|(op, _)| *op == 9)
+                .expect("op 9 changed the prefix");
+            if extra {
+                history.insert(at, (9, vec!["transient".into()]));
+            } else {
+                history.remove(at);
+            }
+        })
+        .err()
+        .expect("P4 must check a rekeyed prefix after its EoR");
+        assert!(reason.starts_with("P4: peer 2 session 2"), "{reason}");
+    }
+}
+
+/// A gated restarted session never sends its IPv4 `EoR`, so the rekeyed
+/// paths stay stale; P1 still compares them.
+#[test]
+fn rekeyed_gr_paths_without_an_eor_still_meet_p1() {
+    let (config, ops) = rekeyed_gr_case(true);
+    assert_clean(&config, &ops);
+    let reason = run_seeded(config, &ops, |harness| {
+        assert!(harness.rekeyed.contains(&(2, 2, rekeyed_prefix())));
+        assert!(!harness.arms[REFERENCE].wire[2].eor.contains(&V4));
+        harness.arms[SUBJECT].wire[2]
+            .held
+            .retain(|key, _| nlri(key) != rekeyed_prefix());
+    })
+    .err()
+    .expect("P1 must check a rekeyed prefix without an EoR");
+    assert!(reason.starts_with("P1: peer 2"), "{reason}");
+}
+
+/// The subject loses the restarted session's re-announcement, so its `EoR`
+/// purges the stale path: P3 fails at that `EoR`.
+#[tokio::test(start_paused = true)]
+async fn an_omitted_gr_reannouncement_fails_p3() {
+    let (config, ops) = rekeyed_gr_case(false);
+    let mut harness = Harness::new(config, None).await.unwrap();
+    for op in &ops[..7] {
+        harness.apply(op).await.unwrap();
+    }
+    let subject = &mut harness.arms[SUBJECT];
+    let dropped = normalize(&subject.rx[2].as_mut().unwrap().try_recv().unwrap());
+    assert_eq!(subject.stamps[2].pop_front(), Some(7));
+    assert!(
+        dropped
+            .announce
+            .iter()
+            .any(|row| row.0 == Prefix::V4(v4_prefix(2)))
+    );
+    harness.drain_until_quiet().await.unwrap();
+    let reason = harness.check().unwrap_err();
+    assert!(
+        reason.starts_with("P3: subject peer 2 initial EoR"),
+        "{reason}"
+    );
+    harness.finish().await;
 }
 
 fn stale_marker_wire(enhanced: bool) -> (Wire, [Key; 3]) {
