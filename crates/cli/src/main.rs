@@ -346,11 +346,11 @@ enum Command {
     /// socket and permission to signal its process (its user or root).
     #[command(after_help = "Exit codes:\n  \
         0  complete (including a reload with no changes)\n  \
-        1  error (no local socket, signal refused, connection failure, or timeout)\n  \
+        1  error (no local socket, signal refused, daemon restarted, connection failure, or timeout)\n  \
         2  known_partial (some reload operations applied, others did not)\n  \
         3  rejected_no_effect or task_failed")]
     Reload {
-        /// Seconds to wait for the reload to settle (1-3600)
+        /// Seconds the whole command may take, RPCs included (1-3600)
         #[arg(long, value_name = "SECONDS", default_value_t = 600,
             value_parser = clap::value_parser!(u64).range(1..=3600))]
         timeout: u64,

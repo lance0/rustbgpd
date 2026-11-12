@@ -1559,7 +1559,7 @@ impl BgpMetrics {
         let sighup_reload_outcomes = IntCounterVec::new(
             Opts::new(
                 "bgp_sighup_reload_outcomes_total",
-                "SIGHUP reload signals and retained tasks by bounded terminal outcome.",
+                "SIGHUP reload tasks by bounded terminal outcome, plus signals coalesced into a follow-up reload (outcome coalesced).",
             ),
             &["outcome"],
         )

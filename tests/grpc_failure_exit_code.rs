@@ -1308,7 +1308,7 @@ fn peer_manager_supervision_is_fail_stop_and_joins_once() {
     assert!(retained < arm && arm < teardown && teardown < join);
     assert_eq!(production.matches("peer_mgr_handle.await").count(), 1);
     let rpc = production
-        .split_once("changed = rpc_shutdown_rx.changed() => {")
+        .split_once("changed = rpc_shutdown_rx.changed(), if !rpc_shutdown_closed => {")
         .unwrap()
         .1;
     let rpc = rpc.split_once("\n            }").unwrap().0;
@@ -1369,7 +1369,7 @@ fn bgp_ingress_tasks_are_retained_unconditionally_supervised_and_torn_down() {
         assert!(retained < arm && arm < teardown, "{handle} ordering");
     }
     let rpc = production
-        .split_once("changed = rpc_shutdown_rx.changed() => {")
+        .split_once("changed = rpc_shutdown_rx.changed(), if !rpc_shutdown_closed => {")
         .unwrap()
         .1;
     let rpc = rpc.split_once("\n            }").unwrap().0;

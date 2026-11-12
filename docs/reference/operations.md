@@ -726,20 +726,26 @@ config file after that signal to settle, prints the same receipt as
 `rbgp config last-reload` (`--json` for automation), and exits 0 for
 `complete` (including no changes), 2 for `known_partial`, 3 for
 `rejected_no_effect` or `task_failed`, and 1 when it cannot signal the
-daemon, loses the connection, or reaches `--timeout` (600 seconds by default)
-first. It needs the local socket and permission to signal the daemon's process
-(its user or root); against a TCP endpoint it refuses and points to
-`rbgp config last-reload`. It matches its reload by the daemon's
-`CLOCK_MONOTONIC` start stamp, so concurrent reload senders cannot make it
-return another reload's result.
+daemon, sees the daemon restart while it waits, or reaches `--timeout` (600
+seconds by default, bounding the whole command) first. It needs the local
+socket and permission to signal the daemon's process (its user or root), which
+it signals through a pidfd so a reused PID is never hit; against a TCP endpoint
+it refuses and points to `rbgp config last-reload`. It returns the first
+settled reload whose `CLOCK_MONOTONIC` start stamp is at or after the moment
+it signalled, so that reload read the config file after the command's signal.
+When another sender signals at the same time, that reload may have been
+started by the other signal; it still read the file after this one, which is
+what an operator who edited the file before running the command needs.
 
 One reload runs at a time. A SIGHUP that arrives while a reload is running
 is coalesced: it sets one pending follow-up, and further signals fold into
 it. When the running reload settles, whatever its outcome, exactly one
 follow-up reload re-reads the config file, so an edit written after the
 running reload read the file is still applied, and a rejected reload's
-candidate can be fixed and picked up by the follow-up. Coordinated shutdown
-discards a pending follow-up instead of starting it and logs a warning.
+candidate can be fixed and picked up by the follow-up. Signals already queued
+when a reload starts are served by that reload and do not schedule another.
+Coordinated shutdown takes precedence: it discards a pending follow-up instead
+of starting it and logs a warning.
 
 What happens:
 

@@ -55,6 +55,10 @@ rustbgpd-wire.workspace = true
 # conversion (`rbgp diff snapshot from-mrt`).
 tempfile.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `rbgp reload` signals the daemon through a pidfd, so a reused PID is never hit.
+rustix = { version = "1.1", features = ["process"] }
+
 [build-dependencies]
 tonic-prost-build.workspace = true
 protoc-bin-vendored = "3"

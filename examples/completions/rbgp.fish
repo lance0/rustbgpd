@@ -238,7 +238,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults resolved)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "import" -d 'Import a BIRD 2/3 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand reload" -l timeout -d 'Seconds to wait for the reload to settle (1-3600)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand reload" -l timeout -d 'Seconds the whole command may take, RPCs included (1-3600)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand reload" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand reload" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand reload" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F

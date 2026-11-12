@@ -3159,6 +3159,7 @@ dependencies = [
  "rustbgpd-policy",
  "rustbgpd-telemetry",
  "rustbgpd-wire",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2 0.11.1",

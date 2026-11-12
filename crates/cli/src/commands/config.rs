@@ -1,5 +1,5 @@
 use crate::connection::{
-    CONFIG_TRANSACTION_RPC_TIMEOUT, Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT,
+    CONFIG_TRANSACTION_RPC_TIMEOUT, Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, LocalProcess,
     config_transaction_rpc, mutation_budget, read_rpc, rpc_with_timeout,
 };
 use crate::error::CliError;
@@ -686,7 +686,9 @@ pub async fn last_reload(connection: Connection, json: bool) -> Result<(), CliEr
 /// `rbgp reload` exit codes after parsing; 1 stays the generic error.
 pub const RELOAD_EXIT_KNOWN_PARTIAL: i32 = 2;
 pub const RELOAD_EXIT_REJECTED: i32 = 3;
-const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// A `complete` record makes the daemon measure RIB outbound convergence on
+/// every read, so the wait polls gently.
+const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// `CLOCK_MONOTONIC` in microseconds; the daemon stamps each reload's start
 /// with the same clock (`started_monotonic_micros`).
@@ -708,82 +710,96 @@ pub fn reload_exit_code(record: &SighupReloadRecord) -> i32 {
     }
 }
 
-/// Whether `record` is a reload that started at or after `sent_at`, so it read
-/// the config file after the signal was sent. A signal that arrives during
-/// another reload is served by one follow-up reload, which also qualifies.
-fn reload_settled_since(response: &GetLastSighupReloadResponse, sent_at: u64) -> bool {
-    response
-        .record
-        .as_ref()
-        .is_some_and(|record| record.started_monotonic_micros >= sent_at)
+/// Whether the response holds a reload that started at or after `sent_at`,
+/// so it read the config file after the signal was sent. A signal that
+/// arrives during another reload is served by one follow-up reload, which
+/// also qualifies. A record without a start stamp comes from a daemon that
+/// predates it, whose reloads can never be matched.
+fn reload_settled_since(
+    response: &GetLastSighupReloadResponse,
+    sent_at: u64,
+) -> Result<bool, CliError> {
+    match &response.record {
+        None => Ok(false),
+        Some(record) if record.started_monotonic_micros == 0 => Err(CliError::Argument(
+            "this daemon does not report reload start times, so rbgp reload cannot tell its \
+             reload apart; send SIGHUP and read rbgp config last-reload instead"
+                .into(),
+        )),
+        Some(record) => Ok(record.started_monotonic_micros >= sent_at),
+    }
+}
+
+fn daemon_restarted() -> CliError {
+    CliError::Rpc("the daemon restarted while waiting; reload outcome unknown".into())
+}
+
+fn signal_error(pid: u32, error: impl std::fmt::Display) -> CliError {
+    CliError::Argument(format!(
+        "cannot send SIGHUP to rustbgpd pid {pid}: {error}\n  \
+         hint: run rbgp reload as the daemon's user or root"
+    ))
+}
+
+/// Send SIGHUP to exactly the process behind the socket. A pidfd pins the
+/// process it was opened for, so the identity check after opening it proves
+/// the PID was not reused in between.
+#[cfg(target_os = "linux")]
+fn signal_reload(connection: &Connection, process: LocalProcess) -> Result<(), CliError> {
+    use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
+    let pid = i32::try_from(process.pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| signal_error(process.pid, "pid out of range"))?;
+    match pidfd_open(pid, PidfdFlags::empty()) {
+        Ok(pidfd) => {
+            if connection.local_process() != Some(process) {
+                return Err(daemon_restarted());
+            }
+            pidfd_send_signal(&pidfd, Signal::HUP).map_err(|e| signal_error(process.pid, e))
+        }
+        // Kernels before 5.3 have no pidfd_open: signal by PID after the same
+        // identity check, which leaves the short PID-reuse window open.
+        Err(rustix::io::Errno::NOSYS) => kill_reload(connection, process),
+        Err(error) => Err(signal_error(process.pid, error)),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn signal_reload(connection: &Connection, process: LocalProcess) -> Result<(), CliError> {
+    kill_reload(connection, process)
+}
+
+fn kill_reload(connection: &Connection, process: LocalProcess) -> Result<(), CliError> {
+    if connection.local_process() != Some(process) {
+        return Err(daemon_restarted());
+    }
+    let pid =
+        i32::try_from(process.pid).map_err(|_| signal_error(process.pid, "pid out of range"))?;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGHUP,
+    )
+    .map_err(|error| signal_error(process.pid, error))
 }
 
 /// Send SIGHUP to the daemon behind the local Unix socket and wait until a
-/// reload that read the config after the signal has settled.
+/// reload that read the config after the signal has settled. `timeout`
+/// bounds the whole command, RPCs included.
 pub async fn reload(
     connection: Connection,
     timeout: Duration,
     json: bool,
 ) -> Result<i32, CliError> {
-    let mut client =
-        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let baseline = read_rpc(
-        "GetLastSighupReload",
-        client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
-    )
-    .await?
-    .into_inner();
-    if baseline
-        .record
-        .as_ref()
-        .is_some_and(|record| record.started_monotonic_micros == 0)
-    {
-        return Err(CliError::Argument(
-            "this daemon does not report reload start times, so rbgp reload cannot tell its \
-             reload apart; send SIGHUP and read rbgp config last-reload instead"
-                .into(),
-        ));
-    }
-    let Some(process) = connection.local_process() else {
-        return Err(CliError::Argument(
-            "rbgp reload signals the daemon process and needs its local Unix socket; for another \
-             endpoint, send SIGHUP on the daemon host and read rbgp config last-reload"
-                .into(),
-        ));
-    };
-    let pid = i32::try_from(process.pid)
-        .map_err(|_| CliError::Argument(format!("daemon pid {} is out of range", process.pid)))?;
-    let sent_at = monotonic_micros()?;
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid),
-        nix::sys::signal::Signal::SIGHUP,
-    )
-    .map_err(|error| {
-        CliError::Argument(format!(
-            "cannot send SIGHUP to rustbgpd pid {pid}: {error}\n  \
-                 hint: run rbgp reload as the daemon's user or root"
-        ))
-    })?;
-    let deadline = tokio::time::Instant::now() + timeout;
-    let response = loop {
-        let response = read_rpc(
-            "GetLastSighupReload",
-            client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
-        )
-        .await?
-        .into_inner();
-        if reload_settled_since(&response, sent_at) {
-            break response;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(CliError::Rpc(format!(
-                "SIGHUP sent to rustbgpd pid {pid}, but no reload settled within {}s; it may \
-                 still be running: check rbgp config last-reload",
+    let response = tokio::time::timeout(timeout, wait_for_reload(&connection))
+        .await
+        .map_err(|_| {
+            CliError::Rpc(format!(
+                "no reload settled within {}s; if SIGHUP was sent the reload may still be \
+                 running: check rbgp config last-reload",
                 timeout.as_secs()
-            )));
-        }
-        tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
-    };
+            ))
+        })??;
     let code = response.record.as_ref().map_or(1, reload_exit_code);
     if json {
         print_json(last_reload_response_to_json(&response))?;
@@ -794,6 +810,45 @@ pub async fn reload(
         ))?;
     }
     Ok(code)
+}
+
+async fn wait_for_reload(connection: &Connection) -> Result<GetLastSighupReloadResponse, CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let baseline = read_rpc(
+        "GetLastSighupReload",
+        client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+    )
+    .await?
+    .into_inner();
+    reload_settled_since(&baseline, u64::MAX)?;
+    let Some(process) = connection.local_process() else {
+        return Err(CliError::Argument(
+            "rbgp reload signals the daemon process and needs its local Unix socket; for another \
+             endpoint, send SIGHUP on the daemon host and read rbgp config last-reload"
+                .into(),
+        ));
+    };
+    let sent_at = monotonic_micros()?;
+    signal_reload(connection, process)?;
+    loop {
+        tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
+        let response = read_rpc(
+            "GetLastSighupReload",
+            client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+        )
+        .await;
+        // A reconnect replaces the transport's identity, and a dead process
+        // has none; either way, neither a new daemon's record nor a broken
+        // transport says anything about the reload this signal started.
+        if connection.local_process() != Some(process) {
+            return Err(daemon_restarted());
+        }
+        let response = response?.into_inner();
+        if reload_settled_since(&response, sent_at)? {
+            return Ok(response);
+        }
+    }
 }
 
 fn last_reload_response_to_json(response: &GetLastSighupReloadResponse) -> serde_json::Value {
@@ -1520,13 +1575,71 @@ mod tests {
             }),
             convergence: None,
         };
-        assert!(!reload_settled_since(
-            &GetLastSighupReloadResponse::default(),
-            10
-        ));
-        assert!(!reload_settled_since(&response(9), 10));
-        assert!(reload_settled_since(&response(10), 10));
-        assert!(reload_settled_since(&response(11), 10));
+        let settled =
+            |response: GetLastSighupReloadResponse| reload_settled_since(&response, 10).unwrap();
+        assert!(!settled(GetLastSighupReloadResponse::default()));
+        assert!(!settled(response(9)));
+        assert!(settled(response(10)));
+        assert!(settled(response(11)));
+        // A daemon that predates the start stamp is refused, not polled.
+        assert!(reload_settled_since(&response(0), 10).is_err());
+        assert!(reload_settled_since(&response(0), u64::MAX).is_err());
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_a_tcp_endpoint_before_signalling() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let error = reload(connection, Duration::from_secs(5), true)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("needs its local Unix socket"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_a_daemon_without_reload_start_stamps() {
+        let server = spawn_mock_server(None).await;
+        *server.state.last_sighup_record.lock().await =
+            Some(rustbgpd_api::proto::SighupReloadRecord {
+                outcome: "complete".to_string(),
+                ..Default::default()
+            });
+        let connection = connect(&server.addr, None).await.unwrap();
+        let error = reload(connection, Duration::from_secs(5), true)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not report reload start times"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_timeout_bounds_a_stalled_read() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .last_sighup_read_stall
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let started = std::time::Instant::now();
+        let error = reload(connection, Duration::from_secs(1), true)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no reload settled within 1s"),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

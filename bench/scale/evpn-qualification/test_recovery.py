@@ -363,7 +363,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(R.reload_complete(last_reload(999, 1001), old["record"], 1000, 1_100_000))
         # Millisecond equality is valid; the signal may arrive later within the same millisecond.
         self.assertTrue(R.reload_complete(last_reload(1000, 1000), old["record"], 1000, 1_100_000))
-        for outcome in ("ignored_in_flight", "known_partial", "rejected_no_effect", "task_failed"):
+        for outcome in ("known_partial", "rejected_no_effect", "task_failed"):
             with self.subTest(outcome=outcome), self.assertRaises(Q.AcceptanceFailure):
                 R.reload_complete(last_reload(1000, 1001, outcome), old["record"], 1000, 1_100_000)
         for response in ({}, last_reload(True, 1000), last_reload(1001, 1000), last_reload(1000, 2000)):
@@ -799,7 +799,7 @@ class RecoveryTests(unittest.TestCase):
         return wire_report
 
     def test_analyzer_rechecks_raw_reload_owner_receipts_in_both_arms(self):
-        defects = ("stale", "ignored_in_flight", "known_partial", "task_failed", "prepublished",
+        defects = ("stale", "rejected_no_effect", "known_partial", "task_failed", "prepublished",
                    "late", "pid", "copied", "client", "missing", "future-finish", "unapplied")
         for arm in ("candidate", "private"):
             for defect in defects:
@@ -812,7 +812,7 @@ class RecoveryTests(unittest.TestCase):
                     response = json.loads(controls[-1]["stdout"])
                     if defect == "stale":
                         response = json.loads(controls[-2]["stdout"])
-                    elif defect in ("ignored_in_flight", "known_partial", "task_failed"):
+                    elif defect in ("rejected_no_effect", "known_partial", "task_failed"):
                         response["record"]["outcome"] = defect
                     elif defect == "future-finish":
                         response["record"]["finished_unix_millis"] = 10_000
@@ -838,7 +838,7 @@ class RecoveryTests(unittest.TestCase):
                         path.write_bytes((other / "reload-control.jsonl").read_bytes())
                     with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
                         R.analyze(root)
-                    expected = "FAIL" if defect in ("ignored_in_flight", "known_partial", "task_failed") else "INVALID"
+                    expected = "FAIL" if defect in ("rejected_no_effect", "known_partial", "task_failed") else "INVALID"
                     self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], expected)
                     self.assertEqual(isinstance(caught.exception, Q.AcceptanceFailure), expected == "FAIL")
 

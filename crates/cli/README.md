@@ -107,12 +107,15 @@ policies, neighbor sets, chains, peer groups and FIB tables. On expiry the
 command exits 1 with an outcome-unknown error that names a command to verify
 with. The daemon may still apply the change, so the CLI never retries it.
 
-`reload` sends SIGHUP to the daemon behind the local Unix socket (it needs
-permission to signal that process) and polls `GetLastSighupReload` until a
-reload that started after its signal has settled. A signal that lands during
-another reload is served by one follow-up reload, which counts. It waits
-`--timeout` seconds (600 by default) and exits 1 on expiry; the reload may
-still be running, so read `rbgp config last-reload` before sending another.
+`reload` sends SIGHUP to the daemon behind the local Unix socket through a
+pidfd (it needs permission to signal that process) and polls
+`GetLastSighupReload` every 500 ms until a reload that started after its
+signal has settled. A signal that lands during another reload is served by one
+follow-up reload, which counts. If the daemon behind the socket changes while
+it waits, it exits 1 with the outcome unknown. `--timeout` (600 seconds by
+default) bounds the whole command, RPCs included, and exits 1 on expiry; the
+reload may still be running, so read `rbgp config last-reload` before sending
+another.
 
 `mrt-dump` waits up to 31 minutes and also exits 1 on expiry, but its
 outcome differs. The daemon treats the dropped request as a cancellation
