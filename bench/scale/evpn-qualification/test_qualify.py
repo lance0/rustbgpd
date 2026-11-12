@@ -388,6 +388,17 @@ class TestQualification(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):
                 Q.analyze(args)
             self.assertEqual(json.loads((root / "summary.json").read_text())["status"], "INVALID")
+            # A headroom miss in another cell still reports the cut-off tail.
+            path.write_text(complete + torn)
+            result = next(root.glob("memory-*-candidate-*/result.json"))
+            row = json.loads(result.read_text())
+            set_provenance_peak(row["ownership"], "peer", int(Q.PEER_BAR_BUDGET * .9))
+            Q.write_json(result, row)
+            (result.parent / "observer.log").write_text("evpn_qualification " + json.dumps(row["ownership"]) + "\n")
+            with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
+                Q.analyze(args)
+            summary = json.loads((root / "summary.json").read_text())
+            self.assertEqual((summary["status"], summary.get("observer_torn_tails")), ("FAIL", [path.parent.name]))
 
     def test_raw_memory_consumer_enforces_peer_and_daemon_headroom(self):
         for arm in ("candidate", "private"):

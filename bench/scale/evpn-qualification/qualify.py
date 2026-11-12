@@ -662,6 +662,10 @@ def analyze_results(args):
                 validate(path, row)
             except AcceptanceFailure as error:
                 missed = missed or error
+    # Any later failure, of a bar or a whole cell, keeps the cut-off tails
+    # in the summary that analyze() completes from this one.
+    summary_path = output / "summary.json"
+    write_json(summary_path, {**json.loads(summary_path.read_text()), "observer_torn_tails": torn_tails})
     if failures:
         write_json(output / "summary.json", {
             "status": "FAIL", "correctness_only": correct, "scope": SCOPE,

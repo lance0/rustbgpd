@@ -882,6 +882,14 @@ class RecoveryTests(unittest.TestCase):
                 with self.assertRaises(json.JSONDecodeError):
                     R.analyze(root)
                 self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "INVALID")
+                # A bar miss still reports the cut-off tail in its FAIL summary.
+                bad = witness("candidate", 3, 10_000)
+                bad.update(owned_groups=2, peak=int(bad["daemon_budget"] * .9))
+                path.write_text(complete + "evpn_qualification " + json.dumps(bad) + "\n" + torn)
+                with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
+                    R.analyze(root)
+                summary = json.loads((root / "recovery-summary.json").read_text())
+                self.assertEqual((summary["status"], summary.get("observer_torn_tails")), ("FAIL", ["recovery-00-candidate"]))
 
     def test_roster_validates_types_ranges_and_source_before_bars(self):
         def private_owned(row):

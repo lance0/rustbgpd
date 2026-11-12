@@ -885,6 +885,10 @@ def analyze_results(output):
                 validate(path, row)
             except Q.AcceptanceFailure as error:
                 missed = missed or error
+    # Any later failure, of a bar or a whole cell, keeps the cut-off tails
+    # in the summary that analyze() completes from this one.
+    summary_path = output / "recovery-summary.json"
+    Q.write_json(summary_path, {**json.loads(summary_path.read_text()), "observer_torn_tails": torn_tails})
     if failures:
         Q.write_json(output / "recovery-summary.json", {
             "status": "FAIL", "correctness_only": correctness, "scope": SCOPE,
