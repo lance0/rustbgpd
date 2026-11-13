@@ -11,7 +11,12 @@
   export change is its own still takes one RIB command, so a reload that
   changes about a hundred peers with per-neighbor export policies at a full
   table can still exceed that budget and roll back.
-  **Operator-visible:** for those grouped peers the Route Refresh that
-  follows an import-policy change is now sent once the group's RIB batches
-  have committed, not between peers, and the `authoritative_batch_phase` log line appears
-  once per group during the remainder walk.
+  **Operator-visible:** such a group is applied where its first peer stands
+  in the walk, at most 100 peers at a time: those peers' sessions take the
+  new chains, their RIB batch commits, and only then is the Route Refresh
+  that follows an import-policy change sent to each of them, not between
+  peers. A reload that fails part-way has touched only the sessions of the
+  batches it reached. A group whose export chain reads a dataset shares only
+  its first batch of 100; its other peers still resync one at a time. The
+  `authoritative_batch_phase` log line appears once per batch during the
+  remainder walk.
