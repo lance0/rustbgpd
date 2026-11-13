@@ -1943,8 +1943,9 @@ impl PeerManager {
             })
             .collect();
         for (pair, group) in groups {
-            // This group's deferred RIB steps: (index into `applied`, plan).
-            let mut planned: Vec<(usize, PolicyRollbackPeerPlan)> = Vec::new();
+            // This group's deferred RIB steps: (index into `applied`, target,
+            // plan).
+            let mut planned: Vec<(usize, &ResolvedPeerPolicy, PolicyRollbackPeerPlan)> = Vec::new();
             for target in group {
                 let peer_key = PeerKey::new(target.address, target.interface.clone());
                 let prior = {
@@ -2001,7 +2002,7 @@ impl PeerManager {
                 // its deferred refresh step has run.
                 applied[applied_idx].adj_rib_in_may_have_moved = plan.is_none();
                 if let Some(plan) = plan {
-                    planned.push((applied_idx, plan));
+                    planned.push((applied_idx, target, plan));
                 }
                 // The apply classified the peer from its state query outcome; its verdict is
                 // authoritative for the convergence-debt scan and adds no extra
@@ -2032,11 +2033,11 @@ impl PeerManager {
                 {
                     let peer_keys: Vec<PeerKey> = planned
                         .iter()
-                        .map(|(_, plan)| plan.peer_key.clone())
+                        .map(|(_, _, plan)| plan.peer_key.clone())
                         .collect();
                     let replacements: Vec<PeerExportPolicyReplacement> = planned
                         .iter()
-                        .map(|(_, plan)| PeerExportPolicyReplacement {
+                        .map(|(_, _, plan)| PeerExportPolicyReplacement {
                             peer: self.rib_peer_of(&plan.peer_key),
                             export_policy: plan
                                 .export_restore
@@ -2077,8 +2078,13 @@ impl PeerManager {
                 // event as one between two pairs: the routes it re-admits reach
                 // a member still awaiting its batch under the old export chain,
                 // and that member's batch then moves it on the delta.
-                for (applied_idx, plan) in &planned {
+                for (applied_idx, target, plan) in &planned {
                     if plan.refresh_failure.is_some()
+                        && !self.adopt_policies_of_held_task_exit(
+                            &plan.peer_key,
+                            target.import_policy.as_ref(),
+                            target.export_policy.as_ref(),
+                        )
                         && let Err(apply_error) = self
                             .dispatch_deferred_refresh(
                                 &plan.peer_key,
@@ -3297,6 +3303,14 @@ impl PeerManager {
         let Some(refresh_failure) = plan.refresh_failure else {
             return;
         };
+        if self.owned_walk_holds_task_exit(&plan.peer_key) {
+            // The restore step already advanced bookkeeping to the prior
+            // chains; the peer adopts them and owes no refresh.
+            let managed = &self.peers[&plan.peer_key];
+            let (import, export) = (managed.import_policy.clone(), managed.export_policy.clone());
+            self.adopt_policies_of_held_task_exit(&plan.peer_key, import.as_ref(), export.as_ref());
+            return;
+        }
         let pending_after = if plan.is_established {
             match self.soft_reset_in(plan.peer_key.clone(), Vec::new()).await {
                 Ok(()) => plan
@@ -3617,7 +3631,13 @@ impl PeerManager {
         }
 
         for (peer_key, prior_refresh, prior_export) in pending_priors {
-            let Some(managed) = self.peers.get(&peer_key) else {
+            // A peer whose task exit the walk holds is retired when the walk
+            // ends: the debt it was captured with goes with it.
+            let Some(managed) = self
+                .peers
+                .get(&peer_key)
+                .filter(|_| !self.owned_walk_holds_task_exit(&peer_key))
+            else {
                 continue;
             };
             if require_exact_pending
@@ -4530,8 +4550,9 @@ impl PeerManager {
     /// session task. If it does, no session is left to install a chain or
     /// to refresh, and the peer is retired when the walk ends, its RIB state
     /// going with its `PeerDown`: the peer takes `import_policy` and
-    /// `export_policy` as a known-down peer does and owes nothing. Every session step of a walk, per-peer or
-    /// cohort, forward or rollback, asks this first.
+    /// `export_policy` as a known-down peer does and owes nothing. Every
+    /// session step of a walk, per-peer or cohort, forward or rollback, asks
+    /// this first, and the rollback's exact-pending scan skips such a peer.
     fn adopt_policies_of_held_task_exit(
         &mut self,
         peer_key: &PeerKey,

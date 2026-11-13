@@ -1704,3 +1704,238 @@ async fn crash_replacement_of_a_bfd_held_peer_waits_for_bfd_up() {
         .expect("the BFD Up starts the replacement")
         .unwrap();
 }
+
+/// A dynamic Established peer at `addr` (session 50) whose task panics when
+/// the returned sender fires; the flag is set once its exit notice is queued.
+fn insert_crashing_dynamic_peer(
+    mgr: &mut PeerManager,
+    addr: IpAddr,
+) -> (oneshot::Sender<()>, Arc<AtomicBool>) {
+    let (crash, crashed) = oneshot::channel();
+    let exited = Arc::new(AtomicBool::new(false));
+    let exit = SessionTaskExitNotice::new(
+        Some(mgr.session_notify_tx.clone()),
+        SessionIdentity::primary(50),
+        addr,
+    );
+    insert_test_dynamic_managed_peer(
+        mgr,
+        addr,
+        50,
+        walk_session(
+            addr,
+            Arc::default(),
+            Some((exit, crashed, Arc::clone(&exited))),
+        ),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 42, 9, 0)),
+        24,
+        "dynamic",
+    );
+    (crash, exited)
+}
+
+/// Handle the task exit the walk held and check it retired `peer`.
+async fn retire_held_peer(mgr: &mut PeerManager, peer: IpAddr) {
+    let held = mgr
+        .session_notify_rx
+        .try_recv()
+        .expect("the held notification is back on the channel");
+    mgr.handle_session_notification(held).await;
+    assert!(
+        !mgr.peers.contains_key(&key(peer)),
+        "retired after the walk"
+    );
+}
+
+/// E-4 in an export pair: a dynamic member's session legs succeed, then its
+/// task ends while the walk waits for the pair's RIB batch, and the seam
+/// after the batch holds the exit. The member owes no deferred Route
+/// Refresh, and the walk commits.
+///
+/// LOAD-BEARING: the deferred refresh probes the ended session, finds it
+/// gone and rolls the reload back.
+#[tokio::test(start_paused = true)]
+async fn dynamic_pair_member_task_exit_owes_no_deferred_refresh() {
+    let Lab {
+        mut mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(1);
+    let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+    let (crash, exited) = insert_crashing_dynamic_peer(&mut mgr, dynamic);
+    let rib = tokio::spawn(async move {
+        let mut crash = Some(crash);
+        while let Some(update) = rib_rx.recv().await {
+            // The dynamic member's batch: its session legs are done and its
+            // Route Refresh is deferred past this reply.
+            if is_walk_command(&update)
+                && let Some(crash) = crash.take()
+            {
+                crash.send(()).unwrap();
+                set(&exited).await;
+            }
+            answer(update);
+        }
+    });
+    let mut targets = distinct_targets(&[dynamic, peers[0]]);
+    targets[0].import_policy = Some(deny_policy_chain());
+    let expected = targets[0].clone();
+    let result = mgr
+        .apply_resolved_policy_snapshot_classified(targets, true)
+        .await;
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result.err().map(|failure| failure.message().to_owned())
+    );
+    let managed = &mgr.peers[&key(dynamic)];
+    assert_eq!(managed.import_policy, expected.import_policy);
+    assert_eq!(managed.export_policy, expected.export_policy);
+    assert!(!managed.pending_refresh, "the member owes nothing");
+    retire_held_peer(&mut mgr, dynamic).await;
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// E-4, rollback: a dynamic peer answers its restore step, which owes a
+/// Route Refresh because its forward unit fired one, and its task then
+/// ends. A rollback seam holds the exit, the ended session is sent no
+/// refresh, and the rollback is exact.
+///
+/// LOAD-BEARING: the refresh goes to the ended session and fails, which
+/// leaves the peer owing a refresh and the rollback ambiguous.
+#[tokio::test(start_paused = true)]
+async fn dynamic_task_exit_after_its_restore_step_owes_no_refresh() {
+    let Lab {
+        mut mgr,
+        mut rib_rx,
+        peers,
+        sessions,
+        ..
+    } = lab(2);
+    let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+    let (crash, exited) = insert_crashing_dynamic_peer(&mut mgr, dynamic);
+    let hooked = Arc::clone(&sessions[0]);
+    let rib = tokio::spawn(async move {
+        let mut commands = 0;
+        let mut crash = Some(crash);
+        let mut exited_before_restore = None;
+        while let Some(update) = rib_rx.recv().await {
+            if !is_walk_command(&update) {
+                answer(update);
+                continue;
+            }
+            commands += 1;
+            match update {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
+                    if commands == 3 =>
+                {
+                    // The rollback restores newest first: the first peer's
+                    // restore step, after the dynamic peer's, ends its task.
+                    let crash = crash.take().unwrap();
+                    *hooked.on_export.lock().unwrap() = Some(Box::new(move || {
+                        let _ = crash.send(());
+                    }));
+                    let _ = reply.send(Err(RibCommandError::internal("refused")));
+                }
+                update @ RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. } => {
+                    exited_before_restore.get_or_insert(exited.load(Ordering::SeqCst));
+                    answer(update);
+                }
+                update => answer(update),
+            }
+        }
+        exited_before_restore
+    });
+    let mut targets = distinct_targets(&[peers[0], dynamic, peers[1]]);
+    targets[1].import_policy = Some(deny_policy_chain());
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(targets, true)
+        .await
+        .expect_err("the third batch is refused");
+    assert_eq!(
+        failure.kind,
+        PolicySnapshotFailureKind::FullyCompensated,
+        "{} ({})",
+        failure.message(),
+        failure.code.as_str()
+    );
+    let managed = &mgr.peers[&key(dynamic)];
+    assert_eq!(managed.import_policy, None);
+    assert_eq!(managed.export_policy, None);
+    assert!(!managed.pending_refresh, "the peer owes nothing");
+    retire_held_peer(&mut mgr, dynamic).await;
+    drop(mgr);
+    assert_eq!(
+        rib.await.unwrap(),
+        Some(true),
+        "the task ended before the rollback's refreshes"
+    );
+}
+
+/// A dynamic peer that owed a Route Refresh before the walk, whose task ends
+/// before the walk reaches it: the walk and then the rollback adopt its
+/// chains without a session step. The peer is retired when the walk ends,
+/// so the debt it was captured with is not the rollback's to restore, and
+/// the rollback is exact.
+///
+/// LOAD-BEARING: the exact-pending scan compares the adopted peer's cleared
+/// flags with its captured debt and reports the rollback ambiguous.
+#[tokio::test(start_paused = true)]
+async fn held_task_exit_of_an_indebted_dynamic_peer_keeps_the_rollback_exact() {
+    let Lab {
+        mut mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(2);
+    let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+    let (crash, exited) = insert_crashing_dynamic_peer(&mut mgr, dynamic);
+    mgr.peers.get_mut(&key(dynamic)).unwrap().pending_refresh = true;
+    let rib = tokio::spawn(async move {
+        let mut commands = 0;
+        let mut crash = Some(crash);
+        while let Some(update) = rib_rx.recv().await {
+            if !is_walk_command(&update) {
+                answer(update);
+                continue;
+            }
+            commands += 1;
+            match update {
+                // The first unit's batch: the walk has not reached the
+                // dynamic peer, and holds its exit at the seam after it.
+                update if commands == 1 => {
+                    crash.take().unwrap().send(()).unwrap();
+                    set(&exited).await;
+                    answer(update);
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
+                    if commands == 2 =>
+                {
+                    let _ = reply.send(Err(RibCommandError::internal("refused")));
+                }
+                update => answer(update),
+            }
+        }
+    });
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(
+            distinct_targets(&[peers[0], dynamic, peers[1]]),
+            true,
+        )
+        .await
+        .expect_err("the last batch is refused");
+    assert_eq!(
+        failure.kind,
+        PolicySnapshotFailureKind::FullyCompensated,
+        "{} ({})",
+        failure.message(),
+        failure.code.as_str()
+    );
+    assert_eq!(mgr.peers[&key(dynamic)].export_policy, None);
+    retire_held_peer(&mut mgr, dynamic).await;
+    drop(mgr);
+    rib.await.unwrap();
+}

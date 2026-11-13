@@ -457,7 +457,11 @@ replaced session is spawned from the manager's bookkeeping, which the walk
 advances only when a session acknowledges a chain: a peer whose step has run
 restarts on the candidate chain, one still to walk on the prior chain and is
 then walked, and one replaced during a rollback on the restored chain. Its
-RIB identity is the peer's slot, which a replacement keeps.
+RIB identity is the peer's slot, which a replacement keeps. The exception is
+a dynamic peer whose task exit the walk holds: no session is left to
+acknowledge, so the peer adopts the chains of each step, forward or
+rollback, without a session step or Route Refresh, and owes nothing,
+because it is retired when the walk ends.
 
 A SIGHUP generation suspends BFD coupling for its whole length, and the
 ordinary handler ignores every change while it does. Inside a generation a
