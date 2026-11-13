@@ -1301,21 +1301,54 @@ standby, upgrade, then swap.
 
 ### gRPC server dies unexpectedly
 
-The daemon treats an unexpected gRPC server exit as fatal and initiates a
-coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
-deliberate: losing the control plane means losing the ability to shut down
-cleanly later. See [ADR-0022](../adr/0022-grpc-server-supervision.md).
+The daemon restarts an unexpectedly ended gRPC server in place and keeps BGP
+running: a failure of the management plane says nothing about routing state.
+BGP sessions and routes are unaffected. See
+[ADR-0147](../adr/0147-management-servers-restart-in-place.md), which
+supersedes the earlier fail-stop of
+[ADR-0022](../adr/0022-grpc-server-supervision.md).
+
+Each exit logs `gRPC server exited unexpectedly; restarting it in place` and
+adds one to `bgp_management_server_crashes_total{server="grpc"}`. All
+configured listeners restart together and bind their configured TCP
+addresses and Unix socket paths again, after a delay that starts at 100 ms
+and doubles per restart to a 10 second cap; a run that stayed up for 60
+seconds starts over at 100 ms. A restart whose listeners cannot start (for
+example, the port was taken during the gap) counts as another crash and is
+retried. There is no restart limit: if every restart fails, the daemon keeps
+running BGP with the API down and logs each attempt. `gRPC server restarted`
+marks a restart whose listeners are all up.
+
+While the server is down, `/readyz` answers `503 not ready: gRPC server is
+restarting`, because the mutation path is unavailable; it returns to `200`
+when the restarted listeners are up. `/livez`, the systemd watchdog and
+`READY=1` are not affected. The shipped `BgpManagementServerCrashed` rule
+fires on any increase of the counter.
+
+What clients see:
+
+- New connections are refused during the gap. Clients reconnect to the same
+  configured addresses.
+- Connections that were open when the listener failed are told to finish. A
+  request in flight on one runs to its own answer. New requests need a new
+  connection.
+- A caller whose connection is lost gets a transport error. A runtime-config
+  mutation that had begun still runs to settlement (see
+  [the settlement watchdog](../how-to/settlement-watchdog.md)); read the
+  state back after reconnecting. No caller is told of a success that did not
+  settle.
 
 A gRPC listener whose socket becomes unusable (`listener socket unusable;
-stopping its accept loop`) gives its open connections the same one-second
-grace as coordinated shutdown, then exits. An open `WatchEvents` stream or an
-idle client connection cannot hold the listener, or the fail-stop, open.
-The other listeners then get one further second to drain before the gRPC
-server exits. So the fail-stop starts within about 2 s of the failure.
+stopping its accept loop`) gives its open connections a one-second grace to
+finish, then exits. The other listeners then get one further second before
+the gRPC server ends, so the restart starts within about 2 s of the failure.
 A TLS listener detects the failure only on its next accept, and it stops
 accepting while all 64 concurrent handshake slots are busy. If stalled
 clients hold every slot, detection waits for the first handshake to finish
 or hit its 10 s timeout, which adds up to 10 s.
+
+No restart begins after coordinated shutdown has started. A listener that
+cannot bind or start at startup still fails startup.
 
 ### RIB manager or peer manager exits unexpectedly
 
@@ -1978,7 +2011,7 @@ closed or reply dropped), `peer_manager_timeout`, `rib_unavailable` (RIB
 channel closed or reply dropped), `rib_timeout`, `rib_stalled` (an export-policy
 transition, selection-deferral release or source-peer teardown exceeded its
 30-second bound) and `daemon_unavailable` (a runtime-config settlement recovery
-fence or coordinated shutdown). The `503` body and the WARN log keep the exact error. Probes that
+fence, coordinated shutdown, or a gRPC server that is being restarted). The `503` body and the WARN log keep the exact error. Probes that
 succeed are not counted, including slow ones that only log a delayed-phase
 warning.
 
@@ -2231,7 +2264,7 @@ name it.
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it. `BgpPolicyTransitionFallback` fires when either fallback outcome increased in the last 15 minutes |
 | `bgp_readiness_probe_failures_total{reason}` | Failed `/readyz` probes, one per `503` response, by the closed `reason` set described under [HTTP probes](#http-probes): `deadline`, `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`, `rib_timeout`, `rib_stalled`, `daemon_unavailable`. All seven series are exported at 0 from startup |
-| `bgp_management_server_crashes_total{server}` | Unexpected exits and failed starts of a management server. The daemon restarts the server in place unless it is shutting down. `server` is `metrics`: the `/metrics`, `/readyz` and `/livez` HTTP server (see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)). Exported at 0 from startup. The server that reports the counter is the one that crashed, so an increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerCrashed` fires on any increase |
+| `bgp_management_server_crashes_total{server}` | Unexpected exits and failed starts of a management server. The daemon restarts the server in place unless it is shutting down. `server` is `metrics` (the `/metrics`, `/readyz` and `/livez` HTTP server, see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)) or `grpc` (the gRPC server with all its listeners, see [gRPC server dies unexpectedly](#grpc-server-dies-unexpectedly)). Both series are exported at 0 from startup. The metrics server reports its own crashes, so that increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerCrashed` fires on any increase |
 | `bgp_rib_stalled` | 1 while the daemon's latest sample of the RIB actor (every 5 seconds, 5-second deadline, independent of `/readyz` requests) got a stalled readiness answer: one export-policy transition, selection-deferral release or peer teardown has run 30 seconds or more. 0 after a ready answer and at startup. A sample that gets no answer leaves the value unchanged; silence is covered by `bgp_systemd_watchdog_pings_skipped_total`. The gauge is always exported but sampled only when the telemetry listener is configured and startup completed; without a sampler it stays 0. `BgpReadinessRibStalled` fires when it reads 1 on every evaluation for ten minutes |
 | `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
@@ -3212,7 +3245,10 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `termination signal received during coordinated shutdown; the owned runtime-config settlement is fenced and the daemon will fail-stop` | ERROR | A further SIGINT/SIGTERM arrived while a runtime-config owner was still settling; it is fenced as `operator_forced` and exit 70 follows after the grace |
 | `runtime config coordinator permit is still held outside settlement ownership` | ERROR | Shutdown stopped waiting for an unowned coordinator permit (`reason` is `deadline_expired` or `second_signal`) and continues without the warm checkpoint |
 | `SIGHUP reload task is still running with no settlement owner` | ERROR | Shutdown stopped waiting to join the reload task and continues |
-| `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `gRPC server exited unexpectedly; restarting it in place` | ERROR | A run of the gRPC server ended on its own, or a restart could not start its listeners (`startup_error`). Not fatal: BGP keeps running, `/readyz` is 503 until the restart is up, and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap). Counted in `bgp_management_server_crashes_total{server="grpc"}` |
+| `gRPC server restarted` | INFO | Every configured gRPC listener is up again after a restart; `/readyz` no longer reports the server down |
+| `gRPC server not restarted: the daemon is shutting down` | WARN | The server ended during coordinated shutdown, or shutdown began while its restart was waiting, and it stays down for the rest of the shutdown. The crash is still counted |
+| `gRPC supervisor exited unexpectedly; the gRPC API stays down until the daemon restarts` | ERROR | The task that restarts the gRPC server ended, which is a defect. Not fatal: BGP keeps running without the API and `/readyz` stays 503 |
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
@@ -3227,7 +3263,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `injection lease expiry task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
-| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then fail-stops the daemon through gRPC server supervision; the metrics/readiness listener is closed and its address bound again |
+| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then ends the gRPC server, which the daemon restarts in place; the metrics/readiness listener is closed and its address bound again |
 | `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
 | `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
 | `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |

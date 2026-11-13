@@ -17,7 +17,7 @@ pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
 /// Process-wide daemon availability gate.
 ///
 /// Two one-way transitions, both set from `main.rs` and observed by the
-/// readiness surface:
+/// readiness surfaces, and one input that clears again:
 ///
 /// - **not-ready**: a fatal availability fault (a runtime-config settlement
 ///   recovery fence, or coordinated shutdown started). `/readyz` reports 503
@@ -25,6 +25,10 @@ pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
 /// - **shutting-down**: coordinated shutdown has begun; admission paths
 ///   (inbound BGP connections, persisted config mutations) reject new
 ///   work instead of racing the teardown.
+/// - **gRPC server down**: the gRPC server ended on its own and is being
+///   restarted in place. `/readyz` reports 503 until the restarted server's
+///   listeners are up. It is not a [`DaemonNotReady`] reason: `GetHealth`
+///   cannot be asked while the server that answers it is down.
 #[derive(Clone, Debug, Default)]
 pub struct DaemonGate {
     inner: Arc<DaemonGateInner>,
@@ -35,6 +39,7 @@ struct DaemonGateInner {
     not_ready: OnceLock<DaemonNotReady>,
     shutting_down: AtomicBool,
     initial_roster_pending: AtomicBool,
+    grpc_server_down: AtomicBool,
 }
 
 impl DaemonGate {
@@ -91,6 +96,19 @@ impl DaemonGate {
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.inner.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// Record that the gRPC server ended on its own (`true`) or that its
+    /// restarted listeners are up again (`false`).
+    pub fn set_grpc_server_down(&self, down: bool) {
+        self.inner.grpc_server_down.store(down, Ordering::Release);
+    }
+
+    /// Whether the gRPC server is down between an unexpected exit and its
+    /// restart.
+    #[must_use]
+    pub fn grpc_server_down(&self) -> bool {
+        self.inner.grpc_server_down.load(Ordering::Acquire)
     }
 }
 
@@ -227,6 +245,11 @@ impl CoreReadinessProbe {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
         }
+        // The mutation path is down. `snapshot` does not ask: it serves
+        // `GetHealth`, which only a running gRPC server can answer.
+        if self.gate.as_ref().is_some_and(DaemonGate::grpc_server_down) {
+            return Err(CoreReadinessError::GrpcServerDown);
+        }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
         tokio::try_join!(
             biased;
@@ -318,7 +341,8 @@ impl CoreReadinessProbe {
                 | CoreReadinessError::RibUnavailable
                 | CoreReadinessError::RibTimedOut
                 | CoreReadinessError::RibDroppedReply
-                | CoreReadinessError::DaemonUnavailable(_)),
+                | CoreReadinessError::DaemonUnavailable(_)
+                | CoreReadinessError::GrpcServerDown),
             ) => Err(error),
         }
     }
@@ -447,8 +471,10 @@ pub const fn core_actor_answered<T>(result: &Result<T, CoreReadinessError>) -> b
             | CoreReadinessError::RibPeerTeardownStalled
             // The availability gate answered without asking the actors, so it
             // says nothing about them. Liveness never consults the gate; this
-            // keeps a gated caller from aborting a settlement shutdown.
-            | CoreReadinessError::DaemonUnavailable(_) => true,
+            // keeps a gated caller from aborting a settlement shutdown. A gRPC
+            // server that is restarting is a management-plane state too.
+            | CoreReadinessError::DaemonUnavailable(_)
+            | CoreReadinessError::GrpcServerDown => true,
         },
     }
 }
@@ -478,6 +504,8 @@ pub enum CoreReadinessError {
     /// runtime-config settlement recovery fence or coordinated shutdown in
     /// progress.
     DaemonUnavailable(DaemonNotReady),
+    /// The gRPC server ended on its own and its restart is not up yet.
+    GrpcServerDown,
 }
 
 impl fmt::Display for CoreReadinessError {
@@ -500,6 +528,7 @@ impl fmt::Display for CoreReadinessError {
             }
             Self::RibPeerTeardownStalled => f.write_str("RIB peer teardown stalled"),
             Self::DaemonUnavailable(reason) => reason.fmt(f),
+            Self::GrpcServerDown => f.write_str("gRPC server is restarting"),
         }
     }
 }
@@ -1261,6 +1290,49 @@ mod tests {
         gate.begin_shutdown();
 
         assert!(gate.is_shutting_down());
+        assert_eq!(
+            probe.check().await,
+            Err(CoreReadinessError::DaemonUnavailable(
+                DaemonNotReady::ShuttingDown
+            ))
+        );
+    }
+
+    /// A gRPC server that is down fails readiness without asking the actors,
+    /// and clears again. It is not a `GetHealth` gate reason, so the health
+    /// snapshot still asks the actors, and a latched gate reason outranks it.
+    #[tokio::test]
+    async fn grpc_server_down_fails_readiness_until_cleared() {
+        let (peer_tx, peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        drop(peer_rx);
+        let gate = DaemonGate::new();
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
+
+        gate.set_grpc_server_down(true);
+        assert!(gate.grpc_server_down());
+        assert_eq!(gate.not_ready_reason(), None);
+        assert_eq!(probe.check().await, Err(CoreReadinessError::GrpcServerDown));
+        assert_eq!(
+            CoreReadinessError::GrpcServerDown.to_string(),
+            "gRPC server is restarting"
+        );
+        assert_eq!(
+            probe.snapshot().await.unwrap_err(),
+            CoreReadinessError::PeerManagerUnavailable
+        );
+        assert!(core_actor_answered::<()>(&Err(
+            CoreReadinessError::GrpcServerDown
+        )));
+
+        gate.set_grpc_server_down(false);
+        assert_eq!(
+            probe.check().await,
+            Err(CoreReadinessError::PeerManagerUnavailable)
+        );
+
+        gate.set_grpc_server_down(true);
+        gate.begin_shutdown();
         assert_eq!(
             probe.check().await,
             Err(CoreReadinessError::DaemonUnavailable(

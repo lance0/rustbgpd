@@ -3102,9 +3102,9 @@ loaded exits 2 there. A running daemon also exits
 1 when a component failure ends it (legacy BGP listen mode could bind
 neither family; explicit
 .B listen_addresses
-mode could not bind every configured endpoint; a configured metrics/readiness
-listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
-gRPC server, BGP listener task, BGP accept-forwarding task, or injection
+mode could not bind every configured endpoint; a configured gRPC or
+metrics/readiness listener failed to start; or the RIB manager, peer manager,
+RPKI subsystem, BGP listener task, BGP accept-forwarding task, or injection
 lease expiry task exited unexpectedly),
 so that a supervisor configured
 with
@@ -3232,10 +3232,10 @@ fn main() -> ExitCode {
                   For --diff: the diff carries actionable changes.\n     \
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
-                  endpoint failed to bind; configured metrics/readiness bind failure;\n     \
-                  or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
-                  gRPC server, BGP listener task, BGP accept-forwarding task,\n     \
-                  or injection lease expiry task exit)\n  \
+                  endpoint failed to bind; a configured gRPC or metrics/readiness\n     \
+                  listener failed to start; or unexpected RIB manager, peer manager,\n     \
+                  RPKI subsystem, BGP listener task, BGP accept-forwarding task, or\n     \
+                  injection lease expiry task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
                   --release-core-isolation exits 0 only when no owned link is left\n     \
@@ -6995,6 +6995,8 @@ async fn run<T>(
         bfd_events: Some(bfd_bgp_event_tx),
     };
     let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
+    let grpc_metrics = metrics.clone();
+    let grpc_gate = daemon_gate.clone();
     let mut grpc_handle = tokio::spawn(async move {
         match make_fib_route_snapshot(fib_status_rx).await {
             Ok(snapshot) => serve_config.fib_route_snapshot = snapshot,
@@ -7005,16 +7007,28 @@ async fn run<T>(
                 return;
             }
         }
-        rustbgpd_api::server::serve(
-            grpc_listeners,
-            grpc_rib_tx,
-            grpc_rib_query_tx,
-            grpc_peer_mgr_tx,
-            serve_config,
-            grpc_shutdown_rx,
-            rpc_shutdown_tx,
-            config_event_tx,
+        // Restarted in place when a run ends on its own: a management-plane
+        // failure must not end BGP. Every run gets clones of the same
+        // inputs, the Shutdown RPC sender among them, and binds the
+        // configured listeners again.
+        rustbgpd_api::restart::supervise_grpc_server(
+            |run| {
+                rustbgpd_api::server::serve(
+                    grpc_listeners.clone(),
+                    grpc_rib_tx.clone(),
+                    grpc_rib_query_tx.clone(),
+                    grpc_peer_mgr_tx.clone(),
+                    serve_config.clone(),
+                    run.stop,
+                    rpc_shutdown_tx.clone(),
+                    config_event_tx.clone(),
+                    run.started,
+                )
+            },
             grpc_startup_tx,
+            grpc_metrics,
+            grpc_gate,
+            grpc_shutdown_rx,
         )
         .await;
     });
@@ -7407,7 +7421,7 @@ async fn run<T>(
     }
 
     // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
-    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager).
+    // supervised-component exit (RIB, RPKI, BGP ingress, peer manager).
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -7471,7 +7485,8 @@ async fn run<T>(
                 break;
             }
             changed = rpc_shutdown_rx.changed(), if !rpc_shutdown_closed => {
-                // The gRPC server owns the sender; its own arm reports an exit.
+                // The gRPC supervisor owns the sender and hands each run a
+                // clone; its own arm reports an exit.
                 rpc_shutdown_closed = changed.is_err();
                 if rpc_shutdown_closed || !*rpc_shutdown_rx.borrow() {
                     continue;
@@ -7479,12 +7494,20 @@ async fn run<T>(
                 info!("shutdown initiated via gRPC");
                 break;
             }
-            result = &mut grpc_handle => {
-                error!(?result, "gRPC server exited unexpectedly");
-                info!("initiating shutdown due to gRPC server failure");
+            // The supervisor restarts the server in place. It returns on the
+            // stop sent at teardown, or once the gate reports shutdown; any
+            // other end is a defect in the supervisor itself. That is still
+            // a management-plane failure: BGP keeps running, with the API
+            // down and readiness red.
+            result = &mut grpc_handle, if !grpc_exited => {
                 grpc_exited = true;
-                component_failed = true;
-                break;
+                if result.is_err() || !daemon_gate.is_shutting_down() {
+                    daemon_gate.set_grpc_server_down(true);
+                    error!(
+                        ?result,
+                        "gRPC supervisor exited unexpectedly; the gRPC API stays down until the daemon restarts"
+                    );
+                }
             }
             result = &mut dampening_control_handle => {
                 dampening_control_exited = true;

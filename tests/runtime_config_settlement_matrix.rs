@@ -251,7 +251,7 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn spawn(config: &Path, log: PathBuf, control: Option<&Path>) -> Self {
+    fn spawn(config: &Path, log: PathBuf, control: Option<&Path>, env: &[(&str, &str)]) -> Self {
         let stderr = File::create(&log).expect("create daemon log");
         let stdout = stderr.try_clone().expect("clone daemon log");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
@@ -259,7 +259,8 @@ impl Daemon {
             .arg(config)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
-            .env_remove(CONTROL_ENV);
+            .env_remove(CONTROL_ENV)
+            .envs(env.iter().copied());
         if let Some(control) = control {
             command.env(CONTROL_ENV, control);
         }
@@ -604,10 +605,15 @@ impl Lab {
     }
 
     fn spawn(&self, name: &str, controlled: bool) -> Daemon {
+        self.spawn_with_env(name, controlled, &[])
+    }
+
+    fn spawn_with_env(&self, name: &str, controlled: bool, env: &[(&str, &str)]) -> Daemon {
         Daemon::spawn(
             &self.config,
             self.root.path().join(format!("{name}.log")),
             controlled.then_some(self.control.dir.as_path()),
+            env,
         )
     }
 
@@ -1728,6 +1734,76 @@ fn escalation_row_owner_settles_first(ordinal: usize) {
             .success()
     );
     restarted.assert_running();
+}
+
+/// The gRPC server ends while an owned mutation is in flight, and the daemon
+/// restarts it in place. The mutation's caller must not be told it succeeded
+/// before it settled. A failed listener stops accepting, but the connection
+/// that carries the call outlives it, and the mutation is shielded from its
+/// caller in any case: across the crash and the restart the call stays
+/// unanswered and the owner stays held, readable but unsettled through the
+/// restarted server. Once released it settles and persists with no fence,
+/// and only then does the caller get its answer.
+///
+/// The owner is held at its checkpoint by the settlement control directory.
+/// The gRPC TCP listener is made unusable by its first connection, which
+/// only this test opens: `rbgp` talks to the UDS listener, and the server
+/// stops that one together with the failed TCP listener.
+#[test]
+fn an_owned_mutation_in_flight_across_a_grpc_server_restart_reports_only_its_settlement() {
+    let _ = rbgp_binary();
+    let row = MatrixRow::PeerGroup;
+    let lab = Lab::new(row, 0, 0x6772_7063).with_hold_budget(ESCALATION_HOLD_BUDGET);
+    let mut daemon = lab.spawn_with_env(
+        "controlled",
+        true,
+        &[("RUSTBGPD_TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER", "1")],
+    );
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let grpc_tcp = bound_grpc_addr(&daemon.log()).expect("bound gRPC TCP listener");
+    let Ok(RowResult::Requests(mut requests)) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row did not hold its owner");
+    };
+    let mut request = requests.pop().expect("the in-flight peer-group set");
+
+    let trigger = TcpStream::connect(grpc_tcp).expect("first gRPC TCP connection");
+    daemon.wait_log(
+        "gRPC server exited unexpectedly; restarting it in place",
+        "",
+    );
+    daemon.wait_log("gRPC server restarted", "");
+    drop(trigger);
+    assert!(
+        metrics(daemon.metrics).is_some_and(
+            |text| text.contains("bgp_management_server_crashes_total{server=\"grpc\"} 1\n")
+        ),
+        "the crash must be counted"
+    );
+
+    // Still held: nothing has settled and the caller has no answer.
+    lab.control.assert_one_claim_without_release();
+    assert!(!daemon.log_has(SETTLED_LINE, "\"kind\":\"peer_group_set\""));
+    lab.assert_disk("matrix-peer-group", false);
+    assert!(
+        request.try_wait().is_none(),
+        "the in-flight call was answered before its mutation settled"
+    );
+    let get = ["--json", "peer-group", "get", "matrix-peer-group"];
+    wait_read_success(&lab, &get, &mut daemon);
+
+    lab.control.release(row.checkpoint());
+    daemon.wait_log(SETTLED_LINE, "\"kind\":\"peer_group_set\"");
+    let output = request.wait_output(Duration::from_secs(15));
+    assert!(
+        output.status.success(),
+        "the settled mutation was reported as failed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_metrics_idle(daemon.metrics, &mut daemon);
+    lab.assert_disk("matrix-peer-group", true);
+    assert!(lab.run(&get).status.success());
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
+    daemon.assert_running();
 }
 
 /// Row (c), signal first: the fence is observed before the held owner is

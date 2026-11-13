@@ -666,11 +666,11 @@ groups:
             the work is not finishing.
 
       - alert: BgpManagementServerCrashed
-        # The daemon restarts its metrics/readiness HTTP server in place
-        # instead of exiting, and counts each unexpected exit or failed
-        # start. The counter is served by the server that crashed, so it
-        # rises only once that server is back; while it is down the signal
-        # is the failed scrape (`up == 0`).
+        # The daemon restarts its gRPC server and its metrics/readiness HTTP
+        # server in place instead of exiting, and counts each unexpected
+        # exit or failed start by `server`. The metrics server serves this
+        # counter itself, so its own crash shows only once it is back; while
+        # it is down the signal is the failed scrape (`up == 0`).
         expr: increase(bgp_management_server_crashes_total[15m]) > 0
         labels:
           severity: warning

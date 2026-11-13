@@ -345,6 +345,8 @@ const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 /// `server` label of `bgp_management_server_crashes_total` for the
 /// metrics/readiness HTTP server.
 const MANAGEMENT_SERVER_METRICS: &str = "metrics";
+/// The same label for the gRPC server.
+const MANAGEMENT_SERVER_GRPC: &str = "grpc";
 
 /// Closed labels for RIB ingest components. Distribution can serve readiness
 /// internally; these component durations do not bound readiness latency.
@@ -2000,12 +2002,13 @@ impl BgpMetrics {
         let management_server_crashes = IntCounterVec::new(
             Opts::new(
                 "bgp_management_server_crashes_total",
-                "Unexpected exits and failed starts of a management server, by server: metrics (the /metrics, /readyz and /livez HTTP server). The daemon restarts the server in place unless it is shutting down.",
+                "Unexpected exits and failed starts of a management server, by server: metrics (the /metrics, /readyz and /livez HTTP server) or grpc (the gRPC server, all listeners). The daemon restarts the server in place unless it is shutting down.",
             ),
             &["server"],
         )
         .expect("valid metric definition");
         management_server_crashes.with_label_values(&[MANAGEMENT_SERVER_METRICS]);
+        management_server_crashes.with_label_values(&[MANAGEMENT_SERVER_GRPC]);
 
         let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -6128,6 +6131,15 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Record one crash of the gRPC server: an unexpected exit of a run, or a
+    /// restart whose listeners could not start.
+    pub fn record_grpc_server_crash(&self) {
+        self.0
+            .management_server_crashes
+            .with_label_values(&[MANAGEMENT_SERVER_GRPC])
+            .inc();
+    }
+
     /// Publish whether the latest RIB sample was a stalled readiness answer.
     pub fn set_rib_stalled(&self, stalled: bool) {
         self.0.rib_stalled.set(i64::from(stalled));
@@ -9423,9 +9435,14 @@ mod tests {
     fn management_server_crashes_export_at_zero_and_count() {
         let m = BgpMetrics::new();
         let row = "\nbgp_management_server_crashes_total{server=\"metrics\"} ";
+        let grpc = "\nbgp_management_server_crashes_total{server=\"grpc\"} ";
         assert!(gather_text(&m).contains(&format!("{row}0\n")));
+        assert!(gather_text(&m).contains(&format!("{grpc}0\n")));
         m.record_metrics_server_crash();
         assert!(gather_text(&m).contains(&format!("{row}1\n")));
+        assert!(gather_text(&m).contains(&format!("{grpc}0\n")));
+        m.record_grpc_server_crash();
+        assert!(gather_text(&m).contains(&format!("{grpc}1\n")));
     }
 
     #[test]

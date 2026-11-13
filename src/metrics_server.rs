@@ -8,6 +8,7 @@ use rustbgpd_api::health_probe::{
     CORE_READINESS_DEADLINE, CoreReadinessError, CoreReadinessProbe, DaemonGate,
 };
 use rustbgpd_api::metrics_render::render_text;
+use rustbgpd_api::restart::RestartBackoff;
 use rustbgpd_evpn_linux::worker_progress::WorkerProgressState;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_telemetry::reason_labels::ReadinessProbeFailureReason;
@@ -307,31 +308,6 @@ impl Drop for MetricsServerThread {
     }
 }
 
-/// First delay before restarting the server; a single crash then costs a
-/// probe less than its usual timeout.
-const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(100);
-/// Longest delay. It stays under the shipped Kubernetes liveness probe's
-/// failure window (three failures, 10 seconds apart), so a restart gap alone
-/// does not get the daemon killed for a management-plane fault.
-const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(10);
-/// A run at least this long starts the next backoff from the initial delay.
-const RESTART_BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
-
-/// Delay before the next restart: doubles per restart up to the cap, and
-/// starts over after a run that stayed up.
-struct RestartBackoff(Duration);
-
-impl RestartBackoff {
-    fn next_delay(&mut self, ran_for: Duration) -> Duration {
-        if ran_for >= RESTART_BACKOFF_RESET_AFTER {
-            self.0 = RESTART_BACKOFF_INITIAL;
-        }
-        let delay = self.0;
-        self.0 = (delay * 2).min(RESTART_BACKOFF_CAP);
-        delay
-    }
-}
-
 /// Keep the metrics/readiness server running until `stop` resolves or its
 /// sender drops, restarting it in place when it ends on its own. A
 /// management-plane failure is not evidence about routing state, so it never
@@ -385,7 +361,7 @@ async fn supervise_with_runtime(
 ) {
     let addr = listener.addr;
     let mut kept = Some(listener);
-    let mut backoff = RestartBackoff(RESTART_BACKOFF_INITIAL);
+    let mut backoff = RestartBackoff::default();
     loop {
         if kept.is_none() {
             kept = rebind(addr).await;
@@ -728,7 +704,9 @@ fn readiness_failure_reason(error: CoreReadinessError) -> ReadinessProbeFailureR
         CoreReadinessError::RibPolicyTransitionStalled
         | CoreReadinessError::RibSelectionReleaseStalled
         | CoreReadinessError::RibPeerTeardownStalled => ReadinessProbeFailureReason::RibStalled,
-        CoreReadinessError::DaemonUnavailable(_) => ReadinessProbeFailureReason::DaemonUnavailable,
+        CoreReadinessError::DaemonUnavailable(_) | CoreReadinessError::GrpcServerDown => {
+            ReadinessProbeFailureReason::DaemonUnavailable
+        }
     }
 }
 
@@ -947,33 +925,6 @@ pub(crate) mod tests {
         let exit = exited.blocking_recv();
         drop(server);
         assert_eq!(exit, Ok(MetricsServerExit::Exited(Ok(()))));
-    }
-
-    #[test]
-    fn restart_backoff_doubles_to_the_cap_and_resets_after_a_stable_run() {
-        let mut backoff = RestartBackoff(RESTART_BACKOFF_INITIAL);
-        let delays: Vec<_> = (0..10)
-            .map(|_| backoff.next_delay(Duration::ZERO))
-            .collect();
-        assert_eq!(
-            delays[..3],
-            [
-                Duration::from_millis(100),
-                Duration::from_millis(200),
-                Duration::from_millis(400)
-            ]
-        );
-        assert_eq!(delays[6], Duration::from_millis(6_400));
-        assert_eq!(delays[7], Duration::from_secs(10));
-        assert_eq!(delays[9], RESTART_BACKOFF_CAP);
-        let almost_stable = RESTART_BACKOFF_RESET_AFTER
-            .checked_sub(Duration::from_millis(1))
-            .unwrap();
-        assert_eq!(backoff.next_delay(almost_stable), RESTART_BACKOFF_CAP);
-        assert_eq!(
-            backoff.next_delay(RESTART_BACKOFF_RESET_AFTER),
-            RESTART_BACKOFF_INITIAL
-        );
     }
 
     fn failed_start() -> std::io::Result<tokio::runtime::Runtime> {
@@ -2183,6 +2134,47 @@ pub(crate) mod tests {
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.ends_with("not ready: daemon is shutting down\n"));
+    }
+
+    /// While the gRPC server is down between a crash and its restart,
+    /// `/readyz` is red with that cause and counts under the gate's reason;
+    /// it turns green again when the restart clears the gate.
+    #[tokio::test]
+    async fn readyz_is_red_while_the_grpc_server_is_down() {
+        use rustbgpd_api::health_probe::DaemonGate;
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let gate = DaemonGate::new();
+        let metrics = BgpMetrics::new();
+        let addr = start_server_with_metrics(
+            metrics.clone(),
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone()),
+            None,
+        )
+        .await;
+
+        gate.set_grpc_server_down(true);
+        let response = request(addr, "/readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.ends_with("not ready: gRPC server is restarting\n"));
+        assert_eq!(
+            readiness_failure_rows(&metrics).await,
+            ["bgp_readiness_probe_failures_total{reason=\"daemon_unavailable\"} 1"]
+        );
+
+        gate.set_grpc_server_down(false);
+        let actors = tokio::spawn(async move {
+            if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
+                let _ = reply.send(());
+            }
+            if let Some(RibUpdate::QueryLocRibCount { reply, .. }) = rib_rx.recv().await {
+                let _ = reply.send(0);
+            }
+        });
+        let response = request(addr, "/readyz").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        actors.await.unwrap();
     }
 
     #[tokio::test]

@@ -629,13 +629,14 @@ Notes on the sandbox:
   immediately if legacy BGP mode binds neither family, explicit
   `listen_addresses` cannot bind every configured endpoint, or a configured
   `prometheus_addr` health listener cannot bind, or any configured gRPC
-  listener cannot bind. An unexpected gRPC server,
+  listener cannot bind. An unexpected
   RIB manager, peer manager, RPKI subsystem task, BGP listener task, inbound
   accept-forwarding task, or injection lease expiry
   task exit instead runs the
   coordinated peer teardown before exit 1. These components are not respawned in place; the supervisor is the
-  recovery path. The metrics/readiness server is the exception: the daemon
-  restarts it in place and keeps BGP running (see
+  recovery path. The gRPC server and the metrics/readiness server are the
+  exception: the daemon restarts them in place and keeps BGP running (see
+  [gRPC server dies unexpectedly](../reference/operations.md#grpc-server-dies-unexpectedly) and
   [Metrics/readiness server exits unexpectedly](../reference/operations.md#metricsreadiness-server-exits-unexpectedly)).
   Exit 70 is also a failure: it is the runtime-config settlement watchdog's
   fail-stop recovery request and must remain restartable. `RestartSec=5`
@@ -1144,6 +1145,10 @@ this probe needs, so a server that comes back does not get the pod killed.
 A server that can never restart still fails liveness, and Kubernetes then
 restarts a daemon whose BGP side was healthy. To let BGP outlive that, point
 liveness at something other than this listener or raise `failureThreshold`.
+
+The gRPC server is restarted in place the same way. While it is down
+`/readyz` answers `503 not ready: gRPC server is restarting`, so the pod is
+unready for the length of the restart; `/livez` is not affected.
 
 Do not point liveness at `/readyz`, with any `failureThreshold`. `/readyz`
 fails for conditions that are not a dead daemon:
