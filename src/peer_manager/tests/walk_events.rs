@@ -1184,3 +1184,72 @@ async fn session_crash_mid_walk_restarts_on_the_chain_the_walk_holds() {
         "a peer that is down when the walk reaches it has no RIB step"
     );
 }
+
+/// A non-strict peer's BFD Down and the end of its session task are both
+/// queued when a walk reaches a seam. The seam takes the hold and then
+/// replaces the session. The replacement is not started while the hold
+/// stands: the BFD Up that releases the hold sends its `Start`.
+///
+/// LOAD-BEARING: a replacement withheld only for a strict peer is started
+/// at once, over a path BFD reports down, and the peer stays marked held.
+#[tokio::test]
+async fn crash_replacement_of_a_bfd_held_peer_waits_for_bfd_up() {
+    let Lab {
+        mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(2);
+    let peer = peers[1];
+    let (mut mgr, states) = couple_bfd(mgr, peer);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let crashed = mgr.peers[&key(peer)].session_id();
+    let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+    managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    let (notices, seam_states) = (mgr.session_notify_tx.clone(), states.clone());
+    tokio::spawn(async move {
+        let mut queued = false;
+        while let Some(update) = rib_rx.recv().await {
+            // The first unit's batch: both events wait for the seam after it.
+            if is_walk_command(&update) && !std::mem::replace(&mut queued, true) {
+                seam_states.send(down(peer));
+                notices
+                    .send(SessionNotification::TaskExited {
+                        session_id: crashed,
+                        role: SessionRole::Primary,
+                        peer_addr: peer,
+                        cause: "ended".into(),
+                    })
+                    .unwrap();
+            }
+            answer(update);
+        }
+    });
+    let result = mgr
+        .apply_resolved_policy_snapshot_classified(distinct_targets(&peers), true)
+        .await;
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result.err().map(|failure| failure.message().to_owned())
+    );
+    let replacement = &mgr.peers[&key(peer)];
+    assert_ne!(replacement.session_id(), crashed);
+    assert!(mgr.bfd_withholding(&peer));
+    // Answered after any `Start` the replacement was sent.
+    let state = replacement
+        .handle()
+        .query_state_timeout(Duration::from_secs(5))
+        .await
+        .expect("the replacement answers");
+    assert_eq!(state.fsm_state, SessionState::Idle);
+
+    states.send(up(peer));
+    let change = PeerManager::receive_bfd_state_change(&mut mgr.bfd_coupling).await;
+    mgr.handle_bfd_state_change(change).await;
+    assert!(!mgr.bfd_withholding(&peer));
+    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the BFD Up starts the replacement")
+        .unwrap();
+}

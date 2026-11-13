@@ -23,5 +23,7 @@
   phase timing` log line gains `owned_wait_service_gap_max_us`,
   `events_served` and `event_service_us`. A neighbor latched disabled during
   a SIGHUP reload that is then rolled back has its BFD session stopped, as
-  after a reload that commits. See
+  after a reload that commits. A neighbor that a BFD Down holds is no longer
+  restarted when its session task crashes, during a reload or outside one:
+  the BFD Up that releases the hold starts the replacement. See
   [Configuration reload](../docs/reference/operations.md#configuration-reload-sighup).

@@ -407,6 +407,10 @@ impl PeerManager {
     /// The replacement publishes the dead session's `PeerDown` on this
     /// actor's ordered RIB lane before the new session gets its `Start`, so
     /// the dead epoch is closed in the RIB before the new one's `PeerUp`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one ordered decision: which exit retires, which is replaced, and whether the replacement starts"
+    )]
     async fn handle_session_task_exit(
         &mut self,
         session_id: u64,
@@ -511,6 +515,13 @@ impl PeerManager {
             self.set_bfd_peer_disabled(peer_addr, false);
             self.mark_bfd_withheld(peer_addr);
             warn!(peer = %peer_addr, session_id, %cause, "session task crashed; replaced, strict BFD withholds the restart until BFD Up");
+            return;
+        }
+        if self.bfd_withholding(&peer_addr) {
+            // A BFD Down holds this peer: the Up that releases the hold
+            // sends the replacement its `Start`.
+            self.keep_bfd_hold_across_replacement(peer_addr);
+            warn!(peer = %peer_addr, session_id, %cause, "session task crashed; replaced, the BFD hold withholds the restart until BFD Up");
             return;
         }
         // The replacement's command channel is new and empty.

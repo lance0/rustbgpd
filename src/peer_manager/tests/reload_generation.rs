@@ -2230,14 +2230,29 @@ async fn generation_dynamic_hot_group_ack_loss_is_classified_by_the_session_ack(
 /// that used to exhaust the stack even though this path never recurses.
 #[test]
 fn run_loop_applies_reload_on_reduced_stack() {
+    reload_on_reduced_stack(false);
+}
+
+/// The deepest path a walk's seam serves, under the same frames: the run
+/// loop, the generation, its policy walk, a seam, and the replacement of a
+/// static peer's session whose task ended.
+///
+/// LOAD-BEARING: with no seam the session is replaced only after the
+/// generation, outside the frames this test pins.
+#[test]
+fn run_loop_replaces_a_crashed_session_inside_a_reload_walk_on_reduced_stack() {
+    reload_on_reduced_stack(true);
+}
+
+fn reload_on_reduced_stack(crash_mid_walk: bool) {
     std::thread::Builder::new()
         .stack_size(1_572_864)
-        .spawn(|| {
+        .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(Box::pin(async {
+                .block_on(Box::pin(async move {
                     let fixture = RsFixture::new();
                     let prior = fixture.load();
                     let mut harness = GenerationHarness::new(&prior);
@@ -2245,6 +2260,23 @@ fn run_loop_applies_reload_on_reduced_stack() {
                         .unwrap();
                     let candidate = fixture.load();
                     let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+                    // Targets are walked in address order. The last one's
+                    // install sees whether the first one's session task,
+                    // reported ended at the second, is already gone.
+                    let replaced_in_walk = Arc::new(AtomicBool::new(false));
+                    let mut listener = None;
+                    if crash_mid_walk {
+                        let crashed: IpAddr = "10.0.0.2".parse().unwrap();
+                        let trigger = "10.0.0.9".parse().unwrap();
+                        let last: IpAddr = "2001:db8::3".parse().unwrap();
+                        listener = Some(crash_at_walk_seam(&mut harness, crashed, trigger).await);
+                        let session = Arc::downgrade(&harness.counters[&crashed]);
+                        let seen = Arc::clone(&replaced_in_walk);
+                        *harness.counters[&last].on_export_install.lock().unwrap() =
+                            Some(Box::new(move |_| {
+                                seen.store(session.strong_count() == 1, Ordering::SeqCst);
+                            }));
+                    }
                     let (commands, command_rx) = mpsc::channel(4);
                     let (internal, internal_rx) = mpsc::channel(4);
                     harness.mgr.rx = command_rx;
@@ -2272,6 +2304,7 @@ fn run_loop_applies_reload_on_reduced_stack() {
                     for counters in harness.counters.values() {
                         assert_eq!(counters.export_installs.load(Ordering::SeqCst), 1);
                     }
+                    assert_eq!(replaced_in_walk.load(Ordering::SeqCst), crash_mid_walk);
                     let (reply, response) = oneshot::channel();
                     commands
                         .send(PeerManagerCommand::Ping { reply })
@@ -2281,6 +2314,7 @@ fn run_loop_applies_reload_on_reduced_stack() {
                     commands.send(PeerManagerCommand::Shutdown).await.unwrap();
                     actor.await.unwrap();
                     harness.rib.abort();
+                    drop(listener);
                 }));
         })
         .unwrap()
@@ -7979,8 +8013,23 @@ fn bfd_walk_fixture() -> (
     Config,
     IpAddr,
 ) {
+    bfd_walk_fixture_with(false, false)
+}
+
+/// [`bfd_walk_fixture`] with the session's strict mode chosen for the
+/// running configuration and for the candidate.
+fn bfd_walk_fixture_with(
+    prior_strict: bool,
+    candidate_strict: bool,
+) -> (
+    RsFixture,
+    GenerationHarness,
+    crate::bfd_runtime::BfdStateChangeSender,
+    Config,
+    IpAddr,
+) {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
-    let with_bfd = |mut config: Config| {
+    let with_bfd = |mut config: Config, strict: bool| {
         config.bfd_profiles.push(crate::config::BfdProfileConfig {
             name: "fast".into(),
             min_tx_interval: 300,
@@ -7995,13 +8044,13 @@ fn bfd_walk_fixture() -> (
             .bfd = Some(crate::config::BfdConfig {
             profile: "fast".into(),
             enabled: true,
-            strict: false,
+            strict,
             multihop: false,
         });
         config
     };
     let fixture = RsFixture::new();
-    let prior = with_bfd(fixture.load());
+    let prior = with_bfd(fixture.load(), prior_strict);
     let mut harness = GenerationHarness::new(&prior);
     let desired = crate::bfd_runtime::BfdRuntimeConfig::from_config(&prior).unwrap();
     let configured = desired
@@ -8016,7 +8065,7 @@ fn bfd_walk_fixture() -> (
         .mgr
         .with_bfd_coupling(desired_tx, states_rx, configured);
     std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
-    let candidate = with_bfd(fixture.load());
+    let candidate = with_bfd(fixture.load(), candidate_strict);
     (fixture, harness, states, candidate, peer)
 }
 
@@ -8158,4 +8207,167 @@ async fn bfd_up_during_a_generation_waits_for_the_generation_to_end() {
     wait_counter(&harness.counters[&peer].starts, 1).await;
     assert!(!harness.mgr.bfd_withholding(&peer));
     harness.shutdown().await;
+}
+
+/// Point `peer`'s sessions at a local listener, so a `Start` shows as a
+/// connection, and report its session task ended while `trigger`'s session
+/// installs the walk's export chain: the notice is queued before that
+/// install is acknowledged, so the walk's next seam replaces the session.
+/// Returns the listener and the reported session.
+async fn crash_at_walk_seam(
+    harness: &mut GenerationHarness,
+    peer: IpAddr,
+    trigger: IpAddr,
+) -> (TcpListener, u64) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let session_id = harness.mgr.peers[&key(peer)].session_id();
+    let managed = harness.mgr.peers.get_mut(&key(peer)).unwrap();
+    managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    let notices = harness.mgr.session_notify_tx.clone();
+    *harness.counters[&trigger].on_export_install.lock().unwrap() = Some(Box::new(move |_| {
+        notices
+            .send(SessionNotification::TaskExited {
+                session_id,
+                role: rustbgpd_transport::SessionRole::Primary,
+                peer_addr: peer,
+                cause: "ended".into(),
+            })
+            .unwrap();
+    }));
+    (listener, session_id)
+}
+
+/// The state of `peer`'s session, read after every command sent before.
+async fn session_state(harness: &GenerationHarness, peer: IpAddr) -> SessionState {
+    harness.mgr.peers[&key(peer)]
+        .handle()
+        .query_state_timeout(Duration::from_secs(5))
+        .await
+        .expect("the session answers")
+        .fsm_state
+}
+
+async fn dials(listener: &TcpListener) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .is_ok()
+}
+
+/// A static peer's session task ends during the walk of a generation whose
+/// candidate makes the peer strict, so the replacement is withheld. A later
+/// unit fails and the generation ends `FullyCompensated`. The running
+/// configuration never held the peer: the abort sends the `Start` the hold
+/// withheld. A peer the running configuration makes strict stays held, and
+/// the BFD Up that follows sends its `Start`.
+///
+/// LOAD-BEARING: an abort that only drops the candidate's hold leaves the
+/// peer enabled, not held and Idle, and no later BFD event starts it.
+#[tokio::test]
+async fn abort_starts_the_crash_replacement_its_candidate_withheld() {
+    for prior_strict in [false, true] {
+        let (_fixture, mut harness, states, candidate, peer) =
+            bfd_walk_fixture_with(prior_strict, true);
+        // Targets are walked in address order: the trigger before the failure.
+        let trigger: IpAddr = "10.0.0.9".parse().unwrap();
+        let failing: IpAddr = "2001:db8::3".parse().unwrap();
+        let (listener, crashed) = crash_at_walk_seam(&mut harness, peer, trigger).await;
+        harness.counters[&failing]
+            .reject_export_updates
+            .store(1, Ordering::SeqCst);
+
+        let outcome = harness.apply(&candidate).await;
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+            "{outcome:?}"
+        );
+        assert_ne!(
+            harness.mgr.peers[&key(peer)].session_id(),
+            crashed,
+            "the session was replaced inside the generation"
+        );
+        assert_eq!(harness.mgr.bfd_withholding(&peer), prior_strict);
+        if prior_strict {
+            assert_eq!(session_state(&harness, peer).await, SessionState::Idle);
+            states.send(bfd_transition(
+                &harness,
+                peer,
+                rustbgpd_bfd::SessionState::Up,
+            ));
+            let change = PeerManager::receive_bfd_state_change(&mut harness.mgr.bfd_coupling).await;
+            harness.mgr.handle_bfd_state_change(change).await;
+            assert!(!harness.mgr.bfd_withholding(&peer));
+        }
+        assert!(
+            dials(&listener).await,
+            "prior_strict={prior_strict}: the replacement was never started"
+        );
+        harness.shutdown().await;
+    }
+}
+
+/// The commit of the same generation keeps the replacement held: it is not
+/// started inside the generation, the commit's Down acknowledgement leaves
+/// it Idle, and the BFD Up that follows sends its one `Start`.
+///
+/// LOAD-BEARING: a replacement started from the running configuration dials
+/// inside the generation, and the commit then has to stop it again.
+#[tokio::test]
+async fn commit_keeps_the_crash_replacement_held_until_bfd_up() {
+    let (_fixture, mut harness, states, candidate, peer) = bfd_walk_fixture_with(false, true);
+    let trigger: IpAddr = "10.0.0.9".parse().unwrap();
+    let (listener, crashed) = crash_at_walk_seam(&mut harness, peer, trigger).await;
+    let listener = Arc::new(listener);
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    harness.mgr = harness.mgr.with_bfd_reload(reload_tx);
+    let commit_listener = Arc::clone(&listener);
+    let actor = tokio::spawn(async move {
+        let mut dialed_before_commit = false;
+        while let Some(command) = reload_rx.recv().await {
+            // The generation is settled up to its BFD commit here.
+            dialed_before_commit |=
+                tokio::time::timeout(Duration::from_millis(200), commit_listener.accept())
+                    .await
+                    .is_ok();
+            // Every desired session re-reports its level: Down.
+            let acks = command
+                .desired
+                .sessions
+                .iter()
+                .map(|params| {
+                    let mut ack = down(params.peer);
+                    ack.revision = params.revision;
+                    ack.resync = true;
+                    ack
+                })
+                .collect();
+            let _ = command.reply.send(acks);
+        }
+        dialed_before_commit
+    });
+
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_ne!(harness.mgr.peers[&key(peer)].session_id(), crashed);
+    assert!(harness.mgr.is_strict_bfd_peer(&peer));
+    assert!(harness.mgr.bfd_withholding(&peer));
+    assert_eq!(session_state(&harness, peer).await, SessionState::Idle);
+
+    states.send(bfd_transition(
+        &harness,
+        peer,
+        rustbgpd_bfd::SessionState::Up,
+    ));
+    let change = PeerManager::receive_bfd_state_change(&mut harness.mgr.bfd_coupling).await;
+    harness.mgr.handle_bfd_state_change(change).await;
+    assert!(!harness.mgr.bfd_withholding(&peer));
+    assert!(dials(&listener).await, "the BFD Up starts the replacement");
+
+    harness.shutdown().await;
+    assert!(
+        !actor.await.unwrap(),
+        "the replacement was started inside the generation"
+    );
 }

@@ -801,19 +801,23 @@ impl PeerManager {
     }
 
     pub(super) fn abort_bfd_reload(&mut self) {
+        let mut relaxed = Vec::new();
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.pending = None;
             coupling.pending_bound = None;
             coupling.pending_probes.clear();
             coupling.reloading = false;
             coupling.rollback_lookup = false;
-            coupling.held_down.retain(|peer| {
-                coupling.prior_held.contains(peer)
-                    || coupling
+            // A hold the generation took because its candidate made the peer
+            // strict ends here, and the accepted configuration never held
+            // the peer: the `Start` the hold withheld is still owed.
+            relaxed.extend(coupling.held_down.extract_if(|peer| {
+                !coupling.prior_held.contains(peer)
+                    && !coupling
                         .configured
                         .get(peer)
                         .is_some_and(|params| params.strict)
-            });
+            }));
             coupling.initially_withheld.retain(|peer| {
                 coupling.held_down.contains(peer)
                     && (!coupling.prior_held.contains(peer)
@@ -835,6 +839,38 @@ impl PeerManager {
                 disabled_from_peers(&self.peers, &coupling.configured, previously_disabled);
         }
         self.republish_bfd_desired();
+        // A session the rollback already started ignores a second `Start`
+        // (RFC 4271 §8.2.2); a removed or disabled peer gets none.
+        for peer in relaxed {
+            if let Err(error) = self.enqueue_bfd_command(peer, true) {
+                warn!(%peer, %error, "aborted reload: failed to start the session its candidate withheld");
+            }
+        }
+    }
+
+    /// Keep `peer`'s hold across the replacement of its crashed session: the
+    /// replacement gets no `Start` until BFD permits BGP. A `Start` the dead
+    /// session never took moves to the replacement instead: a release whose
+    /// delivery was still being retried, or a relaxed strict hold. Inside a
+    /// generation its commit or abort settles the hold, and only the retry
+    /// moves.
+    pub(super) fn keep_bfd_hold_across_replacement(&mut self, peer: IpAddr) {
+        let Some(coupling) = self.bfd_coupling.as_ref() else {
+            return;
+        };
+        let reloading = coupling.reloading;
+        let relaxed = coupling.initially_withheld.contains(&peer);
+        // A retry is keyed to the session it was scheduled for.
+        let retried = self.cancel_bfd_retry(peer, Some(true));
+        if reloading {
+            if retried {
+                self.schedule_bfd_retry(peer, true);
+            }
+        } else if (retried || relaxed)
+            && let Err(error) = self.release_bgp_bfd_hold(peer)
+        {
+            warn!(%peer, %error, "BFD permits BGP: failed to start the replaced session");
+        }
     }
 
     pub(super) async fn commit_bfd_reload(
