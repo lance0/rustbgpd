@@ -1405,8 +1405,9 @@ impl PeerManager {
 
     /// Whether a queued change is one a generation's policy walk serves: a
     /// genuine Down of an accepted member whose enabled peer is not held
-    /// yet, or is held with a `Start` still to deliver. The full handler
-    /// would stop BGP for exactly these.
+    /// yet, is held with a `Start` still to deliver, or holds only an
+    /// initial hold, which the generation's abort could release. The full
+    /// handler would stop BGP for exactly these.
     fn bfd_down_served_in_generation(&self, change: &BfdStateChange) -> bool {
         !change.resync
             && !change.remote_admin_down
@@ -1417,6 +1418,7 @@ impl PeerManager {
                     .get(&change.peer)
                     .is_some_and(|params| params.revision == change.revision)
                     && (!coupling.held_down.contains(&change.peer)
+                        || coupling.initially_withheld.contains(&change.peer)
                         || coupling
                             .retries
                             .get(&change.peer)

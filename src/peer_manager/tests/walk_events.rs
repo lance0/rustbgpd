@@ -2043,3 +2043,94 @@ async fn bfd_up_handled_before_a_held_peers_task_exit_starts_the_replacement() {
             .unwrap();
     }
 }
+
+/// The running configuration couples a peer to BFD non-strictly and the
+/// candidate strictly. Its session task ends inside the generation, and the
+/// replacement takes the candidate's initial hold. A genuine BFD Down that
+/// follows is taken at the seam and recorded as a prior hold, so the
+/// replacement stays held without a dial once the generation has ended,
+/// aborted or committed, and the BFD Up starts it.
+///
+/// LOAD-BEARING: a seam that leaves the Down queued for an already-held peer
+/// keeps only the candidate's hold, which the abort releases with a `Start`
+/// although BFD is Down.
+#[tokio::test]
+async fn bfd_down_after_a_candidate_hold_outlives_the_generation() {
+    for commit in [false, true] {
+        let Lab {
+            mgr,
+            mut rib_rx,
+            peers,
+            ..
+        } = lab(1);
+        let peer = peers[0];
+        let (mgr, states) = couple_bfd(mgr, peer);
+        let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+        let mut mgr = mgr.with_bfd_reload(reload_tx);
+        // The actor re-reports every desired session's level: Down.
+        let actor = tokio::spawn(async move {
+            while let Some(command) = reload_rx.recv().await {
+                let acks = command
+                    .desired
+                    .sessions
+                    .iter()
+                    .map(|params| {
+                        let mut ack = down(params.peer);
+                        ack.revision = params.revision;
+                        ack.resync = true;
+                        ack
+                    })
+                    .collect();
+                let _ = command.reply.send(acks);
+            }
+        });
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        mgr.peers
+            .get_mut(&key(peer))
+            .unwrap()
+            .transport_config
+            .remote_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                answer(update);
+            }
+        });
+        begin_generation(&mut mgr);
+        mgr.bfd_coupling.as_mut().unwrap().pending =
+            Some(HashMap::from([(peer, super::bfd::bfd_params(peer, true))]));
+
+        mgr.handle_session_notification(task_exited(&mgr, peer))
+            .await;
+        assert!(
+            mgr.bfd_withholding(&peer),
+            "the candidate holds the replacement"
+        );
+        states.send(down(peer));
+        mgr.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
+        if commit {
+            mgr.commit_bfd_reload(None).await.unwrap();
+        } else {
+            mgr.abort_bfd_reload();
+        }
+        // Not released by the generation's end, so no `Start` was sent.
+        assert!(mgr.bfd_withholding(&peer), "commit={commit}: at the end");
+        // The run loop then handles whatever is still queued.
+        mgr.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
+        assert!(mgr.bfd_withholding(&peer), "commit={commit}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), listener.accept())
+                .await
+                .is_err(),
+            "commit={commit}: the replacement dialed while BFD is Down"
+        );
+
+        states.send(up(peer));
+        mgr.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
+        assert!(!mgr.bfd_withholding(&peer), "commit={commit}");
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap_or_else(|_| panic!("commit={commit}: the BFD Up starts the replacement"))
+            .unwrap();
+        actor.abort();
+    }
+}
