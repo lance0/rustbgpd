@@ -1561,7 +1561,7 @@ fn slow_peer_edit_on_static_neighbor_takes_session_rebuild_path() {
     // Reported: `--diff` / reload logging must name all three fields,
     // classed session-reset (captured into the session transport config).
     let changes = super::describe_neighbor_changes(&old, &new);
-    let fields: Vec<&str> = changes.iter().map(|change| change.field).collect();
+    let fields: Vec<&str> = changes.iter().map(|change| change.field.as_ref()).collect();
     for field in [
         "slow_peer_threshold_pct",
         "slow_peer_duration",
@@ -2338,5 +2338,174 @@ fn diff_config_flags_flowspec_validation_as_restart_required() {
         assert!(!class.is_committable());
         assert_eq!(class.supported_sections.len(), 0);
         assert_eq!(class.restart_required_sections, ["[flowspec]"]);
+    }
+}
+
+/// Restart-required `[global]` edits are named field by field, with old and
+/// new values, on every diff surface: the JSON `global_changes`, the human
+/// diff, and the v1 transaction's `restart_required_sections`. The section
+/// token `[global]` stays for consumers that match it.
+#[test]
+fn global_restart_required_edits_name_each_field_with_values() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.global.router_id = "10.0.0.9".to_string();
+    new.global.cluster_id = Some("10.255.0.1".to_string());
+    new.global.telemetry.log_format = LogFormatConfig::Text;
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.global_changed);
+    let named: Vec<(&str, serde_json::Value, serde_json::Value)> = diff
+        .global_changes
+        .iter()
+        .map(|change| {
+            (
+                change.field.as_ref(),
+                change.old.clone(),
+                change.new.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            (
+                "cluster_id",
+                serde_json::Value::Null,
+                serde_json::json!("10.255.0.1")
+            ),
+            (
+                "router_id",
+                serde_json::json!("10.0.0.1"),
+                serde_json::json!("10.0.0.9")
+            ),
+            (
+                "telemetry.log_format",
+                serde_json::json!("json"),
+                serde_json::json!("text")
+            ),
+        ]
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["global_changed"], true);
+    assert_eq!(json["global_changes"][1]["field"], "router_id");
+    assert_eq!(json["global_changes"][1]["new"], "10.0.0.9");
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    for line in [
+        "[global] changed",
+        "cluster_id: (unset) → 10.255.0.1",
+        "router_id: 10.0.0.1 → 10.0.0.9",
+        "telemetry.log_format: json → text",
+    ] {
+        assert!(text.contains(line), "missing {line:?}: {text}");
+    }
+
+    let class = super::classify_config_transaction_v1(&diff);
+    for section in [
+        "[global]",
+        "[global].cluster_id: (unset) → 10.255.0.1",
+        "[global].router_id: 10.0.0.1 → 10.0.0.9",
+        "[global].telemetry.log_format: json → text",
+    ] {
+        assert!(
+            class
+                .restart_required_sections
+                .contains(&section.to_string()),
+            "missing {section:?}: {class:?}"
+        );
+    }
+}
+
+/// The diff and the SIGHUP reload ERROR share one `[global]` comparator, and
+/// it leaves out exactly the knobs reported on their own terms. Each row
+/// edits one field: a restart-required one must be named by the comparator;
+/// an exempt one must be absent from it and raise its own diff flag instead.
+#[test]
+fn global_restart_required_comparator_exempts_only_separately_reported_knobs() {
+    type Edit = fn(&mut Global);
+    type Flag = fn(&ConfigDiff) -> bool;
+    let restart_required: [(&str, Edit); 5] = [
+        ("router_id", |g| g.router_id = "10.0.0.9".to_string()),
+        ("listen_port", |g| g.listen_port = 1179),
+        ("cluster_id", |g| {
+            g.cluster_id = Some("10.255.0.1".to_string());
+        }),
+        ("max_as_path_length", |g| g.max_as_path_length = 64),
+        ("telemetry.log_format", |g| {
+            g.telemetry.log_format = LogFormatConfig::Text;
+        }),
+    ];
+    let exempt: [(&str, Edit, Flag); 9] = [
+        (
+            "honor_graceful_shutdown",
+            |g| g.honor_graceful_shutdown = !g.honor_graceful_shutdown,
+            |d| d.honor_graceful_shutdown_changed,
+        ),
+        (
+            "honor_blackhole",
+            |g| g.honor_blackhole = !g.honor_blackhole,
+            |d| d.honor_blackhole_changed,
+        ),
+        (
+            "install_blackhole_discard",
+            |g| g.install_blackhole_discard = !g.install_blackhole_discard,
+            |d| d.blackhole_fib_discard_changed,
+        ),
+        (
+            "allow_blackhole_broad_prefixes",
+            |g| g.allow_blackhole_broad_prefixes = !g.allow_blackhole_broad_prefixes,
+            |d| d.blackhole_fib_discard_changed,
+        ),
+        (
+            "blackhole_discard_max_active",
+            |g| g.blackhole_discard_max_active = Some(7),
+            |d| d.blackhole_fib_discard_changed,
+        ),
+        (
+            "blackhole_discard_install_rate_per_minute",
+            |g| g.blackhole_discard_install_rate_per_minute = Some(7),
+            |d| d.blackhole_fib_discard_changed,
+        ),
+        (
+            "blackhole_discard_install_burst",
+            |g| g.blackhole_discard_install_burst = Some(7),
+            |d| d.blackhole_fib_discard_changed,
+        ),
+        (
+            "dynamic_neighbor_limit",
+            |g| g.dynamic_neighbor_limit = Some(7),
+            |d| d.dynamic_neighbor_limit_changed,
+        ),
+        (
+            "ebgp_requires_policy",
+            |g| g.ebgp_requires_policy = Some(true),
+            |d| d.ebgp_requires_policy_changed,
+        ),
+    ];
+
+    let old = parse(valid_toml()).unwrap();
+    for (field, edit) in restart_required {
+        let mut new = old.clone();
+        edit(&mut new.global);
+        let changes = super::global_restart_required_changes(&old.global, &new.global);
+        let names: Vec<&str> = changes.iter().map(|c| c.field.as_ref()).collect();
+        assert_eq!(names, vec![field], "restart-required edit {field}");
+        let diff = super::diff_config(&old, &new);
+        assert!(diff.global_changed, "{field}");
+        assert!(diff.has_restart_required_changes(), "{field}");
+    }
+    for (field, edit, own_flag) in exempt {
+        let mut new = old.clone();
+        edit(&mut new.global);
+        assert_ne!(old.global, new.global, "row {field} must edit something");
+        assert!(
+            super::global_restart_required_changes(&old.global, &new.global).is_empty(),
+            "{field} is reported on its own terms, not in the [global] bucket"
+        );
+        let diff = super::diff_config(&old, &new);
+        assert!(!diff.global_changed, "{field}");
+        assert!(own_flag(&diff), "{field} must raise its own diff flag");
     }
 }
