@@ -7219,6 +7219,45 @@ async fn honor_redrive_delivers_an_owed_route_refresh() {
     harness.shutdown().await;
 }
 
+/// A re-drive selects a peer whose chains match but whose RIB export apply
+/// is still pending. When its state query goes unanswered the apply stays
+/// deferred, so the fan-out must name the peer instead of reporting success
+/// and letting the reload clear its retry.
+#[tokio::test]
+async fn honor_redrive_names_a_peer_still_owing_its_export_apply() {
+    let prior = export_knob_group_config(2);
+    let mut harness = GenerationHarness::new(&prior);
+    let owed: IpAddr = "10.0.1.1".parse().unwrap();
+    harness
+        .mgr
+        .peers
+        .get_mut(&key(owed))
+        .unwrap()
+        .pending_export_apply = true;
+    harness.counters[&owed]
+        .drop_state_after
+        .store(1, Ordering::SeqCst);
+
+    let enabled = harness.mgr.current_config.global.honor_blackhole;
+    let partial = harness
+        .mgr
+        .set_honor_blackhole(enabled)
+        .await
+        .expect_err("a deferred export apply keeps the peer behind");
+    assert_eq!(
+        partial
+            .failed
+            .iter()
+            .map(|(peer, reason)| (peer.clone(), reason.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(key(owed), "export apply owed")],
+    );
+    let managed = &harness.mgr.peers[&key(owed)];
+    assert!(managed.pending_export_apply);
+    assert!(!managed.policy_known_down);
+    harness.shutdown().await;
+}
+
 /// A generation keeps a member's installed RPOL chains when only unused
 /// source sets moved. An owed re-drive normalizes the same way, so it leaves
 /// those members untouched instead of reinstalling and refreshing them.
