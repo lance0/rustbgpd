@@ -991,15 +991,22 @@ the outcome with `rbgp config last-reload`.
 While the walk or a rollback runs, the peer manager serves readiness probes,
 the operator reads its owner admits and its queued RIB updates, and nothing
 else. Inbound connections are not accepted, so a dynamic neighbor or a
-session the peer dials does not come up; BFD state changes, max-prefix
-restart timers, configuration changes and peer lifecycle commands wait until
-it ends. A first SIGTERM waits for it too; a second forces the fail-stop
+session the peer dials does not come up; session up, down and notification
+events from existing sessions are not processed; BFD state changes,
+max-prefix restart timers, link and interface-discovery events,
+configuration changes and peer lifecycle commands all wait until it ends. A first SIGTERM waits for it too; a second forces the fail-stop
 exit described in the settlement guide. A SIGHUP that arrives meanwhile is
 coalesced as described above. A peer whose session drops during the walk is
-skipped. It re-establishes on the new policy: during the walk when this
-daemon dials it, and after the walk when the peer dials in, since inbound
-connections wait. If the reload is rolled back, it is restored to the prior
-policy with the others.
+skipped, and the peer manager acts on the drop only after the walk. Once the
+session re-establishes it carries the new policy; a peer that dials in can
+do so only after the walk, since inbound connections wait. If the reload is
+rolled back, the peer is restored to the prior policy with the others.
+
+During a rollback the Route Refreshes that re-evaluate imports under the
+prior policy are sent early, once the first restore command is queued. Until
+a peer's own restore command runs, it can receive the results of those
+refreshes under the rejected export policy; its restore then re-exports its
+whole table under the prior one.
 
 On the sequential route, reload halts at the first step failure. A typed
 authoritative receipt records the exact successful peer effects, and the
