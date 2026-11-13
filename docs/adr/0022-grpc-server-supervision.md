@@ -1,6 +1,6 @@
 # ADR-0022: gRPC server supervision — unexpected exit triggers shutdown
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0147](0147-management-servers-restart-in-place.md)
 **Date:** 2026-02-28
 
 ## Context

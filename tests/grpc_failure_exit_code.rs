@@ -883,7 +883,6 @@ fn operations_key_log_table_covers_supervised_failures() {
         .0;
 
     for (handle, diagnostic) in [
-        ("grpc_handle", "gRPC server exited unexpectedly"),
         ("rib_handle", "RIB manager exited unexpectedly"),
         (
             "bgp_listener_handle",
@@ -933,6 +932,29 @@ fn operations_key_log_table_covers_supervised_failures() {
             "missing exact operations row {expected_row:?}"
         );
     }
+
+    // The gRPC server is restarted in place: its supervisor ending may not
+    // enter coordinated shutdown, and holds readiness red.
+    let grpc_arm = production
+        .split_once("            result = &mut grpc_handle, if !grpc_exited => {")
+        .expect("the gRPC supervisor arm must stay guarded against a second poll")
+        .1
+        .split_once("\n            }")
+        .unwrap()
+        .0;
+    assert!(!grpc_arm.contains("component_failed"), "{grpc_arm}");
+    assert!(!grpc_arm.contains("break"), "{grpc_arm}");
+    assert!(grpc_arm.contains("daemon_gate.set_grpc_server_down(true);"));
+    for row in [
+        "| `gRPC server exited unexpectedly; restarting it in place` | ERROR | ",
+        "| `gRPC supervisor exited unexpectedly; the gRPC API stays down until the daemon restarts` | ERROR | ",
+    ] {
+        assert!(
+            key_log_table.lines().any(|line| line.starts_with(row)),
+            "missing operations row {row:?}"
+        );
+    }
+    assert!(!key_log_table.contains("| `gRPC server exited unexpectedly` |"));
 
     // The metrics/readiness server is restarted in place: neither it nor its
     // supervisor ending may enter coordinated shutdown.
@@ -1521,10 +1543,31 @@ fn shutdown_rpc_with_active_watch_cleans_up_uds() {
     );
 }
 
+/// The TCP port in the most recent `bound_addr` the daemon logged. A
+/// restarted gRPC server binds its configured address again, and these tests
+/// configure port 0.
+fn latest_bound_grpc_port(daemon: &Daemon) -> u16 {
+    daemon
+        .logs()
+        .rsplit("\"bound_addr\":\"")
+        .next()
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|addr| addr.rsplit(':').next()?.parse().ok())
+        .expect("a logged gRPC TCP bound_addr")
+}
+
+/// A gRPC listener whose socket becomes unusable ends the gRPC server, and
+/// the daemon restarts that server in place instead of shutting down. An open
+/// watch stream holds the failed listener for its whole 1 s drain grace. The
+/// BGP session established before the fault stays up until the SIGTERM sent
+/// at the end; the crash is counted, `/readyz` answers 200 again, and both
+/// the UDS and the re-bound TCP listener serve.
 #[test]
-fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
+fn grpc_listener_exit_restarts_in_place_and_keeps_bgp_sessions_established() {
     let temp = private_tempdir();
-    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let config_path =
+        write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    add_loopback_neighbor(&config_path);
     // Connection 1 is the watch; connection 2 makes the listener unusable.
     let mut daemon = spawn_daemon_with_env(
         temp.path(),
@@ -1542,14 +1585,26 @@ fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
         );
         thread::sleep(Duration::from_millis(100));
     }
+    let metrics_port = wait_for_logged_port_with_message(&mut daemon, "metrics server listening");
+    let mut peer = establish_bgp(wait_for_logged_port_with_message(
+        &mut daemon,
+        "BGP listener bound",
+    ));
+    let established = "bgp_peer_session_established{interface=\"\",peer=\"127.0.0.1\"} 1\n";
+    let before = wait_for_metric_row(&mut daemon, metrics_port, established);
+    assert!(
+        before.contains("bgp_management_server_crashes_total{server=\"grpc\"} 0\n"),
+        "the gRPC crash counter must be exported at 0\n{before}"
+    );
 
+    let token_file = temp.path().join("grpc-token");
     let tcp_addr = format!("http://127.0.0.1:{grpc_port}");
     let watch_stdout = temp.path().join("rbgp-watch.stdout.log");
     let watch_stderr = temp.path().join("rbgp-watch.stderr.log");
     let mut watcher = Daemon {
         child: rbgp_command(&tcp_addr)
             .arg("--token-file")
-            .arg(temp.path().join("grpc-token"))
+            .arg(&token_file)
             .arg("watch")
             .stdout(Stdio::from(
                 std::fs::File::create(&watch_stdout).expect("watcher stdout log"),
@@ -1564,32 +1619,88 @@ fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
     };
     let uds_addr = format!("unix://{}", socket_path.display());
     wait_for_route_watcher_subscriber(&mut daemon, &mut watcher, &uds_addr);
-
     assert!(
         matches!(watcher.child.try_wait(), Ok(None)),
         "{}",
         watcher.logs()
     );
+
     let trigger = TcpStream::connect(("127.0.0.1", grpc_port)).expect("second gRPC TCP connection");
-    let triggered = Instant::now();
-    let status = daemon.wait_within(Duration::from_secs(30));
-    let elapsed = triggered.elapsed();
+
+    // The metrics/readiness server is a separate server and reports the crash.
+    let after = wait_for_metric_row(
+        &mut daemon,
+        metrics_port,
+        "bgp_management_server_crashes_total{server=\"grpc\"} 1\n",
+    );
     drop(trigger);
+    assert!(
+        after.contains(established),
+        "the session must stay Established\n{after}"
+    );
+    // Readiness is red from the exit until the restarted listeners are up.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let readyz = http_get(metrics_port, "/readyz").expect("/readyz after the gRPC crash");
+        if readyz.starts_with("HTTP/1.1 200 OK") {
+            break;
+        }
+        assert!(
+            readyz.ends_with("not ready: gRPC server is restarting\n"),
+            "{readyz}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "/readyz stayed red\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     let logs = daemon.logs();
     for message in [
         "injected gRPC TCP listener shutdown",
         "listener socket unusable; stopping its accept loop",
         "stopped accepting and its open connections did not close within 1000 ms",
         "gRPC listener exited unexpectedly",
-        "gRPC server exited unexpectedly",
-        "rustbgpd exiting",
+        "gRPC server exited unexpectedly; restarting it in place",
+        "gRPC server restarted",
     ] {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
-    assert_eq!(status.code(), Some(1), "{logs}");
+    assert!(!logs.contains("initiating coordinated shutdown"), "{logs}");
+
+    // Both listeners serve again: the UDS at its path, TCP at the address
+    // the restart bound.
+    rbgp_ok(&daemon, &uds_addr, &["health"]);
+    let restarted_tcp = format!("http://127.0.0.1:{}", latest_bound_grpc_port(&daemon));
+    rbgp_ok(
+        &daemon,
+        &restarted_tcp,
+        &["--token-file", token_file.to_str().unwrap(), "global"],
+    );
+
+    let sigterm = Command::new("kill")
+        .args(["-TERM", &daemon.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+    // The first NOTIFICATION on the original connection is the requested stop.
+    observe_administrative_shutdown(&mut peer);
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a restarted gRPC server must not fail the later stop\n{logs}"
+    );
+    assert_eq!(
+        logs.matches("gRPC server exited unexpectedly").count(),
+        1,
+        "{logs}"
+    );
     assert!(
-        elapsed < Duration::from_secs(15),
-        "fail-stop took {elapsed:?}\n{logs}"
+        !socket_path.exists(),
+        "the restarted gRPC UDS socket survived coordinated shutdown\n{logs}"
     );
 }
 
@@ -1807,15 +1918,17 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     };
     let help = output("--help");
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
-    assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
-    assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
-    assert!(help.contains("gRPC server, BGP listener task, BGP accept-forwarding task,"));
-    assert!(help.contains("or injection lease expiry task exit)"));
+    assert!(help.contains("endpoint failed to bind; a configured gRPC or metrics/readiness"));
+    assert!(help.contains("listener failed to start; or unexpected RIB manager, peer manager,"));
+    assert!(help.contains("RPKI subsystem, BGP listener task, BGP accept-forwarding task, or"));
+    assert!(help.contains("injection lease expiry task exit)"));
     assert!(!help.contains("metrics/readiness server"));
+    assert!(!help.contains("gRPC server"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, or injection\nlease expiry task exited unexpectedly"));
+    assert!(man.contains("a configured gRPC or\nmetrics/readiness listener failed to start; or the RIB manager, peer manager,\nRPKI subsystem, BGP listener task, BGP accept-forwarding task, or injection\nlease expiry task exited unexpectedly"));
     assert!(!man.contains("metrics/readiness\nserver"));
+    assert!(!man.contains("gRPC server"));
 }
 
 #[test]

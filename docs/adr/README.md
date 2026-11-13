@@ -46,7 +46,7 @@ event history was removed), is Superseded.
 | [0019](0019-inbound-tcp-listener.md) | Inbound TCP listener | Accepted | 2026-02-27 | Active |
 | [0020](0020-global-control-services-coordinated-shutdown.md) | GlobalService, ControlService, and coordinated shutdown | Accepted | 2026-02-27 | Active |
 | [0021](0021-tcp-collision-detection.md) | TCP collision detection via PeerManager coordination | Accepted | 2026-02-28 | Active |
-| [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Accepted | 2026-02-28 | Active |
+| [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Superseded by ADR-0147 | 2026-02-28 | Superseded |
 | [0023](0023-prefix-enum-afi-agnostic-rib.md) | Prefix enum and AFI-agnostic RIB for MP-BGP | Accepted | 2026-02-28 | Active |
 | [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker / Helper Mode (RFC 4724) | Accepted (superseded in part by 0040 for restarting-speaker mode) | 2026-03-01 | Active |
 | [0025](0025-extended-communities.md) | Extended Communities (RFC 4360) | Accepted | 2026-03-01 | Active |
@@ -171,6 +171,7 @@ event history was removed), is Superseded.
 | [0143](0143-flowspec-direct-ip-actions.md) | Direct target-IP FlowSpec actions | Accepted | 2026-10-27 | Active |
 | [0144](0144-guarded-flowspec-mutations.md) | Guarded FlowSpec mutation contract | Accepted | 2026-10-30 | Active |
 | [0146](0146-vpn-flowspec.md) | IPv4 VPN FlowSpec origination (AFI 1 / SAFI 134) | Accepted (implementation in slices) | 2026-11-03 | Active |
+| [0147](0147-management-servers-restart-in-place.md) | Management servers restart in place | Accepted | 2026-11-13 | Active |
 
 ## Supporting records
 
