@@ -15,7 +15,6 @@ use super::{
     validate_route_rpki,
 };
 use crate::PeerId;
-use crate::fast_hash::FastSet;
 use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::update::InjectOutcome;
 
@@ -1714,11 +1713,10 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
-        // and holds at most that chunk's NLRI, so a peer crafting colliding
-        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
-        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
-        let mut affected = FastSet::default();
+        // Not hashed: the chunk's keys are sorted and deduplicated below,
+        // O(n log n) in its NLRI count whatever keys a peer crafts. Every
+        // consumer only iterates them.
+        let mut affected = Vec::new();
         let mut removed = 0;
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
@@ -1743,7 +1741,7 @@ impl RibManager {
                 if rib.withdraw(&prefix, path_id) {
                     removed += 1;
                     debug!(%peer, %prefix, path_id, "withdrawn");
-                    affected.insert(prefix);
+                    affected.push(prefix);
                 }
                 let family = prefix_family(&prefix);
                 if active_refresh.contains(&family)
@@ -1756,6 +1754,8 @@ impl RibManager {
             debug!(%peer, routes = rib.len(), "rib updated");
             (rib.unicast_lens(), rib.flowspec_lens())
         };
+        affected.sort_unstable();
+        affected.dedup();
 
         let peer_label = peer.label();
         crate::manager::helpers::set_rib_prefixes(
@@ -1817,11 +1817,10 @@ impl RibManager {
         );
         let aspa_contexts =
             matches!(aspa, Revalidation::With(Some(_))).then(crate::route::AspaContextId::snapshot);
-        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
-        // and holds at most that chunk's NLRI, so a peer crafting colliding
-        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
-        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
-        let mut affected = FastSet::default();
+        // Not hashed: the chunk's keys are sorted and deduplicated below,
+        // O(n log n) in its NLRI count whatever keys a peer crafts. Every
+        // consumer only iterates them.
+        let mut affected = Vec::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut replaced = 0;
 
@@ -1851,7 +1850,7 @@ impl RibManager {
                     _ => {}
                 }
                 debug!(%peer, prefix = %route.prefix, "announced");
-                affected.insert(route.prefix);
+                affected.push(route.prefix);
                 let prefix = route.prefix;
                 let path_id = route.path_id;
                 self.attr_intern.intern(&mut route.attributes);
@@ -1867,6 +1866,8 @@ impl RibManager {
             debug!(%peer, routes = rib.len(), "rib updated");
             (rib.unicast_lens(), rib.flowspec_lens())
         };
+        affected.sort_unstable();
+        affected.dedup();
 
         let peer_label = peer.label();
         crate::manager::helpers::set_rib_prefixes(

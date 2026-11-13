@@ -1074,12 +1074,12 @@ impl RibManager {
     }
 
     /// An empty input retains nothing, so it opens no readiness owner.
-    fn with_deferred_selection_recording<T, S: BuildHasher>(
+    fn with_deferred_selection_recording<'a, T: 'a>(
         &mut self,
-        affected: &HashSet<T, S>,
+        affected: impl IntoIterator<Item = &'a T>,
         work: impl FnOnce(&mut Self),
     ) {
-        if affected.is_empty() || !self.deferred_selection_recording_active() {
+        if affected.into_iter().next().is_none() || !self.deferred_selection_recording_active() {
             return;
         }
         super::with_executor_handoff(|| self.with_replacement_readiness(work));
@@ -1103,9 +1103,9 @@ impl RibManager {
         }
     }
 
-    pub(super) fn record_deferred_unicast<S: BuildHasher>(
+    pub(super) fn record_deferred_unicast<'a>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::Prefix, S>,
+        affected: impl IntoIterator<Item = &'a rustbgpd_wire::Prefix> + Copy,
     ) {
         self.with_deferred_selection_recording(affected, |manager| {
             manager
@@ -1113,9 +1113,9 @@ impl RibManager {
         });
     }
 
-    fn record_deferred_unicast_bounded<S: BuildHasher>(
+    fn record_deferred_unicast_bounded<'a>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::Prefix, S>,
+        affected: impl IntoIterator<Item = &'a rustbgpd_wire::Prefix> + Copy,
         limits: DeferredSelectionLimits,
     ) {
         let Some(selection) = self
@@ -1127,7 +1127,7 @@ impl RibManager {
         };
         let readiness = self.replacement_readiness.clone();
         let deferred = affected
-            .iter()
+            .into_iter()
             .inspect(|_| {
                 super::replacement_readiness_checkpoint_at(
                     &readiness,
@@ -1197,15 +1197,15 @@ impl RibManager {
         });
     }
 
-    pub(super) fn record_deferred_evpn<S: BuildHasher>(
+    pub(super) fn record_deferred_evpn<'a>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
+        affected: impl IntoIterator<Item = &'a rustbgpd_wire::EvpnRouteKey> + Copy,
     ) {
         self.with_deferred_selection_recording(affected, |manager| {
             if manager.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
                 let readiness = manager.replacement_readiness.clone();
                 let deferred = affected
-                    .iter()
+                    .into_iter()
                     .inspect(|_| {
                         super::replacement_readiness_checkpoint_at(
                             &readiness,

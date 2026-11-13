@@ -31,12 +31,10 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
-        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
-        // and holds at most that chunk's NLRI, so a peer crafting colliding
-        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
-        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
-        let mut affected: crate::fast_hash::FastSet<rustbgpd_wire::EvpnRouteKey> =
-            crate::fast_hash::FastSet::default();
+        // Not hashed: the chunk's keys are sorted and deduplicated below,
+        // O(n log n) in its NLRI count whatever keys a peer crafts. Every
+        // consumer only iterates them.
+        let mut affected: Vec<rustbgpd_wire::EvpnRouteKey> = Vec::new();
         let mut removed_stale_count = 0usize;
         let evpn_len = {
             let rib = self
@@ -46,7 +44,7 @@ impl RibManager {
             for key in evpn_withdrawn {
                 if rib.withdraw_evpn(&key) {
                     debug!(%peer, route_type = key.route_type(), "evpn withdrawn");
-                    affected.insert(key);
+                    affected.push(key);
                     if evpn_refresh_active
                         && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer)
                         && stale.remove(&key).is_some()
@@ -57,6 +55,8 @@ impl RibManager {
             }
             rib.evpn_len()
         };
+        affected.sort_unstable();
+        affected.dedup();
         self.metrics
             .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
@@ -96,12 +96,10 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
-        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
-        // and holds at most that chunk's NLRI, so a peer crafting colliding
-        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
-        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
-        let mut affected: crate::fast_hash::FastSet<rustbgpd_wire::EvpnRouteKey> =
-            crate::fast_hash::FastSet::default();
+        // Not hashed: the chunk's keys are sorted and deduplicated below,
+        // O(n log n) in its NLRI count whatever keys a peer crafts. Every
+        // consumer only iterates them.
+        let mut affected: Vec<rustbgpd_wire::EvpnRouteKey> = Vec::new();
         let mut removed_stale_count = 0usize;
         let mut replaced = 0usize;
         let evpn_len = {
@@ -112,7 +110,7 @@ impl RibManager {
             for mut route in evpn_announced {
                 debug!(%peer, route_type = route.route_type(), "evpn announced");
                 let key = route.key();
-                affected.insert(key);
+                affected.push(key);
                 self.attr_intern.intern(&mut route.attributes);
                 replaced += usize::from(rib.insert_evpn(route));
                 // Enhanced Route Refresh: re-advertised key removes from
@@ -126,6 +124,8 @@ impl RibManager {
             }
             rib.evpn_len()
         };
+        affected.sort_unstable();
+        affected.dedup();
         self.metrics
             .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
@@ -751,9 +751,10 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
-    pub(in crate::manager) fn recompute_and_distribute_evpn<S: std::hash::BuildHasher>(
+    pub(in crate::manager) fn recompute_and_distribute_evpn<'a>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
+        affected: impl IntoIterator<Item = &'a rustbgpd_wire::EvpnRouteKey, IntoIter: ExactSizeIterator>
+        + Copy,
     ) {
         self.recompute_and_distribute_evpn_inner(affected, false);
     }
@@ -762,9 +763,10 @@ impl RibManager {
     /// the private fanout parks at a receiver boundary once it has used the
     /// flush budget, in [`RibManager::pending_evpn_fanout`], and the route
     /// chunk queue finishes it before any later chunk or message.
-    pub(in crate::manager) fn recompute_and_distribute_evpn_paced<S: std::hash::BuildHasher>(
+    pub(in crate::manager) fn recompute_and_distribute_evpn_paced<'a>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
+        affected: impl IntoIterator<Item = &'a rustbgpd_wire::EvpnRouteKey, IntoIter: ExactSizeIterator>
+        + Copy,
     ) {
         self.recompute_and_distribute_evpn_inner(affected, true);
     }
@@ -773,9 +775,10 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "one best-path pass preserves displaced group values until every owned and private consumer has admitted or captured OLD"
     )]
-    fn recompute_and_distribute_evpn_inner<S: std::hash::BuildHasher>(
+    fn recompute_and_distribute_evpn_inner<'a>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
+        affected: impl IntoIterator<Item = &'a rustbgpd_wire::EvpnRouteKey, IntoIter: ExactSizeIterator>
+        + Copy,
         paced: bool,
     ) {
         use crate::route::EvpnRibRoute;
@@ -787,7 +790,7 @@ impl RibManager {
         checkpoint();
         // Every accepted EVPN mutation, including non-best attributes and
         // Types 3/4, invalidates received pages even while selection is deferred.
-        if !affected.is_empty() {
+        if affected.into_iter().next().is_some() {
             self.advance_table_pages();
         }
         self.record_deferred_evpn(affected);
@@ -799,7 +802,7 @@ impl RibManager {
         // reserves them so inserts never rehash between checkpoints.
         let mut changed_keys: HashSet<rustbgpd_wire::EvpnRouteKey> =
             HashSet::with_capacity(if readiness.is_some() {
-                affected.len()
+                affected.into_iter().len()
             } else {
                 0
             });
