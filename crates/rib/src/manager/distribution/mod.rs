@@ -6567,6 +6567,10 @@ impl RibManager {
         // term-hit counters survive), kept only so a deferred member can be
         // returned with its installed chain untouched.
         let mut displaced: HashMap<PeerId, Option<Option<PolicyChain>>> = HashMap::new();
+        let tracks_displaced = matches!(
+            mode,
+            ResidualMode::DeferSenders | ResidualMode::Paced { .. }
+        );
         // Install the new chains (content-equal INSTANCE guard — see
         // `replace_peer_export_policy_synchronously` for the ADR-0096
         // term-hit rationale), then classify each member's destination.
@@ -6610,10 +6614,7 @@ impl RibManager {
                 let prior = self
                     .export_chains
                     .replace(replacement.peer, replacement.export_policy.clone());
-                if matches!(
-                    mode,
-                    ResidualMode::DeferSenders | ResidualMode::Paced { .. }
-                ) {
+                if tracks_displaced {
                     displaced.insert(replacement.peer, prior);
                 }
             }
@@ -6767,10 +6768,20 @@ impl RibManager {
         let mut evpn_feeds = HashMap::new();
         for peer in residual {
             checkpoint();
+            // A member whose installed chain already equals its target has
+            // nothing to move: its chain, and with it its group key and
+            // every exported row, stand as they are. It counts as applied
+            // without the regroup below, which resyncs an ungrouped member's
+            // whole table whatever the chain did; a rollback names every
+            // captured member, and most of them the RIB never moved. The
+            // comparison above reads the chain installed now, so a member
+            // that registered under the candidate chain mid-walk is not
+            // equal and is still restored.
+            let unchanged = tracks_displaced && !displaced.contains_key(&peer);
             let hand_back = match mode {
                 #[cfg(test)]
                 ResidualMode::All => false,
-                ResidualMode::DeferSenders => self.sends_any_family(peer),
+                ResidualMode::DeferSenders => !unchanged && self.sends_any_family(peer),
                 ResidualMode::Paced { started, .. } => {
                     #[cfg(test)]
                     let elapsed = self
@@ -6778,7 +6789,11 @@ impl RibManager {
                         .unwrap_or_else(|| started.elapsed());
                     #[cfg(not(test))]
                     let elapsed = started.elapsed();
-                    over_budget = over_budget || !paced_admits_next(elapsed, applied, estimate);
+                    // An unchanged member costs nothing, so it never ends
+                    // the applied prefix; one behind the prefix's end is
+                    // still handed back, in caller order.
+                    over_budget = over_budget
+                        || !(unchanged || paced_admits_next(elapsed, applied, estimate));
                     over_budget
                 }
             };
@@ -6793,6 +6808,11 @@ impl RibManager {
                     None => {}
                 }
                 deferred.insert(peer);
+                continue;
+            }
+            if unchanged {
+                applied += 1;
+                applied_peers.push(peer);
                 continue;
             }
             let member_started = std::time::Instant::now();

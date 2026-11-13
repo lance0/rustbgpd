@@ -1764,11 +1764,11 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
         rib_tx.clone(),
         None,
     );
-    for peer in peers.iter().copied() {
+    for (index, peer) in peers.iter().copied().enumerate() {
         insert_test_managed_peer(
             &mut manager,
             peer,
-            rollback_ordering_policy_session(peer, rib_tx.clone(), false, None),
+            rollback_ordering_policy_session(peer, rib_tx.clone(), index + 1 == peers.len(), None),
             false,
         );
     }
@@ -1777,8 +1777,9 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
     // Distinct export targets keep this snapshot off the LAN-462
     // import-tolerant cohort (no repeated export pair) and on the
     // authoritative transaction whose rollback ordering this proof pins:
-    // every peer is alone in its export pair, so each RIB step is a batch of
-    // one followed by that peer's Route Refresh.
+    // every peer is alone in its export pair, so each is a unit of its own:
+    // its session legs, a batch of one, then its Route Refresh. The last
+    // peer's session leg fails, after every earlier unit completed.
     let apply = manager.apply_resolved_policy_snapshot(
         peers
             .iter()
@@ -1793,7 +1794,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             .collect(),
     );
     let drive_rib = async {
-        for (index, expected_peer) in peers.iter().enumerate() {
+        for expected_peer in peers.iter().take(peers.len() - 1) {
             let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
                 replacements,
                 reply,
@@ -1805,17 +1806,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                 sole_replacement(replacements).peer,
                 PeerId::from_addr(*expected_peer)
             );
-            // The last peer's batch fails, after every earlier peer's batch
-            // committed and its forward Route Refresh went out.
-            reply
-                .send(if index + 1 == peers.len() {
-                    Err(rustbgpd_rib::RibCommandError::internal(
-                        "injected final RIB failure",
-                    ))
-                } else {
-                    Ok(Vec::new())
-                })
-                .unwrap();
+            reply.send(Ok(Vec::new())).unwrap();
         }
 
         let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -1915,7 +1906,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
     assert!(
         result
             .as_ref()
-            .is_err_and(|error| error.contains("injected final RIB failure")
+            .is_err_and(|error| error.contains("injected final session failure")
                 && error.contains("already-applied peers restored")),
         "the forced final failure must drive a complete rollback: {result:?}"
     );

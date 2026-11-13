@@ -1282,6 +1282,194 @@ fn singleton_batch_of_one_costs_less_than_the_per_peer_command() {
     );
 }
 
+/// A rollback names every member the failed walk captured, and most of them
+/// the RIB never moved. Restoring an ungrouped member to the chain it already
+/// has installed must cost no resync: three untouched members together cost
+/// less than the one member that does move. That one registered under the
+/// candidate chain mid-walk, so the chain the RIB has installed for it is not
+/// the prior one, and it is still restored: the shortcut reads the installed
+/// chain, not what the caller believes was sent.
+#[test]
+fn restoring_an_untouched_ungrouped_member_costs_no_resync() {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    const SIZE: usize = 4;
+    let arm = ResidualArm::Ungrouped;
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let register = |manager: &mut RibManager, index: usize, session_id: u64, tag: u32| {
+        let (outbound_tx, receiver) = mpsc::channel(4096);
+        let mut up = test_peer_up(member(index), session_id, outbound_tx);
+        if let RibUpdate::PeerUp {
+            export_policy,
+            peer_asn,
+            sendable_families,
+            ..
+        } = &mut up
+        {
+            *export_policy = Some(arm.chain(tag));
+            *peer_asn = 65_100 + u32::try_from(index).unwrap();
+            *sendable_families = arm.families();
+        }
+        manager.handle_update(up);
+        receiver
+    };
+    let mut receivers: Vec<_> = (0..SIZE)
+        .map(|index| register(&mut manager, index, 1, OLD))
+        .collect();
+    assert_eq!(manager.grouped_member_of(member(0)), None, "setup");
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; SIZE]
+    );
+    // Member 0 flaps and registers under the candidate chain, as a member
+    // whose session accepted it mid-walk does.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: member(0),
+        session_id: 1,
+    });
+    receivers[0] = register(&mut manager, 0, 2, NEW);
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| NEW)[0],
+        RESIDUAL_ROWS,
+        "the registration exported under the candidate chain"
+    );
+    let mut restore = |peers: std::ops::Range<usize>| {
+        let mut receipts = Vec::new();
+        let work = checkpoints_in(|| {
+            receipts = manager
+                .restore_export_policy_replacements_synchronously(
+                    peers
+                        .map(|index| crate::PeerExportPolicyReplacement {
+                            peer: member(index),
+                            export_policy: Some(arm.chain(OLD)),
+                        })
+                        .collect(),
+                )
+                .unwrap();
+        })[ALL];
+        assert!(
+            receipts.iter().all(|receipt| matches!(
+                receipt,
+                crate::PeerExportPolicyRestoreReceipt::Restored { .. }
+            )),
+            "{receipts:?}"
+        );
+        work
+    };
+    let untouched = restore(1..SIZE);
+    let moved = restore(0..1);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS, 0, 0, 0],
+        "only the member that registered under the candidate chain is re-exported, on its prior chain"
+    );
+    assert!(
+        untouched < moved,
+        "restoring {} untouched ungrouped members cost {untouched} checkpoints; one member's \
+         real restore costs {moved}",
+        SIZE - 1
+    );
+}
+
+/// A pair whose target chain reads a dataset shares only its first batch.
+/// That batch builds the destination group; a later batch finds it occupied,
+/// and the batched transition does not read an occupied group's staged view
+/// across a dataset reference, so the RIB hands those members back and the
+/// paced walk moves each one with a resync of its own. Every member still
+/// ends in the one destination group with its table re-exported.
+#[test]
+fn dataset_pair_batches_after_the_first_go_to_the_paced_walk() {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    const BATCH: usize = 2;
+    let arm = ResidualArm::MixedDestinations;
+    // An empty dataset: the chain rejects nothing and tags every row.
+    let (next, _dataset) = super::local_route_export::allowed_dataset_chain(
+        "policy p {\n\
+         term drop { if route.prefix in allowed { reject } }\n\
+         term tag { add community 64512:17; accept }\n\
+         }",
+        false,
+    );
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let all: Vec<PeerId> = (0..2 * BATCH).map(member).collect();
+    let mut receivers: Vec<_> = (0..all.len())
+        .map(|index| {
+            let (outbound_tx, receiver) = mpsc::channel(4096);
+            let mut up = test_peer_up(member(index), 1, outbound_tx);
+            if let RibUpdate::PeerUp {
+                export_policy,
+                peer_asn,
+                sendable_families,
+                ..
+            } = &mut up
+            {
+                *export_policy = Some(arm.chain(OLD));
+                *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                *sendable_families = arm.families();
+            }
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; all.len()]
+    );
+    let replacements = |peers: &[PeerId]| -> Vec<crate::PeerExportPolicyReplacement> {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(next.clone()),
+            })
+            .collect()
+    };
+    let mut deferred = Vec::new();
+    for batch in all.chunks(BATCH) {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(batch),
+            reply,
+        });
+        deferred.push(response.try_recv().unwrap().unwrap());
+    }
+    assert_eq!(
+        deferred,
+        vec![Vec::new(), all[BATCH..].to_vec()],
+        "the first batch commits shared; the second finds the dataset destination occupied \
+         and is handed back whole"
+    );
+    let mut pending = deferred.pop().unwrap();
+    while !pending.is_empty() {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+            replacements: replacements(&pending),
+            cost: None,
+            reply,
+        });
+        pending = response.try_recv().unwrap().unwrap().pending;
+    }
+    let destination = manager.grouped_member_of(all[0]);
+    assert!(
+        destination.is_some()
+            && all
+                .iter()
+                .all(|peer| manager.grouped_member_of(*peer) == destination),
+        "batched and paced members share one destination group"
+    );
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| NEW),
+        vec![RESIDUAL_ROWS; all.len()],
+        "re-exported tables"
+    );
+}
+
 /// Update-group tables no member belongs to.
 fn memberless_groups(manager: &RibManager) -> usize {
     manager
