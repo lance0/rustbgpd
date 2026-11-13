@@ -1200,3 +1200,23 @@ fn external_input_noop_remains_noop() {
     assert!(class.is_noop(), "{class:?}");
     assert!(class.unsupported_sections.is_empty(), "{class:?}");
 }
+
+/// `dynamic_neighbor_limit` is hot-applied by SIGHUP but has no transaction
+/// executor. A candidate that edits only it must be rejected as unsupported,
+/// not planned as a no-op.
+#[test]
+fn transaction_v1_rejects_dynamic_neighbor_limit_only_edit() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.global.dynamic_neighbor_limit = Some(7);
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.dynamic_neighbor_limit_changed);
+
+    let class = super::classify_config_transaction_v1(&diff);
+    assert!(!class.is_noop(), "{class:?}");
+    assert!(!class.is_committable());
+    assert_eq!(
+        class.unsupported_sections,
+        vec!["[global].dynamic_neighbor_limit (apply via SIGHUP reload)".to_string()]
+    );
+}
