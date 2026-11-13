@@ -968,3 +968,71 @@ async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain()
     drop(mgr);
     assert_eq!(rib.await.unwrap(), 3, "one restore command per prior chain");
 }
+
+/// A hold a seam took inside a generation meets that generation's commit.
+/// A candidate that replaces the member's BFD session (a new revision) keeps
+/// the hold, and the new session's Up sends the `Start`; a candidate that
+/// removes the member releases the hold at commit. Either way the session
+/// that was told `BfdDown` is started exactly once.
+#[tokio::test(start_paused = true)]
+async fn a_hold_taken_in_a_generation_meets_its_commit() {
+    for removed in [false, true] {
+        let Lab {
+            mgr,
+            peers,
+            sessions,
+            ..
+        } = lab(1);
+        let peer = peers[0];
+        let (mgr, states) = couple_bfd(mgr, peer);
+        let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+        let mut mgr = mgr.with_bfd_reload(reload_tx);
+        let actor = tokio::spawn(async move {
+            while let Some(command) = reload_rx.recv().await {
+                // Every desired session re-reports its level: a new one is Down.
+                let acks = command
+                    .desired
+                    .sessions
+                    .iter()
+                    .map(|params| {
+                        let mut ack = down(params.peer);
+                        ack.revision = params.revision;
+                        ack.resync = true;
+                        ack
+                    })
+                    .collect();
+                let _ = command.reply.send(acks);
+            }
+        });
+        begin_generation(&mut mgr);
+        let mut replacement = super::bfd::bfd_params(peer, false);
+        replacement.revision = 1;
+        mgr.bfd_coupling.as_mut().unwrap().pending = Some(if removed {
+            HashMap::new()
+        } else {
+            HashMap::from([(peer, replacement)])
+        });
+
+        states.send(down(peer));
+        assert_eq!(mgr.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await, 1);
+        assert!(reaches(&sessions[0].bfd_downs, 1).await);
+        mgr.commit_bfd_reload(None).await.unwrap();
+
+        if removed {
+            assert!(reaches(&sessions[0].starts, 1).await, "released at commit");
+        } else {
+            assert!(mgr.bfd_withholding(&peer), "the new session is Down");
+            assert!(!reaches(&sessions[0].starts, 1).await);
+            let mut now_up = up(peer);
+            now_up.revision = 1;
+            states.send(now_up);
+            let change = PeerManager::receive_bfd_state_change(&mut mgr.bfd_coupling).await;
+            mgr.handle_bfd_state_change(change).await;
+            assert!(reaches(&sessions[0].starts, 1).await);
+        }
+        assert!(!mgr.bfd_withholding(&peer), "removed={removed}");
+        assert_eq!(sessions[0].bfd_downs.load(Ordering::SeqCst), 1);
+        assert_eq!(sessions[0].starts.load(Ordering::SeqCst), 1);
+        actor.abort();
+    }
+}
