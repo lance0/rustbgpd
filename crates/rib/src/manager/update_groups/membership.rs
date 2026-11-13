@@ -599,7 +599,7 @@ impl RibManager {
             prefixes.extend(
                 self.loc_rib
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| crate::manager::group_build_row_checkpoint(&readiness))
                     .map(|r| r.prefix),
             );
             let mut memo = crate::manager::distribution::ExportMemo::default();

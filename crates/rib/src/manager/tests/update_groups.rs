@@ -10837,8 +10837,23 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
         assert_eq!(fleet.manager.loc_rib.len(), 4);
         assert_eq!(fleet.manager.outbound_session_ids.get(&peer), Some(&7));
         assert_eq!(fleet.manager.grouped_member_of(peer).is_none(), ungrouped);
-        assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
-        assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
+        // A registration installs under the ingest owner, then exports
+        // under its own; a limits replay only exports.
+        let receipts = &fleet.manager.replacement_readiness_receipts;
+        let export = super::super::ReadinessOwnerKind::Replacement;
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.kind)
+                .collect::<Vec<_>>(),
+            if limits_update {
+                vec![export]
+            } else {
+                vec![super::super::ReadinessOwnerKind::Ingest, export]
+            },
+            "{stage}"
+        );
+        assert_eq!(receipts.last().unwrap().serviced, 1);
         let mut announced = 0;
         let mut eor = false;
         while let Ok(update) = outbound_rx.try_recv().map(delivered) {

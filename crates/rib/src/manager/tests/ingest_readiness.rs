@@ -670,3 +670,175 @@ fn indexed_rejection_retirement_takes_no_readiness_owner() {
     );
     assert!(manager.peer_unexportable.is_empty(), "both were retired");
 }
+
+/// What one actor turn did at a counted stage: the items it visited, the
+/// readiness queries answered at them, and the owners the turn took.
+#[derive(Debug)]
+struct CountedTurn {
+    visited: usize,
+    answered: usize,
+    owners: Vec<ReadinessOwnerKind>,
+}
+
+/// Run `turn` with readiness queries wired and count `stage`.
+fn counted_turn(
+    manager: &mut RibManager,
+    readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
+    stage: &'static str,
+    turn: impl FnOnce(&mut RibManager),
+) -> CountedTurn {
+    manager.replacement_readiness_receipts.clear();
+    let mut counts = BTreeMap::new();
+    let work = super::work_scaling::checkpoints_in(|| {
+        counts = count_answered_readiness(manager, readiness_tx, turn);
+    });
+    CountedTurn {
+        visited: work.get(stage).copied().unwrap_or(0),
+        answered: answered(&counts, stage),
+        owners: manager
+            .replacement_readiness_receipts
+            .iter()
+            .map(|receipt| receipt.kind)
+            .collect(),
+    }
+}
+
+/// A session registers as the first member of its update group over a
+/// Loc-RIB of `routes` routes, so its `PeerUp` turn builds the group table.
+fn first_member_registration(routes: u16) -> CountedTurn {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let source = peer_v4(SOURCE);
+    register_test_peer(&mut manager, source, 0);
+    let announced = (0..routes)
+        .map(|index| {
+            let [high, low] = index.to_be_bytes();
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 18, high, low), 32),
+                SOURCE,
+            )
+        })
+        .collect();
+    manager.handle_update(super::lifecycle::test_routes_received(source, announced));
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), usize::from(routes));
+    let groups = manager.group_ribs.len();
+
+    let member = peer_v4(CLIENT);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(usize::from(routes) + 8);
+    let mut up = super::lifecycle::test_peer_up(member, 1, outbound_tx);
+    // An iBGP member cannot share the eBGP source's group.
+    if let RibUpdate::PeerUp { is_ebgp, .. } = &mut up {
+        *is_ebgp = false;
+    }
+    let turn = counted_turn(
+        &mut manager,
+        readiness_tx,
+        crate::manager::GROUP_TABLE_BUILD_ROW,
+        |manager| manager.handle_update(up),
+    );
+    let gid = manager
+        .grouped_member_of(member)
+        .expect("member is grouped");
+    assert_eq!(
+        manager.group_ribs.len(),
+        groups + 1,
+        "a new group was built"
+    );
+    assert_eq!(manager.group_ribs[&gid].table.len(), usize::from(routes));
+    let mut sent = 0;
+    while let Ok(update) = outbound_rx.try_recv() {
+        sent += update.announce.len();
+    }
+    assert_eq!(sent, usize::from(routes), "the initial table is unchanged");
+    turn
+}
+
+/// The first member's registration builds its group table from the whole
+/// Loc-RIB before the initial table is sent. The build visits every route,
+/// and answers readiness at each of them under the ingest owner, ahead of
+/// the initial table's own owner.
+#[test]
+fn first_member_registration_answers_readiness_while_building_the_group_table() {
+    let small = first_member_registration(64);
+    let large = first_member_registration(256);
+    assert_eq!(
+        (small.visited, large.visited),
+        (64, 256),
+        "the build visits every Loc-RIB route in one turn"
+    );
+    for (routes, turn) in [(64, &small), (256, &large)] {
+        assert!(
+            turn.answered >= routes,
+            "{routes} routes: the build answered {}: {turn:?}",
+            turn.answered
+        );
+        assert_eq!(
+            turn.owners,
+            [ReadinessOwnerKind::Ingest, ReadinessOwnerKind::Replacement],
+            "{routes} routes"
+        );
+    }
+}
+
+/// An EVPN group member whose recovery ledger holds `keys` admitted keys
+/// goes down, so its teardown turn releases the ledger.
+fn evpn_member_teardown(keys: u16) -> CountedTurn {
+    let (mut manager, member, _gid, _output) = super::evpn_group_storage::fixture();
+    let (readiness_tx, readiness_rx) = mpsc::channel(2);
+    manager = manager.with_readiness_queries(readiness_rx);
+    for index in 0..keys {
+        let [high, low] = index.to_be_bytes();
+        manager
+            .adj_ribs_out
+            .get_mut(&member)
+            .unwrap()
+            .insert_evpn(make_evpn_imet(Ipv4Addr::new(198, 51, high, low), 1));
+    }
+    assert!(
+        manager.with_replacement_readiness(|manager| manager.capture_private_evpn_admitted(member))
+    );
+    let handle = manager.evpn_recovery_handle(member).unwrap();
+    assert_eq!(
+        manager
+            .evpn_recovery
+            .proof_keys(handle)
+            .unwrap()
+            .unwrap()
+            .len(),
+        usize::from(keys)
+    );
+    let turn = counted_turn(
+        &mut manager,
+        readiness_tx,
+        crate::manager::EVPN_RECOVERY_RETIRE,
+        |manager| {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: member,
+                session_id: 7,
+            });
+        },
+    );
+    assert_eq!(manager.evpn_recovery_handle(member), None);
+    turn
+}
+
+/// A departing EVPN member's recovery ledger is released one slot at a time
+/// with a checkpoint per 64 slots. The release answers readiness at each of
+/// them under the ingest owner.
+#[test]
+fn evpn_member_teardown_answers_readiness_while_releasing_its_recovery_ledger() {
+    let small = evpn_member_teardown(4096);
+    let large = evpn_member_teardown(32768);
+    assert!(
+        small.visited >= 256 / 64 && large.visited >= small.visited + (1024 - 256) / 64,
+        "the release checkpoints every 64 slots: {small:?} {large:?}"
+    );
+    for turn in [&small, &large] {
+        assert_eq!(turn.answered, turn.visited, "{turn:?}");
+        assert_eq!(
+            turn.owners.first(),
+            Some(&ReadinessOwnerKind::Ingest),
+            "{turn:?}"
+        );
+    }
+}

@@ -2563,7 +2563,16 @@ impl RibManager {
     /// Everything [`Self::complete_outbound_registration`] does before the
     /// initial table: install the CURRENT live session's outbound state and
     /// update-group membership. `false` only when no live session exists.
+    ///
+    /// The first member of a group builds the group table from the whole
+    /// Loc-RIB here, and a reconnect releases its predecessor's EVPN
+    /// recovery ledger, so the install takes the readiness lane (with the
+    /// executor handoff). Inside a cohort's owner this adds nothing.
     fn install_outbound_registration(&mut self, peer: PeerId) -> bool {
+        self.with_ingest_readiness(|manager| manager.install_registration_state(peer))
+    }
+
+    fn install_registration_state(&mut self, peer: PeerId) -> bool {
         let Some(record) = self
             .live_sessions
             .get_mut(&peer)
