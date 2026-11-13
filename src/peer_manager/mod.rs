@@ -205,6 +205,17 @@ mod update_group_plan;
 use dynamic::{AcceptedDynamicRange, DeadLetteredPending, DynamicRange};
 use peer_table::{ManagedPeer, PeerTable};
 
+/// Build a future directly on the heap and pin it there.
+///
+/// `Box::pin(make_future())` in an unoptimized build first writes the whole
+/// future into a slot of the calling poll function's frame, and every such
+/// call keeps its own slot. A handler with many large arms then needs a
+/// frame of their sum on each poll, whichever arm runs. Built inside this
+/// call, the future's slot is in a frame that is gone before it is polled.
+pub(super) fn boxed<F: Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
 const DEFAULT_HOLD_TIME: u16 = rustbgpd_fsm::DEFAULT_HOLD_TIME;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 const BGP_PORT: u16 = 179;
@@ -308,6 +319,41 @@ fn bounded_fan_out<F: Future>(
 /// A small fixed budget prevents probe traffic from starving forward policy
 /// progress while still keeping the unchanged 200 ms end-to-end deadline.
 const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
+/// How many events of one kind (BFD state changes, session notifications,
+/// notification events) a policy walk takes from its queue at one seam. A
+/// unit has at least two seams, so this is a bound per seam, not per unit.
+/// It does not bound what a served handler drains on its own: session
+/// lifecycle events are drained whole, and a notification round that
+/// retires, replaces or promotes a session, or a BFD Down that retires a
+/// pending inbound session, handles every session notification queued at
+/// that moment. `events_served` counts each of those as handled.
+const OWNED_WALK_EVENT_BUDGET: usize = 8;
+
+/// A resolved policy snapshot's walk owns the actor: what it has served at
+/// its seams, and the notifications it holds until it ends.
+pub(super) struct OwnedWalkEvents {
+    /// Notifications that would retire a dynamic peer. Removing a captured
+    /// peer mid-walk would make the walk's rollback inexact, so they go back
+    /// on the notification channel when the walk ends.
+    held: Vec<SessionNotification>,
+    /// When the walk last finished serving events, or began.
+    served_at: tokio::time::Instant,
+    /// Longest interval between two such instants.
+    gap_max: Duration,
+    /// Events handled while the walk owned the actor, however they were
+    /// reached: a session notification or lifecycle event is counted by
+    /// its handler, so one a served handler drains on its own counts too.
+    events_served: u64,
+    service: Duration,
+}
+
+/// One walk's event service, for its phase log line.
+#[derive(Default)]
+pub(super) struct OwnedWalkService {
+    pub(super) gap_max_us: u64,
+    pub(super) events_served: u64,
+    pub(super) service_us: u64,
+}
 
 /// Hard deadline for RIB channel admission and reply on a single-peer policy
 /// edit. Also used by per-peer outbound refresh and other bounded RIB steps.
@@ -320,9 +366,10 @@ const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 /// pend, and an export-policy replacement then performs a full Loc-RIB
 /// distribution pass of its own — seconds at route-server scale under load.
 /// Five seconds is therefore only defensible for one command whose latency
-/// an operator is waiting on directly. Every `O(peers)` policy walk shares
-/// one [`RIB_BATCH_REPLY_TIMEOUT`] budget across all of its steps instead,
-/// so the walk is bounded in total rather than per peer.
+/// an operator is waiting on directly. Every `O(peers)` policy walk is
+/// bounded by a [`RIB_BATCH_REPLY_TIMEOUT`] budget instead: shared across
+/// all steps of a knob fan-out, and measured from the last completed step
+/// in an export-policy snapshot's walk and its rollback.
 const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ordered primary-lane RIB updates queued while the mailbox was full, so a
@@ -472,10 +519,12 @@ impl DeferredRibUpdates {
     }
 }
 
-/// Hard deadline for the batched authoritative export-policy apply
-/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`) together with
-/// the paced commands that follow it for members the batch deferred,
-/// and for the other `O(peers)` RIB walks of one policy transaction. One
+/// Stall timeout for the RIB walks of one policy transaction: the batched
+/// authoritative export-policy apply
+/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`), the paced
+/// commands that follow it, the per-peer remainder steps and the rollback
+/// restore each get this long after the previous one completed; the other
+/// `O(peers)` RIB walks share it as one absolute deadline. One
 /// command carries the whole fallback cohort, so unlike the inline replies
 /// above it legitimately performs a destination-table build plus a
 /// cohort-wide emission — seconds at route-server scale. Twice the clean
@@ -959,12 +1008,18 @@ pub struct PeerManager {
     /// spawned tasks and the inner future of `await_with_readiness{,_budget}`.
     /// The only `&mut self` futures raced in a `select!` or wrapped in a
     /// `timeout` are `plan_config_transaction`, `await_with_readiness` (whose
-    /// arms serve only readiness and operator reads and send deferred RIB
-    /// updates) and
+    /// arms serve only readiness, operator reads and link changes and send
+    /// deferred RIB updates) and
     /// `query_warm_checkpoint_capture`, and none of them drains session
     /// notifications. Keep it that way, or reset the depth where a drop can
     /// happen; the run loop `debug_assert!`s the depth is zero between steps.
     session_notification_depth: usize,
+    /// `Some` while a resolved policy snapshot's walk owns the actor (set and
+    /// cleared by `apply_resolved_policy_snapshot_with_prestage_reads`).
+    /// While it is, the walk serves BFD, link and session events at its
+    /// seams ([`Self::serve_owned_walk_events`]) and its waits serve link
+    /// changes; a notification that would retire a dynamic peer is held.
+    owned_walk: Option<OwnedWalkEvents>,
     /// Notifications a nested drain left for the outermost handler because
     /// they belong to a different peer, with the peer their session resolved
     /// to. Empty whenever the depth is zero.
@@ -1545,6 +1600,10 @@ impl PeerManager {
         F: Future,
     {
         tokio::pin!(future);
+        // A policy walk's waits can be long (one RIB unit, or the cohort's
+        // whole clean transition): fast external failover does not wait
+        // behind them. Both arms are non-blocking, as in the budget variant.
+        let serve_links = self.owned_walk.is_some();
         loop {
             tokio::select! {
                 biased;
@@ -1573,8 +1632,176 @@ impl PeerManager {
                         None => self.operator_rx = None,
                     }
                 }
+                changed = Self::receive_link_change(&mut self.link_check.changes), if serve_links => {
+                    if changed {
+                        self.handle_links_changed();
+                    }
+                }
+                () = async {
+                    match self.link_check.retry_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if serve_links => self.retry_link_checks(),
             }
         }
+    }
+
+    /// A policy walk takes ownership of the actor. `false` when a walk
+    /// already owns it or a notification handler is running, in which case
+    /// the caller serves and holds nothing.
+    pub(super) fn begin_owned_walk(&mut self) -> bool {
+        if self.owned_walk.is_some() || self.session_notification_depth > 0 {
+            return false;
+        }
+        self.owned_walk = Some(OwnedWalkEvents {
+            held: Vec::new(),
+            served_at: tokio::time::Instant::now(),
+            gap_max: Duration::ZERO,
+            events_served: 0,
+            service: Duration::ZERO,
+        });
+        true
+    }
+
+    /// The walk [`Self::begin_owned_walk`] started has ended: every held
+    /// notification goes back on the notification channel, where the run
+    /// loop (or a later walk's seam, which holds it again) receives it. Its
+    /// handler ignores a notification whose session is no longer current.
+    pub(super) fn end_owned_walk(&mut self) -> OwnedWalkService {
+        let Some(walk) = self.owned_walk.take() else {
+            return OwnedWalkService::default();
+        };
+        for notification in walk.held {
+            let _ = self.session_notify_tx.send(notification);
+        }
+        let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        OwnedWalkService {
+            gap_max_us: micros(walk.gap_max.max(walk.served_at.elapsed())),
+            events_served: walk.events_served,
+            service_us: micros(walk.service),
+        }
+    }
+
+    /// Hold `notification` for the end of the walk that owns the actor.
+    /// Gives it back when no walk does.
+    pub(super) fn hold_for_owned_walk(
+        &mut self,
+        notification: SessionNotification,
+    ) -> Option<SessionNotification> {
+        match self.owned_walk.as_mut() {
+            Some(walk) => {
+                walk.held.push(notification);
+                None
+            }
+            None => Some(notification),
+        }
+    }
+
+    /// Whether the walk that owns the actor holds the end of `peer`'s
+    /// session task: the peer has no session and is retired when the walk
+    /// ends.
+    pub(super) fn owned_walk_holds_task_exit(&self, peer: &PeerKey) -> bool {
+        let Some(session) = self.peers.get(peer).map(ManagedPeer::session_id) else {
+            return false;
+        };
+        self.owned_walk.as_ref().is_some_and(|walk| {
+            walk.held.iter().any(|held| {
+                matches!(held, SessionNotification::TaskExited { session_id, .. } if *session_id == session)
+            })
+        })
+    }
+
+    /// Count one session notification or lifecycle event handled while a
+    /// policy walk owns the actor.
+    pub(super) fn count_owned_walk_event(&mut self) {
+        if let Some(walk) = self.owned_walk.as_mut() {
+            walk.events_served += 1;
+        }
+    }
+
+    /// Serve the events a long policy walk would otherwise hold until it
+    /// ends, at a seam between two of its units: BFD state changes and due
+    /// BFD command retries, link changes and link-check retries, session
+    /// lifecycle events, one round of session notifications, and
+    /// notification events, in that order. What the seam takes from each
+    /// queue but the lifecycle events, which are drained whole before the
+    /// notifications as the run loop drains them, is bounded by
+    /// [`OWNED_WALK_EVENT_BUDGET`]; a served handler that retires, replaces
+    /// or promotes a session still handles every queued notification.
+    ///
+    /// Everything else stays behind the walk: the command channel (config and
+    /// peer mutations, inbound connections, `Shutdown`), internal commands,
+    /// max-prefix restart timers, discovery, reconciles and retention.
+    ///
+    /// Call it only between units: a handler can replace a peer's session or
+    /// latch the peer disabled, and a unit holds a session handle across its
+    /// awaits. It never removes a peer: a notification that would retire a
+    /// dynamic peer is held. Serving is not walk progress, so the caller
+    /// excludes the time from its stall budget and never renews it here.
+    /// A no-op when no walk owns the actor.
+    pub(super) async fn serve_owned_walk_events(&mut self) {
+        if self.owned_walk.is_none() || self.session_notification_depth > 0 {
+            return;
+        }
+        let started = tokio::time::Instant::now();
+        // Boxed: the handlers are not part of every walk's state machine.
+        let events_served = boxed(|| self.serve_owned_walk_events_now()).await;
+        if let Some(walk) = self.owned_walk.as_mut() {
+            walk.gap_max = walk
+                .gap_max
+                .max(started.saturating_duration_since(walk.served_at));
+            walk.served_at = tokio::time::Instant::now();
+            walk.events_served += events_served;
+            walk.service += started.elapsed();
+        }
+    }
+
+    async fn serve_owned_walk_events_now(&mut self) -> u64 {
+        let mut served = self.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
+        let links_changed = self.link_check.changes.as_mut().map(|changes| {
+            // Only a change this seam handles is marked seen: one sent after
+            // an unchanged reading stays pending for the next seam.
+            changes.has_changed().inspect(|changed| {
+                if *changed {
+                    drop(changes.borrow_and_update());
+                }
+            })
+        });
+        match links_changed {
+            Some(Ok(true)) => {
+                self.handle_links_changed();
+                served += 1;
+            }
+            Some(Err(_)) => self.link_check.changes = None,
+            Some(Ok(false)) | None => {}
+        }
+        if self
+            .link_check
+            .retry_at
+            .is_some_and(|at| at <= tokio::time::Instant::now())
+        {
+            self.retry_link_checks();
+        }
+        // Lifecycle events and session notifications count themselves
+        // (`count_owned_walk_event`), wherever a handler drains them.
+        self.drain_ready_session_lifecycle_notifications();
+        if let Ok(notification) = self.session_notify_rx.try_recv() {
+            let more = self
+                .session_notify_rx
+                .ready_count()
+                .min(OWNED_WALK_EVENT_BUDGET - 1);
+            self.handle_session_notification_round(notification, more)
+                .await;
+        }
+        for _ in 0..OWNED_WALK_EVENT_BUDGET {
+            let Ok(event) = self.session_notification_event_rx.try_recv() else {
+                break;
+            };
+            self.publish_notification_event(event);
+            served += 1;
+        }
+        served
     }
 
     /// Await one lifecycle sweep's per-peer session commands, sent at once
@@ -1988,6 +2215,7 @@ impl PeerManager {
             session_notify_tx,
             session_notify_rx,
             session_notification_depth: 0,
+            owned_walk: None,
             deferred_session_notifications: VecDeque::new(),
             deferred_session_notification_counts: HashMap::new(),
             deferred_warning_crossings: HashMap::new(),
@@ -2442,6 +2670,9 @@ impl PeerManager {
             hook(&cmd);
         }
         self.operator_read_seam = OperatorReadSeam::Unfenced;
+        // Every arm's future is a slot of this one poll frame in an
+        // unoptimized build, under whatever the arm that runs goes on to
+        // call. The large ones are built on the heap ([`boxed`]).
         match cmd {
             PeerManagerCommand::EnablePeerOwned { peer, reply } => {
                 let outcome = self.enable_peer_owned(peer).await;
@@ -2466,15 +2697,15 @@ impl PeerManager {
                 sync_config_snapshot,
                 reply,
             } => {
-                let result = self.add_peer(config, sync_config_snapshot).await;
+                let result = boxed(|| self.add_peer(config, sync_config_snapshot)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::AddConfiguredPeers { configs, reply } => {
-                let result = self.add_configured_peers(configs).await;
+                let result = boxed(|| self.add_configured_peers(configs)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
-                let result = self.runtime_create_peer(spec).await;
+                let result = boxed(|| self.runtime_create_peer(spec)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::DeletePeer {
@@ -2482,16 +2713,18 @@ impl PeerManager {
                 sync_config_snapshot,
                 reply,
             } => {
-                let result = self.delete_peer_runtime(peer, sync_config_snapshot).await;
+                let result = boxed(|| self.delete_peer_runtime(peer, sync_config_snapshot)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::OwnedNeighborMutation { mutation, reply } => {
                 // Static delete and both dynamic operations validate
                 // before effect; static add reports cleanup explicitly.
                 let outcome = match mutation {
-                    OwnedNeighborMutation::Add(spec) => self.owned_runtime_create_peer(spec).await,
+                    OwnedNeighborMutation::Add(spec) => {
+                        boxed(|| self.owned_runtime_create_peer(spec)).await
+                    }
                     OwnedNeighborMutation::Delete(peer) => {
-                        match self.delete_peer_runtime(peer, true).await {
+                        match boxed(|| self.delete_peer_runtime(peer, true)).await {
                             Ok(_) => OwnedNeighborMutationOutcome::Success,
                             Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
                                 OwnedNeighborMutationError::Peer(error),
@@ -2569,7 +2802,7 @@ impl PeerManager {
                         rpol,
                         dataset_bindings,
                     } => {
-                        self.sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings)
+                        boxed(|| self.sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings))
                             .await
                     }
                     OwnedCatalogMutation::DeletePeerGroup { name } => {
@@ -2743,7 +2976,7 @@ impl PeerManager {
                 let _ = reply.send(outcome);
             }
             PeerManagerCommand::ReconfigurePeer { config, reply } => {
-                let result = self.reconfigure_peer_runtime(config).await;
+                let result = boxed(|| self.reconfigure_peer_runtime(config)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ListPeers { reply } => {
@@ -2828,14 +3061,15 @@ impl PeerManager {
             PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
                 // API publication rollback restores policy chains before the
                 // staged config. Reads report each source's current values.
-                let result = self
-                    .apply_resolved_policy_snapshot_with_prestage_reads(
+                let result = boxed(|| {
+                    self.apply_resolved_policy_snapshot_with_prestage_reads(
                         targets,
                         false,
                         OperatorReadAdmission::Served,
                     )
-                    .await
-                    .map_err(policy::PolicySnapshotFailure::into_apply_error);
+                })
+                .await
+                .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPolicyImpactSnapshot {
@@ -2843,9 +3077,9 @@ impl PeerManager {
                 dynamic_ranges,
                 reply,
             } => {
-                let result = self
-                    .apply_policy_impact_snapshot(static_targets, dynamic_ranges)
-                    .await;
+                let result =
+                    boxed(|| self.apply_policy_impact_snapshot(static_targets, dynamic_ranges))
+                        .await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
@@ -2900,7 +3134,7 @@ impl PeerManager {
                 reason,
                 reply,
             } => {
-                let result = self.disable_peer(peer, reason).await;
+                let result = boxed(|| self.disable_peer(peer, reason)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ResetPeer {
@@ -2908,7 +3142,7 @@ impl PeerManager {
                 reason,
                 reply,
             } => {
-                let result = self.reset_peer(peer, reason).await;
+                let result = boxed(|| self.reset_peer(peer, reason)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ResetEvpnRecoverySession { request, reply } => {
@@ -2954,7 +3188,7 @@ impl PeerManager {
                 tcp_ao_info,
                 tcp_ao_generation,
             } => {
-                self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation)
+                boxed(|| self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation))
                     .await;
             }
             PeerManagerCommand::ApplyTcpAoRotation {
@@ -3023,7 +3257,7 @@ impl PeerManager {
             }
             PeerManagerCommand::HotUpdatePeer { config, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
-                let outcome = self.hot_update_peer_owned(config).await;
+                let outcome = boxed(|| self.hot_update_peer_owned(config)).await;
                 if matches!(&outcome, OwnedHotUpdatePeerOutcome::Success) {
                     self.reap_retired_policy_routes(&policy_routes_prior);
                 }
@@ -3051,7 +3285,7 @@ impl PeerManager {
                 failed,
                 reply,
             } => {
-                let result = self.refresh_dataset_dependents(&swapped, &failed).await;
+                let result = boxed(|| self.refresh_dataset_dependents(&swapped, &failed)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ListPolicies { reply } => {
@@ -3210,7 +3444,7 @@ impl PeerManager {
             }
             PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
-                let result = self.set_honor_graceful_shutdown(enabled).await;
+                let result = boxed(|| self.set_honor_graceful_shutdown(enabled)).await;
                 if result.is_ok() {
                     self.reap_retired_policy_routes(&policy_routes_prior);
                 }
@@ -3218,7 +3452,7 @@ impl PeerManager {
             }
             PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
-                let result = self.set_honor_blackhole(enabled).await;
+                let result = boxed(|| self.set_honor_blackhole(enabled)).await;
                 if result.is_ok() {
                     self.reap_retired_policy_routes(&policy_routes_prior);
                 }
@@ -3493,14 +3727,10 @@ impl PeerManager {
             interval.tick().await;
         }
 
-        // Take the BFD state-change receiver into a local so the select! arm
-        // captures the local (not `self`), and publish the initial desired set
-        // (the configured set overlaid with the disabled/deleted set — empty at
-        // startup, so every configured peer starts enabled).
-        let mut bfd_state_change_rx = self.take_bfd_state_change_rx();
-        if bfd_state_change_rx.is_some() {
-            self.republish_bfd_desired();
-        }
+        // Publish the initial desired set (the configured set overlaid with
+        // the disabled/deleted set — empty at startup, so every configured
+        // peer starts enabled).
+        self.republish_bfd_desired();
 
         loop {
             if self.dampening_control_failed {
@@ -3513,6 +3743,12 @@ impl PeerManager {
             // builds the published import roster is exactly the peer table
             // and live dataset bindings.
             self.peers.settle_abandoned_batches();
+            if self.owned_walk.is_some() {
+                // No walk is dropped mid-flight; if one ever is, its held
+                // notifications are not lost and nothing more is held.
+                tracing::error!("policy walk did not end its event service; releasing it");
+                self.end_owned_walk();
+            }
             #[cfg(test)]
             self.assert_import_roster_projection();
             debug_assert!(
@@ -3563,13 +3799,13 @@ impl PeerManager {
                         debug!("peer manager channel closed");
                         return;
                     };
-                    if Box::pin(self.dispatch_command(cmd)).await.is_break() {
+                    if boxed(|| self.dispatch_command(cmd)).await.is_break() {
                         return;
                     }
                 }
                 Some(loaded) = self.candidate_loads.join_next(), if !self.candidate_loads.is_empty() => {
                     match loaded {
-                        Ok(loaded) => self.finish_candidate_load(loaded).await,
+                        Ok(loaded) => boxed(|| self.finish_candidate_load(loaded)).await,
                         // A panicking load drops its reply; the caller sees
                         // the dropped-reply error.
                         Err(error) => warn!(%error, "config candidate load task failed"),
@@ -3582,13 +3818,13 @@ impl PeerManager {
                             let _ = reply.send(self.preflight_reload_generation(&candidate, route));
                         }
                         Some(InternalCommand::OpenDynamicBfdSockets { candidate, reply }) => {
-                            let _ = reply.send(self.open_dynamic_bfd_sockets(&candidate).await);
+                            let _ = reply.send(boxed(|| self.open_dynamic_bfd_sockets(&candidate)).await);
                         }
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
                             let outcome =
-                                Box::pin(self.apply_reload_generation(*candidate, actions, datasets)).await;
+                                boxed(|| self.apply_reload_generation(*candidate, actions, datasets)).await;
                             if matches!(outcome, ReloadGenerationOutcome::Applied(_)) {
                                 self.reap_retired_policy_routes(&policy_routes_prior);
                             }
@@ -3772,7 +4008,7 @@ impl PeerManager {
                 notification = self.session_notify_rx.recv() => {
                     if let Some(notification) = notification {
                         self.drain_ready_session_lifecycle_notifications();
-                        self.handle_session_notification(notification).await;
+                        boxed(|| self.handle_session_notification(notification)).await;
                     }
                 }
                 lifecycle = self.session_lifecycle_rx.recv() => {
@@ -3791,7 +4027,7 @@ impl PeerManager {
                     } else {
                         std::future::pending::<()>().await;
                     }
-                } => self.retry_bfd_commands(bfd_state_change_rx.as_ref()),
+                } => self.retry_due_bfd_commands(),
                 () = async {
                     if let Some(deadline) = evpn_recovery_retry_at {
                         tokio::time::sleep_until(deadline).await;
@@ -3813,19 +4049,8 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => self.bfd_scope_retry_due(),
-                change = async {
-                    match bfd_state_change_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match change {
-                        Some(change) => self.handle_bfd_state_change(change).await,
-                        // The actor's state-change sender is gone; stop polling
-                        // a closed channel (recv would return None in a tight
-                        // loop otherwise).
-                        None => bfd_state_change_rx = None,
-                    }
+                change = Self::receive_bfd_state_change(&mut self.bfd_coupling) => {
+                    boxed(|| self.handle_bfd_state_change(change)).await;
                 }
                 changed = Self::receive_link_change(&mut self.link_check.changes) => {
                     if changed {

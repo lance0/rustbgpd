@@ -407,6 +407,10 @@ impl PeerManager {
     /// The replacement publishes the dead session's `PeerDown` on this
     /// actor's ordered RIB lane before the new session gets its `Start`, so
     /// the dead epoch is closed in the RIB before the new one's `PeerUp`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one ordered decision: which exit retires, which is replaced, and whether the replacement starts"
+    )]
     async fn handle_session_task_exit(
         &mut self,
         session_id: u64,
@@ -443,6 +447,23 @@ impl PeerManager {
             .dampening_admission
             .as_ref()
             .is_some_and(rustbgpd_rib::dampening::DampeningAdmission::is_blocked);
+        // A dynamic primary's exit retires the peer. A policy walk that owns
+        // the actor holds the whole notice, before the crash is counted.
+        if !pending
+            && dynamic
+            && enabled
+            && !blocked
+            && self
+                .hold_for_owned_walk(SessionNotification::TaskExited {
+                    session_id,
+                    role,
+                    peer_addr,
+                    cause: cause.clone(),
+                })
+                .is_none()
+        {
+            return;
+        }
         self.metrics.record_session_task_crash(
             &self.peer_metric_label(&peer_key),
             peer_key.interface.as_deref().unwrap_or(""),
@@ -496,6 +517,18 @@ impl PeerManager {
             warn!(peer = %peer_addr, session_id, %cause, "session task crashed; replaced, strict BFD withholds the restart until BFD Up");
             return;
         }
+        if self.bfd_withholding(&peer_addr) {
+            // A BFD Down holds this peer: the Up that releases the hold
+            // sends the replacement its `Start`. An Up handled before this
+            // exit met the ended session and left the hold in place, so the
+            // desired state is republished for the BFD actor to re-confirm
+            // the level, as on the strict path. Inside a generation
+            // publication is suspended, and its commit or abort settles it.
+            self.set_bfd_peer_disabled(peer_addr, false);
+            self.keep_bfd_hold_across_replacement(peer_addr);
+            warn!(peer = %peer_addr, session_id, %cause, "session task crashed; replaced, the BFD hold withholds the restart until BFD Up");
+            return;
+        }
         // The replacement's command channel is new and empty.
         let started = self.peers.get(&peer_key).is_some_and(|managed| {
             managed
@@ -546,7 +579,7 @@ impl PeerManager {
             // one was handled is applied before the caller goes on.
             while let Ok(notification) = self.session_notify_rx.try_recv() {
                 self.drain_ready_session_lifecycle_notifications();
-                self.handle_session_notification(notification).await;
+                super::boxed(|| self.handle_session_notification(notification)).await;
             }
             return;
         }
@@ -579,7 +612,7 @@ impl PeerManager {
                 return;
             };
             if let Some(notification) = notification {
-                self.handle_session_notification(notification).await;
+                super::boxed(|| self.handle_session_notification(notification)).await;
             }
         }
     }
@@ -671,10 +704,22 @@ impl PeerManager {
     /// Capture one finite outer round. Nested drains keep one peer's notices
     /// ordered; unrelated notices they discover belong to the following round.
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+        self.handle_session_notification_round(notification, usize::MAX)
+            .await;
+    }
+
+    /// [`Self::handle_session_notification`], capturing at most `more`
+    /// further queued notifications into the outer round: a policy walk's
+    /// seam bounds what one round takes from the channel.
+    pub(super) async fn handle_session_notification_round(
+        &mut self,
+        notification: SessionNotification,
+        more: usize,
+    ) {
         self.session_notification_depth += 1;
         if self.session_notification_depth > 1 {
             let mut retirements = Vec::new();
-            self.handle_one_session_notification(notification, &mut retirements)
+            super::boxed(|| self.handle_one_session_notification(notification, &mut retirements))
                 .await;
             self.finish_notification_round(retirements).await;
             self.session_notification_depth -= 1;
@@ -682,7 +727,7 @@ impl PeerManager {
         }
         let owner = self.peer_key_for_session(session_notification_id(&notification));
         self.defer_session_notification(owner, notification);
-        for _ in 0..self.session_notify_rx.ready_count() {
+        for _ in 0..self.session_notify_rx.ready_count().min(more) {
             if let Ok(notification) = self.session_notify_rx.try_recv() {
                 let owner = self.peer_key_for_session(session_notification_id(&notification));
                 self.defer_session_notification(owner, notification);
@@ -714,8 +759,10 @@ impl PeerManager {
                     .release_deferred_session_notification(index)
                     .expect("the captured notification remains queued");
                 self.drain_ready_session_lifecycle_notifications();
-                self.handle_one_session_notification(notification, &mut retirements)
-                    .await;
+                super::boxed(|| {
+                    self.handle_one_session_notification(notification, &mut retirements)
+                })
+                .await;
             }
             self.finish_notification_round(retirements).await;
             // A newly deferred ordinary retirement belongs to the next
@@ -732,8 +779,10 @@ impl PeerManager {
                     .release_deferred_session_notification(0)
                     .expect("the deferred collision remains queued");
                 let mut retirements = Vec::new();
-                self.handle_one_session_notification(notification, &mut retirements)
-                    .await;
+                super::boxed(|| {
+                    self.handle_one_session_notification(notification, &mut retirements)
+                })
+                .await;
                 self.finish_notification_round(retirements).await;
             }
             // Unrelated notices found by a nested drain form the next finite batch.
@@ -1098,6 +1147,7 @@ impl PeerManager {
         notification: SessionNotification,
         retirements: &mut Vec<NotificationRetirement>,
     ) {
+        self.count_owned_walk_event();
         match notification {
             SessionNotification::OpenReceived {
                 session_id,
@@ -1126,8 +1176,10 @@ impl PeerManager {
                     .get(&peer_key)
                     .is_some_and(|m| m.pending_inbound.is_some())
                 {
-                    self.resolve_collision(peer_key.clone(), remote_router_id, peer_asn)
-                        .await;
+                    super::boxed(|| {
+                        self.resolve_collision(peer_key.clone(), remote_router_id, peer_asn)
+                    })
+                    .await;
                 }
                 // The session whose OPEN this is, if it is the primary now: a
                 // collision winner promoted just above takes the retention
@@ -1191,8 +1243,18 @@ impl PeerManager {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
                     self.mark_unadmitted_disabled_dynamic(&peer_key);
                 } else if self.peers.get(&peer_key).is_some_and(|m| m.is_dynamic) {
-                    if let Some(retirement) =
-                        self.prepare_dynamic_notification_retirement(&peer_key)
+                    // Retiring removes the peer from the table. A policy
+                    // walk that owns the actor captured it, so the walk
+                    // holds the notice until it ends.
+                    if self
+                        .hold_for_owned_walk(SessionNotification::BackToIdle {
+                            session_id,
+                            role,
+                            peer_addr,
+                        })
+                        .is_some()
+                        && let Some(retirement) =
+                            self.prepare_dynamic_notification_retirement(&peer_key)
                     {
                         retirements.push(retirement);
                     }
@@ -1212,12 +1274,19 @@ impl PeerManager {
                             None => false,
                             // An exited primary has no reconnect wait to honour.
                             Some(rustbgpd_transport::StateQueryOutcome::SessionGone) => {
-                                self.promote_pending_inbound_unless_backoff(&peer_key, None)
-                                    .await
+                                super::boxed(|| {
+                                    self.promote_pending_inbound_unless_backoff(&peer_key, None)
+                                })
+                                .await
                             }
                             Some(rustbgpd_transport::StateQueryOutcome::State(state)) => {
-                                self.promote_pending_inbound_unless_backoff(&peer_key, Some(&state))
-                                    .await
+                                super::boxed(|| {
+                                    self.promote_pending_inbound_unless_backoff(
+                                        &peer_key,
+                                        Some(&state),
+                                    )
+                                })
+                                .await
                             }
                             // A live primary whose backoff streak is unknown:
                             // promoting could bypass its wait and reset the
@@ -1580,6 +1649,7 @@ impl PeerManager {
 
     pub(super) fn drain_ready_session_lifecycle_notifications(&mut self) {
         while let Ok(notification) = self.session_lifecycle_rx.try_recv() {
+            self.count_owned_walk_event();
             self.handle_session_lifecycle_notification(&notification);
         }
     }

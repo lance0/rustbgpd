@@ -1580,9 +1580,14 @@ async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
         Some(keys([peer.addr()])),
     );
     let rib = async {
-        let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
             panic!("expected forward authoritative RIB apply");
         };
+        assert_eq!(sole_replacement(replacements).peer, peer);
         reply
             .send(Err(rustbgpd_rib::RibCommandError::internal(SECRET)))
             .unwrap();

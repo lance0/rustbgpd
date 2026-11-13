@@ -1861,6 +1861,19 @@ fn rfc8212_status_manager() -> (PeerManager, mpsc::Receiver<RibUpdate>) {
     (mgr, rib_rx)
 }
 
+/// The one member of an authoritative export-policy batch. A snapshot walk
+/// sends a peer alone in its export pair to the RIB as a batch of one.
+fn sole_replacement(
+    replacements: Vec<rustbgpd_rib::PeerExportPolicyReplacement>,
+) -> rustbgpd_rib::PeerExportPolicyReplacement {
+    assert_eq!(
+        replacements.len(),
+        1,
+        "a peer alone in its export pair is a batch of one"
+    );
+    replacements.into_iter().next().unwrap()
+}
+
 /// Answer every RIB command the policy snapshot can emit, reporting a fixed
 /// retained GR/LLGR stale count for `QueryPeerRetainedStale`.
 fn spawn_rfc8212_rib_stub(
@@ -1878,6 +1891,9 @@ fn spawn_rfc8212_rib_stub(
                 }
                 RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    let _ = reply.send(Ok(Vec::new()));
                 }
                 _ => {}
             }
@@ -1928,3 +1944,4 @@ mod transport_config;
 #[cfg(target_os = "linux")]
 mod unnumbered;
 mod wait_sites;
+mod walk_events;

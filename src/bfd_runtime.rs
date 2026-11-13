@@ -240,6 +240,37 @@ impl BfdStateChangeReceiver {
             }
         }
     }
+
+    /// The next queued change, without waiting. `None` when nothing is
+    /// queued, or the channel is closed and drained.
+    pub(crate) fn try_recv(&mut self) -> Option<BfdStateChange> {
+        loop {
+            let peer = self.wake.try_recv().ok()?;
+            let change = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&peer);
+            if change.is_some() {
+                return change;
+            }
+        }
+    }
+
+    /// Take one queued change `wanted` accepts and leave every other one
+    /// queued. The taken change's wake token stays behind; `recv` and
+    /// `try_recv` skip a token with no entry.
+    pub(crate) fn try_take_if(
+        &self,
+        wanted: impl Fn(&BfdStateChange) -> bool,
+    ) -> Option<BfdStateChange> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let peer = pending.values().find(|change| wanted(change))?.peer;
+        pending.remove(&peer)
+    }
 }
 
 impl BfdRuntimeConfig {

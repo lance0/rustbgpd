@@ -94,7 +94,7 @@ fn crash_count(mgr: &PeerManager) -> Option<f64> {
 }
 
 /// A test peer at `PEER` whose restarted sessions dial a closed port.
-fn manager_with_peer() -> PeerManager {
+pub(super) fn manager_with_peer() -> PeerManager {
     let mut mgr = test_peer_manager();
     insert_test_managed_peer(&mut mgr, PEER, closed_peer_handle(), false);
     mgr.peers
@@ -166,7 +166,7 @@ fn manager_with_full_rib_mailbox() -> (
 }
 
 /// Bring the session that dialed `listener` to Established.
-async fn accept_and_establish(listener: &TcpListener) -> tokio::net::TcpStream {
+pub(super) async fn accept_and_establish(listener: &TcpListener) -> tokio::net::TcpStream {
     let (mut client, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
         .await
         .expect("the restarted session connects")

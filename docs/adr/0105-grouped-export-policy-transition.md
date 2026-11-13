@@ -344,6 +344,144 @@ is alone in its update group rebuilds a group table and resyncs its own
 table in that turn; bounding it below one member needs a resumable
 replacement, which ADR-0111 examined and rejected.
 
+**Amended:** 2026-11-13 — the forward walks stop rolling back on elapsed
+time. Section 4 and the amendments above describe one two-minute budget for
+the authoritative remainder and one for a cohort fallback's batch and paced
+walk, each an absolute deadline for the whole walk. Measured at a full
+table, that deadline rolled back a reload of roughly 80 or more peers with
+distinct export chains although every RIB command was completing, and the
+rollback then repeated the same work in reverse. Both forward budgets are
+now stall detectors, on the rule the rollback wait uses: after each
+completed step (a target's session legs or its whole per-peer apply, a
+batch, a paced command, a group's Route Refreshes) the budget expires
+`RIB_BATCH_REPLY_TIMEOUT` later. The refreshes are session round trips, not
+RIB work; renewing after them keeps a group whose refreshes are slow from
+spending the stall timeout of the RIB command that follows, as the per-peer
+command already excludes its own refresh from the budget. A walk that keeps completing
+units commits however long it takes; a walk whose RIB completes no unit for
+two minutes rolls back, as does one where a peer refuses or fails its step.
+Expiry still admits no further command, and an admitted command stays ahead
+of its rollback. The RFC 8212 presence proofs that precede a walk and the
+honor-knob fan-outs keep an absolute shared budget. The peer manager holds
+the transaction for the whole walk, so mutations and lifecycle commands wait
+longer behind a large reload than they did; readiness and admitted operator
+reads are served throughout. The outer bound is the owner's fixed 30-minute
+settlement budget: at about 1.5 seconds per distinct-chain peer at a full
+table, a forward walk alone reaches it near 1,200 such peers, and a walk
+that fails late and must be restored reaches it near 600. Reaching it fences
+the daemon, so that budget, not this change, is the limit to revisit before
+a route server carries that many per-neighbor export policies.
+
+The same change sends a remainder peer whose export pair is its own through
+the batch entry point, as a batch of one. The remainder amendment above kept
+the per-peer command for it. A unicast member alone in its update group
+moves in that batch as a shared cohort of one: the RIB builds the
+destination table and emits the old-to-new delta, where the per-peer command
+regroups the member and resyncs its whole table. In checkpoints at 256 rows
+with 16 such members registered, the batch of one passes about 5,600 and the
+per-peer command about 16,000; both put the same 256 announcements on the
+wire. Each command also does work in proportion to the registered peers
+(about 12 checkpoints per peer for the batch, about 28 for the per-peer
+command), so the batch adds no per-command table or fleet pass the per-peer
+command did not have. At a full table the 2026-11-12 rollback measurement
+restored such members as shared cohorts of one in about 0.83 s each, against
+about 1.47 s for the per-peer forward command; the forward figure on this
+path is the campaign's to measure. A member the batch cannot move on the
+shared transition (an ungrouped or peer-context export chain, a
+per-client-best member, a sender of any family other than IPv4 or IPv6
+unicast, mixed destinations under one source group) is handed back and
+applied by the paced walk, whose body is the per-peer command's own regroup
+and resync, so its end state is unchanged at the cost of one short extra RIB
+command. A member with no RIB registration is skipped inside the batch, as
+the per-peer command's typed absence was accepted. The walk's order is the
+remainder amendment's rule, now with every eligible Established peer
+planned: units run in the caller's order of each unit's first target. A pair
+of any size, one member included, runs where its first member stands in
+groups of at most 100; each group runs its session legs, its batch with any
+paced commands and its Route Refreshes before the next unit starts. A target
+on the per-peer command is a unit of its own in its caller position, whole,
+as before. With every peer planned, running the legs ahead of the walk would
+have put all N sessions on the candidate import chain, each with its Route
+Refresh pending and the RIB still exporting to it under the old chain, for
+the whole walk, which is minutes at 150 distinct chains and a full table,
+and a failed reload would have exposed all N sessions instead of the ones
+reached. Interleaved, that state lasts one unit, and the rollback restores
+the units reached. The per-peer command remains for a target that carries retry intent or an
+unconfirmed install, an RFC 8212 presence transition, every target of a
+snapshot that names a peer twice, the honor-knob fan-outs and a single-peer
+hot update.
+
+**Amended:** 2026-11-13 — the walk serves session events between its units.
+Section 1 says the peer manager services only its readiness lane while it
+awaits a session or RIB reply, and later amendments added admitted operator
+reads. With the forward walks and the rollback wait bounded by a stall
+timeout instead of two minutes in total, a walk can hold the actor for many
+minutes, and everything else the run loop does waited for it: a BFD Down
+did not stop its BGP session, a crashed session task was not restarted and
+no session event was published until the walk ended. The owner now serves a
+fixed set of events at seams between its steps, most of them where it
+already drained operator reads: after each target's session step (inside a
+group, between two members' steps: a planned member keeps only its key and
+chains there, no session handle), after each group's batch and each paced
+command, at the end of each unit, between the members of a cohort's session
+setup and of its deferred refreshes, between a rollback's session steps and
+refreshes, and, while it waits for the detached restore, each time that task
+has completed a RIB command when the owner is next polled.
+Served there: BFD state changes and due BFD command retries, link changes
+and link-check retries, session lifecycle events, one round of session
+notifications, and NOTIFICATION events, in the run loop's order (lifecycle
+events before a notification, queued BFD changes before a BFD retry). What
+a seam takes from the BFD, session notification and NOTIFICATION event
+queues is bounded at eight of each per seam; a unit has at least two seams.
+The bound is on what the seam takes, not on what a served handler drains:
+lifecycle events are drained whole, as in the run loop, and a notification
+round that retires, replaces or promotes a session handles every session
+notification queued at that moment, as does a served BFD Down that retires
+a pending inbound session. A flood therefore costs a seam a fixed amount of
+work only while no event in it ends a session. Serving is not
+progress: the stall budget is never renewed at a seam, and the time spent
+serving is taken out of it. Nothing is served inside a unit, which holds a
+session handle across its awaits, except link changes, which only ask
+sessions to check and are served in every wait of the walk, including the
+cohort's clean transition, the one long wait with no seam.
+
+Ownership is unchanged. The command receiver, internal commands, max-prefix
+restart timers, discovery, reconciles and retention stay behind the
+transaction, so no mutation, inbound connection or shutdown runs inside it.
+A served handler may replace a static peer's session or latch the peer
+disabled; it never removes a peer the walk captured. The one notification
+that would, a dynamic peer's session going idle or its task ending, is held
+and put back on the notification channel when the transaction returns, so
+the run loop retires the peer after the owning command, as before. A
+replaced session is spawned from the manager's bookkeeping, which the walk
+advances only when a session acknowledges a chain: a peer whose step has run
+restarts on the candidate chain, one still to walk on the prior chain and is
+then walked, and one replaced during a rollback on the restored chain. Its
+RIB identity is the peer's slot, which a replacement keeps. The exception is
+a dynamic peer whose task exit the walk holds: no session is left to
+acknowledge, so the peer adopts the chains of each step, forward or
+rollback, without a session step or Route Refresh, and owes nothing,
+because it is retired when the walk ends.
+
+A SIGHUP generation suspends BFD coupling for its whole length, and the
+ordinary handler ignores every change while it does. Inside a generation a
+seam therefore takes only a genuine Down of an accepted member from the
+queue, stops the BGP session and records the hold as a prior one, so a
+generation that aborts keeps it and the BFD Up that follows still sends the
+`Start` the stopped session is owed. An Up, a release and every level
+report stay queued until the generation ends, as does a `Start` retry; a
+`BfdDown` retry runs. A peer latched disabled inside a generation has its
+BFD session drained when the generation ends either way: an abort now
+recomputes the disabled set from the peer table as a commit does. Outside a
+generation the ordinary handler runs at the seam.
+
+The phase line reports the result: `owned_wait_service_gap_max_us` (the
+longest interval between two seams, or from the walk's start or to its
+end), `events_served` and `event_service_us`. Later work, not in this
+amendment: inbound connections for static peers, which need a lane of their
+own off the command channel; max-prefix restart timers and BFD Up inside a
+generation; and a seam inside the cohort's clean transition.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

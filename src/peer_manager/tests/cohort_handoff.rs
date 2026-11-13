@@ -277,10 +277,15 @@ async fn clean_state_first_timeout_then_established_commits() {
     let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
     let rib = async {
         tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
-        let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
             panic!("expected forward authoritative RIB apply");
         };
-        reply.send(Ok(())).unwrap();
+        assert_eq!(sole_replacement(replacements).peer.addr(), peer);
+        reply.send(Ok(Vec::new())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, rib);
     assert!(
@@ -352,7 +357,9 @@ async fn clean_state_non_established_carries_pending_intent_and_commits() {
 
 /// The shared clean-state retry window bounds retries, not the per-peer RIB
 /// legs between them. On the authoritative walk, the first peer's retry must
-/// not let its long RIB export step expire the second peer's retry.
+/// not let its long RIB export step expire the second peer's retry. The
+/// first peer carries export retry intent, so its RIB step is the per-peer
+/// command, inline between the two peers' probes.
 #[tokio::test(start_paused = true)]
 async fn clean_state_retry_survives_long_rib_leg_between_peers() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
@@ -384,6 +391,11 @@ async fn clean_state_retry_survives_long_rib_leg_between_peers() {
             false,
         );
     }
+    manager
+        .peers
+        .get_mut(&key(first.addr()))
+        .unwrap()
+        .pending_export_apply = true;
     // The second peer keeps its export chain, so the batched cohort declines
     // and both peers take the per-peer authoritative walk in order.
     let targets = vec![
@@ -1763,8 +1775,11 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
 
     let next = deny_policy_chain();
     // Distinct export targets keep this snapshot off the LAN-462
-    // import-tolerant cohort (no repeated export pair) and on the per-peer
-    // authoritative transaction whose rollback ordering this proof pins.
+    // import-tolerant cohort (no repeated export pair) and on the
+    // authoritative transaction whose rollback ordering this proof pins:
+    // every peer is alone in its export pair, so each is a unit of its own:
+    // its session legs, a batch of one, then its Route Refresh. The last
+    // peer's session leg fails, after every earlier unit completed.
     let apply = manager.apply_resolved_policy_snapshot(
         peers
             .iter()
@@ -1780,13 +1795,18 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
     );
     let drive_rib = async {
         for expected_peer in peers.iter().take(peers.len() - 1) {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
+            let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = rib_rx.recv().await.unwrap()
             else {
-                panic!("expected forward RIB restore");
+                panic!("expected forward RIB batch");
             };
-            assert_eq!(peer, PeerId::from_addr(*expected_peer));
-            reply.send(Ok(())).unwrap();
+            assert_eq!(
+                sole_replacement(replacements).peer,
+                PeerId::from_addr(*expected_peer)
+            );
+            reply.send(Ok(Vec::new())).unwrap();
         }
 
         // The 160 restores go back newest first in batches of at most 100:
@@ -1904,7 +1924,8 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
     assert!(
         result
             .as_ref()
-            .is_err_and(|error| error.contains("injected final session failure")),
+            .is_err_and(|error| error.contains("injected final session failure")
+                && error.contains("already-applied peers restored")),
         "the forced final failure must drive a complete rollback: {result:?}"
     );
 }
@@ -3330,13 +3351,14 @@ async fn paced_handoff_mid_walk_failure_restores_every_prior() {
     }
 }
 
-/// The cohort batch and every paced command share one budget of their own:
-/// the cohort walk alone exceeding it fails and restores. A batch that takes
-/// 70 s leaves 50 s for the walk: a command answering 70 s later is past the
-/// budget, so the reload restores instead of issuing the next one. A fresh
-/// deadline per command would accept it.
+/// The cohort batch and its paced commands are bounded by a stall timeout,
+/// not by a total: a batch that takes 70 s and two commands that each answer
+/// 70 s after the previous one are all accepted, 210 s into the walk. The
+/// next command is never answered, so the walk ends `RIB_BATCH_REPLY_TIMEOUT`
+/// after the last completed command and the reload restores. A deadline
+/// renewed only by the batch would refuse the second command's answer.
 #[tokio::test(start_paused = true)]
-async fn paced_handoff_walk_shares_the_batch_budget() {
+async fn paced_handoff_walk_is_bounded_by_a_stall_timeout() {
     let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(46, 3);
     let next = deny_policy_chain();
     let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
@@ -3363,21 +3385,43 @@ async fn paced_handoff_walk_shares_the_batch_budget() {
             .map(|replacement| replacement.peer)
             .collect();
         reply.send(Ok(ids.clone())).unwrap();
-        let (_, late) = expect_paced(&mut rib_rx, &ids[..1], &next).await;
+        let (_, slow) = expect_paced(&mut rib_rx, &ids[..1], &next).await;
         tokio::time::sleep(Duration::from_secs(70)).await;
         assert!(
-            late.send(Ok(paced_reply(&[], 1, 1))).is_err(),
-            "the command's wait ended at the shared deadline, 50 s after it was sent"
+            slow.send(Ok(paced_reply(&[], 1, 1))).is_ok(),
+            "a command that completes 70 s after the previous one is inside the stall timeout"
+        );
+        let (_, slower) = expect_paced(&mut rib_rx, &ids[1..], &next).await;
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        assert!(
+            slower.send(Ok(paced_reply(&ids[2..], 1, 1))).is_ok(),
+            "each completed command renews the stall timeout"
+        );
+        let (_, stalled) = expect_paced(&mut rib_rx, &ids[2..], &next).await;
+        tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            stalled.send(Ok(paced_reply(&[], 1, 1))).is_err(),
+            "the command's wait ended at the stall timeout"
         );
         answer_restore(&mut rib_rx, &peers).await;
     };
-    let (result, ()) = tokio::join!(apply, drive_rib);
+    let started = tokio::time::Instant::now();
+    let apply = async {
+        let result = apply.await;
+        (result, started.elapsed())
+    };
+    let ((result, applied_after), ()) = tokio::join!(apply, drive_rib);
     assert!(
         result
             .as_ref()
-            .is_err_and(|error| error.contains("shared policy-walk budget")
+            .is_err_and(|error| error.contains("policy-walk stall timeout")
                 && error.contains("already-applied peers restored")),
         "{result:?}"
+    );
+    assert!(
+        applied_after >= Duration::from_secs(210) + RIB_BATCH_REPLY_TIMEOUT
+            && applied_after < Duration::from_secs(212) + RIB_BATCH_REPLY_TIMEOUT,
+        "the walk ends one stall timeout after the last completed command, then waits for the restore the stub answers a second later: {applied_after:?}"
     );
     for peer in peers {
         assert!(
@@ -3433,14 +3477,17 @@ async fn paced_cohort_walk_does_not_spend_the_remainder_budget() {
         let (_, reply) = expect_paced(&mut rib_rx, &ids[2..], &next).await;
         tokio::time::sleep(Duration::from_secs(10)).await;
         reply.send(Ok(paced_reply(&[], 1, 1))).unwrap();
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = recv_rib(&mut rib_rx).await
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = recv_rib(&mut rib_rx).await
         else {
-            panic!("expected the remainder's per-peer command");
+            panic!("expected the remainder's batch of one");
         };
-        assert_eq!(peer.addr(), peers[3]);
+        assert_eq!(sole_replacement(replacements).peer.addr(), peers[3]);
         tokio::time::sleep(Duration::from_secs(30)).await;
         // A walk that already timed out dropped the reply; the result says so.
-        let _ = reply.send(Ok(()));
+        let _ = reply.send(Ok(Vec::new()));
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
     result.expect("the remainder runs on its own budget and the reload commits");

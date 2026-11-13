@@ -42,10 +42,10 @@ use super::{
 /// lines instead of either silence or one line per peer.
 const COHORT_SETUP_PROGRESS_INTERVAL: usize = 64;
 
-/// The most members of one shared export pair that the authoritative
-/// remainder sends in one RIB batch. A shared cohort's batch turn grows with
-/// its members, so a larger pair is sent as several batches and other RIB
-/// work runs between them.
+/// The most members of one export pair that the authoritative remainder
+/// sends in one RIB batch. A shared cohort's batch turn grows with its
+/// members, so a larger pair is sent as several batches and other RIB work
+/// runs between them.
 const PAIR_BATCH_MEMBERS: usize = 100;
 
 /// The union is retained even if a candidate chain stops referencing a dataset.
@@ -198,10 +198,16 @@ struct CapturedResolvedPolicy {
     /// `pending_refresh` armed (`RefreshFailureHandling::BestEffortRearm`) —
     /// that is unfinished convergence debt, not a rejected desired change.
     ///
-    /// It is false only when the forward failed *before* any refresh was
-    /// attempted (session hot-apply bail, RIB failure, a peer that stopped
-    /// reporting Established). `AdjRibIn` provably never left the prior policy
-    /// there, so rollback restores the captured prior pending state
+    /// It is false when no Route Refresh was attempted under the candidate
+    /// import chain: the forward failed before the peer's refresh step
+    /// (session hot-apply bail, RIB failure, a peer that stopped reporting
+    /// Established), or the peer is planned into a batched unit whose
+    /// refreshes had not run. No family was re-requested under the candidate
+    /// chain, so the routes the peer sent before its session took that chain
+    /// are still held as the prior policy accepted them. An UPDATE that
+    /// arrived after the session took the candidate import chain was
+    /// evaluated under it; this flag does not account for those routes.
+    /// Rollback restores the captured prior pending state
     /// (`RefreshFailureHandling::BestEffortRestorePrior`). After such an exact,
     /// fully-unwound rollback, retry intent is structural: the caller's
     /// configuration never advanced, so the next reload re-derives the same
@@ -386,13 +392,18 @@ impl PolicySnapshotFailure {
     }
 }
 
-/// One absolute RIB budget covering a whole `O(peers)` policy walk, anchored
-/// on first use rather than at construction so session-side work that runs
-/// before the first RIB command does not consume it.
+/// The RIB budget of an `O(peers)` policy walk, anchored on first use rather
+/// than at construction so session-side work that runs before the first RIB
+/// command does not consume it.
 ///
-/// A serial walk must bound its RIB waits in total, not per peer: a fresh
-/// per-peer deadline multiplies by the fleet size and therefore bounds
-/// nothing, which is the opposite of what an actor-liveness deadline is for.
+/// A walk that never calls [`Self::progressed`] is bounded in total: every
+/// RIB wait shares the one absolute deadline (the honor-knob fan-outs and
+/// the RFC 8212 presence proofs). The export-policy snapshot's forward walk
+/// and its rollback call `progressed` after each completed unit, which makes
+/// the budget a stall detector: it expires `RIB_BATCH_REPLY_TIMEOUT` after
+/// the last completed unit, so a walk that keeps completing units finishes
+/// however long it takes, inside the owner's settlement budget, and only a
+/// RIB that stops answering ends it.
 #[derive(Default)]
 pub(super) struct LazyRibBudget(Option<tokio::time::Instant>);
 
@@ -442,8 +453,8 @@ struct PolicySnapshotContext {
 
 /// One peer's policy apply, stopped after its session legs and before its RIB
 /// step. A rollback plans every peer this way; the forward remainder walk
-/// plans the Established peers that share an export pair, so that their RIB
-/// steps run as one batch.
+/// plans every Established peer eligible for a batched RIB step, so that the
+/// RIB steps of one export pair run as one batch.
 struct PolicyRollbackPeerPlan {
     peer_key: PeerKey,
     export_restore: Option<(Option<PolicyChain>, bool)>,
@@ -496,14 +507,14 @@ impl std::fmt::Display for PolicyRollbackFailure {
 
 fn paced_budget_expired() -> String {
     format!(
-        "RIB manager did not reply within the {:?} shared policy-walk budget while applying paced export policies",
+        "RIB manager did not reply within the {:?} policy-walk stall timeout while applying paced export policies",
         super::RIB_BATCH_REPLY_TIMEOUT
     )
 }
 
 fn walk_budget_spent() -> String {
     format!(
-        "the {:?} shared policy-walk budget expired before the RIB admitted the next export-policy command",
+        "the {:?} policy-walk stall timeout expired before the RIB admitted the next export-policy command",
         super::RIB_BATCH_REPLY_TIMEOUT
     )
 }
@@ -571,7 +582,32 @@ pub(super) fn paced_remaining(
         .then_some(pending)
 }
 
-/// How often a long restore reports its progress.
+/// Throttles a long walk's progress log line.
+struct WalkProgressLog {
+    started: Instant,
+    logged: Instant,
+}
+
+impl WalkProgressLog {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            logged: now,
+        }
+    }
+
+    /// The walk's elapsed milliseconds when a progress line is due: at most
+    /// one per [`RESTORE_PROGRESS_LOG_INTERVAL`], asked as units complete.
+    fn due(&mut self) -> Option<u64> {
+        (self.logged.elapsed() >= RESTORE_PROGRESS_LOG_INTERVAL).then(|| {
+            self.logged = Instant::now();
+            elapsed_us(self.started) / 1000
+        })
+    }
+}
+
+/// How often a long policy walk or restore reports its progress.
 const RESTORE_PROGRESS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The RIB half of one policy rollback partition, run as a detached task so
@@ -1313,6 +1349,10 @@ impl PeerManager {
             remainder_targets: targets.len(),
             ..PolicySnapshotPhaseTimings::default()
         };
+        // From here to the return below the walk owns the actor: its seams
+        // serve BFD, link and session events, and a notification that would
+        // retire a dynamic peer is held until the walk has ended.
+        let owns_actor = self.begin_owned_walk();
         let outcome = self
             .apply_resolved_policy_snapshot_classified_inner(
                 targets,
@@ -1321,6 +1361,11 @@ impl PeerManager {
                 operator_reads,
             )
             .await;
+        let service = if owns_actor {
+            self.end_owned_walk()
+        } else {
+            super::OwnedWalkService::default()
+        };
         let total_us = elapsed_us(snapshot_started);
         let attributed_us = phases
             .preflight_us
@@ -1351,6 +1396,9 @@ impl PeerManager {
             convergence_check_us = phases.convergence_check_us,
             total_us,
             unattributed_us = total_us.saturating_sub(attributed_us),
+            owned_wait_service_gap_max_us = service.gap_max_us,
+            events_served = service.events_served,
+            event_service_us = service.service_us,
             "reload generation phase timing"
         );
         outcome
@@ -1374,9 +1422,11 @@ impl PeerManager {
         // anything below can touch a peer, so one incapable peer rejects the
         // whole edit rather than being discovered mid-fanout and unwound.
         let preflight_started = Instant::now();
-        // One forward RIB budget for the whole transaction: the presence
-        // proofs below and the authoritative walk's per-peer applies both
-        // queue on the RIB's primary lane, so they are bounded in total.
+        // The forward RIB budget: the presence proofs below share it as one
+        // absolute deadline and it is then reset, so the authoritative walk
+        // anchors it at its own first RIB command and renews it after each
+        // completed unit. For the walk it bounds a stalled RIB, not the
+        // walk's total time.
         let mut context = PolicySnapshotContext {
             forward: LazyRibBudget::default(),
             rollback: LazyRibBudget::default(),
@@ -1393,6 +1443,11 @@ impl PeerManager {
         phases.preflight_us = elapsed_us(preflight_started);
         preflight
             .map_err(|error| PolicySnapshotFailure::rejected_code(error.code, error.message))?;
+        // The presence proofs share one absolute budget among themselves.
+        // The walks that follow are stall-bounded from their own first RIB
+        // command: a budget the preflight anchored would already be spent
+        // by the time a long cohort transition hands over to the remainder.
+        context.forward = LazyRibBudget::default();
         let total_targets = targets.len();
         let cohort_selection_started = Instant::now();
         let mut seen = BTreeSet::new();
@@ -1560,6 +1615,16 @@ impl PeerManager {
                 }
             }
         }
+    }
+
+    /// A seam between two units of the walk: serve the events it would
+    /// otherwise hold ([`Self::serve_owned_walk_events`]). Serving is not
+    /// walk progress, so its time is taken out of `budget`, which is never
+    /// renewed here.
+    async fn serve_walk_events(&mut self, budget: &mut LazyRibBudget) {
+        let started = tokio::time::Instant::now();
+        self.serve_owned_walk_events().await;
+        budget.exclude_since(started);
     }
 
     async fn complete_policy_snapshot(
@@ -1742,13 +1807,15 @@ impl PeerManager {
             .then_some((&managed.export_policy, &target.export_policy))
     }
 
-    /// For each target, the index of the `(installed, target)` export pair it
-    /// shares with at least one other target, numbered by first occurrence;
-    /// `None` for a target whose pair is its own, or that is not locally
+    /// For each target, the index of its `(installed, target)` export pair,
+    /// numbered by first occurrence; `None` for a target that is not locally
     /// eligible for a batched RIB step (see
-    /// [`Self::local_export_only_policy_pair`]). A snapshot naming a peer
-    /// twice shares nothing: its replacements are order-dependent.
-    fn shared_export_pairs(&self, targets: &[ResolvedPeerPolicy]) -> Vec<Option<usize>> {
+    /// [`Self::local_export_only_policy_pair`]). A peer alone in its pair is
+    /// numbered too and goes to the RIB as a batch of one: the batch moves a
+    /// unicast member on the shared transition, which costs less than the
+    /// per-peer command's full resync. A snapshot naming a peer twice
+    /// batches nothing: its replacements are order-dependent.
+    fn batched_export_pairs(&self, targets: &[ResolvedPeerPolicy]) -> Vec<Option<usize>> {
         let mut seen = BTreeSet::new();
         if targets
             .iter()
@@ -1756,27 +1823,21 @@ impl PeerManager {
         {
             return vec![None; targets.len()];
         }
-        // (representative target, members)
-        let mut pairs: Vec<(usize, usize)> = Vec::new();
-        let pair_of: Vec<Option<usize>> = targets
+        // The first target of each pair.
+        let mut representatives: Vec<usize> = Vec::new();
+        targets
             .iter()
             .enumerate()
             .map(|(index, target)| {
                 let pair = self.local_export_only_policy_pair(target)?;
-                let known = pairs.iter().position(|(representative, _)| {
-                    self.local_export_only_policy_pair(&targets[*representative]) == Some(pair)
+                let known = representatives.iter().position(|&representative| {
+                    self.local_export_only_policy_pair(&targets[representative]) == Some(pair)
                 });
-                let known = known.unwrap_or_else(|| {
-                    pairs.push((index, 0));
-                    pairs.len() - 1
-                });
-                pairs[known].1 += 1;
-                Some(known)
+                Some(known.unwrap_or_else(|| {
+                    representatives.push(index);
+                    representatives.len() - 1
+                }))
             })
-            .collect();
-        pair_of
-            .into_iter()
-            .map(|pair| pair.filter(|&pair| pairs[pair].1 >= 2))
             .collect()
     }
 
@@ -1816,18 +1877,27 @@ impl PeerManager {
     /// unpartitioned snapshot and for a partition's stable remainder. It
     /// never recursively selects a cohort.
     ///
-    /// A target whose export pair is its own is a unit applied whole: session
-    /// legs, its `ReplacePeerExportPolicy` RIB step, its Route Refresh. The
-    /// targets that share an export pair run together where the pair's first
-    /// member stands, in groups of at most `PAIR_BATCH_MEMBERS`, and a group
-    /// is a unit too: its members' session legs, then their RIB steps as one
-    /// batch through the entry point the cohort handoff uses, so the RIB
-    /// shares the destination build and the old-to-new delta across the
-    /// group instead of resyncing a full table per member, then their Route
-    /// Refreshes. A session therefore holds the candidate chains ahead of its
-    /// RIB step and refresh for one unit, not for the walk, and a failure has
-    /// touched only the sessions of the units reached. Every RIB command of
-    /// the walk shares the transaction's forward budget.
+    /// Every Established target eligible for a batched RIB step (see
+    /// [`Self::batched_export_pairs`]) is planned. The targets of one export
+    /// pair run together where the pair's first member stands, in groups of
+    /// at most `PAIR_BATCH_MEMBERS`; a peer alone in its pair is a group of
+    /// one. A group is one unit: its members' session legs, then their RIB
+    /// steps as one batch through the entry point the cohort handoff uses,
+    /// so the RIB builds the destination and derives the old-to-new delta
+    /// once instead of resyncing a full table per member, then their Route
+    /// Refreshes. A member the batch cannot move on that shared transition
+    /// comes back and is applied through the paced walk, inside the same
+    /// unit. Every other target is a unit of its own, applied whole (session
+    /// legs, its `ReplacePeerExportPolicy` RIB step, its Route Refresh): a
+    /// target with carried retry intent or an unconfirmed install, an RFC
+    /// 8212 presence transition, and every target of a snapshot that names a
+    /// peer twice. A session therefore holds the candidate chains ahead of
+    /// its RIB step and refresh for one unit, not for the walk, and a
+    /// failure has touched only the sessions of the units reached. Every RIB
+    /// command of the walk is bounded by the transaction's forward budget,
+    /// which the walk renews after each completed step of a unit: the walk
+    /// rolls back when a peer fails its step or the RIB completes nothing
+    /// for `RIB_BATCH_REPLY_TIMEOUT`, never on elapsed time alone.
     #[expect(
         clippy::too_many_lines,
         reason = "the walk keeps prior capture, the session legs, the deferred RIB steps and their refreshes in one rollback owner"
@@ -1840,11 +1910,16 @@ impl PeerManager {
         refresh_count: &mut usize,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
-        let pair_of = self.shared_export_pairs(&targets);
+        let pair_of = self.batched_export_pairs(&targets);
+        let total_targets = targets.len();
+        let mut progress = WalkProgressLog::new();
+        if total_targets > 1 {
+            info!(targets = total_targets, "authoritative policy walk started");
+        }
         // The order rule: units run in the caller's order of each unit's
         // first target. A target that keeps the per-peer command is a unit
-        // of its own; the members of a shared export pair run together, in
-        // caller order, where the pair's first member stands.
+        // of its own; the members of an export pair run together, in caller
+        // order, where the pair's first member stands.
         let mut units: Vec<(Option<usize>, Vec<ResolvedPeerPolicy>)> = Vec::new();
         for (target, pair) in targets.into_iter().zip(pair_of) {
             match pair.and_then(|pair| units.iter_mut().find(|(unit, _)| *unit == Some(pair))) {
@@ -1868,8 +1943,9 @@ impl PeerManager {
             })
             .collect();
         for (pair, group) in groups {
-            // This group's deferred RIB steps: (index into `applied`, plan).
-            let mut planned: Vec<(usize, PolicyRollbackPeerPlan)> = Vec::new();
+            // This group's deferred RIB steps: (index into `applied`, target,
+            // plan).
+            let mut planned: Vec<(usize, &ResolvedPeerPolicy, PolicyRollbackPeerPlan)> = Vec::new();
             for target in group {
                 let peer_key = PeerKey::new(target.address, target.interface.clone());
                 let prior = {
@@ -1926,7 +2002,7 @@ impl PeerManager {
                 // its deferred refresh step has run.
                 applied[applied_idx].adj_rib_in_may_have_moved = plan.is_none();
                 if let Some(plan) = plan {
-                    planned.push((applied_idx, plan));
+                    planned.push((applied_idx, target, plan));
                 }
                 // The apply classified the peer from its state query outcome; its verdict is
                 // authoritative for the convergence-debt scan and adds no extra
@@ -1935,93 +2011,120 @@ impl PeerManager {
                     .peers
                     .get(&peer_key)
                     .is_some_and(|managed| managed.policy_known_down);
+                // This target completed its session legs, or all of its
+                // per-peer apply: the next step is given a full stall
+                // timeout of its own.
+                context.forward.progressed();
                 self.drain_operator_queries(context.operator_reads).await;
+                // Between two members' session legs. A member already
+                // planned keeps only its key and chains here, no session
+                // handle: a handler that replaces its session leaves the
+                // batch to skip it and its Route Refresh to probe it again.
+                self.serve_walk_events(&mut context.forward).await;
             }
-            if planned.is_empty() {
-                continue;
-            }
-            // The group's deferred RIB steps as one batch: a later group of
-            // the pair joins the destination group the first one built. A
-            // failure leaves it unknown which of the batch's members the RIB
-            // moved; the rollback restores every captured prior either way,
-            // since a member can also register with the RIB mid-walk and
-            // that registration installs the chain its session already
-            // holds.
-            {
-                let peer_keys: Vec<PeerKey> = planned
-                    .iter()
-                    .map(|(_, plan)| plan.peer_key.clone())
-                    .collect();
-                let replacements: Vec<PeerExportPolicyReplacement> = planned
-                    .iter()
-                    .map(|(_, plan)| PeerExportPolicyReplacement {
-                        peer: self.rib_peer_of(&plan.peer_key),
-                        export_policy: plan
-                            .export_restore
-                            .as_ref()
-                            .and_then(|(export_policy, _)| export_policy.clone()),
-                    })
-                    .collect();
-                let deadline = context.forward.deadline();
-                if let Err(message) = self
-                    .apply_export_policy_replacements_authoritatively(
-                        &peer_keys,
-                        &replacements,
-                        deadline,
-                        context,
-                    )
-                    .await
+            if !planned.is_empty() {
+                // The group's deferred RIB steps as one batch: a later group of
+                // the pair joins the destination group the first one built. A
+                // failure leaves it unknown which of the batch's members the RIB
+                // moved; the rollback restores every captured prior either way,
+                // since a member can also register with the RIB mid-walk and
+                // that registration installs the chain its session already
+                // holds.
                 {
-                    let apply_error = PolicyApplyFailure {
-                        code: RuntimeConfigPolicyFailureCode::RibApplyRejected,
-                        message,
-                        refresh_delivery_began: false,
-                    };
-                    return Err(self
-                        .fail_authoritative_walk(
-                            applied,
-                            context,
-                            require_clean_convergence,
-                            peer_keys[0].address,
-                            &apply_error,
+                    let peer_keys: Vec<PeerKey> = planned
+                        .iter()
+                        .map(|(_, _, plan)| plan.peer_key.clone())
+                        .collect();
+                    let replacements: Vec<PeerExportPolicyReplacement> = planned
+                        .iter()
+                        .map(|(_, _, plan)| PeerExportPolicyReplacement {
+                            peer: self.rib_peer_of(&plan.peer_key),
+                            export_policy: plan
+                                .export_restore
+                                .as_ref()
+                                .and_then(|(export_policy, _)| export_policy.clone()),
+                        })
+                        .collect();
+                    let batch = self
+                        .apply_export_policy_replacements_authoritatively(
+                            &peer_keys,
+                            &replacements,
+                            &mut context.forward,
+                            context.operator_reads,
                         )
-                        .await);
+                        .await;
+                    if let Err(message) = batch {
+                        let apply_error = PolicyApplyFailure {
+                            code: RuntimeConfigPolicyFailureCode::RibApplyRejected,
+                            message,
+                            refresh_delivery_began: false,
+                        };
+                        return Err(self
+                            .fail_authoritative_walk(
+                                applied,
+                                context,
+                                require_clean_convergence,
+                                peer_keys[0].address,
+                                &apply_error,
+                            )
+                            .await);
+                    }
                 }
-            }
-            // The group's Route Refreshes follow its own commit, not the
-            // pair's or the walk's: until a member's refresh, its `AdjRibIn`
-            // holds routes accepted under the old import chain. They are
-            // deferred past the RIB step exactly as the cohort defers its
-            // members'. A refresh between two groups of one pair is the same
-            // event as one between two pairs: the routes it re-admits reach
-            // a member still awaiting its batch under the old export chain,
-            // and that member's batch then moves it on the delta.
-            for (applied_idx, plan) in &planned {
-                if plan.refresh_failure.is_some()
-                    && let Err(apply_error) = self
-                        .dispatch_deferred_refresh(
+                // The group's Route Refreshes follow its own commit, not the
+                // pair's or the walk's: until a member's refresh, its `AdjRibIn`
+                // holds routes accepted under the old import chain. They are
+                // deferred past the RIB step exactly as the cohort defers its
+                // members'. A refresh between two groups of one pair is the same
+                // event as one between two pairs: the routes it re-admits reach
+                // a member still awaiting its batch under the old export chain,
+                // and that member's batch then moves it on the delta.
+                for (applied_idx, target, plan) in &planned {
+                    if plan.refresh_failure.is_some()
+                        && !self.adopt_policies_of_held_task_exit(
                             &plan.peer_key,
-                            context,
-                            require_clean_convergence,
-                            refresh_count,
+                            target.import_policy.as_ref(),
+                            target.export_policy.as_ref(),
                         )
-                        .await
-                {
-                    applied[*applied_idx].adj_rib_in_may_have_moved =
-                        apply_error.refresh_delivery_began;
-                    let address = plan.peer_key.address;
-                    return Err(self
-                        .fail_authoritative_walk(
-                            applied,
-                            context,
-                            require_clean_convergence,
-                            address,
-                            &apply_error,
-                        )
-                        .await);
+                        && let Err(apply_error) = self
+                            .dispatch_deferred_refresh(
+                                &plan.peer_key,
+                                context,
+                                require_clean_convergence,
+                                refresh_count,
+                            )
+                            .await
+                    {
+                        applied[*applied_idx].adj_rib_in_may_have_moved =
+                            apply_error.refresh_delivery_began;
+                        let address = plan.peer_key.address;
+                        return Err(self
+                            .fail_authoritative_walk(
+                                applied,
+                                context,
+                                require_clean_convergence,
+                                address,
+                                &apply_error,
+                            )
+                            .await);
+                    }
+                    applied[*applied_idx].adj_rib_in_may_have_moved = true;
                 }
-                applied[*applied_idx].adj_rib_in_may_have_moved = true;
+                // The refreshes are session round trips, not RIB work: the
+                // stall budget must not charge the next unit's RIB step for
+                // them, as the per-peer command does not charge its own.
+                context.forward.progressed();
             }
+            // Every captured target belongs to a completed unit here.
+            if let Some(elapsed_ms) = progress.due() {
+                info!(
+                    targets = total_targets,
+                    walked = applied.len(),
+                    elapsed_ms,
+                    "authoritative policy walk in progress"
+                );
+            }
+            // The unit is complete: nothing of it is in flight.
+            self.serve_walk_events(&mut context.forward).await;
         }
         Ok(applied)
     }
@@ -2233,8 +2336,14 @@ impl PeerManager {
             // (`update_import_policy`), but do NOT fire `soft_reset_in` here —
             // the Route Refresh is deferred until after the cohort RIB commit
             // (see the deferred-refresh phase below for the correctness
-            // argument).
-            if import_changed {
+            // argument). A member whose task exit the walk holds owes no
+            // session step at all.
+            let held = self.adopt_policies_of_held_task_exit(
+                peer_key,
+                target.import_policy.as_ref(),
+                target.export_policy.as_ref(),
+            );
+            if import_changed && !held {
                 let import_commands = self
                     .peers
                     .get(peer_key)
@@ -2299,15 +2408,18 @@ impl PeerManager {
                 .expect("cohort peer existed before export hot-apply")
                 .handle()
                 .commands_sender();
-            let apply_result = self
-                .hot_apply_session_policy(
+            let apply_result = if held {
+                Ok(())
+            } else {
+                self.hot_apply_session_policy(
                     rustbgpd_transport::PeerHandle::update_export_policy_via(
                         commands,
                         target.export_policy.clone(),
                     ),
                     "update_export_policy",
                 )
-                .await;
+                .await
+            };
             if let Err(error) = apply_result {
                 if prestaged {
                     self.discard_prepared_export_destination(targets[0]).await;
@@ -2466,6 +2578,9 @@ impl PeerManager {
                 .clone_from(&target.export_policy);
             captured.push(prior);
             self.drain_operator_queries(context.operator_reads).await;
+            // Between two members: no handler removes a peer, so the
+            // members still to set up stay in the table.
+            self.serve_walk_events(&mut context.forward).await;
             if captured.len() % COHORT_SETUP_PROGRESS_INTERVAL == 0
                 || captured.len() == targets.len()
             {
@@ -2527,8 +2642,8 @@ impl PeerManager {
                 self.apply_export_policy_replacements_authoritatively(
                     &peer_keys,
                     &replacements,
-                    tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT,
-                    context,
+                    &mut LazyRibBudget::default(),
+                    context.operator_reads,
                 )
                 .await
             }
@@ -2571,8 +2686,17 @@ impl PeerManager {
         // interned-attr-equal replacements). Members whose import chain was
         // unchanged get no refresh at all, exactly as today.
         let deferred_refresh_started = Instant::now();
+        // The transition was one RIB wait with no seam: a dynamic member
+        // whose task ended during it is held here, before the first refresh
+        // probes its session.
+        self.serve_walk_events(&mut context.forward).await;
         for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
             if import_deltas[index]
+                && !self.adopt_policies_of_held_task_exit(
+                    peer_key,
+                    target.import_policy.as_ref(),
+                    target.export_policy.as_ref(),
+                )
                 && let Err(failure) = self
                     .dispatch_deferred_refresh(
                         peer_key,
@@ -2612,6 +2736,7 @@ impl PeerManager {
                 }));
             }
             captured[index].adj_rib_in_may_have_moved = true;
+            self.serve_walk_events(&mut context.forward).await;
         }
         phase_timings.deferred_refresh_dispatch_us = elapsed_us(deferred_refresh_started);
         Some(Ok(captured))
@@ -2761,12 +2886,13 @@ impl PeerManager {
     /// paced RIB commands. Each command applies the members that fit the
     /// RIB's turn budget and returns the rest, so other RIB work runs between
     /// commands instead of waiting behind one turn that grows with members ×
-    /// rows. The batch and every command of that walk share the caller's
-    /// `deadline`, never renewed per command: a cohort handoff passes one
-    /// `RIB_BATCH_REPLY_TIMEOUT` budget of its own, anchored when the batch
-    /// is sent, and the authoritative remainder passes the transaction's
-    /// forward budget, anchored at its own first command. Any failure,
-    /// including that budget expiring mid-walk, returns
+    /// rows. The batch and every command of that walk are bounded by the
+    /// caller's `budget`, renewed after each completed command, so it expires
+    /// only when the RIB completes none for `RIB_BATCH_REPLY_TIMEOUT`: a
+    /// cohort handoff passes a budget of its own, anchored when the batch is
+    /// sent, and the authoritative remainder passes the transaction's
+    /// forward budget. Any failure, including that budget expiring mid-walk,
+    /// returns
     /// `Err` and the caller restores every captured prior; a peer that left
     /// the RIB comes back skipped, as its reconnect installs the session's
     /// accepted chain.
@@ -2776,16 +2902,17 @@ impl PeerManager {
         &mut self,
         peer_keys: &[PeerKey],
         replacements: &[PeerExportPolicyReplacement],
-        deadline: tokio::time::Instant,
-        context: &mut PolicySnapshotContext,
+        budget: &mut LazyRibBudget,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), String> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
+        let deadline = budget.deadline();
         let rib_tx = self.rib_tx.clone();
         let batch = async {
             let (reply_tx, reply_rx) = oneshot::channel();
-            // An expired budget admits no further batch: the walk is about
-            // to roll back, and a batch queued now would only cost the RIB a
-            // turn to skip.
+            // A lapsed stall timeout admits no further batch: the walk is
+            // about to roll back, and a batch queued now would only cost the
+            // RIB a turn to skip.
             admit_rib_command_before(
                 &rib_tx,
                 deadline,
@@ -2802,33 +2929,32 @@ impl PeerManager {
             }
         };
         let outcome = self
-            .await_with_readiness(
-                tokio::time::timeout_at(deadline, batch),
-                context.operator_reads,
-            )
+            .await_with_readiness(tokio::time::timeout_at(deadline, batch), operator_reads)
             .await;
         self.drain_readiness_queries().await;
         let deferred = outcome.map_err(|_| {
             format!(
-                "RIB manager did not reply within the {:?} shared policy-walk budget while applying the authoritative export-policy batch",
+                "RIB manager did not reply within the {:?} policy-walk stall timeout while applying the authoritative export-policy batch",
                 super::RIB_BATCH_REPLY_TIMEOUT
             )
         })??;
-        self.walk_paced_export_policies(peer_keys, replacements, &deferred, deadline, context)
+        budget.progressed();
+        self.serve_walk_events(budget).await;
+        self.walk_paced_export_policies(peer_keys, replacements, &deferred, budget, operator_reads)
             .await
     }
 
     /// The paced walk over the members the authoritative batch handed back:
     /// each `ApplyPacedExportPolicies` command applies as many of the
     /// remaining members as fit the RIB's turn budget and returns the rest,
-    /// under the cohort batch's deadline.
+    /// under the batch's stall budget.
     async fn walk_paced_export_policies(
         &mut self,
         peer_keys: &[PeerKey],
         replacements: &[PeerExportPolicyReplacement],
         deferred: &[PeerId],
-        deadline: tokio::time::Instant,
-        context: &mut PolicySnapshotContext,
+        budget: &mut LazyRibBudget,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), String> {
         let index_of: std::collections::HashMap<_, _> = replacements
             .iter()
@@ -2850,6 +2976,7 @@ impl PeerManager {
         // list into one turn; the RIB applies the prefix its budget predicts
         // to fit and returns the rest.
         let (mut cost, mut commands, mut widest, mut window) = (None, 0_usize, 0_usize, 1_usize);
+        let mut progress = WalkProgressLog::new();
         while !pending.is_empty() {
             let take = window.min(pending.len());
             // A peer that re-registered since the batch gets its current RIB
@@ -2867,6 +2994,7 @@ impl PeerManager {
                 })
                 .collect();
             let rib_tx = self.rib_tx.clone();
+            let deadline = budget.deadline();
             let command = sent
                 .iter()
                 .map(|(_, replacement)| replacement.clone())
@@ -2890,12 +3018,19 @@ impl PeerManager {
                 }
             };
             let outcome = self
-                .await_with_readiness(
-                    tokio::time::timeout_at(deadline, step),
-                    context.operator_reads,
-                )
+                .await_with_readiness(tokio::time::timeout_at(deadline, step), operator_reads)
                 .await
                 .map_err(|_| paced_budget_expired())??;
+            budget.progressed();
+            if let Some(elapsed_ms) = progress.due() {
+                info!(
+                    members = deferred.len(),
+                    remaining = pending.len(),
+                    commands,
+                    elapsed_ms,
+                    "paced export-policy walk in progress"
+                );
+            }
             let sent_peers: Vec<PeerId> = sent.iter().map(|(_, r)| r.peer).collect();
             let positions = paced_remaining(&sent_peers, &outcome).ok_or_else(|| {
                 "RIB paced export-policy reply does not account for every sent member in caller order"
@@ -2911,7 +3046,8 @@ impl PeerManager {
                 .map(|position| sent[position].0)
                 .chain(rest)
                 .collect();
-            self.drain_operator_queries(context.operator_reads).await;
+            self.drain_operator_queries(operator_reads).await;
+            self.serve_walk_events(budget).await;
         }
         if commands > 0 {
             info!(
@@ -2928,8 +3064,8 @@ impl PeerManager {
     /// dedicated readiness lane.
     ///
     /// `rib_budget` is `Some` when this command is one step of an
-    /// `O(peers)` policy walk: every step of that walk shares the one absolute
-    /// deadline so the walk is bounded in total. `None` is the single-peer
+    /// `O(peers)` policy walk and waits no later than that walk's budget
+    /// (see [`LazyRibBudget`] for which walks renew it). `None` is the single-peer
     /// step of an owned hot update ([`Self::update_runtime_policies_fatal`]):
     /// both halves wait for the RIB, bounded by the settlement owner, since
     /// the dequeued replacement cannot be cancelled and a miss there fences.
@@ -2945,7 +3081,7 @@ impl PeerManager {
         let rib_peer = self.rib_peer_of(peer);
         let timed_out = || {
             RibCommandError::internal(format!(
-                "RIB manager did not reply within the {:?} shared policy-walk budget while updating export policy",
+                "RIB manager did not reply within the {:?} policy-walk budget while updating export policy",
                 super::RIB_BATCH_REPLY_TIMEOUT
             ))
         };
@@ -3171,6 +3307,14 @@ impl PeerManager {
         let Some(refresh_failure) = plan.refresh_failure else {
             return;
         };
+        if self.owned_walk_holds_task_exit(&plan.peer_key) {
+            // The restore step already advanced bookkeeping to the prior
+            // chains; the peer adopts them and owes no refresh.
+            let managed = &self.peers[&plan.peer_key];
+            let (import, export) = (managed.import_policy.clone(), managed.export_policy.clone());
+            self.adopt_policies_of_held_task_exit(&plan.peer_key, import.as_ref(), export.as_ref());
+            return;
+        }
         let pending_after = if plan.is_established {
             match self.soft_reset_in(plan.peer_key.clone(), Vec::new()).await {
                 Ok(()) => plan
@@ -3245,6 +3389,9 @@ impl PeerManager {
             if plan.export_restore.is_none() {
                 self.finish_policy_rollback_rib_success(plan);
             }
+            // The restore task is detached and timed on its own progress,
+            // so there is no budget to take this out of.
+            self.serve_owned_walk_events().await;
         }
     }
 
@@ -3286,6 +3433,10 @@ impl PeerManager {
         let mut errors: Vec<String> = Vec::new();
         let mut failure_code = None;
         let mut plans = Vec::new();
+        // The forward step that failed was a wait with no seam: a dynamic
+        // peer whose task ended during it is held here, before the first
+        // restore step probes its session.
+        self.serve_walk_events(&mut context.rollback).await;
         for prior in priors.into_iter().rev() {
             let address = prior.policy.address;
             let peer_key = PeerKey::new(address, prior.policy.interface.clone());
@@ -3337,6 +3488,7 @@ impl PeerManager {
                     }
                 }
             }
+            self.serve_walk_events(&mut context.rollback).await;
         }
 
         let registered = match self.register_policy_rollback_rib(&plans, context).await {
@@ -3367,6 +3519,7 @@ impl PeerManager {
                 progress,
                 mut task,
             } = registered;
+            let mut completed = progress.clone();
             let stall_deadline = move || {
                 progress.borrow().map_or(deadline, |completed| {
                     deadline.max(completed + super::RIB_BATCH_REPLY_TIMEOUT)
@@ -3382,9 +3535,27 @@ impl PeerManager {
                     }
                 }
             };
-            let outcome = self
-                .await_with_readiness(wait, context.operator_reads)
-                .await;
+            // The restore task has no seam on this actor, so each command
+            // it completes is one: events are served while it runs the
+            // next. The task is detached and its stall detector reads its
+            // own progress, which serving neither renews nor delays.
+            let mut wait = std::pin::pin!(wait);
+            let outcome = loop {
+                let step = async {
+                    tokio::select! {
+                        biased;
+                        outcome = &mut wait => Some(outcome),
+                        Ok(()) = completed.changed() => None,
+                    }
+                };
+                match self
+                    .await_with_readiness(step, context.operator_reads)
+                    .await
+                {
+                    Some(outcome) => break outcome,
+                    None => self.serve_owned_walk_events().await,
+                }
+            };
             if matches!(outcome, Ok(Ok(Ok(_)))) {
                 // Later partitions of this rollback are measured from here.
                 context.rollback.progressed();
@@ -3468,7 +3639,13 @@ impl PeerManager {
         }
 
         for (peer_key, prior_refresh, prior_export) in pending_priors {
-            let Some(managed) = self.peers.get(&peer_key) else {
+            // A peer whose task exit the walk holds is retired when the walk
+            // ends: the debt it was captured with goes with it.
+            let Some(managed) = self
+                .peers
+                .get(&peer_key)
+                .filter(|_| !self.owned_walk_holds_task_exit(&peer_key))
+            else {
                 continue;
             };
             if require_exact_pending
@@ -4377,6 +4554,35 @@ impl PeerManager {
         result
     }
 
+    /// Whether the walk that owns the actor holds the end of `peer_key`'s
+    /// session task. If it does, no session is left to install a chain or
+    /// to refresh, and the peer is retired when the walk ends, its RIB state
+    /// going with its `PeerDown`: the peer takes `import_policy` and
+    /// `export_policy` as a known-down peer does and owes nothing. Every
+    /// session step of a walk, per-peer or cohort, forward or rollback, asks
+    /// this first, and the rollback's exact-pending scan skips such a peer.
+    fn adopt_policies_of_held_task_exit(
+        &mut self,
+        peer_key: &PeerKey,
+        import_policy: Option<&PolicyChain>,
+        export_policy: Option<&PolicyChain>,
+    ) -> bool {
+        if !self.owned_walk_holds_task_exit(peer_key) {
+            return false;
+        }
+        let Some(managed) = self.peers.get_mut(peer_key) else {
+            return false;
+        };
+        managed.import_policy = import_policy.cloned();
+        managed.export_policy = export_policy.cloned();
+        managed.import_install_unknown = false;
+        managed.export_install_unknown = false;
+        managed.pending_refresh = false;
+        managed.pending_export_apply = false;
+        managed.policy_known_down = true;
+        true
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "runtime policy application keeps ordered import and export transitions together"
@@ -4398,6 +4604,14 @@ impl PeerManager {
     ) -> Result<(), PolicyApplyFailure> {
         use std::fmt::Write as _;
         let address = peer_key.address;
+
+        if self.adopt_policies_of_held_task_exit(
+            &peer_key,
+            import_policy.as_ref(),
+            export_policy.as_ref(),
+        ) {
+            return Ok(());
+        }
 
         // ADR-0112: the last gate before this peer is touched. Every live chain
         // apply funnels through here — the snapshot transaction, `hot_update_peer`
@@ -5004,9 +5218,10 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
 
-        let applied = self
-            .refresh_policies_for_config(next_config, affected_peers)
-            .await?;
+        // Thirteen command arms await this future: keep the refresh state
+        // out of it, and so out of the command-dispatch poll frame.
+        let applied =
+            super::boxed(|| self.refresh_policies_for_config(next_config, affected_peers)).await?;
         self.publish_policy_config_event(&event, applied);
         Ok(())
     }

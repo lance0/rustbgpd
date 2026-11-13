@@ -952,11 +952,142 @@ non-Established reply, a departed session task, or retry exhaustion rolls the
 policy change back. RIB compensation is registered before rollback Route
 Refresh work is issued and runs newest first: one batch per prior policy, at
 most 100 peers each, then a few peers per RIB command for the peers whose
-restore resyncs a whole table. The rollback has no total deadline: it is
-bounded by a two-minute stall timeout, measured from the last RIB command it
-completed. A local timeout does not cancel the repair: the late receiver
-remains daemon-owned and retry flags stay armed until a later operation
-proves convergence.
+restore resyncs a whole table. A local timeout does not cancel the repair: the
+late receiver remains daemon-owned and retry flags stay armed until a later
+operation proves convergence.
+
+How long an export-policy change takes depends on its shape. Peers that move
+between the same pair of export policies are applied together, so their cost
+is close to one table per policy pair. Peers whose export change is their own
+(per-neighbor export policies) cost one RIB batch each, a pass over the full
+table, so the change scales with distinct policy chains times table size: at
+a full table, on the order of a second per such peer.
+
+The change is applied one step at a time. A step is the peers of one policy
+pair, at most 100 of them; a larger pair takes several steps in a row. Steps
+run in the order in which the first peer of each pair appears in the
+change. Each step does three things before the next one starts: the peers'
+sessions take their new import and export policies, the RIB commits the
+step's export change, and a Route Refresh is sent to each of its peers whose
+import policy changed. Each of these peers is a step of its own: a peer with
+retry state from an earlier failed change, a peer whose export policy does
+not change (an import-only change), a peer whose change adds or removes its
+import policy under `ebgp_requires_policy`, and every peer of a change that
+names the same peer twice.
+
+A peer the change has not reached yet runs its old policies on its session
+and in the RIB. Inside its own step a peer is briefly in a mixed state.
+From the session change until the RIB commit, the routes advertised to it
+are still the ones its old export policy produced. From the session change
+until its Route Refresh, its session applies the new import policy to every
+UPDATE that arrives, while the routes it sent earlier stay in its Adj-RIB-In
+as the old import policy accepted them; the refresh has the peer resend
+them, and they are then accepted or dropped under the new policy. That
+state lasts for the one step, a RIB batch and the step's refreshes, not for
+the whole change. If the change fails part-way, only the peers of the steps
+it reached were touched, and only those are restored.
+
+Elapsed time does not roll
+the change back. Neither the forward walk nor a rollback has a total deadline;
+each is bounded by a two-minute stall timeout, measured from the last piece of
+work it completed, inside the 30-minute settlement budget described in
+[the settlement watchdog guide](../how-to/settlement-watchdog.md). For the
+forward walk that is one peer's session policy change (or the whole change of
+a peer that is a step of its own), one RIB command, or the Route Refreshes of
+one step; for a rollback it is one RIB command. A change is rolled back when
+a peer refuses or fails its step, or when the walk completes nothing for two
+minutes; a rollback that stalls the same way fences. The log reports a walk
+over more than one peer with `authoritative policy walk started`, then a progress line about every ten seconds, as units
+complete (`authoritative policy walk in progress`, or `paced export-policy
+walk in progress` inside a batch), and the `reload generation phase timing`
+line when it ends; a rollback logs `policy rollback: restoring export
+policies in the RIB`, a progress line on the same rule and `policy rollback:
+export policies restored in the RIB`.
+
+A walk that is still progressing when the 30-minute settlement budget ends
+is fenced like any other owner: the daemon exits 70 and every session drops.
+At a full table that is roughly 1,200 neighbors with per-neighbor export
+policies changed in one reload, or roughly 600 when the walk fails late and
+must also be restored; a RIB that is slow for another reason reaches it
+sooner. Split a change of that size across several reloads.
+
+`rbgp reload` waits 600 seconds by default and exits 1 when that elapses,
+although the reload it is waiting for may still commit. For a large change
+of per-neighbor export policies, raise `--timeout` (at most 3600) and read
+the outcome with `rbgp config last-reload`.
+
+While the walk or a rollback runs, the peer manager serves readiness probes,
+the operator reads its owner admits, its queued RIB updates and link-state
+changes at any moment, so fast external failover does not wait for it.
+
+Between two units of the walk it also serves the events of existing
+sessions. A unit is one peer's session step, one RIB batch or paced command,
+or, during a rollback, one restore command: at a full table, on the order of
+a second for a peer with its own export policy. Served at each boundary
+(a unit has at least two), at most eight of each kind per boundary:
+
+- A BFD state change that takes a session down, and a `BfdDown` that is
+  being retried because the session's mailbox was full. The BGP session is
+  stopped within about one unit of BFD detecting the failure.
+- Session up and down events and NOTIFICATION events, so event subscribers
+  and the session history see them as they happen.
+- A static neighbor's session notifications. A session task that crashed is
+  replaced and restarted on the policy the walk holds for that neighbor at
+  that moment (the new one once its step has run, the prior one before, and
+  the restored one during a rollback). A neighbor held down by BFD has its
+  session replaced but not started until BFD is Up. The third crash in ten
+  minutes latches the neighbor. A max-prefix breach stops the session and
+  latches the neighbor. An OPEN collision is resolved.
+
+The bound is on what a boundary takes from each queue, not on what a served
+event's handler drains: session up and down events are taken whole, and a
+round of notifications that retires, replaces or promotes a session handles
+every session notification queued at that moment, as does a BFD Down that
+ends an inbound collision candidate. When a session is replaced inside a
+reload, operator reads of that peer's import counters show the old
+session's values until the reload ends.
+
+These still wait until the walk or rollback has ended:
+
+- Inbound connections: a dynamic neighbor, or a session the peer dials,
+  does not come up.
+- The removal of a dynamic neighbor whose session went idle or whose task
+  ended. It stays in the peer table, so a rollback can restore it, and is
+  removed right after.
+- During a SIGHUP reload, a BFD Up and every other BFD change that would
+  release a held session: the session is started once the reload has
+  committed or rolled back. A policy change made over gRPC serves BFD Up
+  between units like BFD Down.
+- Max-prefix restart timers, interface-discovery events and the rebinding
+  of an interface-only neighbor, configuration changes and peer lifecycle
+  commands.
+
+One wait has no unit boundary: the shared transition of the largest group
+of peers that make the same export change, reported as
+`cohort_rib_transition_us`. Session events and BFD changes wait for it;
+link-state changes, readiness and admitted reads do not.
+
+The `reload generation phase timing` line reports this service:
+`owned_wait_service_gap_max_us` is the longest interval in which no session
+event could be served (one unit, or the shared transition),
+`events_served` counts the events handled at the boundaries, including
+every notification such a round drained, and
+`event_service_us` is the time spent serving them. That time is not counted
+against the two-minute stall timeout, and serving an event never renews it.
+
+A first SIGTERM waits for the walk too; a second forces the fail-stop
+exit described in the settlement guide. A SIGHUP that arrives meanwhile is
+coalesced as described above. A peer whose session drops during the walk is
+skipped. Once the session re-establishes it carries the new policy; a peer
+that dials in can do so only after the walk, since inbound connections
+wait. If the reload is rolled back, the peer is restored to the prior policy
+with the others.
+
+During a rollback the Route Refreshes that re-evaluate imports under the
+prior policy are sent early, once the first restore command is queued. Until
+a peer's own restore command runs, it can receive the results of those
+refreshes under the rejected export policy; its restore then re-exports its
+whole table under the prior one.
 
 On the sequential route, reload halts at the first step failure. A typed
 authoritative receipt records the exact successful peer effects, and the
