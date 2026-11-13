@@ -1270,7 +1270,9 @@ and which owner did:
 - `SESSION_CRASH_LATCHED`: the neighbor's session task crashed three times
   within ten minutes and the daemon latched it down. Only `EnableNeighbor`
   clears it; an explicit disable, a reconfigure and an armed max-prefix
-  restart keep it.
+  restart keep it. While it holds, a max-prefix latch on the same neighbor
+  reports `max_prefix_action` `shutdown` and no restart countdown, since its
+  expiry cannot restart the neighbor.
 - `UNSPECIFIED`: an older daemon that does not report it, or a retention-only
   row, which has no neighbor to hold.
 

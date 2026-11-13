@@ -799,7 +799,10 @@ fn peer_checks(
             status: CheckStatus::Warn,
             detail: format!("peer {address} state read timed out (stale) — session task busy"),
         });
-    } else if let Some(remaining) = max_prefix_restart_remaining_millis {
+    } else if let Some(remaining) = max_prefix_restart_remaining_millis
+        // A max-prefix restart cannot lift a crash latch.
+        .filter(|_| admin_state != Some("session_crash_latched"))
+    {
         checks.push(Check {
             name: format!("peer.{address}.session"),
             status: CheckStatus::Warn,
@@ -5839,6 +5842,45 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 ),
             );
         }
+        // An armed max-prefix countdown cannot lift a crash latch, so it does
+        // not turn the peer into an intentional hold that restarts itself.
+        // Mutation-red: without the crash-latch filter the countdown Warn
+        // wins and the crash error is gone.
+        let countdown = |admin_state| {
+            peer_checks(
+                "10.0.0.2",
+                "10.0.0.2",
+                "Idle",
+                false,
+                Some(30_000),
+                false,
+                "",
+                0,
+                0,
+                retained_session_evidence_with_admin(
+                    Some(1),
+                    None,
+                    Some(RetainedAdminState::Disabled),
+                ),
+                1_000_000,
+                error,
+                Some(admin_state),
+            )
+        };
+        let crashed = countdown("session_crash_latched");
+        assert_eq!(crashed[0].status, CheckStatus::Fail);
+        assert!(
+            crashed[0]
+                .detail
+                .contains("latched down after repeated session task crashes"),
+            "{}",
+            crashed[0].detail
+        );
+        assert!(crashed[0].detail.contains(error), "{}", crashed[0].detail);
+        assert!(!crashed[0].detail.contains("automatic restart"));
+        let restarting = countdown("max_prefix_latched");
+        assert_eq!(restarting[0].status, CheckStatus::Warn);
+        assert!(restarting[0].detail.contains("30000ms remaining"));
         // An operator or config hold stays green.
         for admin_state in ["operator_disabled", "config_admin_down"] {
             let checks = peer_checks(

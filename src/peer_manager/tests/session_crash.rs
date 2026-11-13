@@ -542,6 +542,15 @@ async fn a_max_prefix_restart_leaves_a_crash_latched_peer_down() {
         info.admin_down_reason,
         Some(rustbgpd_api::peer_types::AdminDownReason::SessionCrashLatched)
     );
+    // Nothing promises the restart the crash latch refuses.
+    // Mutation-red: keeping the countdown reports Some(..) and "restart".
+    assert_eq!(
+        (
+            info.max_prefix_restart_remaining_millis,
+            info.max_prefix_action.as_str()
+        ),
+        (None, "shutdown")
+    );
 
     tokio::time::advance(Duration::from_secs(31)).await;
     mgr.handle_due_max_prefix_restarts().await;

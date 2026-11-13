@@ -483,6 +483,11 @@ pub(super) fn apply_session_crash(info: &mut PeerInfo, crash: Option<(&str, bool
         crash.clone_into(&mut info.last_error);
         if latched && !info.enabled {
             info.admin_down_reason = Some(AdminDownReason::SessionCrashLatched);
+            // A max-prefix restart cannot lift a crash latch, so no automatic
+            // restart is armed: the max-prefix latch reads as a shutdown.
+            if info.max_prefix_restart_remaining_millis.take().is_some() {
+                "shutdown".clone_into(&mut info.max_prefix_action);
+            }
         }
     }
 }
