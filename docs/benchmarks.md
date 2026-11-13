@@ -239,26 +239,26 @@ workspace (`[package] rustbgpd` alongside `[workspace]`) with no
 `[[bench]]` target, `fib_projection`, is `bench-internals`-gated, which
 leaves the auto-discovered `src/lib.rs` libtest harness as the one thing that
 runs — and it declares no benchmarks. `cargo bench` at the root therefore
-measures nothing. `cargo bench --workspace` is not a substitute either: seven
+measures nothing. `cargo bench --workspace` is not a substitute either: eight
 targets are standalone CLIs rather than criterion harnesses and reject
 criterion's flags.
 
-Run each target explicitly with `-p <crate> --bench <name>`. Twenty-two exist.
+Run each target explicitly with `-p <crate> --bench <name>`. Twenty-three exist.
 Eight build with default features (wire/`codec`, rib/`rib_ops`,
 rib/`export_roster`, policy/`policy_eval`, rpki/`validate`,
 mrt/`snapshot_allocation`, api/`import_roster`,
-transport/`shared_payload_drop`); fourteen are
+transport/`shared_payload_drop`); fifteen are
 `bench-internals`-gated (transport/`fanout`, transport/`inbound_attrs`,
 transport/`explain_snapshot`, transport/`outbound_encode`,
 rustbgpd/`fib_projection`, rib/`route_paging`, rib/`evpn_dataplane_query`,
 rib/`dataplane_prefix_paging`, rib/`selection_deferral_release`,
-rib/`gr_end_of_rib`, rib/`contested_prefix_scoped`, rib/`orf_distribution`,
-api/`vpn_query_timing`,
+rib/`gr_end_of_rib`, rib/`contested_prefix_scoped`,
+rib/`addpath_selection_rescan`, rib/`orf_distribution`, api/`vpn_query_timing`,
 api/`vpn_query_allocation` — the last also requires the api crate's
-`vpn-query-allocation` feature). Seven of the twenty-two —
+`vpn-query-allocation` feature). Eight of the twenty-three —
 `snapshot_allocation`, `route_paging`, `dataplane_prefix_paging`,
-`selection_deferral_release`, `gr_end_of_rib`, `vpn_query_timing`, and
-`vpn_query_allocation` — are standalone measurement CLIs with their own
+`selection_deferral_release`, `gr_end_of_rib`, `addpath_selection_rescan`,
+`vpn_query_timing`, and `vpn_query_allocation` — are standalone measurement CLIs with their own
 argument contracts (`snapshot_allocation` hard-errors without a
 `timing|diagnostic` mode), not criterion harnesses. `shared_payload_drop` is
 also not a criterion harness: it is a plain timing `main()` that ignores
@@ -267,7 +267,8 @@ also not a criterion harness: it is a plain timing `main()` that ignores
 `bench/smoke-benches.sh` enumerates the target list from `cargo metadata`,
 runs every criterion target once through `cargo test --bench`, exercises
 `route_paging` and `dataplane_prefix_paging` with bounded multi-page native CLI
-fixtures, and runs the `gr_end_of_rib` self-test. The four other custom
+fixtures, runs the `gr_end_of_rib` self-test, and runs every
+`addpath_selection_rescan` cell once. The four other custom
 harnesses retain dedicated CI smoke invocations.
 
 The `gr_end_of_rib` JSON field `stale_resolution_ns` covers unicast GR/LLGR

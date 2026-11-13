@@ -21,8 +21,10 @@ resolved.
   waits on sessions writing a reload's new exports. The peer manager answers
   both on its dedicated readiness lane, including while it waits on the RIB
   during reload settlement, graceful-restart bursts and full RIB mailboxes.
-  The RIB serves its readiness lane at checkpoints inside long operations,
-  including each receiver boundary of private EVPN distribution. The probe
+  The RIB serves its readiness lane at checkpoints inside its long owned
+  operations, for example each receiver boundary of private EVPN
+  distribution, BGP-LS and RT-Constrain distribution, the route-refresh
+  End-of-RIB sweep, and peer regroup and teardown turns. The probe
   listener runs on its own thread.
   Both actors still run on the daemon runtime, so saturated runtime workers,
   or actor work that runs past the deadline between readiness checkpoints,

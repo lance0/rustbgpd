@@ -1,4 +1,4 @@
-//! ADR-0145 slice 1b: owed-key sets for private families. A receiver whose
+//! ADR-0099 amendment (slice 1b): owed-key sets for private families. A receiver whose
 //! row credit is spent is owed keys instead of being marked dirty; the
 //! resync tick drains them from current state, barriers absorb them, and
 //! shutdown flushes their withdrawals.

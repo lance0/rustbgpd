@@ -196,9 +196,18 @@ rs-config-render --context "$STATE/context.yml" \
 rustbgpd --check --strict "$STATE/candidate/config.toml"
 # The generated rpol resolves dataset paths relative to this tree. Install the
 # config, policy, and datasets together; never update only one directory.
-rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
+# Sync only the rendered trees: --delete on /etc/rustbgpd itself would remove
+# token files, TLS keys and anything else the renderer did not emit.
+rsync -a --delete "$STATE/candidate/policy/" /etc/rustbgpd/policy/
+rsync -a --delete "$STATE/candidate/datasets/" /etc/rustbgpd/datasets/
+install -m 0600 "$STATE/candidate/render-receipt.json" /etc/rustbgpd/
+install -m 0600 "$STATE/candidate/config.toml" /etc/rustbgpd/config.toml
 systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
+
+The `policy/` and `datasets/` directories under `/etc/rustbgpd` must hold only
+renderer output, because `--delete` removes anything else in them. Keep gRPC
+token files, TLS material and other operator files outside those two trees.
 
 Before the first cutover — or any time you want to see what a refresh
 will change — compare the candidate with the running daemon:

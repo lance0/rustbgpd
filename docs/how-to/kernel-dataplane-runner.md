@@ -29,9 +29,10 @@ UDP/3784 and UDP/4784 for BFD.
 Each hosted job has its own VM and Docker daemon. Documentation-only pushes and
 pull requests are excluded by the workflow's path filters. Triggered pull
 requests then classify their complete diff and can skip lab-independent
-changes. Triggered main pushes and manual dispatches run the heavy suite. A
-primer job warms the shared `rustbgpd:dev` build cache from the checked-out
-source. Each topology job still builds and loads its own image through
+changes. A draft pull request runs no labs; marking it ready for review reruns
+the workflow on the same head. Triggered main pushes and manual dispatches run
+the heavy suite. A primer job warms the shared `rustbgpd:dev` build cache from
+the checked-out source. Each topology job still builds and loads its own image through
 [`setup-dataplane-host`](../../.github/actions/setup-dataplane-host/action.yml),
 which calls the pinned
 [`install-containerlab`](../../.github/actions/install-containerlab/action.yml)

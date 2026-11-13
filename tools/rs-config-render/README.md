@@ -494,7 +494,11 @@ rm -rf "${STATE:?}/candidate"        # the output directory must be absent or em
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 rustbgpd --check --strict "$STATE/candidate/config.toml"
-rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
+# Sync only the rendered trees, never --delete on /etc/rustbgpd itself.
+rsync -a --delete "$STATE/candidate/policy/" /etc/rustbgpd/policy/
+rsync -a --delete "$STATE/candidate/datasets/" /etc/rustbgpd/datasets/
+install -m 0600 "$STATE/candidate/render-receipt.json" /etc/rustbgpd/
+install -m 0600 "$STATE/candidate/config.toml" /etc/rustbgpd/config.toml
 systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
 

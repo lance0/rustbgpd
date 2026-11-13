@@ -244,6 +244,9 @@ curl -s http://127.0.0.1:9179/metrics \
   | grep -E 'evpn_duplicate_mac_(moves_total|first_move_timestamp_seconds|threshold_exceeded_total|quarantine_active)'
 ```
 
+To list the active `(VNI, MAC)` quarantines, run
+`rbgp evpn duplicate-mac-quarantines`.
+
 Repeated increments for the same `(vni, mac)` indicate cross-VTEP
 contention and should be investigated as a loop, spoof, or host mobility
 event. One-off increments can be normal during planned host moves. While

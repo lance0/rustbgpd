@@ -363,7 +363,8 @@ remain demand-gated.** Release-by-release changes, including which wire line
 each FSM and RPKI release pairs with, live in each crate's changelog:
 [wire](../../crates/wire/CHANGELOG.md), [fsm](../../crates/fsm/CHANGELOG.md),
 and [rpki](../../crates/rpki/CHANGELOG.md). The wire README's compatibility
-notes itemize the migration for each breaking wire line.
+notes itemize the migration for each breaking wire line from 0.15.0 onward;
+the [wire changelog](../../crates/wire/CHANGELOG.md) records earlier lines.
 
 1. **`rustbgpd-wire`.** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists

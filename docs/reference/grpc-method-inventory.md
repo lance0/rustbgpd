@@ -329,7 +329,7 @@ specific method if the model warrants it.
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
-3. **InjectionService is `operator_only` apart from its five reads.**
+3. **InjectionService is `operator_only` apart from its six reads.**
    Fourteen of the thirty-two `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and

@@ -55,7 +55,7 @@
 //!   queued envelopes of. The key relaxes only inside a deferral: the
 //!   operations in which the subject receiver was dirty, owed a
 //!   refresh answer in the key's family, or owed the key or its whole family
-//!   (ADR-0145 slice 1b's logged deferral, read through the product's test
+//!   (the ADR-0099 slice 1b amendment's logged deferral, read through the product's test
 //!   hook once per operation and session), through the settling operation.
 //!   Inside an interval the subject's values are a
 //!   subsequence of the reference's and match its state at the interval's
@@ -140,7 +140,7 @@ fn wire_family(family: (Afi, Safi)) -> (u16, u8) {
 
 /// The largest number of envelopes a receiver may have queued. Today the
 /// channel capacity bounds them by construction; the outbound redesign
-/// (ADR-0145) pins its window here.
+/// (ADR-0099 amendment, slice 1b) pins its window here.
 const fn retention_bound(capacity: usize) -> usize {
     capacity
 }
