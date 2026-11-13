@@ -45,14 +45,23 @@ const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
 /// Each all-neighbors path renders every neighbor, so the path count
 /// multiplies the response.
 const MAX_GET_PATHS: usize = MAX_SUBSCRIPTIONS;
-/// Leaf updates one `Get` may render. A full-state all-neighbors path costs
-/// ten updates per neighbor, so this serves a whole roster of 6,553 neighbors
-/// in one request; a larger request is refused before any rendering.
-const MAX_GET_UPDATES: usize = 65_536;
-/// `Get` renders running at once on the blocking pool. Further `Get`s wait
-/// for a slot before taking a peer snapshot, which bounds the memory held by
-/// concurrent renders to this many [`MAX_GET_UPDATES`] responses.
-const GET_RENDER_SLOTS: usize = 4;
+/// Leaf updates one `Get`, or one `Subscribe` snapshot or tick, may render. A
+/// full-state all-neighbors path costs ten updates per neighbor, so this
+/// serves a whole roster of 6,553 neighbors; a larger render is refused before
+/// it starts.
+const MAX_RENDER_UPDATES: usize = 65_536;
+/// Renders running at once, shared by `Get` and `Subscribe`. Further renders
+/// wait for a slot before taking a peer snapshot. This bounds the memory held
+/// by concurrent renders to this many [`MAX_RENDER_UPDATES`] responses, except
+/// for a `SAMPLE` stream with `suppress_redundant` or `heartbeat_interval`:
+/// it filters a copy of the shared render per due path, so one render can
+/// transiently hold up to [`MAX_SUBSCRIPTIONS`] times that.
+const RENDER_SLOTS: usize = 4;
+/// A `Subscribe` render whose work (see
+/// [`GnmiService::render_subscription_queries`]) is at most this many entries
+/// runs inline on its stream task; a larger one moves to the blocking pool,
+/// where the handoff costs less than the work.
+const INLINE_SUBSCRIBE_RENDER_UPDATES: usize = 1_024;
 
 /// Preserve a periodic path's monotonic phase while skipping every deadline
 /// that passed during delayed work. The remainder avoids an unbounded catch-up
@@ -119,8 +128,16 @@ type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
 type SessionEventsFuture =
     Pin<Box<dyn Future<Output = Result<broadcast::Receiver<Arc<SessionEvent>>, Status>> + Send>>;
 type SessionEventsFn = Arc<dyn Fn() -> SessionEventsFuture + Send + Sync>;
-type HeartbeatSnapshotFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<gnmi::SubscribeResponse>, Status>> + Send + 'a>>;
+/// A heartbeat render running in its own task. Dropping it aborts the task,
+/// so a stream that ends (client gone, lag, failed send) leaves no render-slot
+/// waiter or render behind for a collector that is no longer there.
+struct HeartbeatSnapshotTask(tokio::task::JoinHandle<Result<Vec<gnmi::SubscribeResponse>, Status>>);
+
+impl Drop for HeartbeatSnapshotTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 fn due_heartbeat_indices(
     deadlines: &[Option<tokio::time::Instant>; MAX_SUBSCRIPTIONS],
@@ -137,16 +154,22 @@ fn due_heartbeat_indices(
         .collect()
 }
 
-fn render_heartbeat_snapshot<'a>(
-    service: &'a GnmiService,
-    plan: &'a SubscriptionPlan,
+/// Render a heartbeat in its own task. The stream loop may block on a slow
+/// client's send while the render is in flight; the task still finishes and
+/// frees its shared render slot instead of holding it until the loop polls.
+/// The returned guard aborts the task when the stream drops it.
+fn spawn_heartbeat_snapshot(
+    service: &GnmiService,
+    plan: &SubscriptionPlan,
     due: Vec<usize>,
-) -> HeartbeatSnapshotFuture<'a> {
-    Box::pin(async move {
+) -> HeartbeatSnapshotTask {
+    let service = service.clone();
+    let plan = plan.clone();
+    HeartbeatSnapshotTask(tokio::spawn(async move {
         service
-            .render_subscription_snapshot(plan, Some(&due), false)
+            .render_subscription_snapshot(&plan, Some(&due), false)
             .await
-    })
+    }))
 }
 
 /// gNMI target for the supported `OpenConfig` telemetry and Set subset.
@@ -162,8 +185,8 @@ pub struct GnmiService {
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
     /// of each open stream.
     subscribe_slots: Arc<tokio::sync::Semaphore>,
-    /// Bounds concurrent `Get` renders (see [`GET_RENDER_SLOTS`]).
-    get_render_slots: Arc<tokio::sync::Semaphore>,
+    /// Bounds concurrent `Get` and `Subscribe` renders (see [`RENDER_SLOTS`]).
+    render_slots: Arc<tokio::sync::Semaphore>,
     /// Subscribes to the peer manager's live session-event broadcast for
     /// `Subscribe ON_CHANGE`.
     session_events: SessionEventsFn,
@@ -248,7 +271,11 @@ impl GnmiService {
     /// binds one.
     // ponytail: unbound interface-only neighbors are invisible to gNMI;
     // give them an interface key when gNMI learns that identity.
-    fn with_peer_snapshot<F, Fut>(asn: u32, router_id: impl Into<String>, peer_snapshot: F) -> Self
+    pub(crate) fn with_peer_snapshot<F, Fut>(
+        asn: u32,
+        router_id: impl Into<String>,
+        peer_snapshot: F,
+    ) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<PeerInfo>, Status>> + Send + 'static,
@@ -263,7 +290,7 @@ impl GnmiService {
             }),
             initial_roster_gate: None,
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
-            get_render_slots: Arc::new(tokio::sync::Semaphore::new(GET_RENDER_SLOTS)),
+            render_slots: Arc::new(tokio::sync::Semaphore::new(RENDER_SLOTS)),
             session_events: Arc::new(|| {
                 Box::pin(async {
                     Err(Status::unavailable(
@@ -306,7 +333,7 @@ impl GnmiService {
 
         // Wait for a render slot before the snapshot, so queued Gets hold no
         // roster copy.
-        let permit = Arc::clone(&self.get_render_slots)
+        let permit = Arc::clone(&self.render_slots)
             .acquire_owned()
             .await
             .map_err(|_| Status::unavailable("gNMI Get render slots closed"))?;
@@ -328,18 +355,9 @@ impl GnmiService {
             None
         };
 
-        let planned = queries
-            .iter()
-            .map(|query| query.max_updates(peers.as_ref().map_or(0, Vec::len)))
-            .fold(0_usize, usize::saturating_add);
-        if planned > MAX_GET_UPDATES {
-            return Err(Status::resource_exhausted(format!(
-                "gNMI Get would render {planned} updates, over the limit of \
-                 {MAX_GET_UPDATES}; request fewer paths or specific neighbors"
-            )));
-        }
+        check_render_budget("Get", &queries, peers.as_ref().map_or(0, Vec::len))?;
 
-        // Up to MAX_GET_UPDATES leaves: render on the blocking pool so a large
+        // Up to MAX_RENDER_UPDATES leaves: render on the blocking pool so a large
         // roster never holds an async worker.
         let service = self.clone();
         let notifications = tokio::task::spawn_blocking(move || {
@@ -444,6 +462,67 @@ impl GnmiService {
             .await
     }
 
+    /// Render each of `queries` once for one `Subscribe` snapshot or tick, then
+    /// hand the results, in `queries` order, to `finish`. The peer snapshot is
+    /// taken once (global-only renders skip it) under a render slot, and the
+    /// render is refused past [`MAX_RENDER_UPDATES`].
+    ///
+    /// The render and `finish` run on the blocking pool when their work
+    /// exceeds [`INLINE_SUBSCRIBE_RENDER_UPDATES`]. That work counts the planned
+    /// updates once per due path that `finish` filters (`fan_out`), the
+    /// per-path state entries `finish` walks or drops (`retained`), which can
+    /// dwarf the render after the roster shrinks, and the roster traversal:
+    /// sorting the snapshot and searching it once per concrete-neighbor path,
+    /// which costs a whole roster even when a path renders ten updates.
+    ///
+    /// The refusal ends the stream, as every render error does: on the
+    /// initial snapshot it arrives before any update or `sync_response`, and on
+    /// a later tick (the roster grew) it ends the stream rather than skipping
+    /// the tick, because gNMI 0.10 has no non-terminal error notification and
+    /// a silently skipped tick would leave the collector holding stale values.
+    async fn render_subscription_queries<R: Send + 'static>(
+        &self,
+        queries: Vec<SupportedPath>,
+        encoding: gnmi::Encoding,
+        fan_out: usize,
+        retained: usize,
+        finish: impl FnOnce(Vec<Vec<gnmi::Update>>) -> R + Send + 'static,
+    ) -> Result<R, Status> {
+        let permit = Arc::clone(&self.render_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| Status::unavailable("gNMI render slots closed"))?;
+        let peers = if queries.iter().any(SupportedPath::needs_peers) {
+            Some((self.peer_snapshot)().await?)
+        } else {
+            None
+        };
+        let roster = peers.as_ref().map_or(0, Vec::len);
+        let planned = check_render_budget("Subscribe", &queries, roster)?;
+        let traversed = roster_traversal(&queries, roster);
+        let service = self.clone();
+        let render = move || {
+            let _permit = permit;
+            // Sorted here so an offloaded render sorts on the blocking pool.
+            let peers = peers.map(|mut peers| {
+                peers.sort_by_key(|peer| peer.address);
+                peers
+            });
+            let rendered = queries
+                .iter()
+                .map(|query| service.render_subscription_query(query, peers.as_deref(), encoding))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(finish(rendered))
+        };
+        if subscription_render_inline(planned, fan_out, retained.saturating_add(traversed)) {
+            render()
+        } else {
+            tokio::task::spawn_blocking(render).await.map_err(|error| {
+                Status::internal(format!("gNMI Subscribe render failed: {error}"))
+            })?
+        }
+    }
+
     /// [`Self::render_subscription_snapshot`] for a `SAMPLE` stream, which
     /// deletes a `peer-as` leaf it delivered once the leaf disappears
     /// (`delivered`, per subscription path).
@@ -452,44 +531,47 @@ impl GnmiService {
         plan: &SubscriptionPlan,
         due_paths: Option<&[usize]>,
         include_sync: bool,
-        mut delivered: Option<&mut [DeliveredPeerAs]>,
+        mut delivered: Option<&mut Vec<DeliveredPeerAs>>,
     ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
         let mut updates = Vec::new();
         let mut deletes = Vec::new();
         if !plan.updates_only {
-            let is_due = |index| due_paths.is_none_or(|due| due.contains(&index));
-            // Snapshot peers once per snapshot/tick (the subscription may carry
-            // multiple neighbor paths; otherwise each path fans out its own
-            // peer-manager round-trip). Global-only plans skip the snapshot.
-            let peers = if plan
-                .paths
-                .iter()
-                .enumerate()
-                .any(|(index, path)| is_due(index) && path.needs_peers())
-            {
-                let mut peers = (self.peer_snapshot)().await?;
-                peers.sort_by_key(|peer| peer.address);
-                Some(peers)
-            } else {
-                None
-            };
-            for (index, query) in plan.paths.iter().enumerate() {
-                if !is_due(index) {
-                    continue;
-                }
-                let source =
-                    self.render_subscription_query(query, peers.as_deref(), plan.encoding)?;
-                if let Some(delivered) = delivered.as_deref_mut() {
-                    deletes.extend(delivered[index].track(&source, &source));
-                }
-                updates.extend(source);
+            let (queries, due) = due_queries(plan, |index| {
+                due_paths.is_none_or(|due| due.contains(&index))
+            });
+            // The per-path state moves to the render and back.
+            let mut tracked = delivered.as_deref_mut().map(std::mem::take);
+            let (fan_out, retained) = tracked.as_deref().map_or((1, 0), |tracked| {
+                (due.len(), retained_sample_entries(&[], tracked))
+            });
+            (updates, deletes, tracked) = self
+                .render_subscription_queries(
+                    queries,
+                    plan.encoding,
+                    fan_out,
+                    retained,
+                    move |rendered| {
+                        let mut deletes = Vec::new();
+                        if let Some(delivered) = tracked.as_mut() {
+                            for (index, query) in due {
+                                let source = &rendered[query];
+                                deletes.extend(delivered[index].track(source, source));
+                            }
+                        }
+                        let updates =
+                            deduplicate_update_paths(rendered.into_iter().flatten().collect());
+                        (updates, deduplicate_paths(deletes), tracked)
+                    },
+                )
+                .await?;
+            if let (Some(delivered), Some(tracked)) = (delivered, tracked) {
+                *delivered = tracked;
             }
-            updates = deduplicate_update_paths(updates);
         }
 
         let mut responses = Vec::new();
         if !updates.is_empty() || !deletes.is_empty() {
-            responses.push(update_response(updates, deduplicate_paths(deletes)));
+            responses.push(update_response(updates, deletes));
         }
         if include_sync {
             responses.push(sync_response());
@@ -503,52 +585,62 @@ impl GnmiService {
         due: &[Option<bool>; MAX_SUBSCRIPTIONS],
         withhold_updates: bool,
         include_sync: bool,
-        caches: &mut [Option<SampleValueCache>],
-        delivered: &mut [DeliveredPeerAs],
+        caches: &mut Vec<Option<SampleValueCache>>,
+        delivered: &mut Vec<DeliveredPeerAs>,
     ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
-        let due_force = |index| due[index];
-        let peers = if plan
-            .paths
-            .iter()
-            .enumerate()
-            .any(|(index, path)| due_force(index).is_some() && path.needs_peers())
-        {
-            let mut peers = (self.peer_snapshot)().await?;
-            peers.sort_by_key(|peer| peer.address);
-            Some(peers)
-        } else {
-            None
-        };
-
-        let mut updates = Vec::new();
-        let mut deletes = Vec::new();
-        for (index, query) in plan.paths.iter().enumerate() {
-            let Some(force) = due_force(index) else {
-                continue;
-            };
-            let source = self.render_subscription_query(query, peers.as_deref(), plan.encoding)?;
-            // A withheld rendering still seeds the cache, but delivers nothing.
-            let mut sent =
-                filter_sample_source_updates(source.clone(), force, caches[index].as_mut());
-            if withhold_updates {
-                sent.clear();
-            }
-            deletes.extend(delivered[index].track(&source, &sent));
-            updates.extend(sent);
-        }
-        updates = deduplicate_update_paths(updates);
-        let deletes = deduplicate_paths(deletes);
-        // A delete clears the leaf from the collector for every subscription
-        // path: none may suppress its return as unchanged, nor delete it again.
-        for path in &deletes {
-            let identity = CanonicalPath::from(path);
-            for cache in caches.iter_mut().flatten() {
-                cache.0.remove(&identity);
-            }
-            for delivered in delivered.iter_mut() {
-                delivered.0.remove(&identity);
-            }
-        }
+        let force = *due;
+        let (queries, due) = due_queries(plan, |index| force[index].is_some());
+        // The per-path state moves to the render and back.
+        let retained = retained_sample_entries(caches, delivered);
+        let fan_out = due.len();
+        let state = (std::mem::take(caches), std::mem::take(delivered));
+        let (updates, deletes);
+        (updates, deletes, *caches, *delivered) = self
+            .render_subscription_queries(
+                queries,
+                plan.encoding,
+                fan_out,
+                retained,
+                move |rendered| {
+                    let (mut caches, mut delivered) = state;
+                    let mut updates = Vec::new();
+                    let mut deletes = Vec::new();
+                    // ponytail: each due path filters its own copy of a shared
+                    // render, so a tick costs at most MAX_SUBSCRIPTIONS times the
+                    // rendered bound; merge paths with identical controls if that
+                    // ever matters.
+                    for (index, query) in due {
+                        let source = &rendered[query];
+                        let force = force[index].expect("due path has a force flag");
+                        // A withheld rendering still seeds the cache, but delivers nothing.
+                        let mut sent = filter_sample_source_updates(
+                            source.clone(),
+                            force,
+                            caches[index].as_mut(),
+                        );
+                        if withhold_updates {
+                            sent.clear();
+                        }
+                        deletes.extend(delivered[index].track(source, &sent));
+                        updates.extend(sent);
+                    }
+                    let updates = deduplicate_update_paths(updates);
+                    let deletes = deduplicate_paths(deletes);
+                    // A delete clears the leaf from the collector for every subscription
+                    // path: none may suppress its return as unchanged, nor delete it again.
+                    for path in &deletes {
+                        let identity = CanonicalPath::from(path);
+                        for cache in caches.iter_mut().flatten() {
+                            cache.0.remove(&identity);
+                        }
+                        for delivered in &mut delivered {
+                            delivered.0.remove(&identity);
+                        }
+                    }
+                    (updates, deletes, caches, delivered)
+                },
+            )
+            .await?;
 
         let mut responses = Vec::new();
         if !updates.is_empty() || !deletes.is_empty() {
@@ -568,7 +660,7 @@ impl GnmiService {
         due_paths: Option<&[usize]>,
         include_sync: bool,
         tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
-        delivered: Option<&mut [DeliveredPeerAs]>,
+        delivered: Option<&mut Vec<DeliveredPeerAs>>,
     ) -> bool {
         match self
             .render_tracked_subscription_snapshot(plan, due_paths, include_sync, delivered)
@@ -839,7 +931,7 @@ impl GnmiService {
 
         // Heartbeats anchor after sync; live events neither satisfy nor rearm them.
         let mut heartbeat_deadlines = initial_heartbeat_deadlines(&plan);
-        let mut heartbeat_snapshot: Option<HeartbeatSnapshotFuture<'_>> = None;
+        let mut heartbeat_snapshot: Option<HeartbeatSnapshotTask> = None;
         let mut heartbeat_due = Vec::new();
         loop {
             let heartbeat_deadline =
@@ -859,6 +951,7 @@ impl GnmiService {
                                 if heartbeat_snapshot.is_some()
                                     && due_paths_cover(&plan, &heartbeat_due, &identity)
                                 {
+                                    // Dropping the guard aborts the superseded render.
                                     heartbeat_snapshot = None;
                                 }
                                 let is_update = update.is_some();
@@ -894,15 +987,23 @@ impl GnmiService {
                     Err(RecvError::Closed) => return,
                 },
                 rendered = async {
-                    heartbeat_snapshot
+                    (&mut heartbeat_snapshot
                         .as_mut()
                         .expect("heartbeat snapshot arm is guarded")
+                        .0)
                         .await
                 }, if heartbeat_snapshot.is_some() => {
                     heartbeat_snapshot = None;
                     let mut responses = match rendered {
-                        Ok(responses) => responses,
+                        Ok(Ok(responses)) => responses,
+                        Ok(Err(error)) => {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
                         Err(error) => {
+                            let error = Status::internal(format!(
+                                "gNMI heartbeat render failed: {error}"
+                            ));
                             let _ = tx.send(Err(error)).await;
                             return;
                         }
@@ -944,7 +1045,7 @@ impl GnmiService {
                     ).await;
                 }, if heartbeat_deadline.is_some() => {
                     heartbeat_due = due_heartbeat_indices(&heartbeat_deadlines);
-                    heartbeat_snapshot = Some(render_heartbeat_snapshot(
+                    heartbeat_snapshot = Some(spawn_heartbeat_snapshot(
                         &self,
                         &plan,
                         heartbeat_due.clone(),
@@ -955,63 +1056,20 @@ impl GnmiService {
         }
     }
 
-    /// Emit the initial Updates for an `ON_CHANGE` subscription —
-    /// one `session-state` leaf Update per peer the plan's paths
-    /// target. Returns `false` when the client dropped (in which
-    /// case the caller stops without sending `sync_response`).
+    /// Emit the initial Updates for an `ON_CHANGE` subscription — one
+    /// `session-state` leaf Update per peer the plan's paths target, through
+    /// the bounded snapshot renderer the heartbeats share. Returns `false`
+    /// when the client dropped or the render failed (in which case the caller
+    /// stops without sending `sync_response`).
     async fn forward_on_change_snapshot(
         &self,
         plan: &SubscriptionPlan,
         tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
         presence: &mut HashMap<CanonicalPath, gnmi::Path>,
     ) -> bool {
-        if plan.updates_only {
-            return true;
-        }
-
-        let peers = match (self.peer_snapshot)().await {
-            Ok(mut peers) => {
-                peers.sort_by_key(|peer| peer.address);
-                peers
-            }
-            Err(err) => {
-                let _ = tx.send(Err(err)).await;
-                return false;
-            }
-        };
-
-        let mut updates: Vec<gnmi::Update> = Vec::new();
-        for query in &plan.paths {
-            match query {
-                SupportedPath::Neighbor { peer: key, .. } => {
-                    if let Some(peer) = peers.iter().find(|p| peer_info_key(p) == *key) {
-                        updates.push(leaf_update(
-                            neighbor_leaf_path(&peer_info_key(peer), NeighborLeaf::SessionState),
-                            &LeafValue::Str(session_state_name(peer.state).to_string()),
-                            plan.encoding,
-                        ));
-                    }
-                }
-                SupportedPath::AllNeighbors { .. } => {
-                    for peer in &peers {
-                        updates.push(leaf_update(
-                            neighbor_leaf_path(&peer_info_key(peer), NeighborLeaf::SessionState),
-                            &LeafValue::Str(session_state_name(peer.state).to_string()),
-                            plan.encoding,
-                        ));
-                    }
-                }
-                SupportedPath::Global { .. } => {}
-            }
-        }
-        updates = deduplicate_update_paths(updates);
-
-        if updates.is_empty() {
-            return true;
-        }
-        let response = update_response(updates, Vec::new());
-        let present = update_paths(std::slice::from_ref(&response));
-        if tx.send(Ok(response)).await.is_err() {
+        let responses = self.render_subscription_snapshot(plan, None, false).await;
+        let present = responses.as_deref().map(update_paths).unwrap_or_default();
+        if !forward_responses(responses, tx).await {
             return false;
         }
         presence.extend(present);
@@ -1205,6 +1263,85 @@ impl SupportedPath {
             SupportedPath::AllNeighbors { select } => peers.saturating_mul(select.leaves().len()),
         }
     }
+}
+
+/// Refuse a `Get` or `Subscribe` render whose distinct `queries` would render
+/// more than [`MAX_RENDER_UPDATES`] against `peers` neighbors; otherwise
+/// return the planned update count.
+fn check_render_budget(
+    rpc: &str,
+    queries: &[SupportedPath],
+    peers: usize,
+) -> Result<usize, Status> {
+    let planned = queries
+        .iter()
+        .map(|query| query.max_updates(peers))
+        .fold(0_usize, usize::saturating_add);
+    if planned > MAX_RENDER_UPDATES {
+        return Err(Status::resource_exhausted(format!(
+            "gNMI {rpc} would render {planned} updates, over the limit of \
+             {MAX_RENDER_UPDATES}; request fewer paths or specific neighbors"
+        )));
+    }
+    Ok(planned)
+}
+
+/// Whether a `Subscribe` render stays on its stream task: the planned updates,
+/// filtered once per due path, plus the other entries the render walks
+/// (retained per-path state, roster traversal), fit
+/// [`INLINE_SUBSCRIBE_RENDER_UPDATES`].
+fn subscription_render_inline(planned: usize, fan_out: usize, walked: usize) -> bool {
+    planned
+        .saturating_mul(fan_out.max(1))
+        .saturating_add(walked)
+        <= INLINE_SUBSCRIBE_RENDER_UPDATES
+}
+
+/// Roster entries a render visits outside the planned updates: one pass to
+/// sort the snapshot, and one search per distinct path. Approximates each
+/// path as a full pass, which is exact for concrete-neighbor paths.
+fn roster_traversal(queries: &[SupportedPath], roster: usize) -> usize {
+    if queries.iter().any(SupportedPath::needs_peers) {
+        roster.saturating_mul(queries.len().saturating_add(1))
+    } else {
+        0
+    }
+}
+
+/// Entries a `SAMPLE` stream carries between renders: cached values and
+/// delivered `peer-as` leaves, across every subscription path.
+fn retained_sample_entries(
+    caches: &[Option<SampleValueCache>],
+    delivered: &[DeliveredPeerAs],
+) -> usize {
+    let values = caches.iter().flatten().map(|cache| cache.0.len());
+    let peer_as = delivered.iter().map(|path| path.0.len());
+    values.chain(peer_as).fold(0, usize::saturating_add)
+}
+
+/// The distinct queries among a plan's due paths, and each due path's index
+/// paired with its query's position. Paths that select the same data render
+/// once and share the result.
+fn due_queries(
+    plan: &SubscriptionPlan,
+    is_due: impl Fn(usize) -> bool,
+) -> (Vec<SupportedPath>, Vec<(usize, usize)>) {
+    let mut queries: Vec<SupportedPath> = Vec::new();
+    let mut due = Vec::new();
+    for (index, query) in plan.paths.iter().enumerate() {
+        if !is_due(index) {
+            continue;
+        }
+        let position = queries
+            .iter()
+            .position(|known| known == query)
+            .unwrap_or_else(|| {
+                queries.push(query.clone());
+                queries.len() - 1
+            });
+        due.push((index, position));
+    }
+    (queries, due)
 }
 
 #[derive(Clone, Debug)]
@@ -3841,7 +3978,7 @@ mod tests {
     #[tokio::test]
     async fn get_rendered_update_count_is_bounded() {
         // A full-state neighbor renders ten leaves, so 6,553 neighbors fit
-        // MAX_GET_UPDATES and one more does not.
+        // MAX_RENDER_UPDATES and one more does not.
         let roster = |count: u32| -> Vec<PeerInfo> {
             (0..count)
                 .map(|index| test_peer(IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + index))))
@@ -3866,6 +4003,225 @@ mod tests {
             "gNMI Get would render 65540 updates, over the limit of 65536; \
              request fewer paths or specific neighbors"
         );
+    }
+
+    fn numbered_roster(count: u32) -> Vec<PeerInfo> {
+        (0..count)
+            .map(|index| test_peer(IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + index))))
+            .collect()
+    }
+
+    fn all_neighbors_path() -> gnmi::Path {
+        mounted_path(&[pe("bgp"), pe("neighbors")])
+    }
+
+    /// `list` with its one subscription repeated `count` times.
+    fn repeated(mut list: gnmi::SubscriptionList, count: usize) -> gnmi::SubscriptionList {
+        list.subscription = vec![list.subscription[0].clone(); count];
+        list
+    }
+
+    fn over_bound_message(planned: usize) -> String {
+        format!(
+            "gNMI Subscribe would render {planned} updates, over the limit of 65536; \
+             request fewer paths or specific neighbors"
+        )
+    }
+
+    #[tokio::test]
+    async fn subscribe_refuses_a_snapshot_over_the_render_bound() {
+        // Load-bearing break: dropping the budget check in the shared
+        // subscription renderer streams data for every mode instead.
+        let full_state = |mode, subscription_mode| {
+            subscription_list(mode, subscription_mode, all_neighbors_path())
+        };
+        let cases = [
+            (
+                full_state(
+                    gnmi::subscription_list::Mode::Once,
+                    gnmi::SubscriptionMode::TargetDefined,
+                ),
+                6_554,
+                65_540,
+            ),
+            (
+                full_state(
+                    gnmi::subscription_list::Mode::Poll,
+                    gnmi::SubscriptionMode::TargetDefined,
+                ),
+                6_554,
+                65_540,
+            ),
+            (
+                full_state(
+                    gnmi::subscription_list::Mode::Stream,
+                    gnmi::SubscriptionMode::Sample,
+                ),
+                6_554,
+                65_540,
+            ),
+            (
+                controlled_sample_list(all_neighbors_path(), true, 0, 1_000_000_000),
+                6_554,
+                65_540,
+            ),
+            // ON_CHANGE renders one session-state leaf per neighbor.
+            (
+                stream_on_change_list(neighbor_session_state_wildcard_path()),
+                65_537,
+                65_537,
+            ),
+        ];
+        for (list, neighbors, planned) in cases {
+            let (service, _events) = live_service(numbered_roster(neighbors));
+            let mut harness = serve(service).await;
+            let status = subscribe_outage_status(&mut harness.client, list).await;
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+            assert_eq!(status.message(), over_bound_message(planned));
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_renders_identical_paths_once_against_the_bound() {
+        // Load-bearing break: rendering each of the 16 identical paths counts
+        // 160,000 planned updates and refuses both snapshots.
+        let service = test_service(numbered_roster(1_000));
+
+        let once = parse_subscription_list(&repeated(
+            subscription_list(
+                gnmi::subscription_list::Mode::Once,
+                gnmi::SubscriptionMode::TargetDefined,
+                all_neighbors_path(),
+            ),
+            MAX_SUBSCRIPTIONS,
+        ))
+        .unwrap();
+        let responses = service
+            .render_subscription_snapshot(&once, None, true)
+            .await
+            .unwrap();
+        assert_eq!(subscribe_updates(responses[0].clone()).len(), 10_000);
+
+        // A suppressing stream keeps per-path state across the blocking-pool
+        // render: the second, unforced tick finds nothing changed.
+        let controlled = parse_subscription_list(&repeated(
+            controlled_sample_list(all_neighbors_path(), true, 0, 0),
+            MAX_SUBSCRIPTIONS,
+        ))
+        .unwrap();
+        let mut caches = (0..MAX_SUBSCRIPTIONS)
+            .map(|_| Some(SampleValueCache::default()))
+            .collect::<Vec<_>>();
+        let mut delivered = vec![DeliveredPeerAs::default(); MAX_SUBSCRIPTIONS];
+        let initial = service
+            .render_controlled_sample_snapshot(
+                &controlled,
+                &[Some(true); MAX_SUBSCRIPTIONS],
+                false,
+                true,
+                &mut caches,
+                &mut delivered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(subscribe_updates(initial[0].clone()).len(), 10_000);
+        assert!(
+            caches
+                .iter()
+                .all(|cache| cache.as_ref().unwrap().0.len() == 10_000)
+        );
+        assert_eq!(delivered.len(), MAX_SUBSCRIPTIONS);
+        let unchanged = service
+            .render_controlled_sample_snapshot(
+                &controlled,
+                &[Some(false); MAX_SUBSCRIPTIONS],
+                false,
+                false,
+                &mut caches,
+                &mut delivered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged, Vec::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subscribe_stream_ends_when_the_roster_outgrows_the_render_bound() {
+        // Load-bearing break: without the per-render budget check, the tick
+        // after the roster grows renders 65,540 updates instead of ending the
+        // stream with RESOURCE_EXHAUSTED.
+        use std::sync::atomic::AtomicU32;
+
+        for list in [
+            subscription_list(
+                gnmi::subscription_list::Mode::Stream,
+                gnmi::SubscriptionMode::Sample,
+                all_neighbors_path(),
+            ),
+            controlled_sample_list(all_neighbors_path(), true, 0, 1_000_000_000),
+        ] {
+            let neighbors = Arc::new(AtomicU32::new(1));
+            let roster = Arc::clone(&neighbors);
+            let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+                let peers = numbered_roster(roster.load(Ordering::SeqCst));
+                async move { Ok(peers) }
+            });
+            let plan = parse_subscription_list(&list).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+            let stream = tokio::spawn(service.run_stream_sample(plan, tx));
+
+            let initial = rx.recv().await.unwrap().unwrap();
+            assert_eq!(subscribe_updates(initial).len(), 10);
+            assert_eq!(
+                rx.recv().await.unwrap().unwrap().response,
+                Some(gnmi::subscribe_response::Response::SyncResponse(true))
+            );
+            neighbors.store(6_554, Ordering::SeqCst);
+            let status = rx.recv().await.unwrap().unwrap_err();
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+            assert_eq!(status.message(), over_bound_message(65_540));
+            assert!(rx.recv().await.is_none());
+            stream.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_renders_wait_for_the_shared_render_slots() {
+        // Load-bearing break: a subscription render that skips the slots Get
+        // holds takes its peer snapshot while every slot is busy.
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(numbered_roster(1)) }
+        });
+        let held = Arc::clone(&service.render_slots)
+            .acquire_many_owned(u32::try_from(RENDER_SLOTS).unwrap())
+            .await
+            .unwrap();
+        let plan = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            all_neighbors_path(),
+        ))
+        .unwrap();
+        let render = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .render_subscription_snapshot(&plan, None, true)
+                    .await
+            }
+        });
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(held);
+        assert_eq!(render.await.unwrap().unwrap().len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -5871,6 +6227,206 @@ mod tests {
         })
         .with_test_session_events(&events);
         (service, events)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn on_change_heartbeat_frees_its_render_slot_while_a_send_blocks() {
+        // Load-bearing break: polling the heartbeat render only from the
+        // stream loop leaves its shared render slot held for as long as the
+        // loop waits on a client that stopped reading.
+        use crate::peer_types::SessionLifecycleEventType::Lost;
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (snapshot_calls, snapshot_gate) = (Arc::clone(&calls), Arc::clone(&gate));
+        let events = broadcast::channel(64).0;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            // The initial snapshot answers; every later one waits on the gate.
+            let gated = snapshot_calls.fetch_add(1, Ordering::SeqCst) > 0;
+            let gate = Arc::clone(&snapshot_gate);
+            async move {
+                if gated {
+                    gate.acquire().await.unwrap().forget();
+                }
+                Ok(vec![
+                    test_peer("10.0.0.2".parse().unwrap()),
+                    test_peer("10.0.0.3".parse().unwrap()),
+                ])
+            }
+        })
+        .with_test_session_events(&events);
+        // A heartbeat path on 10.0.0.3, and a plain path on 10.0.0.2, the
+        // peer `session_event` names.
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.3"));
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let mut without_heartbeat = list.subscription[0].clone();
+        without_heartbeat.path = Some(neighbor_session_state_path("10.0.0.2"));
+        without_heartbeat.heartbeat_interval = 0;
+        list.subscription.push(without_heartbeat);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let stream = tokio::spawn(service.clone().run_on_change(plan, tx));
+        assert_eq!(
+            subscribe_updates(rx.recv().await.unwrap().unwrap()).len(),
+            2
+        );
+        assert_eq!(
+            rx.recv().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+
+        // The heartbeat render takes a slot and waits on its peer snapshot.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(service.render_slots.available_permits(), RENDER_SLOTS - 1);
+        // Events on the plain path fill the channel; the loop blocks in send.
+        for _ in 0..3 {
+            events
+                .send(session_event(Lost, Some(SessionState::Idle)))
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        gate.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(service.render_slots.available_permits(), RENDER_SLOTS);
+
+        drop(rx);
+        stream.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ended_on_change_stream_leaves_no_heartbeat_render_behind() {
+        // Load-bearing break: a detached heartbeat task outlives its stream,
+        // waits for a render slot, and then renders a snapshot for a client
+        // that is gone.
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let events = broadcast::channel(64).0;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(vec![test_peer("10.0.0.2".parse().unwrap())]) }
+        })
+        .with_test_session_events(&events);
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.2"));
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let stream = tokio::spawn(service.clone().run_on_change(plan, tx));
+        assert_eq!(
+            subscribe_updates(rx.recv().await.unwrap().unwrap()).len(),
+            1
+        );
+        assert_eq!(
+            rx.recv().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Every slot is busy, so the heartbeat render queues for one.
+        let held = Arc::clone(&service.render_slots)
+            .acquire_many_owned(u32::try_from(RENDER_SLOTS).unwrap())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        // The client goes away and the stream ends.
+        drop(rx);
+        stream.await.unwrap();
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.render_slots.available_permits(), RENDER_SLOTS);
+    }
+
+    #[test]
+    fn concrete_neighbor_paths_count_their_roster_search() {
+        // Load-bearing break: counting only the planned updates keeps sixteen
+        // searches of a 65,536-neighbor roster (one update each) inline.
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.1.0"));
+        list.subscription = (0..MAX_SUBSCRIPTIONS)
+            .map(|index| gnmi::Subscription {
+                path: Some(neighbor_session_state_path(&format!("10.0.1.{index}"))),
+                ..list.subscription[0].clone()
+            })
+            .collect();
+        let plan = parse_subscription_list(&list).unwrap();
+        let (queries, _) = due_queries(&plan, |_| true);
+        let planned = check_render_budget("Subscribe", &queries, 65_536).unwrap();
+        assert_eq!(planned, MAX_SUBSCRIPTIONS);
+        assert!(subscription_render_inline(planned, 1, 0));
+        let traversed = roster_traversal(&queries, 65_536);
+        assert_eq!(traversed, 65_536 * (MAX_SUBSCRIPTIONS + 1));
+        assert!(!subscription_render_inline(planned, 1, traversed));
+
+        let global = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            mounted_path(&[pe("bgp"), pe("global"), pe("state")]),
+        ))
+        .unwrap();
+        assert_eq!(roster_traversal(&global.paths, 65_536), 0);
+    }
+
+    #[tokio::test]
+    async fn retained_sample_state_counts_toward_moving_a_render_off_the_runtime() {
+        // Load-bearing break: deciding on rendered updates alone keeps a tick
+        // that drops 176,000 retained entries on the stream task once the
+        // roster shrinks to nothing.
+        use std::sync::atomic::AtomicU32;
+
+        let neighbors = Arc::new(AtomicU32::new(1_000));
+        let roster = Arc::clone(&neighbors);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = numbered_roster(roster.load(Ordering::SeqCst));
+            async move { Ok(peers) }
+        });
+        let plan = parse_subscription_list(&repeated(
+            controlled_sample_list(all_neighbors_path(), true, 0, 0),
+            MAX_SUBSCRIPTIONS,
+        ))
+        .unwrap();
+        let mut caches = (0..MAX_SUBSCRIPTIONS)
+            .map(|_| Some(SampleValueCache::default()))
+            .collect::<Vec<_>>();
+        let mut delivered = vec![DeliveredPeerAs::default(); MAX_SUBSCRIPTIONS];
+        service
+            .render_controlled_sample_snapshot(
+                &plan,
+                &[Some(true); MAX_SUBSCRIPTIONS],
+                false,
+                true,
+                &mut caches,
+                &mut delivered,
+            )
+            .await
+            .unwrap();
+
+        // Ten cached leaves and one delivered `peer-as` per neighbor and path.
+        let retained = retained_sample_entries(&caches, &delivered);
+        assert_eq!(retained, MAX_SUBSCRIPTIONS * 11_000);
+        assert!(subscription_render_inline(0, MAX_SUBSCRIPTIONS, 0));
+        assert!(!subscription_render_inline(0, MAX_SUBSCRIPTIONS, retained));
+
+        // The shrink tick itself: every delivered `peer-as` is deleted once and
+        // the state comes back from the blocking pool empty.
+        neighbors.store(0, Ordering::SeqCst);
+        let shrunk = service
+            .render_controlled_sample_snapshot(
+                &plan,
+                &[Some(false); MAX_SUBSCRIPTIONS],
+                false,
+                false,
+                &mut caches,
+                &mut delivered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(subscribe_deletes(shrunk[0].clone()).len(), 1_000);
+        assert_eq!(retained_sample_entries(&caches, &delivered), 0);
+        assert_eq!(caches.len(), MAX_SUBSCRIPTIONS);
     }
 
     #[tokio::test]
