@@ -154,7 +154,10 @@ fn ebgp_requires_policy_diff_is_restart_required_named_and_pinned() {
 
     let diff = super::diff_config(&old, &new);
     assert!(diff.ebgp_requires_policy_changed);
-    assert!(diff.global_changed);
+    assert!(
+        !diff.global_changed,
+        "the RFC 8212 posture is reported by its own field, not the [global] bucket"
+    );
     assert!(diff.has_restart_required_changes());
     assert!(
         !diff.has_reload_applied_changes(),
