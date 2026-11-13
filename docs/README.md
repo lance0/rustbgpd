@@ -97,7 +97,7 @@ Understand the design and choose a deployment role.
 | [Architecture](explanation/architecture.md) | Workspace structure and subsystem boundaries. |
 | [Design](explanation/design.md) | Constraints, tradeoffs, and protocol scope. |
 | [Implementation comparison](explanation/comparison.md) | Capability and scope comparisons with other BGP daemons. |
-| [GoBGP parity](explanation/gobgp-parity.md) | Detailed capability comparison against the pinned release. |
+| [GoBGP parity](explanation/gobgp-parity.md) | Detailed capability comparison against GoBGP v4.10.0. |
 | [IXP evaluation](explanation/ixp-evaluation.md) | Assess route-server fit using configuration and evidence. |
 | [EVPN reflector inventory proposal](explanation/evpn-rr-inventory-proposal.md) | Historical: how the scoped EVPN route-reflector v1 boundary was chosen. |
 

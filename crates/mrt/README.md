@@ -17,6 +17,9 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **Periodic + on-demand** — configurable dump interval or gRPC
   `TriggerMrtDump` for immediate snapshots
 - **Optional gzip** compression via flate2
+- **Retention** — `max_files` keeps at most that many of the writer's
+  `<file_prefix>` dumps, deleting the oldest after each successful publish;
+  unset keeps every dump
 - **Durable atomic writes** — sync the completed temp file before rename,
   then sync the output directory; failed writes clean up their temp file
 - **NH synthesis** — IPv4 routes get NEXT_HOP attribute, IPv6 get

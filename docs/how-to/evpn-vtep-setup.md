@@ -20,6 +20,9 @@ Two independent readiness surfaces govern this:
 | L2VNI bridge/VXLAN probe | `[[evpn_instances]]` | ADR-0054 §4 | `rbgp evpn instances` |
 | IP-VRF / L3VNI predicates | `[[evpn_ip_vrfs]]` | ADR-0058 §3 | `rbgp evpn vrfs [NAME]` |
 
+When rustbgpd creates or adopts the netdevs itself through `[managed_netdevs]`
+(ADR-0091), `rbgp evpn managed-netdevs` lists each one's ownership and status.
+
 Ethernet Segments (`[[ethernet_segments]]`) with an explicit `esi` are
 **control-plane only** (Type 1/4 origination) and do **not** probe a kernel
 netdev. An `esi = "auto-lacp"` segment probes its 802.3ad bond for an LACP

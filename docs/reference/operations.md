@@ -1214,7 +1214,7 @@ rename.
     [fences and exits 70](#runtime-config-settlement-fail-stop). The
     supervisor restarts it from the edited file.
 
-Either way, `rbgp doctor` reports `daemon.config_freshness` yellow until a
+Either way, `rbgp doctor` reports `daemon.config_freshness.<pid>` yellow until a
 SIGHUP adopts the edit. After that, mutations write the file again.
 
 The check starts at boot, including after a commit-confirm boot revert. When
