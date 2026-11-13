@@ -643,7 +643,8 @@ async fn read_admitted_during_prestage_is_labelled_prestage() {
     rib.await.unwrap();
 }
 
-/// A fenced owner runs the authoritative per-peer walk. A read that arrives
+/// A fenced owner runs the authoritative walk, whose one peer takes a batch
+/// of one. A read that arrives
 /// while its RIB reply is held is drained only after the run loop resumes;
 /// its wait covers the fenced time and is attributed to `commit_batches`.
 #[tokio::test(start_paused = true)]
@@ -658,14 +659,19 @@ async fn read_fenced_by_the_authoritative_walk_is_timed_when_drained_after_relea
         let mut held = Some(held_tx);
         let mut release = Some(release_rx);
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+            if let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = update
+            {
+                sole_replacement(replacements);
                 if let Some(held) = held.take() {
                     let _ = held.send(());
                 }
                 if let Some(release) = release.take() {
                     let _ = release.await;
                 }
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(Ok(Vec::new()));
             }
         }
     });

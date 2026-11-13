@@ -102,10 +102,14 @@ enum Drive {
         import_delta: bool,
         cohort_reply: CohortReply,
     },
-    /// One target: the authoritative per-peer walk, forward owner.
+    /// One target: the authoritative walk, forward owner. Its RIB step is a
+    /// batch of one.
     ForwardWalk {
         clean: bool,
     },
+    /// As `ForwardWalk`, with the target carrying export retry intent: its
+    /// RIB step is the per-peer command.
+    ForwardRetryWalk,
     /// One target moving the RFC 8212 import verdict (preflight qualifies it).
     Rfc8212Transition {
         established: bool,
@@ -555,7 +559,7 @@ const WAIT_SITES: &[WaitSite] = &[
     WaitSite {
         site: "policy.rs::replace_peer_export_policy_in_rib",
         awaits: "RibUpdate::ReplacePeerExportPolicy reply (authoritative walk step)",
-        drive: Drive::ForwardWalk { clean: false },
+        drive: Drive::ForwardRetryWalk,
         rib: RibHold::Reply(is_single_replace),
         session: answer_all,
         additional_entry: None,
@@ -1499,6 +1503,14 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             false,
         ),
         Drive::ForwardWalk { clean } => (vec![target(peers[0], false, true)], clean),
+        Drive::ForwardRetryWalk => {
+            manager
+                .peers
+                .get_mut(&key(peers[0]))
+                .unwrap()
+                .pending_export_apply = true;
+            (vec![target(peers[0], false, true)], false)
+        }
         Drive::Rfc8212Transition { .. } => (vec![target(peers[0], true, false)], false),
         Drive::ApiPolicyImpact | Drive::ApiPublicationCompensation => (
             peers
@@ -1536,6 +1548,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
     match drive {
         Drive::ForwardCohort { .. }
         | Drive::ForwardWalk { .. }
+        | Drive::ForwardRetryWalk
         | Drive::Rfc8212Transition { .. } => manager
             .apply_resolved_policy_snapshot_with_prestage_reads(
                 targets,
@@ -2040,6 +2053,7 @@ async fn run(row: &WaitSite) {
         }
         Drive::ForwardCohort { .. }
         | Drive::ForwardWalk { .. }
+        | Drive::ForwardRetryWalk
         | Drive::ApiPolicyImpact
         | Drive::CatalogPolicyRefresh
         | Drive::HonorGracefulShutdown

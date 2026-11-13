@@ -161,7 +161,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
     let (handle_a, counters_a) = fake_session(a.addr());
     let (handle_b, counters_b) = fake_session(b);
 
-    // RIB drainer counting ReplacePeerExportPolicy per peer.
+    // RIB drainer counting export-policy replacements per peer.
     let rib_replaces_a = Arc::new(AtomicU32::new(0));
     let rib_replaces_b = Arc::new(AtomicU32::new(0));
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
@@ -169,13 +169,18 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
     let rib_drainer = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
             match update {
-                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    if peer == a {
+                // The scoped re-apply: the one changed peer is alone in its
+                // export pair and goes to the RIB as a batch of one.
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    if sole_replacement(replacements).peer == a {
                         replaces_a.fetch_add(1, Ordering::SeqCst);
                     } else {
                         replaces_b.fetch_add(1, Ordering::SeqCst);
                     }
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(Vec::new()));
                 }
                 // LAN-462: the initial uniform install rides the batched
                 // import-tolerant cohort — one member replacement per peer.
@@ -254,7 +259,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
     assert_eq!(
         rib_replaces_a.load(Ordering::SeqCst),
         1,
-        "content-equal re-resolve must not send ReplacePeerExportPolicy \
+        "content-equal re-resolve must not send an export-policy replacement \
          (a fresh instance would strand the update group's term-hit counters)"
     );
     assert_eq!(
@@ -547,10 +552,14 @@ async fn export_only_snapshot_selects_largest_local_policy_pair() {
     assert_eq!(batches, vec![large.to_vec()]);
     assert_eq!(
         authoritative,
-        vec![small.to_vec()],
-        "a losing pair takes one authoritative batch, not a command per member"
+        vec![small.to_vec(), vec![ninth], vec![tenth]],
+        "a losing pair takes one authoritative batch, not a command per member; a peer \
+         alone in its pair takes a batch of one"
     );
-    assert_eq!(singles, vec![ninth, tenth]);
+    assert!(
+        singles.is_empty(),
+        "no remainder peer takes the per-peer command: {singles:?}"
+    );
 }
 
 /// Load-bearing LAN-521 regression: replacing the canonical tie-break with
@@ -689,9 +698,15 @@ async fn export_only_snapshot_partitions_first_eligible_cohort_and_stable_remain
                     );
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
-                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer.addr());
-                    let _ = reply.send(Ok(()));
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    singles.push(sole_replacement(replacements).peer.addr());
+                    let _ = reply.send(Ok(Vec::new()));
+                }
+                RibUpdate::ReplacePeerExportPolicy { peer, .. } => {
+                    panic!("{peer} must not take a per-peer command in a snapshot walk");
                 }
                 _ => {}
             }
@@ -1534,14 +1549,19 @@ async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
     );
     let drive_rib = async {
         for (index, expected_peer) in peers.iter().copied().enumerate() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
+            let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = rib_rx.recv().await.unwrap()
             else {
                 panic!("expected forward RIB command");
             };
-            assert_eq!(peer, PeerId::from_addr(expected_peer));
+            assert_eq!(
+                sole_replacement(replacements).peer,
+                PeerId::from_addr(expected_peer)
+            );
             if index == 0 {
-                reply.send(Ok(())).unwrap();
+                reply.send(Ok(Vec::new())).unwrap();
             } else {
                 reply
                     .send(Err(rustbgpd_rib::RibCommandError::internal(
@@ -1640,18 +1660,30 @@ async fn policy_rollback_skips_refresh_when_rib_restore_cannot_register() {
             .collect(),
     );
     let close_rib_before_rollback = async {
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected first forward RIB command");
         };
-        assert_eq!(peer, PeerId::from_addr(peers[0]));
-        reply.send(Ok(())).unwrap();
+        assert_eq!(
+            sole_replacement(replacements).peer,
+            PeerId::from_addr(peers[0])
+        );
+        reply.send(Ok(Vec::new())).unwrap();
 
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected second forward RIB command");
         };
-        assert_eq!(peer, PeerId::from_addr(peers[1]));
+        assert_eq!(
+            sole_replacement(replacements).peer,
+            PeerId::from_addr(peers[1])
+        );
         reply
             .send(Err(rustbgpd_rib::RibCommandError::internal(
                 "force rollback after one completed peer",
@@ -1836,10 +1868,11 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
 
 /// The stable remainder's work is counted in RIB commands: every export pair
 /// shared by two or more Established remainder peers costs one authoritative
-/// batch, and only a peer whose pair is its own keeps its per-peer command.
-/// Each RIB command here takes 35 s, so the remainder (two pairs of two and
-/// one single) is three commands and 105 s; one command per member would be
-/// five.
+/// batch, and a peer whose pair is its own is a batch of one. The batches
+/// follow every session leg, one export pair at a time in the order each
+/// pair first appears. Each RIB command here takes 35 s, so the remainder
+/// (two pairs of two and one single) is three commands and 105 s; one
+/// command per member would be five.
 #[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
@@ -1879,10 +1912,8 @@ async fn authoritative_remainder_batches_each_shared_export_pair() {
                     tokio::time::sleep(Duration::from_secs(35)).await;
                     let _ = reply.send(Ok(Vec::new()));
                 }
-                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    commands.push(("single", vec![peer.addr()]));
-                    tokio::time::sleep(Duration::from_secs(35)).await;
-                    let _ = reply.send(Ok(()));
+                RibUpdate::ReplacePeerExportPolicy { peer, .. } => {
+                    panic!("{peer} must not take a per-peer command in a snapshot walk");
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
                     replacements,
@@ -1971,13 +2002,13 @@ async fn authoritative_remainder_batches_each_shared_export_pair() {
         commands,
         vec![
             ("cohort", cohort.to_vec()),
-            // The single keeps its place in the caller-order walk; the pairs'
-            // RIB steps follow it, one batch each.
-            ("single", vec![single]),
+            // Pairs in first-occurrence order: the caller named a member of
+            // each shared pair before the single.
             ("batch", pair_b.to_vec()),
             ("batch", pair_c.to_vec()),
+            ("batch", vec![single]),
         ],
-        "one RIB command per shared export pair, not one per member"
+        "one RIB batch per export pair, not one command per member"
     );
 }
 

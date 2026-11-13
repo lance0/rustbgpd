@@ -539,8 +539,9 @@ async fn cohort_hot_apply_budget_still_bounds_a_stalled_session() {
 ///
 /// LOAD-BEARING: restoring a fresh per-peer `RIB_REPLY_TIMEOUT` on the walk
 /// makes this apply fail with `policy_rib_apply_rejected` instead of `Ok`.
-/// Coverage that the batched cohort path cannot provide: a single target can
-/// never form a cohort, so this exercises the fallback the fast path skips.
+/// Coverage that the batched paths cannot provide: a target that carries
+/// export retry intent is not eligible for a batched RIB step, so the walk
+/// sends it the per-peer command.
 #[tokio::test(start_paused = true)]
 async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
@@ -567,7 +568,13 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
     );
 
     // One target can never reach the two-member cohort, so this snapshot takes
-    // the wholly authoritative walk.
+    // the wholly authoritative walk; its carried retry intent keeps it on the
+    // per-peer command.
+    manager
+        .peers
+        .get_mut(&key(peer.addr()))
+        .unwrap()
+        .pending_export_apply = true;
     let apply = manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
         address: peer.addr(),
         interface: None,
@@ -581,7 +588,7 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
             ..
         } = rib_rx.recv().await.unwrap()
         else {
-            panic!("expected the forward remainder command");
+            panic!("expected the per-peer forward command");
         };
         assert_eq!(target, peer);
         tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_secs(6)).await;
@@ -597,12 +604,29 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
     assert!(!peer_state.pending_refresh);
 }
 
+/// The RIB step a walk takes for a peer alone in its export pair.
+#[derive(Clone, Copy, Debug)]
+enum WalkStep {
+    /// An eligible peer: an authoritative batch of one.
+    BatchOfOne,
+    /// A peer carrying export retry intent: the per-peer command.
+    PerPeer,
+}
+
 /// Drive a three-peer authoritative walk (pairwise distinct export chains, so
 /// no cohort and no shared pair) against a RIB stub that takes two thirds of
-/// `RIB_BATCH_REPLY_TIMEOUT` per command. With `stall_at`, that command
-/// (counted from 1) is never answered. Returns the snapshot result, the
-/// forward commands the stub received and the elapsed time.
-async fn timed_forward_walk(stall_at: Option<usize>) -> (Result<(), String>, usize, Duration) {
+/// `RIB_BATCH_REPLY_TIMEOUT` per command. Every peer takes `step`; the stub
+/// refuses the other command. With `stall_at`, that command (counted from 1)
+/// is never answered. Returns the snapshot result, the forward commands the
+/// stub received and the elapsed time.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the timed RIB stub for both walk steps and the fleet"
+)]
+async fn timed_forward_walk(
+    step: WalkStep,
+    stall_at: Option<usize>,
+) -> (Result<(), String>, usize, Duration) {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
     let per_peer_delay = RIB_BATCH_REPLY_TIMEOUT * 2 / 3;
@@ -618,12 +642,26 @@ async fn timed_forward_walk(stall_at: Option<usize>) -> (Result<(), String>, usi
         while let Some(update) = rib_rx.recv().await {
             match update {
                 RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    assert!(matches!(step, WalkStep::PerPeer), "{step:?}");
                     if stall_at == Some(stub_served.fetch_add(1, Ordering::SeqCst) + 1) {
-                        held.push(reply);
+                        held.push(Box::new(reply) as Box<dyn std::any::Any + Send>);
                         continue;
                     }
                     tokio::time::sleep(per_peer_delay).await;
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    assert!(matches!(step, WalkStep::BatchOfOne), "{step:?}");
+                    sole_replacement(replacements);
+                    if stall_at == Some(stub_served.fetch_add(1, Ordering::SeqCst) + 1) {
+                        held.push(Box::new(reply));
+                        continue;
+                    }
+                    tokio::time::sleep(per_peer_delay).await;
+                    let _ = reply.send(Ok(Vec::new()));
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
                     replacements,
@@ -662,6 +700,11 @@ async fn timed_forward_walk(stall_at: Option<usize>) -> (Result<(), String>, usi
             established_export_policy_test_session(peer, Arc::clone(&attempts), None),
             false,
         );
+        manager
+            .peers
+            .get_mut(&key(peer))
+            .unwrap()
+            .pending_export_apply = matches!(step, WalkStep::PerPeer);
     }
     let started = tokio::time::Instant::now();
     let result = manager
@@ -691,19 +734,22 @@ async fn timed_forward_walk(stall_at: Option<usize>) -> (Result<(), String>, usi
 
 /// Elapsed time alone does not roll a forward walk back. Every command here
 /// completes inside the stall timeout, and the walk as a whole takes twice
-/// `RIB_BATCH_REPLY_TIMEOUT`; it commits.
+/// `RIB_BATCH_REPLY_TIMEOUT`; it commits, whether its peers take batches of
+/// one or the per-peer command.
 ///
 /// LOAD-BEARING: one absolute deadline for the whole walk refuses the third
 /// command and rolls the reload back.
 #[tokio::test(start_paused = true)]
 async fn forward_walk_commits_past_the_stall_timeout_while_every_unit_completes() {
-    let (result, served, elapsed) = timed_forward_walk(None).await;
-    assert!(
-        result.is_ok(),
-        "a walk whose every command completes must commit: {result:?}"
-    );
-    assert_eq!(served, 3);
-    assert_eq!(elapsed, RIB_BATCH_REPLY_TIMEOUT * 2);
+    for step in [WalkStep::BatchOfOne, WalkStep::PerPeer] {
+        let (result, served, elapsed) = timed_forward_walk(step, None).await;
+        assert!(
+            result.is_ok(),
+            "{step:?}: a walk whose every command completes must commit: {result:?}"
+        );
+        assert_eq!(served, 3, "{step:?}");
+        assert_eq!(elapsed, RIB_BATCH_REPLY_TIMEOUT * 2, "{step:?}");
+    }
 }
 
 /// A unit that never completes is a stall: the walk rolls back
@@ -711,20 +757,26 @@ async fn forward_walk_commits_past_the_stall_timeout_while_every_unit_completes(
 /// command, and the rollback is exact.
 #[tokio::test(start_paused = true)]
 async fn forward_walk_rolls_back_when_a_unit_stalls() {
-    let (result, served, elapsed) = timed_forward_walk(Some(2)).await;
-    assert!(
-        result.as_ref().is_err_and(|error| {
-            error.contains("already-applied peers restored") && !error.contains("also failed")
-        }),
-        "a stalled walk must roll back to an exact compensation: {result:?}"
-    );
-    assert_eq!(served, 2, "no command follows the one that stalled");
-    // The first command completed at two thirds of the timeout; the stall is
-    // measured from there.
-    assert_eq!(
-        elapsed,
-        RIB_BATCH_REPLY_TIMEOUT * 2 / 3 + RIB_BATCH_REPLY_TIMEOUT
-    );
+    for step in [WalkStep::BatchOfOne, WalkStep::PerPeer] {
+        let (result, served, elapsed) = timed_forward_walk(step, Some(2)).await;
+        assert!(
+            result.as_ref().is_err_and(|error| {
+                error.contains("already-applied peers restored") && !error.contains("also failed")
+            }),
+            "{step:?}: a stalled walk must roll back to an exact compensation: {result:?}"
+        );
+        assert_eq!(
+            served, 2,
+            "{step:?}: no command follows the one that stalled"
+        );
+        // The first command completed at two thirds of the timeout; the stall
+        // is measured from there.
+        assert_eq!(
+            elapsed,
+            RIB_BATCH_REPLY_TIMEOUT * 2 / 3 + RIB_BATCH_REPLY_TIMEOUT,
+            "{step:?}"
+        );
+    }
 }
 
 /// Session work before the first RIB command cannot spend its lazy budget.
@@ -1453,8 +1505,12 @@ async fn rfc8212_preflight_does_not_anchor_the_remainder_walk_budget() {
                     tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(10)).await;
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
-                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
-                    let _ = reply.send(Ok(()));
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    sole_replacement(replacements);
+                    let _ = reply.send(Ok(Vec::new()));
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
                     replacements,

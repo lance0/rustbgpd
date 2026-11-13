@@ -959,9 +959,12 @@ convergence.
 How long an export-policy change takes depends on its shape. Peers that move
 between the same pair of export policies are applied together, so their cost
 is close to one table per policy pair. Peers whose export change is their own
-(per-neighbor export policies) cost one full-table RIB command each, so the
-change scales with distinct policy chains times table size: at a full table,
-on the order of a second or more per such peer. Elapsed time does not roll
+(per-neighbor export policies) cost one RIB batch each, a pass over the full
+table, so the change scales with distinct policy chains times table size: at
+a full table, on the order of a second per such peer. Every changed peer's
+session takes its new policies first; the RIB batches follow, one policy pair
+at a time, and each pair's Route Refreshes are sent once that pair has
+committed. Elapsed time does not roll
 the change back. Neither the forward walk nor a rollback has a total deadline;
 each is bounded by a two-minute stall timeout, measured from the last RIB
 command that completed, inside the 30-minute settlement budget described in

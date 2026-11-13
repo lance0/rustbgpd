@@ -452,23 +452,26 @@ async fn assert_non_established_rollback_rib_outcome(
     let expected_next = format!("{:?}", Some(next.clone()));
     let expected_prior = format!("{:?}", Some(prior_export.clone()));
     let rib_driver = tokio::spawn(async move {
-        let RibUpdate::ReplacePeerExportPolicy {
-            peer,
-            export_policy,
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
             reply,
         } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected flapping peer forward RIB replacement");
         };
-        assert_eq!(peer, flapping);
-        assert_eq!(format!("{export_policy:?}"), expected_next);
-        reply.send(Ok(())).unwrap();
+        let replacement = sole_replacement(replacements);
+        assert_eq!(replacement.peer, flapping);
+        assert_eq!(format!("{:?}", replacement.export_policy), expected_next);
+        reply.send(Ok(Vec::new())).unwrap();
 
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected failing peer forward RIB replacement");
         };
-        assert_eq!(peer, failing);
+        assert_eq!(sole_replacement(replacements).peer, failing);
         reply
             .send(Err(rustbgpd_rib::RibCommandError::internal(
                 "force transaction rollback",
@@ -516,8 +519,9 @@ async fn assert_non_established_rollback_rib_outcome(
     });
 
     // Distinct export targets keep this snapshot off the LAN-462
-    // import-tolerant cohort (no repeated export pair) and on the per-peer
-    // authoritative transaction whose rollback this regression pins.
+    // import-tolerant cohort (no repeated export pair) and on the
+    // authoritative transaction whose rollback this regression pins: each
+    // peer is alone in its export pair and takes a batch of one.
     let result = mgr
         .apply_resolved_policy_snapshot(
             [flapping, failing]
@@ -613,7 +617,11 @@ async fn established_rollback_accepts_typed_rib_absence_of_deferred_registration
 /// LAN-2512: a forward per-peer apply to an Established session whose RIB
 /// outbound registration is still deferred gets a typed `NotFound`. The
 /// session accepted the new chain, and its registration installs it, so the
-/// apply succeeds without retaining export intent.
+/// apply succeeds without retaining export intent. The peer carries export
+/// retry intent, which keeps a snapshot walk's RIB step on the per-peer
+/// command; an eligible peer's batch of one skips an unregistered member
+/// inside the RIB
+/// (`forward_batch_of_one_commits_for_a_peer_the_rib_has_not_registered`).
 #[tokio::test]
 async fn forward_apply_accepts_typed_rib_absence_for_established_peer() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
@@ -642,6 +650,7 @@ async fn forward_apply_accepts_typed_rib_absence_for_established_peer() {
         let managed = mgr.peers.get_mut(&key(peer.addr())).unwrap();
         managed.import_policy.clone_from(&import_policy);
         managed.export_policy = Some(validation_policy_chain(ImportValidationDependency::Aspa));
+        managed.pending_export_apply = true;
     }
     let next = deny_policy_chain();
     let rib_driver = tokio::spawn(async move {
@@ -651,7 +660,7 @@ async fn forward_apply_accepts_typed_rib_absence_for_established_peer() {
             ..
         } = rib_rx.recv().await.unwrap()
         else {
-            panic!("expected the forward RIB replacement");
+            panic!("expected the per-peer forward RIB replacement");
         };
         assert_eq!(target, peer);
         reply
@@ -681,6 +690,70 @@ async fn forward_apply_accepts_typed_rib_absence_for_established_peer() {
         !managed.pending_export_apply,
         "the registration installs the accepted chain; no export intent remains"
     );
+}
+
+/// A snapshot walk sends an eligible Established peer to the RIB as a batch
+/// of one. When the real RIB holds no outbound registration for it (a
+/// deferred `PeerUp`, or a session that dropped after the probe), the batch
+/// skips it and the walk commits: the peer manager holds the new chain,
+/// which the peer's next registration installs, and no export intent remains.
+#[tokio::test]
+async fn forward_batch_of_one_commits_for_a_peer_the_rib_has_not_registered() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let rib = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .run(),
+    );
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    insert_test_managed_peer(
+        &mut mgr,
+        peer.addr(),
+        acking_policy_handle(peer.addr(), SessionState::Established),
+        false,
+    );
+    mgr.peers.get_mut(&key(peer.addr())).unwrap().export_policy =
+        Some(validation_policy_chain(ImportValidationDependency::Aspa));
+    let next = deny_policy_chain();
+    mgr.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+        address: peer.addr(),
+        interface: None,
+        import_policy: None,
+        export_policy: Some(next.clone()),
+    }])
+    .await
+    .expect("an unregistered member does not fail its batch");
+    let managed = mgr.peers.get(&key(peer.addr())).unwrap();
+    assert_eq!(
+        format!("{:?}", managed.export_policy),
+        format!("{:?}", Some(next))
+    );
+    assert!(
+        !managed.pending_export_apply,
+        "the registration installs the accepted chain; no export intent remains"
+    );
+    let (reply, installed) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryInstalledExportChain { peer, reply })
+        .await
+        .unwrap();
+    assert!(
+        installed.await.unwrap().is_none(),
+        "the batch registered nothing for the absent peer"
+    );
+    rib.abort();
 }
 
 #[tokio::test]

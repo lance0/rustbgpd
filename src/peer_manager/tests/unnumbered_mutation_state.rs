@@ -38,9 +38,15 @@ async fn scoped_chain_edits_persist_and_reach_only_the_selected_binding() {
     let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
     let rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = update {
-                observed_tx.send(peer).unwrap();
-                let _ = reply.send(Ok(()));
+            if let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = update
+            {
+                observed_tx
+                    .send(sole_replacement(replacements).peer)
+                    .unwrap();
+                let _ = reply.send(Ok(Vec::new()));
             }
         }
     });
@@ -770,14 +776,13 @@ async fn policy_timeout_requires_convergence(path: PolicyMutation) {
     let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
     let rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy {
-                export_policy,
+            if let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
                 reply,
-                ..
             } = update
             {
-                *observed.lock().unwrap() = export_policy;
-                let _ = reply.send(Ok(()));
+                *observed.lock().unwrap() = sole_replacement(replacements).export_policy;
+                let _ = reply.send(Ok(Vec::new()));
             }
         }
     });

@@ -336,6 +336,36 @@ that fails late and must be restored reaches it near 600. Reaching it fences
 the daemon, so that budget, not this change, is the limit to revisit before
 a route server carries that many per-neighbor export policies.
 
+The same change sends a remainder peer whose export pair is its own through
+the batch entry point, as a batch of one. The remainder amendment above kept
+the per-peer command for it. A unicast member alone in its update group
+moves in that batch as a shared cohort of one: the RIB builds the
+destination table and emits the old-to-new delta, where the per-peer command
+regroups the member and resyncs its whole table. In checkpoints at 256 rows
+with 16 such members registered, the batch of one passes about 5,600 and the
+per-peer command about 16,000; both put the same 256 announcements on the
+wire. Each command also does work in proportion to the registered peers
+(about 12 checkpoints per peer for the batch, about 28 for the per-peer
+command), so the batch adds no per-command table or fleet pass the per-peer
+command did not have. At a full table the 2026-11-12 rollback measurement
+restored such members as shared cohorts of one in about 0.83 s each, against
+about 1.47 s for the per-peer forward command; the forward figure on this
+path is the campaign's to measure. A member the batch cannot move on the
+shared transition (an ungrouped or peer-context export chain, a
+per-client-best member, a sender of any family other than IPv4 or IPv6
+unicast, mixed destinations under one source group) is handed back and
+applied by the paced walk, whose body is the per-peer command's own regroup
+and resync, so its end state is unchanged at the cost of one short extra RIB
+command. A member with no RIB registration is skipped inside the batch, as
+the per-peer command's typed absence was accepted. The walk's order changes
+with it: every planned peer's session legs run before the first RIB batch,
+batches follow in the order each export pair first appears, and a peer's
+Route Refresh follows its pair's commit instead of its own session leg. The
+per-peer command remains for a target that carries retry intent or an
+unconfirmed install, an RFC 8212 presence transition, every target of a
+snapshot that names a peer twice, the honor-knob fan-outs and a single-peer
+hot update.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

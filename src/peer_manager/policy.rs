@@ -42,10 +42,10 @@ use super::{
 /// lines instead of either silence or one line per peer.
 const COHORT_SETUP_PROGRESS_INTERVAL: usize = 64;
 
-/// The most members of one shared export pair that the authoritative
-/// remainder sends in one RIB batch. A shared cohort's batch turn grows with
-/// its members, so a larger pair is sent as several batches and other RIB
-/// work runs between them.
+/// The most members of one export pair that the authoritative remainder
+/// sends in one RIB batch. A shared cohort's batch turn grows with its
+/// members, so a larger pair is sent as several batches and other RIB work
+/// runs between them.
 const PAIR_BATCH_MEMBERS: usize = 100;
 
 /// The union is retained even if a candidate chain stops referencing a dataset.
@@ -447,8 +447,8 @@ struct PolicySnapshotContext {
 
 /// One peer's policy apply, stopped after its session legs and before its RIB
 /// step. A rollback plans every peer this way; the forward remainder walk
-/// plans the Established peers that share an export pair, so that their RIB
-/// steps run as one batch.
+/// plans every Established peer eligible for a batched RIB step, so that the
+/// RIB steps of one export pair run as one batch.
 struct PolicyRollbackPeerPlan {
     peer_key: PeerKey,
     export_restore: Option<(Option<PolicyChain>, bool)>,
@@ -1772,13 +1772,15 @@ impl PeerManager {
             .then_some((&managed.export_policy, &target.export_policy))
     }
 
-    /// For each target, the index of the `(installed, target)` export pair it
-    /// shares with at least one other target, numbered by first occurrence;
-    /// `None` for a target whose pair is its own, or that is not locally
+    /// For each target, the index of its `(installed, target)` export pair,
+    /// numbered by first occurrence; `None` for a target that is not locally
     /// eligible for a batched RIB step (see
-    /// [`Self::local_export_only_policy_pair`]). A snapshot naming a peer
-    /// twice shares nothing: its replacements are order-dependent.
-    fn shared_export_pairs(&self, targets: &[ResolvedPeerPolicy]) -> Vec<Option<usize>> {
+    /// [`Self::local_export_only_policy_pair`]). A peer alone in its pair is
+    /// numbered too and goes to the RIB as a batch of one: the batch moves a
+    /// unicast member on the shared transition, which costs less than the
+    /// per-peer command's full resync. A snapshot naming a peer twice
+    /// batches nothing: its replacements are order-dependent.
+    fn batched_export_pairs(&self, targets: &[ResolvedPeerPolicy]) -> Vec<Option<usize>> {
         let mut seen = BTreeSet::new();
         if targets
             .iter()
@@ -1786,27 +1788,21 @@ impl PeerManager {
         {
             return vec![None; targets.len()];
         }
-        // (representative target, members)
-        let mut pairs: Vec<(usize, usize)> = Vec::new();
-        let pair_of: Vec<Option<usize>> = targets
+        // The first target of each pair.
+        let mut representatives: Vec<usize> = Vec::new();
+        targets
             .iter()
             .enumerate()
             .map(|(index, target)| {
                 let pair = self.local_export_only_policy_pair(target)?;
-                let known = pairs.iter().position(|(representative, _)| {
-                    self.local_export_only_policy_pair(&targets[*representative]) == Some(pair)
+                let known = representatives.iter().position(|&representative| {
+                    self.local_export_only_policy_pair(&targets[representative]) == Some(pair)
                 });
-                let known = known.unwrap_or_else(|| {
-                    pairs.push((index, 0));
-                    pairs.len() - 1
-                });
-                pairs[known].1 += 1;
-                Some(known)
+                Some(known.unwrap_or_else(|| {
+                    representatives.push(index);
+                    representatives.len() - 1
+                }))
             })
-            .collect();
-        pair_of
-            .into_iter()
-            .map(|pair| pair.filter(|&pair| pairs[pair].1 >= 2))
             .collect()
     }
 
@@ -1845,14 +1841,20 @@ impl PeerManager {
     /// transaction used for an unpartitioned snapshot and for a partition's
     /// stable remainder. It never recursively selects a cohort.
     ///
-    /// A target whose export pair is its own is applied whole, one peer at a
-    /// time: session legs, its `ReplacePeerExportPolicy` RIB step, its Route
-    /// Refresh. Established targets that share an export pair run only their
-    /// session legs in that walk. Their RIB steps then go, one pair at a
-    /// time, through the batch entry point the cohort handoff uses, so the
-    /// RIB shares the destination build and the old-to-new delta across the
-    /// pair instead of resyncing a full table per member; their Route
-    /// Refreshes follow that pair's commit. Every RIB command of
+    /// Every Established target eligible for a batched RIB step (see
+    /// [`Self::batched_export_pairs`]) runs only its session legs in that
+    /// walk. Their RIB steps then go, one export pair at a time, through the
+    /// batch entry point the cohort handoff uses, so the RIB builds the
+    /// destination and derives the old-to-new delta once per pair instead of
+    /// resyncing a full table per member; a peer alone in its pair is a
+    /// batch of one. A member the batch cannot move on that shared
+    /// transition comes back and is applied through the paced walk. Each
+    /// pair's Route Refreshes follow that pair's commit. Every other target
+    /// is applied whole, one peer at a time (session legs, its
+    /// `ReplacePeerExportPolicy` RIB step, its Route Refresh): a target with
+    /// carried retry intent or an unconfirmed install, an RFC 8212 presence
+    /// transition, and every target of a snapshot that names a peer twice.
+    /// Every RIB command of
     /// the walk is bounded by the transaction's forward budget, which the
     /// walk renews after each completed unit: the walk rolls back when a
     /// peer fails its step or the RIB completes no unit for
@@ -1869,7 +1871,7 @@ impl PeerManager {
         refresh_count: &mut usize,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
-        let pair_of = self.shared_export_pairs(&targets);
+        let pair_of = self.batched_export_pairs(&targets);
         let total_targets = targets.len();
         let mut progress = WalkProgressLog::new();
         if total_targets > 1 {
@@ -1957,7 +1959,7 @@ impl PeerManager {
             self.drain_operator_queries(context.operator_reads).await;
         }
 
-        // The deferred RIB steps, one shared export pair at a time in
+        // The deferred RIB steps, one export pair at a time in
         // first-occurrence order, each pair in batches of at most
         // `PAIR_BATCH_MEMBERS`: a later batch's members join the destination
         // group the first one built. A failure leaves it unknown which of

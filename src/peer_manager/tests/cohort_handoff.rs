@@ -277,10 +277,15 @@ async fn clean_state_first_timeout_then_established_commits() {
     let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
     let rib = async {
         tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
-        let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
             panic!("expected forward authoritative RIB apply");
         };
-        reply.send(Ok(())).unwrap();
+        assert_eq!(sole_replacement(replacements).peer.addr(), peer);
+        reply.send(Ok(Vec::new())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, rib);
     assert!(
@@ -352,7 +357,9 @@ async fn clean_state_non_established_carries_pending_intent_and_commits() {
 
 /// The shared clean-state retry window bounds retries, not the per-peer RIB
 /// legs between them. On the authoritative walk, the first peer's retry must
-/// not let its long RIB export step expire the second peer's retry.
+/// not let its long RIB export step expire the second peer's retry. The
+/// first peer carries export retry intent, so its RIB step is the per-peer
+/// command, inline between the two peers' probes.
 #[tokio::test(start_paused = true)]
 async fn clean_state_retry_survives_long_rib_leg_between_peers() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
@@ -384,6 +391,11 @@ async fn clean_state_retry_survives_long_rib_leg_between_peers() {
             false,
         );
     }
+    manager
+        .peers
+        .get_mut(&key(first.addr()))
+        .unwrap()
+        .pending_export_apply = true;
     // The second peer keeps its export chain, so the batched cohort declines
     // and both peers take the per-peer authoritative walk in order.
     let targets = vec![
@@ -1752,19 +1764,21 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
         rib_tx.clone(),
         None,
     );
-    for (index, peer) in peers.iter().copied().enumerate() {
+    for peer in peers.iter().copied() {
         insert_test_managed_peer(
             &mut manager,
             peer,
-            rollback_ordering_policy_session(peer, rib_tx.clone(), index + 1 == peers.len(), None),
+            rollback_ordering_policy_session(peer, rib_tx.clone(), false, None),
             false,
         );
     }
 
     let next = deny_policy_chain();
     // Distinct export targets keep this snapshot off the LAN-462
-    // import-tolerant cohort (no repeated export pair) and on the per-peer
-    // authoritative transaction whose rollback ordering this proof pins.
+    // import-tolerant cohort (no repeated export pair) and on the
+    // authoritative transaction whose rollback ordering this proof pins:
+    // every peer is alone in its export pair, so each RIB step is a batch of
+    // one followed by that peer's Route Refresh.
     let apply = manager.apply_resolved_policy_snapshot(
         peers
             .iter()
@@ -1779,14 +1793,29 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             .collect(),
     );
     let drive_rib = async {
-        for expected_peer in peers.iter().take(peers.len() - 1) {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
+        for (index, expected_peer) in peers.iter().enumerate() {
+            let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = rib_rx.recv().await.unwrap()
             else {
-                panic!("expected forward RIB restore");
+                panic!("expected forward RIB batch");
             };
-            assert_eq!(peer, PeerId::from_addr(*expected_peer));
-            reply.send(Ok(())).unwrap();
+            assert_eq!(
+                sole_replacement(replacements).peer,
+                PeerId::from_addr(*expected_peer)
+            );
+            // The last peer's batch fails, after every earlier peer's batch
+            // committed and its forward Route Refresh went out.
+            reply
+                .send(if index + 1 == peers.len() {
+                    Err(rustbgpd_rib::RibCommandError::internal(
+                        "injected final RIB failure",
+                    ))
+                } else {
+                    Ok(Vec::new())
+                })
+                .unwrap();
         }
 
         let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -1886,7 +1915,8 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
     assert!(
         result
             .as_ref()
-            .is_err_and(|error| error.contains("injected final session failure")),
+            .is_err_and(|error| error.contains("injected final RIB failure")
+                && error.contains("already-applied peers restored")),
         "the forced final failure must drive a complete rollback: {result:?}"
     );
 }
@@ -3438,14 +3468,17 @@ async fn paced_cohort_walk_does_not_spend_the_remainder_budget() {
         let (_, reply) = expect_paced(&mut rib_rx, &ids[2..], &next).await;
         tokio::time::sleep(Duration::from_secs(10)).await;
         reply.send(Ok(paced_reply(&[], 1, 1))).unwrap();
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = recv_rib(&mut rib_rx).await
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = recv_rib(&mut rib_rx).await
         else {
-            panic!("expected the remainder's per-peer command");
+            panic!("expected the remainder's batch of one");
         };
-        assert_eq!(peer.addr(), peers[3]);
+        assert_eq!(sole_replacement(replacements).peer.addr(), peers[3]);
         tokio::time::sleep(Duration::from_secs(30)).await;
         // A walk that already timed out dropped the reply; the result says so.
-        let _ = reply.send(Ok(()));
+        let _ = reply.send(Ok(Vec::new()));
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
     result.expect("the remainder runs on its own budget and the reload commits");
