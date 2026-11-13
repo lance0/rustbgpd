@@ -4694,6 +4694,13 @@ actor busy for example in the short tail of a configuration reload, or
 persistent, a wedged actor; a caller may retry once and should treat a
 repeated miss as a failure. A closed actor channel, a dropped reply, or a
 stalled export-policy transition or selection release returns `INTERNAL`.
+`GetHealth` follows the same daemon gate as HTTP `/readyz`: once coordinated
+shutdown begins, or a runtime-config settlement arms its recovery fence, it
+returns `UNAVAILABLE` without querying the actors, with a
+`google.rpc.ErrorInfo` detail (`domain: "rustbgpd"`) whose `reason` is
+`DAEMON_SHUTTING_DOWN` or `RUNTIME_CONFIG_RECOVERY_FENCE`. That state lasts
+until the process exits, so a retry does not help. `CheckLiveness` never
+consults the gate.
 `active_peers` counts configured peers whose session reports `Established`.
 Each session publishes its state on every FSM transition and clears it when it
 ends, and the peer manager counts from that published state without querying

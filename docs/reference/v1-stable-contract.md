@@ -613,7 +613,11 @@ These meanings are part of the inventoried RPC contract:
   `UNAVAILABLE` when a core actor misses the probe deadline, which may be
   transient (busy) or persistent (wedged), so a caller may retry once and
   should treat a repeated miss as a failure; `INTERNAL` for every other
-  cause.
+  cause. While coordinated shutdown or the settlement recovery fence holds
+  `/readyz` at 503, `GetHealth` returns `UNAVAILABLE` with one
+  `google.rpc.ErrorInfo` (`domain: "rustbgpd"`) whose `reason` is
+  `DAEMON_SHUTTING_DOWN` or `RUNTIME_CONFIG_RECOVERY_FENCE`; it lasts until
+  the process exits. The reason is contract; the message text is not.
 - `GetPolicyStats`: success means the installed counters were available,
   not that the session command loop is responsive. Peer validation, import
   counters and dataset status are read from the roster the peer manager

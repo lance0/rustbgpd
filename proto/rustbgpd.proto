@@ -5592,7 +5592,12 @@ service ControlService {
   // miss may be transient (busy, as while a reload settles) or persistent (a
   // wedged actor): retry once and treat a repeated miss as a failure. Other
   // core snapshot failures (closed actor channel, dropped reply, stalled
-  // readiness transition or release) fail INTERNAL.
+  // readiness transition or release) fail INTERNAL. While the daemon gate
+  // holds readiness red (coordinated shutdown or the runtime-config
+  // settlement recovery fence, as for HTTP /readyz) it fails UNAVAILABLE with
+  // a google.rpc.ErrorInfo (domain "rustbgpd") whose reason is
+  // DAEMON_SHUTTING_DOWN or RUNTIME_CONFIG_RECOVERY_FENCE; that lasts until
+  // the process exits, so do not retry it.
   rpc GetHealth(HealthRequest) returns (HealthResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
   rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);

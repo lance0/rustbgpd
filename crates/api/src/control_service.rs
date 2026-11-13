@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::authz::AuthTier;
-use crate::health_probe::{CoreReadinessError, CoreReadinessProbe};
+use crate::health_probe::{CoreReadinessError, CoreReadinessProbe, DaemonGate};
 use crate::peer_types::{PeerManagerCommand, PeerManagerReadinessQuery};
 use crate::proto;
 use crate::server::read_only_rejection;
@@ -28,6 +28,7 @@ pub struct ControlService {
     peer_mgr_readiness_tx: Option<mpsc::Sender<PeerManagerReadinessQuery>>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: Option<mpsc::Sender<RibReadinessQuery>>,
+    gate: Option<DaemonGate>,
     shutdown_tx: watch::Sender<bool>,
     mrt_trigger_tx: Option<MrtTriggerTx>,
     incarnation: u64,
@@ -55,6 +56,7 @@ impl ControlService {
             peer_mgr_readiness_tx: None,
             rib_query_tx,
             rib_readiness_tx: None,
+            gate: None,
             shutdown_tx,
             mrt_trigger_tx,
             incarnation: 0,
@@ -88,6 +90,16 @@ impl ControlService {
         self.rib_readiness_tx = Some(rib_readiness_tx);
         self
     }
+
+    /// Consult the process-wide [`DaemonGate`] on `GetHealth`, as `/readyz`
+    /// does: while the gate holds readiness red (coordinated shutdown, the
+    /// settlement recovery fence), `GetHealth` fails without probing the
+    /// core actors.
+    #[must_use]
+    pub fn with_gate(mut self, gate: DaemonGate) -> Self {
+        self.gate = Some(gate);
+        self
+    }
 }
 
 /// `GetHealth` status for a failed core snapshot. A missed probe deadline is
@@ -96,8 +108,21 @@ impl ControlService {
 /// once and should treat a repeated miss as a failure. A closed actor
 /// channel, a dropped reply, or a stalled export-policy transition or
 /// selection release stays `INTERNAL`.
+///
+/// A daemon-gate fault is `UNAVAILABLE` with a `google.rpc.ErrorInfo` detail
+/// (domain `rustbgpd`) whose reason is [`DaemonNotReady::reason`]; it lasts
+/// until the process exits, so a retry does not help.
+///
+/// [`DaemonNotReady::reason`]: crate::health_probe::DaemonNotReady::reason
 fn health_probe_status(error: CoreReadinessError) -> Status {
     match error {
+        CoreReadinessError::DaemonUnavailable(gate) => {
+            crate::injection_service::status_with_reason(
+                tonic::Code::Unavailable,
+                gate.reason(),
+                gate.message().to_string(),
+            )
+        }
         CoreReadinessError::PeerManagerTimedOut | CoreReadinessError::RibTimedOut => {
             Status::unavailable(error.to_string())
         }
@@ -129,6 +154,9 @@ impl proto::control_service_server::ControlService for ControlService {
         }
         if let Some(readiness_tx) = &self.rib_readiness_tx {
             probe = probe.with_rib_readiness(readiness_tx.clone());
+        }
+        if let Some(gate) = &self.gate {
+            probe = probe.with_gate(gate.clone());
         }
         let snapshot = probe.snapshot().await.map_err(health_probe_status)?;
 
@@ -569,5 +597,91 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
         assert_eq!(err.message(), "RIB manager dropped reply");
+    }
+
+    /// The `google.rpc.ErrorInfo` reason of a `GetHealth` status, decoded as
+    /// a client reads the `grpc-status-details-bin` trailer.
+    fn error_info_reason(status: &Status) -> Option<String> {
+        use prost::Message as _;
+        let details = crate::injection_service::RpcStatus::decode(status.details()).ok()?;
+        let [any] = details.details.as_slice() else {
+            return None;
+        };
+        assert_eq!(any.type_url, "type.googleapis.com/google.rpc.ErrorInfo");
+        let info = crate::injection_service::ErrorInfo::decode(any.value.as_slice()).ok()?;
+        assert_eq!(info.domain, "rustbgpd");
+        Some(info.reason)
+    }
+
+    /// `GetHealth` follows the daemon gate as `/readyz` does: shutdown and
+    /// the recovery fence (which also begins shutdown, keeping its own
+    /// reason) are `UNAVAILABLE` with the gate's reason, without asking the
+    /// core actors. Closed actor channels make an ungated answer `INTERNAL`.
+    #[tokio::test]
+    async fn get_health_reports_each_daemon_gate_fault() {
+        use crate::health_probe::DaemonNotReady;
+        let shutdown = DaemonGate::new();
+        shutdown.begin_shutdown();
+        let fence = DaemonGate::new();
+        fence.mark_not_ready(DaemonNotReady::RecoveryFence);
+        fence.begin_shutdown();
+        for (gate, expected) in [
+            (shutdown, DaemonNotReady::ShuttingDown),
+            (fence, DaemonNotReady::RecoveryFence),
+        ] {
+            let svc = make_service().with_gate(gate);
+            let err = svc
+                .get_health(Request::new(proto::HealthRequest {}))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+            assert_eq!(err.message(), expected.message());
+            assert_eq!(error_info_reason(&err).as_deref(), Some(expected.reason()));
+        }
+
+        // An untripped gate leaves the core probe in charge.
+        let err = make_service()
+            .with_gate(DaemonGate::new())
+            .get_health(Request::new(proto::HealthRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.message(), "peer manager unavailable");
+        assert_eq!(error_info_reason(&err), None);
+    }
+
+    /// Liveness never consults the gate.
+    #[tokio::test]
+    async fn liveness_ignores_the_daemon_gate() {
+        let gate = DaemonGate::new();
+        gate.begin_shutdown();
+        let svc = make_service().with_gate(gate).with_incarnation(7);
+        let response = svc
+            .check_liveness(Request::new(proto::CheckLivenessRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.incarnation, 7);
+    }
+
+    /// Both production route builders hand the daemon gate to
+    /// `ControlService`; a builder without it would report healthy during
+    /// shutdown again.
+    #[test]
+    fn every_production_control_service_carries_the_daemon_gate() {
+        let server = include_str!("server.rs");
+        let production = &server[..server.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let builders: Vec<&str> = production
+            .split("ControlService::new(")
+            .skip(1)
+            .map(|rest| &rest[..rest.find("interceptor.clone()").unwrap()])
+            .collect();
+        assert_eq!(builders.len(), 2);
+        for builder in builders {
+            assert!(
+                builder.contains(".with_gate(daemon_gate.clone())"),
+                "{builder}"
+            );
+        }
     }
 }

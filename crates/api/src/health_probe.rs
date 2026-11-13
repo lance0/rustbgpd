@@ -32,7 +32,7 @@ pub struct DaemonGate {
 
 #[derive(Debug, Default)]
 struct DaemonGateInner {
-    not_ready: OnceLock<&'static str>,
+    not_ready: OnceLock<DaemonNotReady>,
     shutting_down: AtomicBool,
     initial_roster_pending: AtomicBool,
 }
@@ -66,7 +66,7 @@ impl DaemonGate {
 
     /// Record a fatal availability fault. First reason wins; later calls
     /// are no-ops so the root cause stays visible.
-    pub fn mark_not_ready(&self, reason: &'static str) {
+    pub fn mark_not_ready(&self, reason: DaemonNotReady) {
         let _ = self.inner.not_ready.set(reason);
     }
 
@@ -78,12 +78,12 @@ impl DaemonGate {
     /// and then loads the owner. A relaxed pair would let both loads miss.
     pub fn begin_shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
-        self.mark_not_ready("daemon is shutting down");
+        self.mark_not_ready(DaemonNotReady::ShuttingDown);
     }
 
     /// The not-ready reason, if any fault has been recorded.
     #[must_use]
-    pub fn not_ready_reason(&self) -> Option<&'static str> {
+    pub fn not_ready_reason(&self) -> Option<DaemonNotReady> {
         self.inner.not_ready.get().copied()
     }
 
@@ -91,6 +91,52 @@ impl DaemonGate {
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.inner.shutting_down.load(Ordering::SeqCst)
+    }
+}
+
+/// Why the [`DaemonGate`] holds readiness red.
+///
+/// This is the one mapping from a gate input to what the readiness surfaces
+/// report: `/readyz` writes [`Self::message`] in its 503 body, and
+/// `ControlService.GetHealth` returns `UNAVAILABLE` with [`Self::message`] as
+/// the status message and [`Self::reason`] as its `google.rpc.ErrorInfo`
+/// reason. A new gate input is a new variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonNotReady {
+    /// Coordinated shutdown has begun.
+    ShuttingDown,
+    /// A runtime-config settlement missed its budget and armed the recovery
+    /// fence; the daemon is stopping for supervised recovery.
+    RecoveryFence,
+}
+
+impl DaemonNotReady {
+    /// Every gate reason.
+    pub const ALL: [Self; 2] = [Self::ShuttingDown, Self::RecoveryFence];
+
+    /// The stable, machine-readable reason (`google.rpc.ErrorInfo.reason`
+    /// on `GetHealth`). Contract; [`Self::message`] is not.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::ShuttingDown => "DAEMON_SHUTTING_DOWN",
+            Self::RecoveryFence => "RUNTIME_CONFIG_RECOVERY_FENCE",
+        }
+    }
+
+    /// The operator-facing explanation.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::ShuttingDown => "daemon is shutting down",
+            Self::RecoveryFence => "runtime config settlement requires supervised recovery",
+        }
+    }
+}
+
+impl fmt::Display for DaemonNotReady {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
     }
 }
 
@@ -431,7 +477,7 @@ pub enum CoreReadinessError {
     /// The daemon recorded a fatal availability fault ([`DaemonGate`]): a
     /// runtime-config settlement recovery fence or coordinated shutdown in
     /// progress.
-    DaemonUnavailable(&'static str),
+    DaemonUnavailable(DaemonNotReady),
 }
 
 impl fmt::Display for CoreReadinessError {
@@ -453,7 +499,7 @@ impl fmt::Display for CoreReadinessError {
                 f.write_str("RIB selection-deferral release stalled")
             }
             Self::RibPeerTeardownStalled => f.write_str("RIB peer teardown stalled"),
-            Self::DaemonUnavailable(reason) => f.write_str(reason),
+            Self::DaemonUnavailable(reason) => reason.fmt(f),
         }
     }
 }
@@ -571,7 +617,7 @@ mod tests {
             "RIB peer teardown stalled"
         );
         assert_eq!(
-            CoreReadinessError::DaemonUnavailable("daemon is shutting down").to_string(),
+            CoreReadinessError::DaemonUnavailable(DaemonNotReady::ShuttingDown).to_string(),
             "daemon is shutting down"
         );
     }
@@ -586,7 +632,8 @@ mod tests {
             E::RibPolicyTransitionStalled,
             E::RibSelectionReleaseStalled,
             E::RibPeerTeardownStalled,
-            E::DaemonUnavailable("daemon is shutting down"),
+            E::DaemonUnavailable(DaemonNotReady::ShuttingDown),
+            E::DaemonUnavailable(DaemonNotReady::RecoveryFence),
         ] {
             assert!(
                 core_actor_answered::<()>(&Err(answered)),
@@ -1183,7 +1230,7 @@ mod tests {
         let gate = DaemonGate::new();
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
 
-        gate.mark_not_ready("fatal availability fault");
+        gate.mark_not_ready(DaemonNotReady::RecoveryFence);
 
         let err = probe
             .check()
@@ -1191,9 +1238,12 @@ mod tests {
             .expect_err("tripped gate must fail readiness");
         assert_eq!(
             err,
-            CoreReadinessError::DaemonUnavailable("fatal availability fault")
+            CoreReadinessError::DaemonUnavailable(DaemonNotReady::RecoveryFence)
         );
-        assert_eq!(err.to_string(), "fatal availability fault");
+        assert_eq!(
+            err.to_string(),
+            "runtime config settlement requires supervised recovery"
+        );
         assert!(
             !gate.is_shutting_down(),
             "a non-shutdown fault must not flip the shutdown admission gate"
@@ -1214,19 +1264,41 @@ mod tests {
         assert_eq!(
             probe.check().await,
             Err(CoreReadinessError::DaemonUnavailable(
-                "daemon is shutting down"
+                DaemonNotReady::ShuttingDown
             ))
         );
+    }
+
+    /// Gate reasons are distinct `UPPER_SNAKE` codes; `/readyz` shows the
+    /// message.
+    #[test]
+    fn daemon_not_ready_reasons_are_distinct_codes() {
+        let reasons: std::collections::BTreeSet<_> =
+            DaemonNotReady::ALL.iter().map(|r| r.reason()).collect();
+        assert_eq!(reasons.len(), DaemonNotReady::ALL.len());
+        for reason in DaemonNotReady::ALL {
+            assert!(
+                reason
+                    .reason()
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b == b'_'),
+                "{reason:?}"
+            );
+            assert_eq!(
+                CoreReadinessError::DaemonUnavailable(reason).to_string(),
+                reason.message()
+            );
+        }
     }
 
     #[test]
     fn first_not_ready_reason_wins() {
         let gate = DaemonGate::new();
-        gate.mark_not_ready("fatal availability fault");
+        gate.mark_not_ready(DaemonNotReady::RecoveryFence);
         gate.begin_shutdown();
         assert_eq!(
             gate.not_ready_reason(),
-            Some("fatal availability fault"),
+            Some(DaemonNotReady::RecoveryFence),
             "the root-cause fault must stay visible across later transitions"
         );
     }

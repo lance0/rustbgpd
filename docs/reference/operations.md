@@ -2033,7 +2033,10 @@ administrative state 0, so it is silent here and covered by
 `BgpMaxPrefixLatched` instead. Flap-rate alerting remains based on
 `bgp_session_flaps_total`. Aggregate Established counts and daemon uptime are
 also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
-the same 200 ms core-actor deadline as `/readyz`. `rbgp health --liveness`
+the same 200 ms core-actor deadline and daemon gate as `/readyz`, so during
+coordinated shutdown or the settlement recovery fence it fails and
+`rbgp health` prints `daemon not ready (DAEMON_SHUTTING_DOWN)` or
+`daemon not ready (RUNTIME_CONFIG_RECOVERY_FENCE)`. `rbgp health --liveness`
 uses the Read-tier `ControlService.CheckLiveness` instead: it proves only that
 an authenticated gRPC handler answered and prints `alive` (JSON: a
 pretty-printed object with `"alive": true`).
@@ -3310,7 +3313,9 @@ and live watches keep their existing budgets and lifetimes.
 (a core actor missed the 200 ms probe deadline), doctor waits one second and
 asks once more. The miss may be transient, as briefly while a reload settles,
 or persistent, from a wedged actor. A healthy second answer is yellow and
-names the first miss; a second miss is red. Any other
+names the first miss; a second miss is red. An `UNAVAILABLE` that names a
+daemon-gate reason (`DAEMON_SHUTTING_DOWN`, `RUNTIME_CONFIG_RECOVERY_FENCE`)
+is red at once without a retry, because it lasts until the daemon exits. Any other
 error, including doctor's own 30-second response deadline, is red at once
 without a retry, as is a snapshot reporting `healthy=false`.
 

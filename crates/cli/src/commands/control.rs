@@ -11,6 +11,51 @@ use crate::proto::{
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
+/// `google.rpc.Status`, the payload of the `grpc-status-details-bin` trailer.
+#[derive(Clone, PartialEq, prost::Message)]
+struct RpcStatus {
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+/// `google.rpc.ErrorInfo`, reason and domain only.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ErrorInfo {
+    #[prost(string, tag = "1")]
+    reason: String,
+    #[prost(string, tag = "2")]
+    domain: String,
+}
+
+/// The daemon-gate reason (`DAEMON_SHUTTING_DOWN`,
+/// `RUNTIME_CONFIG_RECOVERY_FENCE`, ...) of a `GetHealth` `UNAVAILABLE`:
+/// the `google.rpc.ErrorInfo` reason in the `rustbgpd` domain. `None` for a
+/// probe deadline miss or any other status. A gate fault lasts until the
+/// daemon exits, so a caller should not retry it.
+pub(crate) fn health_gate_reason(status: &tonic::Status) -> Option<String> {
+    use prost::Message as _;
+    if status.code() != tonic::Code::Unavailable {
+        return None;
+    }
+    RpcStatus::decode(status.details())
+        .ok()?
+        .details
+        .iter()
+        .filter(|any| any.type_url == "type.googleapis.com/google.rpc.ErrorInfo")
+        .filter_map(|any| ErrorInfo::decode(any.value.as_slice()).ok())
+        .find(|info| info.domain == "rustbgpd")
+        .map(|info| info.reason)
+}
+
+/// `rbgp health` error for a `GetHealth` status: a daemon-gate fault names
+/// its reason instead of reading as a temporary miss.
+fn health_error(status: tonic::Status) -> CliError {
+    match health_gate_reason(&status) {
+        Some(reason) => CliError::Rpc(format!("daemon not ready ({reason}): {}", status.message())),
+        None => status.into(),
+    }
+}
+
 /// Sum a complete, unique, valid IPv4 + IPv6 RPKI VRP gauge snapshot.
 /// `Some(0)` distinguishes a synchronized empty table from an unusable snapshot.
 pub(crate) fn rpki_vrp_count_sum(prometheus_text: &str) -> Option<u64> {
@@ -122,7 +167,8 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
         return Ok(());
     }
     let resp = read_rpc("GetHealth", client.get_health(HealthRequest {}))
-        .await?
+        .await
+        .map_err(health_error)?
         .into_inner();
 
     if json {
@@ -264,6 +310,28 @@ mod tests {
         health(connection, true, false).await.unwrap();
 
         assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A daemon-gate fault names its machine-readable reason instead of
+    /// reading as a temporary miss; any other `UNAVAILABLE` keeps the
+    /// shared mapping.
+    #[tokio::test]
+    async fn health_names_the_daemon_gate_reason() {
+        let server = spawn_mock_server(None).await;
+        *server.state.health_gate_reason.lock().await = Some("DAEMON_SHUTTING_DOWN");
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let error = health(connection, true, false).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon not ready (DAEMON_SHUTTING_DOWN): daemon is shutting down"
+        );
+        assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            health_gate_reason(&tonic::Status::unavailable("RIB manager probe timed out")),
+            None
+        );
     }
 
     #[tokio::test]
