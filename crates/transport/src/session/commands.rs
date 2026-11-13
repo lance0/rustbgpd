@@ -192,7 +192,7 @@ impl PeerSession {
     async fn administrative_reset(&mut self, reason: Option<bytes::Bytes>) {
         if self.fsm.state() == SessionState::Idle {
             info!(peer = %self.peer_label, "administrative reset requested while idle");
-            self.notification_idle_failures = 0;
+            self.clear_reconnect_streak();
             if !self.stop_requested {
                 self.start_after_rib_admission().await;
             }
@@ -1523,7 +1523,7 @@ impl PeerSession {
                 // running session keeps its NOTIFICATION backoff streak.
                 if self.fsm.state() == SessionState::Idle {
                     self.stop_requested = false;
-                    self.notification_idle_failures = 0;
+                    self.clear_reconnect_streak();
                     self.start_after_rib_admission().await;
                 }
                 ControlFlow::Continue(())
@@ -1662,7 +1662,7 @@ impl PeerSession {
                     // The drain raised a Cease/8, but this is still the
                     // operator's reset: it clears the backoff streak.
                     self.local_notification_teardown = false;
-                    self.notification_idle_failures = 0;
+                    self.clear_reconnect_streak();
                     self.finish_drain_teardown().await;
                 } else {
                     self.administrative_reset(reason).await;

@@ -48,7 +48,7 @@ event history was removed), is Superseded.
 | [0021](0021-tcp-collision-detection.md) | TCP collision detection via PeerManager coordination | Accepted | 2026-02-28 | Active |
 | [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Accepted | 2026-02-28 | Active |
 | [0023](0023-prefix-enum-afi-agnostic-rib.md) | Prefix enum and AFI-agnostic RIB for MP-BGP | Accepted | 2026-02-28 | Active |
-| [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker / Helper Mode (RFC 4724) | Accepted | 2026-03-01 | Active |
+| [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker / Helper Mode (RFC 4724) | Accepted (superseded in part by 0040 for restarting-speaker mode) | 2026-03-01 | Active |
 | [0025](0025-extended-communities.md) | Extended Communities (RFC 4360) | Accepted | 2026-03-01 | Active |
 | [0026](0026-extended-community-policy.md) | Extended Community Policy Matching | Accepted | 2026-03-01 | Active |
 | [0027](0027-route-refresh.md) | Route Refresh (RFC 2918) | Accepted | 2026-03-02 | Active |
@@ -90,7 +90,7 @@ event history was removed), is Superseded.
 | [0063](0063-evpn-runtime-instance-mutation.md) | EVPN runtime instance mutation semantics | Accepted | 2026-05-17 | Active |
 | [0064](0064-grpc-authorization.md) | gRPC per-method authorization | Accepted | 2026-05-18 | Active |
 | [0064-annex](0064-threat-model.md) | gRPC authorization threat model (ADR-0064 annex) | Current | 2026-07-26 | Active |
-| [0065](0065-evpn-localbias-split-horizon.md) | EVPN VXLAN local-bias split-horizon (spike-gated) | Accepted | 2026-05-22 | Active |
+| [0065](0065-evpn-localbias-split-horizon.md) | EVPN VXLAN local-bias split-horizon (spike-gated) | Accepted; A2 deferred; revisited by 0094 | 2026-05-22 | Active |
 | [0066](0066-unicast-multipath-ecmp-fib.md) | Unicast multipath / ECMP FIB install | Accepted | 2026-05-24 | Active |
 | [0067](0067-bfd-single-hop.md) | Single-hop asynchronous BFD for BGP | Accepted | 2026-05-24 | Active |
 | [0068](0068-weighted-multipath.md) | Weighted (unequal-cost) multipath via Link Bandwidth | Accepted | 2026-05-24 | Active |

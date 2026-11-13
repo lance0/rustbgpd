@@ -4282,11 +4282,12 @@ rejection summary. The first policy, OTC, or next-hop-ownership rejection in
 an UPDATE builds one bounded prototype shared by that UPDATE's identities.
 
 Like `[policy.explain]`, this is **diagnostic state only** — it never
-affects which routes are accepted. Scope is IPv4 / IPv6 unicast
-(max-prefix violations tear the session down, so there is no per-route
-rejection to retain). An entry leaves the store when the peer withdraws the
-route, when the route is later accepted, or when an RFC 7313 enhanced route
-refresh ends (End-of-RIB-Refresh or the window timeout) without the peer
+affects which routes are accepted. Scope is IPv4 / IPv6 unicast.
+Max-prefix enforcement is not an import rejection: `shutdown` tears the
+session down, and `block` withholds routes without retaining them. An entry
+leaves the store when the peer withdraws the route, when import policy later
+accepts it (even if max-prefix `block` then withholds it), or when an RFC 7313
+enhanced route refresh ends (End-of-RIB-Refresh or the window timeout) without the peer
 re-announcing it. The store resets on peer session reset. Both
 fields are **restart-required per-peer** on reload; see
 [`reload-matrix.md`](reload-matrix.md) and the "Answer a member's 'why

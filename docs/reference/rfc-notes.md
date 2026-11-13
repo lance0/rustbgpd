@@ -21,7 +21,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
 | Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE`, `NO_EXPORT`, and `NO_EXPORT_SUBCONFED` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, BGP-LS, EVPN, and FlowSpec |
-| eBGP default policy | RFC 8212 | Opt-in `ebgp_requires_policy`: an eBGP direction with no explicit operator policy runs a reserved internal deny |
+| eBGP default policy | RFC 8212 | `ebgp_requires_policy`, on by default under `config_epoch = 2` and opt-in for epoch-less and `config_epoch = 1` configs: an eBGP direction with no explicit operator policy runs a reserved internal deny |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
@@ -130,7 +130,9 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 - RFC 8212 makes an eBGP route without an explicit import policy ineligible
   for the decision process and keeps a route without an explicit export
   policy out of that peer's Adj-RIB-Out. rustbgpd implements the boundary
-  behind the opt-in `[global] ebgp_requires_policy` knob (restart-required):
+  behind the `[global] ebgp_requires_policy` knob (restart-required; on by
+  default under `config_epoch = 2`, opt-in for epoch-less and epoch-1
+  configs):
   when on, an eBGP session that resolves no explicit operator policy in a
   direction runs a reserved internal deny-all chain
   (`rfc8212_missing_import_policy` / `rfc8212_missing_export_policy` — both
@@ -426,19 +428,34 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   Hold, Keepalive.
 - DelayOpen timer: not implemented in v1 (RFC 4271 §8 optional).
 - Exponential backoff on connect retry: `base * 2^counter`, capped at
-  300s, reset on ManualStart or reaching Established.
+  300s, reset on ManualStart. Unlike RFC 4271 §8.2.2, a ConnectRetryTimer
+  expiry in Connect (a dial that got no answer) increments the
+  ConnectRetryCounter, so a peer that silently drops SYNs backs off like one
+  that refuses them. A dial whose connect attempt times out first (the
+  connect timeout or the kernel's SYN retries) raises no
+  TcpConnection_Fails; the session waits in Connect for the timer, so the
+  curve stays monotonic up to the cap. A refused dial, an RST or an
+  unreachable route is TcpConnection_Fails and first gets two 1s retries.
+- Jitter (RFC 4271 §10): the ConnectRetryTimer and the transport's Idle
+  reconnect wait are multiplied by a factor drawn uniformly from 0.75 to 1.0
+  each time they are set, the RFC's suggested default. The range is fixed.
+  The Keepalive and MinRouteAdvertisementInterval timers are not jittered.
 - DampPeerOscillations (RFC 4271 §8.1.1) is not implemented as the
   optional attribute with its IdleHoldTimer. The transport layer applies a
   fixed equivalent: each consecutive fall to Idle caused by a NOTIFICATION
-  (sent or received, including an OPEN exchange that ends in one) doubles
-  the Idle reconnect wait from `connect_retry_secs`, capped at 300s and
-  never below the configured interval. The streak clears after the session
+  (sent or received, including an OPEN exchange that ends in one), or by the
+  peer dropping TCP without a NOTIFICATION in OpenConfirm or Established,
+  doubles the Idle reconnect wait from `connect_retry_secs`, capped at 300s and
+  never below the configured interval. Only the NOTIFICATION teardowns in
+  the streak hold the neighbor's inbound connections (from the second), so
+  a TCP drop never refuses an inbound-only or restarting peer. The streak
+  clears after the session
   stays Established for five minutes, on an explicit operator enable while
-  the session is in Idle, or on an administrative reset. TCP connection misses in Connect or Active keep
-  the fast initial retries followed by the existing exponential curve; a TCP
-  loss after Established uses the configured fixed Idle interval. Neither
-  advances the NOTIFICATION streak, and there is no configuration knob for
-  its curve.
+  the session is in Idle, or on an administrative reset. Local closes without
+  a NOTIFICATION (an operator drain, fast external failover) keep the
+  configured interval. Dial misses in Connect or Active back off inside the
+  FSM as above and do not advance the streak. There is no configuration
+  knob for either curve.
 - Start events (RFC 4271 §8.2.2): `ManualStart` acts only in Idle. In
   Connect, Active, OpenSent, OpenConfirm and Established it is ignored, so
   enabling an enabled peer sends no NOTIFICATION and leaves the session and
@@ -656,7 +673,9 @@ RFC 4271 §4.1 defines a 4096-byte maximum unless Extended Messages
 If the negotiated hold time is non-zero and less than 3 seconds,
 rustbgpd sends NOTIFICATION (2, 6) — Unacceptable Hold Time. This
 prevents pathologically short hold times that would cause false flaps.
-RFC 4271 recommends a minimum of 3 seconds; we enforce it.
+RFC 4271 requires that floor: "The Hold Time MUST be either zero or at least
+three seconds" (§4.2), and "An implementation MUST reject Hold Time values of
+one or two seconds" (§6.2). We enforce it.
 An optional per-neighbor or peer-group `min_hold_time` raises that acceptance
 floor and also rejects a zero proposal with NOTIFICATION (2, 6).
 

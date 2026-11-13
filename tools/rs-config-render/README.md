@@ -494,7 +494,12 @@ rm -rf "${STATE:?}/candidate"        # the output directory must be absent or em
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 rustbgpd --check --strict "$STATE/candidate/config.toml"
-rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
+# Sync only renderer outputs: deletes stale ones, keeps operator files.
+rsync -a --delete \
+    --include='/config.toml' --include='/render-receipt.json' \
+    --include='/birdwatcher-reject-communities.json' \
+    --include='/policy/***' --include='/datasets/***' --exclude='*' \
+    "$STATE/candidate/" /etc/rustbgpd/
 systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
 

@@ -1088,3 +1088,136 @@ async fn enhanced_refresh_sweep_keeps_replays_across_eviction() {
     assert_eq!(session.rejected_routes.policy_reject_counts(), (2, 0));
     assert_eq!(query_pre_policy_route_counts(&mut session).await, None);
 }
+
+/// Policy denies the route while it carries community 999.
+fn community_tagged_update(prefix: Ipv4Prefix) -> UpdateMessage {
+    UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities(vec![999]),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    )
+}
+
+/// A route import policy accepts is no longer a policy reject, even when
+/// max-prefix `Block` then withholds it, so its stale entry leaves the store
+/// (RFC 9972 type 22 and `--rejected`). Max-prefix accounting is unchanged:
+/// withheld by the accepted bound, `held` still holds its received slot as a
+/// rejected identity; withheld by a full received bound, it never had one.
+/// Break-to-red: removing store entries only for the routes `Block` keeps
+/// leaves `held` retained under both bounds.
+#[tokio::test]
+async fn block_withheld_policy_accept_clears_stale_reject() {
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let held = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let mut deny_communities = retention_statement(None, PolicyAction::Deny);
+    deny_communities.match_community =
+        vec![rustbgpd_policy::CommunityMatch::Standard { value: 999 }];
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![deny_communities],
+        default_action: PolicyAction::Permit,
+    }]);
+    // (accepted bound, received bound, `held` keeps its received slot)
+    for (accepted, received, keeps_received_slot) in [(Some(1), 3, true), (None, 1, false)] {
+        let (mut session, metrics) = retention_session_with_chain(Some(chain.clone()), |config| {
+            config.max_prefix_action = MaxPrefixAction::Block;
+            config.max_prefixes_ipv4 = accepted;
+            config.max_prefixes_received_ipv4 = Some(received);
+        });
+        session
+            .process_update(retention_update(&[first], &[]))
+            .await;
+        session.process_update(community_tagged_update(held)).await;
+        assert_eq!(retained_v4_prefixes(&session), vec![Prefix::V4(held)]);
+
+        session.process_update(retention_update(&[held], &[])).await;
+        assert_eq!(session.known_prefix_count(), 1, "`held` is withheld");
+        assert!(
+            session.rejected_routes.is_empty(),
+            "a policy accept clears the stale reject even when `Block` withholds it"
+        );
+        assert_eq!(
+            query_policy_reject_counts(&mut session).await,
+            Some(crate::PolicyRejectCounts::default())
+        );
+        assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 0);
+        assert_eq!(
+            session.has_rejected_identity(Prefix::V4(held)),
+            keeps_received_slot
+        );
+    }
+}
+
+/// The refresh sweep is per family: an IPv6 rejection survives an IPv4
+/// enhanced refresh that omits every rejection. Break-to-red: dropping the
+/// AFI/SAFI filter in `RejectedRouteStore::family_keys` sweeps the IPv6
+/// entry at the IPv4 `EoRR`.
+#[tokio::test]
+async fn ipv4_enhanced_refresh_keeps_ipv6_rejection() {
+    use rustbgpd_wire::{MpReachNlri, NlriEntry};
+
+    let (mut session, _metrics) =
+        retention_session_with_chain(Some(named_rpol_reject_chain()), |_| {});
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:505::".parse().unwrap(), 64));
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: v4,
+            }],
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                    next_hop: "2001:db8::2".parse().unwrap(),
+                    link_local_next_hop: None,
+                    announced: vec![NlriEntry {
+                        path_id: 0,
+                        prefix: v6,
+                    }],
+                    flowspec_announced: vec![],
+                    evpn_announced: vec![],
+                    bgpls_announced: vec![],
+                    labeled_announced: vec![],
+                    vpn_announced: vec![],
+                    rtc_announced: vec![],
+                    vpn_flowspec_announced: vec![],
+                })),
+            ],
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    assert_eq!(session.rejected_routes.policy_reject_counts(), (1, 1));
+
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    let retained: Vec<Prefix> = session
+        .rejected_routes
+        .snapshot()
+        .into_iter()
+        .map(|(key, _)| key.prefix)
+        .collect();
+    assert_eq!(retained, vec![v6]);
+    assert_eq!(session.rejected_routes.policy_reject_counts(), (0, 1));
+}

@@ -21,6 +21,20 @@ impl PeerSession {
         self.record_connect_failure_with_source(error, None, ConnectFailureSource::Socket);
     }
 
+    /// A dial that failed. A refusal, RST or unreachable route is a prompt
+    /// miss for the FSM's fast-retry curve. A timeout (the connect timeout,
+    /// or the kernel giving up on SYNs) is an unanswered dial: the session
+    /// stays in Connect until the running `ConnectRetry` timer expires and
+    /// counts the miss, so the doubled interval is not cut short.
+    pub(super) async fn handle_connect_error(&mut self, error: &std::io::Error) {
+        self.record_connect_failure(error);
+        if error.kind() == std::io::ErrorKind::TimedOut && self.timers.connect_retry.is_some() {
+            return;
+        }
+        self.drive_fsm(rustbgpd_fsm::Event::TcpConnectionFails)
+            .await;
+    }
+
     pub(super) fn record_connect_task_failure(&mut self, error: &JoinError) {
         let log_error = if error.is_cancelled() {
             "connect task cancelled"
