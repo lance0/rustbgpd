@@ -531,6 +531,44 @@ groups:
             End of Data. Run rbgp rpki caches for its session state and age,
             and check the cache and the path to it.
 
+      - alert: RpkiTaskRestarted
+        # The VRP manager and the validation-table forwarders recover from a
+        # panic in place instead of ending BGP, and count each one by `task`.
+        expr: increase(bgp_rpki_task_restarts_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPKI {{ $labels.task }} recovered from a panic on {{ $labels.instance }}"
+          description: >-
+            bgp_rpki_task_restarts_total{task="{{ $labels.task }}"} on
+            {{ $labels.instance }} increased in the last 15 minutes. BGP
+            sessions are not affected and the validation tables in use were
+            kept. The daemon ERROR log and its panic report name the cause;
+            check bgp_rpki_cache_resync_pending for a cache that now owes a
+            full table.
+
+      - alert: RpkiCacheResyncPending
+        # After the VRP manager loses one of a cache's updates to a panic it
+        # keeps the cache's last applied data and waits for a full table,
+        # which the client requests after its retry interval. Still waiting
+        # after 15 minutes means the cache is not answering or the manager
+        # keeps losing its table; the held data leaves at its own expire.
+        expr: bgp_rpki_cache_resync_pending == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPKI cache {{ $labels.cache }} has owed a full table for 15 minutes"
+          description: >-
+            rustbgpd on {{ $labels.instance }} has waited 15 minutes for a
+            full table from cache {{ $labels.cache }} after a recovered VRP
+            manager panic. Validation still uses that cache's last applied
+            data, which is not being refreshed and is dropped at its expire
+            (bgp_rpki_cache_end_of_data_age_seconds against
+            bgp_rpki_cache_effective_expire_seconds). Check
+            bgp_rpki_task_restarts_total{task="vrp_manager"} for repeated
+            panics, and run rbgp rpki caches for the cache's session state.
+
       - alert: MrtDumpStale
         # mrt_last_dump_success_timestamp_seconds stays 0 until the first
         # successful dump, so dump age is anchored on process start until

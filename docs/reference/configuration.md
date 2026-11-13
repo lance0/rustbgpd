@@ -3692,6 +3692,8 @@ Prometheus metrics exposed at the configured metrics endpoint:
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Retained validated End-of-Data readiness per cache; includes empty tables and remains ready through reconnect until flush or expiry |
 | `bgp_rpki_cache_connected{cache}` | Whether an RTR session to the cache is established; `0` whenever it is down, including while an ordinary disconnect's retained contribution is still in use |
 | `bgp_rpki_rtr_client_restarts_total{cache}` | Times the cache's RTR client panicked and restarted its session; the restart is handled as an ordinary session loss |
+| `bgp_rpki_task_restarts_total{task}` | Panics the VRP manager (`vrp_manager`) or a validation-table forwarder (`vrp_forwarder`, `aspa_forwarder`) recovered from in place |
+| `bgp_rpki_cache_resync_pending{cache}` | `1` while the VRP manager waits for a full table from the cache after a recovered panic and keeps using the cache's last applied data, `0` otherwise |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data; present only while a contribution is retained, removed on flush or expiry |
 
 `NotFound` includes startup before validated data and the state after all

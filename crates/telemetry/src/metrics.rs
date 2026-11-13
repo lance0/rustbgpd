@@ -347,6 +347,18 @@ const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 const MANAGEMENT_SERVER_METRICS: &str = "metrics";
 /// The same label for the gRPC server.
 const MANAGEMENT_SERVER_GRPC: &str = "grpc";
+/// `task` label of `bgp_rpki_task_restarts_total` for the VRP manager.
+pub const RPKI_TASK_VRP_MANAGER: &str = "vrp_manager";
+/// The same label for the VRP table forwarder.
+pub const RPKI_TASK_VRP_FORWARDER: &str = "vrp_forwarder";
+/// The same label for the ASPA table forwarder.
+pub const RPKI_TASK_ASPA_FORWARDER: &str = "aspa_forwarder";
+/// Every `task` label of `bgp_rpki_task_restarts_total`.
+pub const RPKI_TASKS: [&str; 3] = [
+    RPKI_TASK_VRP_MANAGER,
+    RPKI_TASK_VRP_FORWARDER,
+    RPKI_TASK_ASPA_FORWARDER,
+];
 
 /// Closed labels for RIB ingest components. Distribution can serve readiness
 /// internally; these component durations do not bound readiness latency.
@@ -833,6 +845,8 @@ struct BgpMetricsInner {
     rpki_cache_end_of_data_ready: IntGaugeVec,
     rpki_cache_connected: IntGaugeVec,
     rpki_rtr_client_restarts: IntCounterVec,
+    rpki_cache_resync_pending: IntGaugeVec,
+    rpki_task_restarts: IntCounterVec,
     rpki_cache_end_of_data_accepted_at: Arc<Mutex<BTreeMap<String, Instant>>>,
 
     // ── ASPA ───────────────────────────────────────────────────
@@ -2636,6 +2650,27 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_cache_resync_pending = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_cache_resync_pending",
+                "Whether the VRP manager is waiting for a full table from this configured cache after losing one of its updates to a recovered panic (1 waiting, 0 not); while 1 the cache's last applied VRPs and ASPAs stay in use, unrefreshed, until that data's own expiry, and its serial deltas are dropped",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
+        let rpki_task_restarts = IntCounterVec::new(
+            Opts::new(
+                "bgp_rpki_task_restarts_total",
+                "Panics the RPKI VRP manager (vrp_manager) or a validation-table forwarder (vrp_forwarder, aspa_forwarder) recovered from in place; BGP sessions are not affected and the validation tables in use are kept",
+            ),
+            &["task"],
+        )
+        .expect("valid metric definition");
+        for task in RPKI_TASKS {
+            rpki_task_restarts.with_label_values(&[task]);
+        }
+
         let rpki_cache_end_of_data_accepted_at = Arc::new(Mutex::new(BTreeMap::new()));
 
         let aspa_records = IntGauge::new(
@@ -3805,6 +3840,12 @@ impl BgpMetrics {
             .register(Box::new(rpki_rtr_client_restarts.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rpki_cache_resync_pending.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rpki_task_restarts.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(RpkiCacheEndOfDataAgeCollector::new(Arc::clone(
                 &rpki_cache_end_of_data_accepted_at,
             ))))
@@ -4204,6 +4245,8 @@ impl BgpMetrics {
             rpki_cache_end_of_data_ready,
             rpki_cache_connected,
             rpki_rtr_client_restarts,
+            rpki_cache_resync_pending,
+            rpki_task_restarts,
             rpki_cache_end_of_data_accepted_at,
             aspa_records,
             validation_import_refreshes,
@@ -6744,6 +6787,21 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Set whether the VRP manager is waiting for a full table from one
+    /// configured cache after losing one of its updates.
+    pub fn set_rpki_cache_resync_pending(&self, cache: &str, pending: bool) {
+        self.0
+            .rpki_cache_resync_pending
+            .with_label_values(&[cache])
+            .set(i64::from(pending));
+    }
+
+    /// Count one panic an RPKI task recovered from. `task` is one of
+    /// [`RPKI_TASKS`].
+    pub fn record_rpki_task_restart(&self, task: &'static str) {
+        self.0.rpki_task_restarts.with_label_values(&[task]).inc();
+    }
+
     /// Record the monotonic instant of one cache's last accepted End of Data
     /// (`Some`), or remove its age series when the retained contribution is
     /// dropped by a flush or expiry (`None`). The exported age is computed
@@ -8751,6 +8809,24 @@ mod tests {
         ));
         assert!(text.contains("bgp_rpki_cache_connected{cache=\"192.0.2.10:3323\"} 0"));
         assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 1"));
+    }
+
+    #[test]
+    fn rpki_task_restarts_are_seeded_at_zero_and_resync_pending_is_per_cache() {
+        let m = BgpMetrics::new();
+        let seeded = gather_text(&m);
+        for task in RPKI_TASKS {
+            let line = format!("bgp_rpki_task_restarts_total{{task=\"{task}\"}} 0");
+            assert!(seeded.contains(&line), "missing {line}");
+        }
+        m.record_rpki_task_restart(RPKI_TASK_VRP_MANAGER);
+        m.set_rpki_cache_resync_pending("192.0.2.10:3323", true);
+        m.set_rpki_cache_resync_pending("192.0.2.11:3323", false);
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1"));
+        assert!(text.contains("bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 0"));
+        assert!(text.contains("bgp_rpki_cache_resync_pending{cache=\"192.0.2.10:3323\"} 1"));
+        assert!(text.contains("bgp_rpki_cache_resync_pending{cache=\"192.0.2.11:3323\"} 0"));
     }
 
     #[test]

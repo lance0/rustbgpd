@@ -1452,9 +1452,59 @@ daemon: a recovered client panic has a non-zero
 cache as `server`, and no `initiating coordinated shutdown` after it. The
 report is still worth attaching to a bug report.
 
-The daemon treats an unexpected return or panic from the VRP manager or either
-validation-table forwarder as fatal, and likewise an RTR client task that ends
-despite the restart. It logs
+A panic in the VRP manager while it handles one message is not fatal either.
+The manager builds every update before it installs any of it, so after the
+panic each cache's VRPs and ASPAs, and the validation tables in use, are
+exactly what they were before the message. It logs
+`VRP manager panicked handling a message; continuing with its state as before it`
+with `what` and `server`, leaves a panic report, counts the panic in
+`bgp_rpki_task_restarts_total{task="vrp_manager"}`, and carries on. BGP
+sessions, the other caches and their RTR sessions are not touched. What
+follows depends on the message that was lost:
+
+- **A full table or a serial delta.** The cache's last applied data stays in
+  the tables, so import policy that matches on the validation state, best-path
+  selection and what is advertised see no change: existing routes keep their
+  states, and a route received now is validated against that same data.
+  Nothing becomes NotFound because of the panic. The cache is marked
+  `bgp_rpki_cache_resync_pending{cache}` `1`: the manager asks its client for a
+  full table, and the client sends a Reset Query on the same RTR session
+  after `retry_interval` (sooner if the cache sends a Serial Notify). Serial
+  deltas from that cache are dropped until the full table arrives, because
+  they apply to data the manager does not have. When the table is applied the
+  gauge returns to `0` and the RIB revalidates once, visiting only the routes
+  covered by the VRPs the two tables differ in; a table equal to the held one
+  changes nothing and triggers no revalidation.
+- **Held data still expires on time.** While a cache is resync pending the
+  manager itself drops the held data at the expire of the last End of Data it
+  applied, because the client's own timer was renewed by the update that was
+  lost. A manager that loses every table from one cache therefore asks again
+  once per `retry_interval`, and at that expire the cache's data leaves the
+  tables exactly as for an [unreachable cache](#rpki-cache-unreachable):
+  routes only it covered become NotFound.
+- **A flush or an expiry.** The removal is carried out again at once, the
+  remaining caches' tables are published, and the cache is marked resync
+  pending.
+- **A connectivity change or a `rbgp rpki caches` query.** Only that
+  notification or query is lost; the query's caller gets an error.
+
+A panic in a validation-table forwarder is handled the same way: it logs
+`validation-table forwarder panicked; forwarding the latest table again in full`,
+counts in `bgp_rpki_task_restarts_total{task}` (`vrp_forwarder` or
+`aspa_forwarder`), waits out a restart backoff (100 ms, doubling to 10 s) and
+forwards the latest table to the RIB and the sessions again. Until then they
+keep the table they last received. Because the forwarder cannot know whether
+the interrupted table arrived, that one pass revalidates every route; states
+change only where the table really differs. The shipped `RpkiTaskRestarted`
+rule fires on any increase of the counter, and `RpkiCacheResyncPending` when a
+cache stays pending for 15 minutes. `rbgp doctor` flags these panic reports
+too, as described above.
+
+The daemon still treats as fatal: a panic of the VRP manager outside the
+handling of one message; a second panic while it repeats a lost flush or
+expiry, when the tables cannot be rebuilt without that cache and nothing could
+make its data leave on time; a VRP manager or forwarder task that returns; and
+an RTR client task that ends despite its restart. It logs
 `RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
 shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
@@ -3148,6 +3198,8 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
 | `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
 | `bgp_rpki_rtr_client_restarts_total{cache}` | Times that cache's RTR client panicked and restarted its session. `0` from startup for each configured cache. Each restart is an ordinary session loss: retained data stays in use until the effective expire and the client reconnects after `retry_interval` with a Reset Query |
+| `bgp_rpki_task_restarts_total{task}` | Panics the VRP manager (`vrp_manager`) or a validation-table forwarder (`vrp_forwarder`, `aspa_forwarder`) recovered from in place. All three series are `0` from startup. BGP sessions are not affected and the validation tables in use are kept; see [RPKI subsystem task exits unexpectedly](#rpki-subsystem-task-exits-unexpectedly). `RpkiTaskRestarted` fires on any increase |
+| `bgp_rpki_cache_resync_pending{cache}` | `1` while the VRP manager waits for a full table from that cache after losing one of its updates to a recovered panic, `0` otherwise and from startup. While `1` the cache's last applied VRPs and ASPAs stay in use, unrefreshed, until that data's own expire; `bgp_rpki_cache_end_of_data_age_seconds{cache}` is their age. `RpkiCacheResyncPending` fires after 15 minutes |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data, computed at scrape time from a monotonic clock (the age `rbgp rpki caches` shows). Absent until the first End of Data and after a flush or expiry; advances through an ordinary disconnect. `bgp_rpki_cache_effective_expire_seconds` minus this value is the time left before the retained contribution expires |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Import re-evaluation work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed` (an inbound Route Refresh was sent), `skipped_not_established`, `skipped_state_unknown`, or `failed`. With `[rpki] local_revalidation`, `revalidated_locally` counts peers re-evaluated from retained input and `fallback_refresh` counts peers whose retained input was incomplete and that were refreshed instead. A state-query or re-evaluation-request timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
@@ -3291,6 +3343,10 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RTR client panicked; restarting its session with the held data retained` | ERROR | One cache's RTR client panicked (`server`); it reconnects after `retry_interval` and the cache's data stays in use until it expires. Not fatal |
+| `VRP manager panicked handling a message; continuing with its state as before it` | ERROR | The VRP manager lost one message (`what`, `server`) to a panic; validation data is as before it, and a cache whose data update was lost resynchronizes with a Reset Query. Not fatal |
+| `validation-table forwarder panicked; forwarding the latest table again in full` | ERROR | A validation-table forwarder panicked; after `restart_in_ms` it forwards the latest table again and the RIB revalidates once. Not fatal |
+| `data held for a cache awaiting resynchronization reached its expiry` | WARN | A resync-pending cache (`server`) delivered no full table before its held data expired; that data now leaves the tables |
+| `serial delta dropped: cache is awaiting resynchronization` | WARN | A serial delta from a resync-pending cache (`server`) was discarded; its full table replaces the held data |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap), with `exit` naming the cause. Counted in `bgp_management_server_crashes_total{server="metrics"}` |
