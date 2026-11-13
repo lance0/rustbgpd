@@ -2109,20 +2109,6 @@ async fn reload_config_recorded(
     .await
 }
 
-/// Whether a SIGHUP candidate's `[global]` differs from the live one in a
-/// field that only the broad restart-required ERROR reports. The implicit
-/// receiver honor knobs and `dynamic_neighbor_limit` are hot-applied, and
-/// `ebgp_requires_policy` belongs to the RFC 8212 posture tuple that
-/// `pin_rfc8212_posture_startup_only` pins and reports on its own terms.
-fn sighup_global_restart_required(current: &config::Global, new: &config::Global) -> bool {
-    let mut new = new.clone();
-    new.honor_graceful_shutdown = current.honor_graceful_shutdown;
-    new.honor_blackhole = current.honor_blackhole;
-    new.dynamic_neighbor_limit = current.dynamic_neighbor_limit;
-    new.ebgp_requires_policy = current.ebgp_requires_policy;
-    new != *current
-}
-
 #[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
@@ -2195,8 +2181,15 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
 
     // Flag sections that require restart at ERROR, the documented level for
     // a restart-required edit.
-    if sighup_global_restart_required(&current.global, &new_config.global) {
-        error!("[global] changed — requires full restart to take effect");
+    let global_changes =
+        config::global_restart_required_changes(&current.global, &new_config.global);
+    if !global_changes.is_empty() {
+        let fields = global_changes
+            .iter()
+            .map(config::FieldChange::render)
+            .collect::<Vec<_>>()
+            .join(", ");
+        error!(fields = %fields, "[global] changed — requires full restart to take effect");
     }
     if new_config.flowspec != current.flowspec {
         error!(
@@ -12162,6 +12155,68 @@ hold_time = 90
         }
     }
 
+    /// The `[global]` restart-required ERROR names each changed field with
+    /// its old and new value, from the comparator `--diff` also uses.
+    #[tokio::test]
+    async fn reload_logs_restart_required_global_fields_by_name() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+        let writer_sink = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer_sink.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let desired = baseline_toml()
+            .replace(
+                "router_id = \"10.0.0.1\"",
+                "router_id = \"10.0.0.9\"\ncluster_id = \"10.255.0.1\"",
+            )
+            .replace("log_format = \"json\"", "log_format = \"text\"");
+        assert_ne!(
+            desired,
+            baseline_toml(),
+            "the edit must apply to the fixture"
+        );
+        // Warm the callsite inside this scope (see the `[rpki]` sibling).
+        let _ = drive_reload(baseline_toml(), &desired).await;
+        tracing::callsite::rebuild_interest_cache();
+        sink.0.lock().unwrap().clear();
+
+        let _ = drive_reload(baseline_toml(), &desired).await;
+
+        let output = String::from_utf8(sink.0.lock().unwrap().clone()).expect("utf8 log output");
+        let line = output
+            .lines()
+            .find(|line| line.contains("[global] changed — requires full restart to take effect"))
+            .unwrap_or_else(|| {
+                panic!("reload must emit the global restart-required line; captured: {output}")
+            });
+        let json: serde_json::Value = serde_json::from_str(line).expect("structured log line");
+        assert_eq!(json["level"], "ERROR", "{line}");
+        assert_eq!(
+            json["fields"]["fields"],
+            "cluster_id: (unset) → 10.255.0.1, router_id: 10.0.0.1 → 10.0.0.9, \
+             telemetry.log_format: json → text",
+            "{line}"
+        );
+    }
+
     #[tokio::test]
     async fn reload_rejects_peer_in_desired_only_listen_family_before_runtime_mutation() {
         let initial = baseline_toml().replace(
@@ -15226,13 +15281,13 @@ remote_asn = 65002
             // The broad `[global] changed` ERROR runs before the pin, on the
             // unpinned candidate, and must not fire on the materialized boolean.
             assert!(
-                !sighup_global_restart_required(&runtime.global, &disk.global),
+                config::global_restart_required_changes(&runtime.global, &disk.global).is_empty(),
                 "an unedited SIGHUP after a runtime mutation must not report [global] changed: {cell}"
             );
             let mut other = disk.global.clone();
             other.listen_port += 1;
             assert!(
-                sighup_global_restart_required(&runtime.global, &other),
+                !config::global_restart_required_changes(&runtime.global, &other).is_empty(),
                 "{cell}"
             );
 

@@ -563,6 +563,7 @@ impl PeerManager {
                 managed.transport_config.rib_peer.clone(),
             );
             self.remove_max_prefix_latch(&peer_key);
+            self.clear_session_crashes(&peer_key);
             self.unregister_session(session_id);
             let pending = managed.pending_inbound.take().map(|pending| {
                 self.unregister_session(pending.session_id);

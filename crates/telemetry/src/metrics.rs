@@ -342,6 +342,9 @@ fn operator_query_wait_buckets() -> Vec<f64> {
 
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
+/// `server` label of `bgp_management_server_crashes_total` for the
+/// metrics/readiness HTTP server.
+const MANAGEMENT_SERVER_METRICS: &str = "metrics";
 
 /// Closed labels for RIB ingest components. Distribution can serve readiness
 /// internally; these component durations do not bound readiness latency.
@@ -617,6 +620,7 @@ struct BgpMetricsInner {
     session_established: IntCounterVec,
     peer_admin_enabled: IntGaugeVec,
     max_prefix_latched: IntGaugeVec,
+    session_task_crashes: IntCounterVec,
     peer_session_established: IntGaugeVec,
     peer_session_state: IntGaugeVec,
     peer_info: IntGaugeVec,
@@ -749,6 +753,7 @@ struct BgpMetricsInner {
     readiness_probe_failures: IntCounterVec,
     systemd_watchdog_pings_skipped: IntCounter,
     rib_stalled: IntGauge,
+    management_server_crashes: IntCounterVec,
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
     rib_route_refresh_actor_duration_seconds: HistogramVec,
     rib_actor_work_duration_seconds: HistogramVec,
@@ -1022,6 +1027,16 @@ impl BgpMetrics {
                 "bgp_peer_admin_enabled",
                 "Effective peer administrative state (1 = enabled, 0 = disabled by \
                  operator or latched off by a max-prefix shutdown)",
+            ),
+            &["peer", "interface"],
+        )
+        .expect("valid metric definition");
+
+        let session_task_crashes = IntCounterVec::new(
+            Opts::new(
+                "bgp_session_task_crashes_total",
+                "Session tasks of this peer that ended without a shutdown request \
+                 (a panic or a run-loop error) and were restarted or latched down",
             ),
             &["peer", "interface"],
         )
@@ -1992,6 +2007,16 @@ impl BgpMetrics {
             "1 while the RIB actor's latest periodic sample got a stalled readiness answer (one unit of work running 30 seconds or more), 0 after a ready answer. Set by the daemon's periodic sampler (every 5 seconds, independent of /readyz requests) and unchanged when a sample gets no answer; stays 0 where no sampler runs.",
         )
         .expect("valid metric definition");
+
+        let management_server_crashes = IntCounterVec::new(
+            Opts::new(
+                "bgp_management_server_crashes_total",
+                "Unexpected exits and failed starts of a management server, by server: metrics (the /metrics, /readyz and /livez HTTP server). The daemon restarts the server in place unless it is shutting down.",
+            ),
+            &["server"],
+        )
+        .expect("valid metric definition");
+        management_server_crashes.with_label_values(&[MANAGEMENT_SERVER_METRICS]);
 
         let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -3247,6 +3272,9 @@ impl BgpMetrics {
             .register(Box::new(max_prefix_latched.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(session_task_crashes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(peer_session_established.clone()))
             .expect("metric not already registered");
         registry
@@ -3559,6 +3587,9 @@ impl BgpMetrics {
             .expect("metric not already registered");
         registry
             .register(Box::new(rib_stalled.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(management_server_crashes.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(
@@ -3986,6 +4017,7 @@ impl BgpMetrics {
             session_established,
             peer_admin_enabled,
             max_prefix_latched,
+            session_task_crashes,
             peer_session_established,
             peer_session_state,
             peer_info,
@@ -4088,6 +4120,7 @@ impl BgpMetrics {
             readiness_probe_failures,
             systemd_watchdog_pings_skipped,
             rib_stalled,
+            management_server_crashes,
             rib_outbound_prefix_limit_actor_duration_seconds,
             rib_route_refresh_actor_duration_seconds,
             rib_actor_work_duration_seconds,
@@ -4438,6 +4471,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_admin_enabled, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_latched, peer);
+        Self::reap_peer_series_from_vec(&self.0.session_task_crashes, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_state, peer);
         {
@@ -4651,6 +4685,7 @@ impl BgpMetrics {
         let labels = &[peer, interface];
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
         let _ = self.0.max_prefix_latched.remove_label_values(labels);
+        let _ = self.0.session_task_crashes.remove_label_values(labels);
         let _ = self.0.peer_session_established.remove_label_values(labels);
         {
             let mut identities = self
@@ -4786,6 +4821,24 @@ impl BgpMetrics {
             .max_prefix_latched
             .with_label_values(&[peer, interface])
             .set(i64::from(latched));
+    }
+
+    /// Count one session task of this exact peer that ended without a
+    /// shutdown request.
+    pub fn record_session_task_crash(&self, peer: &str, interface: &str) {
+        self.0
+            .session_task_crashes
+            .with_label_values(&[peer, interface])
+            .inc();
+    }
+
+    /// Export this exact peer's session-task crash counter, at 0 when it has
+    /// none yet, so the first crash is an increase.
+    pub fn seed_session_task_crashes(&self, peer: &str, interface: &str) {
+        let _ = self
+            .0
+            .session_task_crashes
+            .with_label_values(&[peer, interface]);
     }
 
     /// Publish the configured identity of one exact `(peer, interface)` peer
@@ -6099,6 +6152,15 @@ impl BgpMetrics {
     /// Record one liveness sample that withheld the systemd watchdog ping.
     pub fn record_systemd_watchdog_ping_skipped(&self) {
         self.0.systemd_watchdog_pings_skipped.inc();
+    }
+
+    /// Record one crash of the metrics/readiness HTTP server: an unexpected
+    /// exit or a failed start.
+    pub fn record_metrics_server_crash(&self) {
+        self.0
+            .management_server_crashes
+            .with_label_values(&[MANAGEMENT_SERVER_METRICS])
+            .inc();
     }
 
     /// Publish whether the latest RIB sample was a stalled readiness answer.
@@ -9390,6 +9452,15 @@ mod tests {
                 reason.as_str()
             )));
         }
+    }
+
+    #[test]
+    fn management_server_crashes_export_at_zero_and_count() {
+        let m = BgpMetrics::new();
+        let row = "\nbgp_management_server_crashes_total{server=\"metrics\"} ";
+        assert!(gather_text(&m).contains(&format!("{row}0\n")));
+        m.record_metrics_server_crash();
+        assert!(gather_text(&m).contains(&format!("{row}1\n")));
     }
 
     #[test]

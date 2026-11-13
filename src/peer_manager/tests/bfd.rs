@@ -2446,3 +2446,30 @@ async fn re_adding_a_deleted_strict_bfd_neighbor_without_bfd_is_not_withheld() {
     );
     assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER));
 }
+
+/// A strict peer whose session task crashed is replaced and withheld until
+/// BFD confirms Up. A BFD session that stays Up sends no new edge, so the
+/// restart republishes the desired state for the actor's acknowledgement,
+/// which then releases the hold.
+/// Red proof: withholding without the republish leaves the desired state
+/// unchanged, and the replacement Idle while BFD stays Up.
+#[tokio::test]
+async fn a_strict_peer_restarted_after_a_session_crash_asks_bfd_for_an_ack() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let (mut mgr, mut desired_rx) = coupled_mgr(peer, true, closed_peer_handle());
+    let _ = desired_rx.borrow_and_update();
+    let crash = super::session_crash::install_crashing_primary(&mut mgr, &key(peer));
+    super::session_crash::crash_primary(&mut mgr, crash).await;
+
+    assert!(mgr.peers[&key(peer)].enabled);
+    assert!(mgr.bfd_withholding(&peer));
+    assert!(
+        desired_rx.has_changed().unwrap(),
+        "the withheld restart asks the BFD actor to reconcile"
+    );
+    mgr.handle_bfd_state_change(up_ack(peer)).await;
+    assert!(
+        !mgr.bfd_withholding(&peer),
+        "the ack of an Up session releases"
+    );
+}
