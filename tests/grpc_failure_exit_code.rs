@@ -1289,17 +1289,22 @@ impl RpkiFaultDaemon {
             &config_path,
             Some(("RUSTBGPD_TEST_RPKI_TASK_EXIT", fault)),
         );
+        let is_metrics = |line: &str| line.contains("metrics server listening");
+        let metrics_port = wait_for_logged_port(&mut daemon, is_metrics);
+        // One cache at a time, each applied before the next answers, so the
+        // manager accepts their End of Data in this order whatever the load.
         let rtr = listeners
             .iter()
-            .map(|listener| {
+            .zip(&caches)
+            .map(|(listener, cache)| {
                 let mut session = accept_rtr(listener, &mut daemon);
                 assert_eq!(read_rtr_pdu(&mut session), RtrPdu::ResetQuery);
                 write_rtr_full_table(&mut session, 100);
+                let ready = format!("bgp_rpki_cache_end_of_data_ready{{cache=\"{cache}\"}} 1");
+                wait_for_metric_row(&mut daemon, metrics_port, &ready);
                 session
             })
             .collect();
-        let is_metrics = |line: &str| line.contains("metrics server listening");
-        let metrics_port = wait_for_logged_port(&mut daemon, is_metrics);
         let bgp_port = wait_for_logged_port(&mut daemon, |line| !is_metrics(line));
         Self {
             _temp: temp,
