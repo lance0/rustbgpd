@@ -1255,6 +1255,42 @@ the peer's OPEN, as the configuration's `remote_asn = <number>`,
   is session state: `NegotiatedSessionState.remote_asn`, present while the
   session is Established.
 
+### Administrative state
+
+`NeighborState.admin_state` says whether the daemon is holding a neighbor down
+and which owner did:
+
+- `ENABLED`: not held down; the session connects or accepts as configured.
+- `OPERATOR_DISABLED`: a runtime `DisableNeighbor` (`rbgp neighbor <addr>
+  disable`). `EnableNeighbor` clears it.
+- `CONFIG_ADMIN_DOWN`: the neighbor's configured `admin_down`.
+- `MAX_PREFIX_LATCHED`: a max-prefix shutdown latch. `EnableNeighbor`, or the
+  single automatic attempt that `max_prefix_restart_seconds` arms, clears it.
+  An explicit disable keeps the latch.
+- `SESSION_CRASH_LATCHED`: the neighbor's session task crashed three times
+  within ten minutes and the daemon latched it down. Only `EnableNeighbor`
+  clears it; an explicit disable, a reconfigure and an armed max-prefix
+  restart keep it. While it holds, a max-prefix latch on the same neighbor
+  reports `max_prefix_action` `shutdown` and no restart countdown, since its
+  expiry cannot restart the neighbor.
+- `UNSPECIFIED`: an older daemon that does not report it, or a retention-only
+  row, which has no neighbor to hold.
+
+When more than one owner holds a neighbor, `admin_state` names the first of
+`SESSION_CRASH_LATCHED`, `MAX_PREFIX_LATCHED`, `CONFIG_ADMIN_DOWN` and
+`OPERATOR_DISABLED`. A latch outranks the others because its message is the
+reported `last_error`, and the crash latch outranks the max-prefix latch
+because a max-prefix restart cannot lift it. A configured `admin_down`
+outranks a later operator disable.
+
+A held-down neighbor settles to `state` `IDLE` and is not trying to connect.
+Disabling a session sends a Cease without replacing `last_error`, so for
+`OPERATOR_DISABLED` and `CONFIG_ADMIN_DOWN` that field is the failure from
+before the hold, not its cause. For the two latches it is the latch message:
+the max-prefix breach, or the crash with its time and the recovery command.
+`bgp_peer_admin_enabled` carries the same enabled or held-down state, without
+the owner; `bgp_max_prefix_latched` separates the max-prefix latch.
+
 ### Interface-only neighbors
 
 An interface-only neighbor

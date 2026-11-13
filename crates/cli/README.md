@@ -827,6 +827,13 @@ while `rbgp neighbor` reports `state` in display form (`Idle`, `Connect`,
 `Active`, `OpenSent`, `OpenConfirm`, `Established`, or `Stale`). Both are
 existing fields and keep their spelling; a consumer joining the two maps one
 vocabulary to the other rather than comparing strings directly.
+A neighbor the daemon holds down keeps `state` `Idle` and adds `admin_state`
+(`operator_disabled`, `config_admin_down`, `max_prefix_latched` or
+`session_crash_latched`; `enabled` otherwise). Human output shows it as
+`Idle (Admin)`, `Idle (PfxCt)` for a max-prefix latch or `Idle (Crash)` for a
+session-crash latch, and the detail view adds `Admin State` and labels the
+retained error `Error Before Disable` outside a latch, since disabling a
+session does not replace it.
 
 RPC-backed JSON views use exhaustive generated-message fixtures and complete
 serialized expectations. A new protobuf field requires an explicit projection
@@ -872,13 +879,15 @@ This coverage does not widen the [stable surface](../../docs/reference/stability
 or the EVPN and Linux dataplane support boundaries.
 
 For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
-supported command). The result is `{"format":"rbgp-json","format_version":"1.2","data":...}`.
+supported command). The result is `{"format":"rbgp-json","format_version":"1.3","data":...}`.
 `data` contains the existing command result unchanged, including an empty `[]`,
 optional fields and bounded-list metadata. Ordinary `-j` keeps its current shape.
 The version describes the CLI JSON representation, not the daemon version.
 Version 1.1 adds inbound `path_id` to advertised-explain ORR candidates, so
 multiple paths from the same peer and next hop remain distinguishable.
 Version 1.2 adds `daemon_version`, the running daemon's version, to `health`.
+Version 1.3 adds `admin_state` to `neighbor` rows and detail, so a neighbor the
+daemon holds down reads as disabled, with its owner, instead of plain `Idle`.
 
 Consumers should check the format and major version and ignore unknown fields.
 Additive fields increment the minor version; removing or renaming fields, changing
