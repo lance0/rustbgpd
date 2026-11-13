@@ -38,6 +38,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         peer_group: None,
         state: SessionState::Established,
         enabled: true,
+        admin_down_reason: None,
         graceful_shutdown_advertise_intent: false,
         prefix_count: 0,
         rejected_routes_retained: Some(0),
