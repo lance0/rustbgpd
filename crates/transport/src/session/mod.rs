@@ -384,17 +384,23 @@ pub(crate) struct PeerSession {
     /// reconnect loop (e.g., persistent OPEN validation failures).
     reconnect_timer: Option<Pin<Box<Sleep>>>,
     /// Consecutive falls to Idle caused by a NOTIFICATION (sent or received,
-    /// including OPEN exchanges that end in one). Each one doubles the
-    /// deferred reconnect wait up to `MAX_NOTIFICATION_IDLE_BACKOFF_SECS`.
+    /// including OPEN exchanges that end in one) or by a peer-side TCP loss
+    /// without one. Each one doubles the deferred reconnect wait up to
+    /// `MAX_NOTIFICATION_IDLE_BACKOFF_SECS`.
     /// Cleared by an explicit operator start in Idle, an administrative
     /// reset, or a session that stays Established for `HEALTHY_ESTABLISHED`.
     notification_idle_failures: u32,
     /// The FSM batch being executed tore the session down with a
-    /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.
-    batch_notification_teardown: bool,
+    /// NOTIFICATION or followed a peer-side TCP loss. Read when that batch
+    /// falls to Idle to pick the wait.
+    batch_escalates_reconnect: bool,
     /// A local Cease/8 went out outside the FSM, so the teardown batch that
     /// follows it counts as a sent NOTIFICATION. Taken by that batch.
     local_notification_teardown: bool,
+    /// The peer side ended the connection without a NOTIFICATION (EOF or a
+    /// socket error on read or write), so the `TcpConnectionFails` batch that
+    /// follows joins the reconnect backoff streak. Taken by that batch.
+    peer_tcp_loss: bool,
     /// RFC 4271 §6.8 gate for an unpromoted inbound collision candidate: its
     /// KEEPALIVE and further input wait in `OpenConfirm` for `PeerManager`'s
     /// verdict, so a collision loser never reaches Established.
@@ -2521,8 +2527,9 @@ impl PeerSession {
             stop_requested: false,
             reconnect_timer: None,
             notification_idle_failures: 0,
-            batch_notification_teardown: false,
+            batch_escalates_reconnect: false,
             local_notification_teardown: false,
+            peer_tcp_loss: false,
             collision_hold: if session_identity.role == SessionRole::InboundCandidate {
                 fsm::CollisionHold::Armed
             } else {
@@ -3057,6 +3064,7 @@ impl PeerSession {
                     .latch_down_reason(SessionDownReason::TransportError);
             }
             Ok(Err(writer::WriterExit::Io(e))) => {
+                self.peer_tcp_loss = true;
                 let cause = crate::handle::SessionFailureCause::WriterIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "writer task TCP error");
                 if pending_outbound_cause.is_none() {
@@ -3086,6 +3094,7 @@ impl PeerSession {
     async fn handle_tcp_read_result(&mut self, result: std::io::Result<usize>) {
         match result {
             Ok(0) => {
+                self.peer_tcp_loss = true;
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::RemoteNoNotification);
                 self.handle_tcp_disconnect();
@@ -3093,6 +3102,7 @@ impl PeerSession {
             }
             Ok(_n) => self.process_read_buffer().await,
             Err(e) => {
+                self.peer_tcp_loss = true;
                 let cause = crate::handle::SessionFailureCause::ReaderIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "TCP read error");
                 if self.pending_outbound_teardown_cause.is_none() {

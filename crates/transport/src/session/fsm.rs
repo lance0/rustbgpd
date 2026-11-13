@@ -208,14 +208,15 @@ impl PeerSession {
 
     /// Deferred reconnect wait for the fall to Idle being executed.
     ///
-    /// A NOTIFICATION teardown doubles `connect_retry_secs` for each
-    /// consecutive NOTIFICATION failure, capped at
-    /// `MAX_NOTIFICATION_IDLE_BACKOFF_SECS` and never below the configured
-    /// interval. Every other fall to Idle keeps the configured interval and
-    /// leaves the streak untouched.
+    /// A NOTIFICATION teardown, or a peer-side TCP loss without one after
+    /// the connection came up, doubles `connect_retry_secs` for each consecutive
+    /// such failure, capped at `MAX_NOTIFICATION_IDLE_BACKOFF_SECS` and never
+    /// below the configured interval. Every other fall to Idle keeps the
+    /// configured interval and leaves the streak untouched. The caller
+    /// jitters the wait.
     fn idle_reconnect_delay_secs(&mut self) -> u32 {
         let base = self.config.peer.connect_retry_secs;
-        if !self.batch_notification_teardown {
+        if !self.batch_escalates_reconnect {
             return base;
         }
         let shift = self.notification_idle_failures.min(31);
@@ -223,6 +224,13 @@ impl PeerSession {
         base.saturating_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
             .min(MAX_NOTIFICATION_IDLE_BACKOFF_SECS)
             .max(base)
+    }
+
+    /// Take both latches that make a TCP-failure batch escalate the
+    /// reconnect streak: a local Cease/8 and a peer-side TCP loss.
+    fn take_reconnect_latches(&mut self) -> bool {
+        std::mem::take(&mut self.local_notification_teardown)
+            | std::mem::take(&mut self.peer_tcp_loss)
     }
 
     pub(super) fn log_notification(
@@ -814,11 +822,9 @@ impl PeerSession {
             if matches!(event, Event::AdministrativeReset { .. }) {
                 self.notification_idle_failures = 0;
             }
-            // A local Cease/8 ends its connection through the transport
-            // failure batch; that teardown was a sent NOTIFICATION too.
-            let local_notification =
-                down_reason.is_some() && std::mem::take(&mut self.local_notification_teardown);
-            self.batch_notification_teardown = (local_notification
+            // A local Cease/8 or a peer-side TCP loss ends in this TCP batch.
+            let latched = down_reason.is_some() && self.take_reconnect_latches();
+            self.batch_escalates_reconnect = (latched
                 || matches!(
                     down_reason,
                     Some(
@@ -1126,7 +1132,7 @@ impl PeerSession {
                             "scheduling reconnect"
                         );
                         self.reconnect_timer = Some(Box::pin(tokio::time::sleep(
-                            Duration::from_secs(u64::from(delay)),
+                            crate::timer::jittered(Duration::from_secs(u64::from(delay))),
                         )));
                     }
                 }

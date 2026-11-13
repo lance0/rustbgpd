@@ -1242,7 +1242,7 @@ async fn healthy_established_session_forgets_notification_idle_backoff() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn tcp_failures_keep_fixed_retries_alongside_notification_idle_backoff() {
+async fn tcp_misses_keep_fast_retries_and_peer_tcp_loss_joins_idle_backoff() {
     let mut session = make_test_session(65001, 65002);
     notification_cycle(&mut session).await;
     assert_eq!(notification_cycle(&mut session).await, 60);
@@ -1267,19 +1267,103 @@ async fn tcp_failures_keep_fixed_retries_alongside_notification_idle_backoff() {
     }
     assert_eq!(session.notification_idle_failures, 2);
 
-    // An Established session lost to a TCP failure keeps the configured
-    // Idle wait and neither advances nor forgets the NOTIFICATION streak.
+    // An Established session the peer closes without a NOTIFICATION joins
+    // the same streak.
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.drive_fsm(Event::TcpConnectionConfirmed).await;
     session.drive_fsm(peer_open(65002)).await;
     session.drive_fsm(Event::KeepaliveReceived).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
-    session.drive_fsm(Event::TcpConnectionFails).await;
+    session.handle_tcp_read_result(Ok(0)).await;
     assert_eq!(session.fsm.state(), SessionState::Idle);
-    assert_eq!(pending_reconnect_secs(&session), 30);
-    assert_eq!(session.notification_idle_failures, 2);
-    assert_eq!(notification_cycle(&mut session).await, 120);
+    assert_eq!(pending_reconnect_secs(&session), 120);
+    assert_eq!(session.notification_idle_failures, 3);
+    assert_eq!(notification_cycle(&mut session).await, 240);
+}
+
+/// Bring the session up over a fresh stream to `state` (`OpenConfirm` or
+/// `Established`), then let the peer drop TCP without a NOTIFICATION, through
+/// `loss`. Returns the wait armed for the next reconnect.
+async fn peer_tcp_loss_cycle(
+    session: &mut PeerSession,
+    state: SessionState,
+    loss: std::io::Result<usize>,
+) -> u64 {
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session.drive_fsm(peer_open(65002)).await;
+    if state == SessionState::Established {
+        session.drive_fsm(Event::KeepaliveReceived).await;
+    }
+    assert_eq!(session.fsm.state(), state);
+    session.handle_tcp_read_result(loss).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    pending_reconnect_secs(session)
+}
+
+/// A peer that accepts TCP and then drops it without a NOTIFICATION, after
+/// OPEN or after Established, by EOF or by a reset, backs off on the same
+/// capped streak as a NOTIFICATION teardown.
+/// Mutation-red: without the peer-TCP-loss latch every wait stays at 30.
+#[tokio::test(start_paused = true)]
+async fn peer_tcp_loss_after_connect_escalates_idle_backoff_up_to_cap() {
+    let mut session = make_test_session(65001, 65002);
+    let mut waits = Vec::new();
+    for state in [SessionState::OpenConfirm, SessionState::Established] {
+        for loss in [
+            Ok(0),
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            Ok(0),
+        ] {
+            waits.push(peer_tcp_loss_cycle(&mut session, state, loss).await);
+        }
+    }
+    assert_eq!(waits, [30, 60, 120, 240, 300, 300]);
+    assert_eq!(session.notification_idle_failures, 6);
+
+    // A session that stays up for the healthy window starts over.
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    tokio::time::advance(fsm::HEALTHY_ESTABLISHED).await;
+    session.handle_tcp_read_result(Ok(0)).await;
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (30, 1)
+    );
+}
+
+/// The armed Idle reconnect wait is jittered into RFC 4271 §10's 0.75..=1.0
+/// range of the escalated wait, and varies between falls.
+#[tokio::test(start_paused = true)]
+async fn idle_reconnect_wait_is_jittered_within_bounds() {
+    crate::timer::TEST_RANDOM_JITTER.set(true);
+    let mut waits = std::collections::BTreeSet::new();
+    for _ in 0..16 {
+        let mut session = make_test_session(65001, 65002);
+        session.notification_idle_failures = 5;
+        peer_tcp_loss_cycle(&mut session, SessionState::Established, Ok(0)).await;
+        let wait = session
+            .reconnect_timer
+            .as_ref()
+            .unwrap()
+            .deadline()
+            .saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            wait >= Duration::from_secs(225) && wait <= Duration::from_secs(300),
+            "{wait:?}"
+        );
+        waits.insert(wait);
+    }
+    crate::timer::TEST_RANDOM_JITTER.set(false);
+    assert!(waits.len() > 1, "Idle reconnect wait is not jittered");
 }
 
 #[tokio::test(start_paused = true)]
@@ -1409,7 +1493,7 @@ async fn local_outbound_cease8_escalates_notification_idle_backoff() {
         ),
         (120, 3)
     );
-    // A later plain TCP loss is not a NOTIFICATION teardown.
+    // A later peer TCP loss without a NOTIFICATION joins the streak too.
     session.reconnect_timer = None;
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
@@ -1420,7 +1504,7 @@ async fn local_outbound_cease8_escalates_notification_idle_backoff() {
             pending_reconnect_secs(&session),
             session.notification_idle_failures
         ),
-        (30, 3)
+        (240, 4)
     );
 }
 
@@ -1558,13 +1642,14 @@ async fn stop_then_start_after_cease8_does_not_leak_the_latch() {
     session.drive_fsm(peer_open(65002)).await;
     session.drive_fsm(Event::KeepaliveReceived).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
+    // The peer's EOF is the first failure of a new streak.
     session.handle_tcp_read_result(Ok(0)).await;
     assert_eq!(
         (
             pending_reconnect_secs(&session),
             session.notification_idle_failures
         ),
-        (30, 0)
+        (30, 1)
     );
 }
 

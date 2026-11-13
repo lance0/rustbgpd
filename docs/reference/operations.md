@@ -2138,7 +2138,7 @@ name it.
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; at zero, a new matching address is rejected unless a retained neighbor kept only because it may hold our routes can be evicted |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_dynamic_neighbor_retained_until_timestamp_seconds{peer,range,retention}` | An idle dynamic neighbor that keeps its slot for graceful restart retention, with the accepted `range`. `retention="its_routes"` while the RIB retains its routes, valued at the RIB's next GR or LLGR deadline (or the next re-check, at most 30 seconds away, when the RIB reports no timer armed); `retention="our_routes"` while it may retain ours, valued at the latest it can. Unix seconds. A neighbor kept for both has both series. Until a retention check first answers, `its_routes` is valued at the time of the first check, and stays at that value while the RIB does not answer. A value already past is awaiting the neighbor's next check, which removes or renews it; until then a past `its_routes` value still holds the slot. Absent while a reconnect from the address is live, and removed when the neighbor is deleted. `rbgp doctor` reports these as `dynamic_neighbors.retained` |
-| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait), `rib_cleanup_pending` (a deleted neighbor's RIB cleanup was waiting for RIB mailbox room), or `bfd_unavailable` (a BFD range's new session could not register its BFD session without waiting). All six series are exported at 0 from startup |
+| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION or TCP-drop reconnect wait), `rib_cleanup_pending` (a deleted neighbor's RIB cleanup was waiting for RIB mailbox room), or `bfd_unavailable` (a BFD range's new session could not register its BFD session without waiting). All six series are exported at 0 from startup |
 | `bgp_bmp_identity_conflicts_total{outcome}` | Neighbors admitted at a link-local address another BMP-monitored neighbor holds: `refused` before the session starts, or `excluded` from BMP when every collector sets `on_identity_conflict = "exclude"`. Both series are exported at 0 from startup |
 | `bgp_bmp_identity_excluded_neighbors` | Neighbors whose sessions currently report nothing to BMP for an identity conflict |
 | `bgp_max_prefix_usage{peer,family,stage}` | Live session-actor max-prefix enforcement count. `family` is `aggregate`, `ipv4_unicast`, `ipv6_unicast`, or a non-unicast family (`l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`); `stage` is `accepted` (after import policy) or `received` (before import policy, unicast only). Series are absent while the session is down, and the `received` and non-unicast family series are absent while their bound is unset |
@@ -3228,7 +3228,8 @@ records for a later outage.
    daemon is waiting out the deferred reconnect that follows an unplanned
    teardown. Each consecutive NOTIFICATION teardown (sent or received,
    including an OPEN exchange that ends in one, such as an ASN mismatch or
-   a repeated hold-timer expiry) doubles that wait, starting from
+   a repeated hold-timer expiry), and each time the peer drops TCP without a
+   NOTIFICATION in `OpenConfirm` or `Established`, doubles that wait, starting from
    `connect_retry_secs` (default 5 s) and capped at 300 s. The wait is also
    `reconnect_in_seconds` in the JSON output and in `NeighborState`. The API
    field is absent on older daemons, while JSON omits it when absent or zero.
@@ -3243,12 +3244,14 @@ records for a later outage.
    always reconnects to us escalates the same way.
    The streak clears after the session stays Established for five minutes, on
    `rbgp neighbor <addr> enable` while the session is in Idle, or on an
-   administrative reset. TCP misses
-   in `Connect` or `Active` keep the fast initial retries followed by the
-   existing exponential curve; a TCP loss after `Established` uses the
-   configured fixed Idle interval. Neither advances the NOTIFICATION streak.
+   administrative reset. In `Connect` or `Active`, a refused dial gets two
+   1 s retries and then the same doubling curve; a dial that gets no answer
+   doubles the interval from `connect_retry_secs` on each miss, up to 300 s.
+   These dial misses do not advance the reconnect streak. Every retry wait is
+   jittered down by up to 25% (RFC 4271 §10), so the reported wait can be
+   shorter than the doubled value.
    A max-prefix shutdown stays latched until an explicit enable. There is no
-   configuration knob for the NOTIFICATION curve.
+   configuration knob for these curves or the jitter.
 
 2. **Check logs for the peer:**
    ```bash
