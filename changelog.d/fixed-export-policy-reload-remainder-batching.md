@@ -12,6 +12,6 @@
   changes about a hundred peers with per-neighbor export policies at a full
   table can still exceed that budget and roll back.
   **Operator-visible:** for those grouped peers the Route Refresh that
-  follows an import-policy change is now sent after the group's RIB batch,
-  not between peers, and the `authoritative_batch_phase` log line appears
+  follows an import-policy change is now sent once the group's RIB batches
+  have committed, not between peers, and the `authoritative_batch_phase` log line appears
   once per group during the remainder walk.

@@ -239,17 +239,19 @@ therefore carries the shared cohorts of one export pair, which is more than
 one cohort when the pair's members sit in several source groups, or the
 members the paced budget admits. Every RIB command of the remainder,
 per-peer or batched, shares the transaction's one forward budget, anchored at
-its first RIB command. Once every pair has committed, the deferred Route
-Refreshes run in walk order through the step the cohort uses: the session is
+its first RIB command. A pair larger than 100 members is sent as several
+batches of at most 100, the later ones joining the destination group the
+first built, so one batch turn does not grow with the pair. Once a pair has
+committed, its deferred Route Refreshes run in walk order, before the next
+pair's batch, through the step the cohort uses: the session is
 probed again, a positively known-down peer owes no refresh, and a failed
 refresh is fatal. Between its session leg and its batch a member's session
 holds the new chain while the RIB holds the old one, the window cohort
 members already have. Any failure (a session leg, a batch or paced command,
 budget expiry, a deferred refresh) restores every captured prior, remainder
-then cohort. A member whose batch was never sent still holds its prior chain
-in the RIB, so its rollback restores the session and bookkeeping only; a
-member of a batch that was sent, whatever its reply, is in the restore batch.
-The limit that remains: peers with pairwise distinct export changes
+then cohort, including a member whose batch was never sent: a member can
+register with the RIB during the walk, and that registration installs the
+candidate chain its session already holds. The limit that remains: peers with pairwise distinct export changes
 still cost one full-table RIB command each under the two-minute budget.
 
 **Amended:** 2026-11-13 — the rollback restore is paced, and its wait
@@ -280,7 +282,9 @@ enqueued before the rollback Route Refreshes. Refresh-generated route work
 and peer lifecycle events can now run between restore commands; a member
 not yet restored exports them under the candidate chain it already had,
 until its own command resyncs its whole table under the prior chain. The
-end state is the same. Second, the wait for the task expires
+end state is the same. The refreshes are deliberately not held until the
+restore ends: restoring what the Loc-RIB accepts matters more than sparing
+unrestored members a second round of UPDATEs. Second, the wait for the task expires
 `RIB_BATCH_REPLY_TIMEOUT` after the task last completed a RIB command, and
 never before the transaction's lazy rollback deadline. A paced restore of N
 members takes about as long as the forward walk that applied them, so one
@@ -299,7 +303,11 @@ every ten seconds and its end. No metric reports restore progress: the only
 related series is the clean transition's
 `bgp_rib_policy_transition_in_progress`, which does not cover it.
 
-The limit that remains: one member's restore is one RIB turn. A member that
+Two limits remain. A restore batch still runs one shared cohort transition
+per source group in its one turn, so members returning from many source
+groups to one prior chain are restored in a single turn that grows with
+them (measured in checkpoints at 256 rows: 19,144 for 8 members from two
+groups, 53,416 for 32). And one member's restore is one RIB turn. A member that
 is alone in its update group rebuilds a group table and resyncs its own
 table in that turn; bounding it below one member needs a resumable
 replacement, which ADR-0111 examined and rejected.

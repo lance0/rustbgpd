@@ -1921,6 +1921,7 @@ mod queries;
 mod recovery;
 mod reload_generation;
 mod rfc8212;
+mod session_crash;
 mod session_wait_rounds;
 mod snapshots;
 mod transport_config;

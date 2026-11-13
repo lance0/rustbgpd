@@ -3104,8 +3104,8 @@ neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
 listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
-gRPC server, BGP listener task, BGP accept-forwarding task, metrics/readiness
-server, or injection lease expiry task exited unexpectedly),
+gRPC server, BGP listener task, BGP accept-forwarding task, or injection
+lease expiry task exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -3235,7 +3235,7 @@ fn main() -> ExitCode {
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
                   or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
                   gRPC server, BGP listener task, BGP accept-forwarding task,\n     \
-                  metrics/readiness server, or injection lease expiry task exit)\n  \
+                  or injection lease expiry task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
                   --release-core-isolation exits 0 only when no owned link is left\n     \
@@ -4117,10 +4117,11 @@ const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 /// others are ignored with a sanitized warning.
 const TEST_LEASE_EXPIRY_PANIC_ENV: &str = "RUSTBGPD_TEST_LEASE_EXPIRY_PANIC";
 
-/// Test-only fault injection; never set this in production. The only accepted
-/// value is `1`, which shuts down the bound metrics/readiness listening socket
-/// so its accept loop takes the unusable-socket exit; all others are ignored
-/// with a sanitized warning.
+/// Test-only fault injection; never set this in production. The value is the
+/// absolute path of a Unix socket: byte 1 reports that the fault is armed,
+/// and one received byte shuts down the bound metrics/readiness listening
+/// socket so its accept loop takes the unusable-socket exit. Any other value
+/// is ignored with a sanitized warning.
 const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE";
 
 /// Test-only fault injection; never set this in production. The only accepted
@@ -4159,13 +4160,15 @@ fn resolve_test_lease_expiry_panic() -> bool {
     }
 }
 
-fn resolve_test_metrics_listener_unusable() -> bool {
+fn resolve_test_metrics_listener_unusable() -> Option<std::path::PathBuf> {
     match std::env::var(TEST_METRICS_LISTENER_UNUSABLE_ENV) {
-        Err(std::env::VarError::NotPresent) => false,
-        Ok(value) if value == "1" => true,
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) if std::path::Path::new(&value).is_absolute() => Some(value.into()),
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
-            warn!("ignoring invalid {TEST_METRICS_LISTENER_UNUSABLE_ENV}; expected 1");
-            false
+            warn!(
+                "ignoring invalid {TEST_METRICS_LISTENER_UNUSABLE_ENV}; expected an absolute socket path"
+            );
+            None
         }
     }
 }
@@ -4821,7 +4824,6 @@ async fn run<T>(
     let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
     let test_rpki_task_exit = resolve_test_rpki_task_exit();
-    let test_metrics_listener_unusable = resolve_test_metrics_listener_unusable();
     let test_lease_expiry_panic = resolve_test_lease_expiry_panic();
 
     let mut config = accepted.config();
@@ -7273,9 +7275,9 @@ async fn run<T>(
     )
     .with_peer_manager_readiness(peer_mgr_readiness_tx.clone())
     .with_rib_readiness(rib_readiness_tx.clone());
-    // Supervised like the other listeners: `serve_metrics` returns only when
-    // its accept loop ends (an unusable socket), so any exit is a failure.
-    // With no configured listener its supervision arm never completes.
+    // Restarted in place by its supervisor when it ends on its own: a
+    // management-plane failure must not end BGP. With no configured listener
+    // the supervision task only waits for the stop.
     let metrics_listener = metrics_listener.filter(|_| !initial_peer_boot_failed);
     let metrics_clone = metrics.clone();
     let readiness_probe = core_probe.clone().with_gate(daemon_gate.clone());
@@ -7316,30 +7318,45 @@ async fn run<T>(
     });
     // Served from its own thread and runtime so saturated daemon workers
     // cannot delay `/livez` or `/metrics`; `/readyz` still asks the actors on
-    // this runtime. Dropped after the coordinated teardown below.
-    let (metrics_server, metrics_exited) = metrics_listener
-        .map(|metrics_listener| {
-            if test_metrics_listener_unusable {
-                metrics_listener.shut_down_for_test();
+    // this runtime. Stopped after the coordinated teardown below.
+    if let Some(metrics_listener) = &metrics_listener
+        && let Some(path) = resolve_test_metrics_listener_unusable()
+        && let Ok(fault) = metrics_listener.try_clone()
+    {
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let armed = async {
+                let mut stream = tokio::net::UnixStream::connect(path).await?;
+                stream.write_all(&[1]).await?;
+                stream.read_exact(&mut [0]).await
+            };
+            match armed.await {
+                Ok(_) => fault.shut_down_for_test(),
+                Err(error) => warn!(%error, "metrics-listener test fault not armed"),
             }
-            metrics_server::MetricsServerThread::spawn(
-                metrics_listener,
-                metrics_clone,
-                readiness_probe,
-                dataplane_probe,
-            )
-        })
-        .unzip();
+        });
+    }
+    let (metrics_stop, metrics_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let metrics_gate = daemon_gate.clone();
     let mut metrics_handle = tokio::spawn(async move {
-        let Some(exited) = metrics_exited else {
-            return std::future::pending().await;
-        };
-        exited.await.unwrap_or_else(|_| {
-            metrics_server::MetricsServerExit::Exited(Err(
-                "metrics/readiness thread panicked".to_string()
-            ))
-        })
+        match metrics_listener {
+            Some(metrics_listener) => {
+                metrics_server::supervise_metrics_server(
+                    metrics_listener,
+                    metrics_clone,
+                    readiness_probe,
+                    dataplane_probe,
+                    metrics_gate,
+                    metrics_stop_rx,
+                )
+                .await;
+            }
+            None => {
+                let _ = metrics_stop_rx.await;
+            }
+        }
     });
+    let mut metrics_supervisor_exited = false;
     let runtime_probe = runtime_probe::RuntimeProbe::spawn(&metrics);
 
     // systemd `READY=1` shares the readiness boundary above: every configured
@@ -7390,8 +7407,7 @@ async fn run<T>(
     }
 
     // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
-    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager,
-    // metrics/readiness).
+    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager).
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -7513,11 +7529,19 @@ async fn run<T>(
                 component_failed = true;
                 break;
             }
-            result = &mut metrics_handle => {
-                error!(?result, "metrics/readiness server exited unexpectedly");
-                info!("initiating shutdown due to metrics/readiness server failure");
-                component_failed = true;
-                break;
+            // The supervisor restarts the server in place. It returns on the
+            // stop sent at teardown, or once the gate reports shutdown; any
+            // other end is a defect in the supervisor itself. That is still
+            // a management-plane failure: BGP keeps running with the
+            // listener down.
+            result = &mut metrics_handle, if !metrics_supervisor_exited => {
+                metrics_supervisor_exited = true;
+                if result.is_err() || !daemon_gate.is_shutting_down() {
+                    error!(
+                        ?result,
+                        "metrics/readiness supervisor exited unexpectedly; /metrics, /readyz and /livez stay down until the daemon restarts"
+                    );
+                }
             }
             result = &mut bgp_listener_handle => {
                 error!(?result, "BGP listener task exited unexpectedly");
@@ -8371,7 +8395,10 @@ async fn run<T>(
     runtime_probe.shutdown(&stop_waiting).await;
     // Last to stop, as when it shared the daemon runtime: probes keep getting
     // `503 not ready: daemon is shutting down` through the whole teardown.
-    drop(metrics_server);
+    drop(metrics_stop);
+    if !metrics_supervisor_exited && let Err(error) = metrics_handle.await {
+        error!(%error, "metrics/readiness supervisor panicked");
+    }
     info!("rustbgpd exiting");
     component_failed
 }
@@ -10072,7 +10099,7 @@ mod tests {
             "bfd_runtime::spawn_prepared_with_reload(",
             "let mut bgp_forwarder_handle = tokio::spawn(async move {",
             "let mut bgp_listener_handle = tokio::spawn(async move {",
-            "metrics_server::MetricsServerThread::spawn(",
+            "metrics_server::supervise_metrics_server(",
         ] {
             let position = production
                 .find(activation)
@@ -10097,7 +10124,7 @@ mod tests {
                 .find("// Activate BGP ingress only after the complete configured-peer roster is")
                 .unwrap()
                 < production
-                    .find("metrics_server::MetricsServerThread::spawn(")
+                    .find("metrics_server::supervise_metrics_server(")
                     .unwrap()
         );
 

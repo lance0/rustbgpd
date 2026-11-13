@@ -6251,7 +6251,7 @@ impl RibManager {
     /// [`Self::apply_paced_export_policies`], a few per RIB command within
     /// [`PACED_TURN_BUDGET`], and other work runs between those commands
     /// instead of waiting behind one actor turn growing with moved members ×
-    /// rows. Rollback batches stay whole.
+    /// rows. The rollback batch hands the same members back.
     pub(in crate::manager) fn apply_export_policy_replacements_deferring_residual(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
