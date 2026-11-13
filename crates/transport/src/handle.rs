@@ -1225,6 +1225,16 @@ pub struct PolicyRejectCounts {
     pub ipv6_unicast: u64,
 }
 
+/// Exact pre-policy Adj-RIB-In route counts by supported unicast family:
+/// accepted routes plus retained rejections the peer still announces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrePolicyRouteCounts {
+    /// Pre-policy IPv4-unicast routes.
+    pub ipv4_unicast: u64,
+    /// Pre-policy IPv6-unicast routes.
+    pub ipv6_unicast: u64,
+}
+
 /// Snapshot of a peer session's runtime state.
 #[derive(Debug, Clone)]
 pub struct PeerSessionState {
@@ -1242,6 +1252,11 @@ pub struct PeerSessionState {
     /// authoritative. Absent when retention is disabled or any entry has been
     /// evicted since the current session began.
     pub policy_reject_counts: Option<PolicyRejectCounts>,
+    /// Exact pre-policy unicast route counts. Present only when rejected-route
+    /// retention is enabled with no eviction, unicast Add-Path receive is not
+    /// negotiated, and neither max-prefix `Block` withholding nor a unicast
+    /// enhanced route refresh has happened since the current session began.
+    pub pre_policy_route_counts: Option<PrePolicyRouteCounts>,
     /// Family-local counts, effective finite limits, and remaining capacity.
     pub max_prefix: MaxPrefixState,
     /// Negotiated hold time (seconds), if session reached `OpenConfirm`.

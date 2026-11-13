@@ -1974,7 +1974,10 @@ carries inactive (absent), unlimited (zero), or finite.
   are encoded; Route Mirroring (type 6) is not emitted.
 - Per-collector TCP client with reconnect/backoff.
 - Peer Up replay on collector reconnect.
-- Periodic Stats Report (type 7: Adj-RIB-In route count, 60s interval).
+- Periodic Stats Report every 60s. Type 7 (routes in Adj-RIB-In, the
+  pre-policy table per §2) is sent only when the pre-policy count is exact;
+  see the RFC 9972 entry below. It is omitted, not approximated by the
+  post-policy count, for any other session.
 - Coordinated Termination on daemon shutdown.
 - RFC 9736 (Peer Up message namespace) is satisfied by construction: Peer
   Up stays message type 3, the ordinary Peer Up carries no Information
@@ -2045,12 +2048,19 @@ carries inactive (absent), unlimited (zero), or finite.
 
 - The periodic peer Stats Report emits the selected
   [RFC 9972 statistics types](https://www.rfc-editor.org/rfc/rfc9972.html#section-8):
-  post-policy Adj-RIB-In types 20/21/23, inbound policy-rejection type 22,
-  and RPKI Invalid/Valid/NotFound types 35/36/37.
+  pre-policy Adj-RIB-In types 18/19, post-policy Adj-RIB-In types 20/21/23,
+  inbound policy-rejection type 22, and RPKI Invalid/Valid/NotFound types
+  35/36/37.
 - The family-qualified rows cover negotiated IPv4/IPv6 unicast. Types
   20/21/23 are omitted under effective Add-Path receive; type 22 requires
   authoritative reject retention; types 35/36/37 require an authoritative
   VRP table. Unavailable observations are omitted rather than reported as zero.
+- Pre-policy type 19 is accepted routes plus retained rejections other than
+  RFC 7606 treat-as-withdraw. It requires authoritative reject retention, no
+  max-prefix `Block` withholding and no RFC 7313 enhanced route refresh of a
+  unicast family since the session reset, and no unicast Add-Path receive. Global type 18, and RFC 7854 type 7 with the same value
+  as §5 recommends, also require that no family other than IPv4/IPv6 unicast
+  is negotiated, because denied routes of other families are not retained.
 - See the [BMP configuration contract](configuration.md#bmp) for
   the emission conditions and the [M81 interop entry](../interop.md) for the
   collector checks. Other RFC 9972 statistics types are outside this emitted set.

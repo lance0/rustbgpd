@@ -734,3 +734,241 @@ async fn list_rejected_routes_command_returns_sorted_snapshot() {
         "the query is a read — the store is untouched"
     );
 }
+
+async fn query_pre_policy_route_counts(
+    session: &mut PeerSession,
+) -> Option<crate::PrePolicyRouteCounts> {
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    state.await.unwrap().pre_policy_route_counts
+}
+
+fn pre_policy_v4(count: u64) -> crate::PrePolicyRouteCounts {
+    crate::PrePolicyRouteCounts {
+        ipv4_unicast: count,
+        ipv6_unicast: 0,
+    }
+}
+
+fn deny_prefix_chain(denied: &[Ipv4Prefix]) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: denied
+            .iter()
+            .map(|&prefix| retention_statement(Some(Prefix::V4(prefix)), PolicyAction::Deny))
+            .collect(),
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// The pre-policy count is accepted routes plus every retained rejection the
+/// peer still announces: a policy deny and an `AS_PATH` loop stay counted, a
+/// treat-as-withdraw removes the route, and a withdrawal removes it.
+/// Break-to-red: counting only policy rejects drops the loop (3 → 2 after the
+/// loop); counting treat-as-withdraw keeps the third value at 4.
+#[tokio::test]
+async fn pre_policy_route_counts_follow_accepts_rejects_and_withdrawals() {
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 128), 25);
+    let looped = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let (mut session, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[denied])), |_| {});
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(0))
+    );
+
+    session
+        .process_update(retention_update(&[denied, first, second], &[]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(3))
+    );
+
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: looped,
+            }],
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002, 65001])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(4)),
+        "a looped route stays in the pre-policy Adj-RIB-In"
+    );
+
+    // RFC 9774 AS_SET: treat-as-withdraw replaces the accepted `first`.
+    let as_set_attrs = vec![
+        0x40, 1, 1, 0, 0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA, 0x40, 3, 4, 10, 0, 0, 2,
+    ];
+    session
+        .process_update(rfc7606_update(as_set_attrs, &[first]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(3)),
+        "treat-as-withdraw removes the route from the pre-policy count"
+    );
+
+    session
+        .process_update(retention_update(&[], &[denied, second]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(1))
+    );
+}
+
+/// Without retention, or after the first eviction, rejected routes the peer
+/// still announces are unknown, so the count is omitted rather than reported
+/// as the accepted count. Break-to-red: dropping either authority check
+/// reports `Some`.
+#[tokio::test]
+async fn pre_policy_route_counts_require_authoritative_retention() {
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let other = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    let (mut disabled, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[denied])), |config| {
+            config.reject_retention_enabled = false;
+        });
+    disabled
+        .process_update(retention_update(&[denied, accepted], &[]))
+        .await;
+    assert_eq!(query_pre_policy_route_counts(&mut disabled).await, None);
+
+    let (mut evicting, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[denied, other])), |config| {
+            config.reject_retention_capacity = 1;
+        });
+    evicting
+        .process_update(retention_update(&[denied, accepted], &[]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut evicting).await,
+        Some(pre_policy_v4(2))
+    );
+    evicting
+        .process_update(retention_update(&[other], &[]))
+        .await;
+    assert_eq!(evicting.rejected_routes.evictions_since_reset(), 1);
+    assert_eq!(
+        query_pre_policy_route_counts(&mut evicting).await,
+        None,
+        "the evicted rejection is still announced but no longer counted"
+    );
+    evicting
+        .process_update(retention_update(&[], &[other]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut evicting).await,
+        None,
+        "authority returns only with a session reset"
+    );
+}
+
+/// Max-prefix `Block` withholds a policy-accepted announcement from both the
+/// accepted set and the store, and unicast Add-Path receive counts paths in
+/// the store but prefixes in the accepted set; either omits the count while
+/// retention itself stays authoritative. Break-to-red: dropping the latch or
+/// the Add-Path check reports `Some`.
+#[tokio::test]
+async fn pre_policy_route_counts_omit_block_withholding_and_add_path() {
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    let (mut blocking, _metrics) = retention_session_with_chain(None, |config| {
+        config.max_prefix_action = MaxPrefixAction::Block;
+        config.max_prefixes_ipv4 = Some(1);
+    });
+    blocking
+        .process_update(retention_update(&[first], &[]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut blocking).await,
+        Some(pre_policy_v4(1))
+    );
+    blocking
+        .process_update(retention_update(&[second], &[]))
+        .await;
+    assert_eq!(
+        blocking.known_prefix_count(),
+        1,
+        "the second route is withheld"
+    );
+    assert_eq!(query_pre_policy_route_counts(&mut blocking).await, None);
+    assert_eq!(
+        query_policy_reject_counts(&mut blocking).await,
+        Some(crate::PolicyRejectCounts::default()),
+        "retention itself remains authoritative"
+    );
+
+    let (mut add_path, _metrics) = retention_session_with_chain(None, |_| {});
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Receive);
+    install_test_negotiated_session(&mut add_path, negotiated);
+    assert_eq!(query_pre_policy_route_counts(&mut add_path).await, None);
+    assert_eq!(
+        query_policy_reject_counts(&mut add_path).await,
+        Some(crate::PolicyRejectCounts::default())
+    );
+}
+
+/// An RFC 7313 boundary sweep does not reach the rejected-route store, so a
+/// denied route the peer leaves out of an enhanced refresh stays retained.
+/// The pre-policy count is omitted from the first unicast refresh window until
+/// the session resets. Break-to-red: dropping the latch reports a count that
+/// still includes the omitted rejection.
+#[tokio::test]
+async fn pre_policy_route_counts_omitted_after_enhanced_refresh() {
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let (mut session, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[denied])), |_| {});
+    session
+        .process_update(retention_update(&[denied, accepted], &[]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(2))
+    );
+
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .process_update(retention_update(&[accepted], &[]))
+        .await;
+    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    assert_eq!(
+        session.rejected_routes.len(),
+        1,
+        "the omitted rejection is still retained"
+    );
+    assert_eq!(query_pre_policy_route_counts(&mut session).await, None);
+
+    session.clear_known_routes();
+    session.rejected_routes.clear();
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(0)),
+        "a session reset restores authority"
+    );
+}

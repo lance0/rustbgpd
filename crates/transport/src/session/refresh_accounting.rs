@@ -63,6 +63,9 @@ impl PeerSession {
     /// fresh snapshot and deadline.
     pub(super) fn begin_refresh_accounting(&mut self, afi: Afi, safi: Safi) {
         let family = (afi, safi);
+        if matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
+            self.unicast_refresh_window_opened = true;
+        }
         if safi == Safi::Unicast
             && let Some(retention) = self.validation_retention.as_mut()
         {

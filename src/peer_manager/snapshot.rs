@@ -91,6 +91,42 @@ pub(super) fn rfc9972_policy_reject_counts(
     (!counts.is_empty()).then_some(counts)
 }
 
+/// BMP `(AFI, SAFI, count)` rows for one per-family statistic.
+type FamilyCounts = Vec<(u16, u8, u64)>;
+
+/// Exact pre-policy Adj-RIB-In route counts for BMP: the global count sent as
+/// RFC 7854 type 7 and RFC 9972 type 18, and the per-family RFC 9972 type 19
+/// rows. Only IPv4/IPv6 unicast has a pre-policy count (other families discard
+/// denied routes), so the global count exists only when no other family is
+/// negotiated. Both are `None` whenever the session's count is not exact.
+pub(super) fn bmp_pre_policy_counts(
+    state: &PeerSessionState,
+) -> (Option<u64>, Option<FamilyCounts>) {
+    let (Some(session), Some(counts)) = (
+        state.negotiated_session.as_ref(),
+        state.pre_policy_route_counts,
+    ) else {
+        return (None, None);
+    };
+    let per_family: Vec<_> = [
+        (Afi::Ipv4, counts.ipv4_unicast),
+        (Afi::Ipv6, counts.ipv6_unicast),
+    ]
+    .into_iter()
+    .filter(|&(afi, _)| session.families.contains(&(afi, Safi::Unicast)))
+    .map(|(afi, count)| (afi as u16, Safi::Unicast as u8, count))
+    .collect();
+    if per_family.is_empty() {
+        return (None, None);
+    }
+    let only_unicast = session
+        .families
+        .iter()
+        .all(|family| matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)));
+    let global = only_unicast.then(|| per_family.iter().map(|&(_, _, count)| count).sum());
+    (global, Some(per_family))
+}
+
 pub(super) fn rfc9972_rpki_validation_counts(
     peer: PeerId,
     state: &PeerSessionState,
@@ -1156,7 +1192,7 @@ impl PeerManager {
                 continue;
             }
 
-            let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
+            let (adj_rib_in_routes, rfc9972_adj_rib_in_pre) = bmp_pre_policy_counts(state);
             let rfc9972_adj_rib_in_post = rfc9972_adj_rib_in_counts(state);
             let rfc9972_policy_rejects = rfc9972_policy_reject_counts(state);
             let rfc9972_rpki_adj_rib_in_post = rfc9972_rpki_validation_counts(
@@ -1190,7 +1226,8 @@ impl PeerManager {
                     state.remote_router_id,
                     state.four_octet_as,
                 ),
-                adj_rib_in_routes: prefix_count,
+                adj_rib_in_routes,
+                rfc9972_adj_rib_in_pre,
                 rfc9972_adj_rib_in_post,
                 rfc9972_policy_rejects,
                 rfc9972_rpki_adj_rib_in_post,

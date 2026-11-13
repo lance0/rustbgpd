@@ -826,7 +826,8 @@ async fn bmp_repair_timer_retries_until_channel_drains() {
     for _ in 0..16 {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
-            adj_rib_in_routes: 0,
+            adj_rib_in_routes: Some(0),
+            rfc9972_adj_rib_in_pre: None,
             rfc9972_adj_rib_in_post: None,
             rfc9972_policy_rejects: None,
             rfc9972_rpki_adj_rib_in_post: None,
@@ -874,7 +875,8 @@ async fn bmp_peer_down_survives_full_channel() {
     for _ in 0..16 {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
-            adj_rib_in_routes: 0,
+            adj_rib_in_routes: Some(0),
+            rfc9972_adj_rib_in_pre: None,
             rfc9972_adj_rib_in_post: None,
             rfc9972_policy_rejects: None,
             rfc9972_rpki_adj_rib_in_post: None,
@@ -1200,7 +1202,8 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
     for _ in 0..16 {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
-            adj_rib_in_routes: 0,
+            adj_rib_in_routes: Some(0),
+            rfc9972_adj_rib_in_pre: None,
             rfc9972_adj_rib_in_post: None,
             rfc9972_policy_rejects: None,
             rfc9972_rpki_adj_rib_in_post: None,
@@ -1254,7 +1257,8 @@ async fn repair_partial_enqueue_duplicate_peer_down_is_acceptable() {
     for _ in 0..15 {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
-            adj_rib_in_routes: 0,
+            adj_rib_in_routes: Some(0),
+            rfc9972_adj_rib_in_pre: None,
             rfc9972_adj_rib_in_post: None,
             rfc9972_policy_rejects: None,
             rfc9972_rpki_adj_rib_in_post: None,
