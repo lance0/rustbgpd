@@ -1,10 +1,11 @@
 ### Documentation
 
 - The IXP filter-pipeline cron script and the `rs-config-render` README now
-  sync only the rendered `policy/` and `datasets/` trees and install
-  `config.toml` and `render-receipt.json` individually, instead of running
-  `rsync --delete` over all of `/etc/rustbgpd`, which removed token files, TLS
-  keys and other operator files the renderer does not emit. The IXP Manager
+  filter their `rsync --delete` to the files the renderer can emit, instead of
+  syncing all of `/etc/rustbgpd`, which removed token files, TLS keys and
+  other operator files. A stale policy, dataset tree or
+  `birdwatcher-reject-communities.json` that a new render omits is still
+  removed. The IXP Manager
   route-server cookbook fetches the router document with a mode-0600 header
   file, so the API key no longer appears on `curl`'s command line.
 - The gNMI reference documents the limit of 64 concurrent `Subscribe` streams
