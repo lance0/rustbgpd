@@ -1325,6 +1325,13 @@ when the restarted listeners are up. `/livez`, the systemd watchdog and
 `READY=1` are not affected. The shipped `BgpManagementServerCrashed` rule
 fires on any increase of the counter.
 
+The gRPC sockets are not held across a restart. During the gap the TCP ports
+are unbound and the Unix socket path is absent: the run that ended removes
+it and the restart creates it again. If another process binds a configured
+TCP port in that gap, each restart fails with the bind error in
+`startup_error` and is retried, at most 10 seconds apart, until the port is
+free; `/readyz` stays 503 meanwhile.
+
 What clients see:
 
 - New connections are refused during the gap. Clients reconnect to the same

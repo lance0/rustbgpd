@@ -55,6 +55,19 @@ server in place and keeps restarting it for as long as it takes.
    restart together, because `serve` already stops the others when one
    fails. A bind that fails on restart is a failed start and is retried.
 
+   The gRPC sockets are not kept across runs. A gRPC run ends on its own
+   when a listening socket reports itself unusable, and that socket has to
+   be replaced whatever the supervisor holds; a panic in a request handler
+   ends only its connection, not the run. Keeping the sockets would
+   therefore help only a panic in the listener task itself, and would need
+   `serve` to take pre-bound listeners and to give up ownership of the Unix
+   socket cleanup that today removes the path under the directory lock when
+   a listener ends. During the gap an operator sees: TCP connections
+   refused; the Unix socket path absent, since the ending run removes it and
+   the restart creates it again; and, if another process binds the TCP port
+   meanwhile, restarts that fail and are retried at most 10 seconds apart
+   with `/readyz` red until the port is free.
+
 5. **Readiness.** While the gRPC server is down, `/readyz` answers 503
    `not ready: gRPC server is restarting`: the mutation path is unavailable.
    It clears when the restarted server reports every listener started. The
