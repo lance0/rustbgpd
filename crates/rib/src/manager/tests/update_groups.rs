@@ -17705,7 +17705,22 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                     }
                 }
             }));
-            if operation == "restore" {
+            if operation == "restore" && stage == "fallback_baseline" {
+                // The rollback batch defers residual members as the forward
+                // batch does, so the per-member interior runs in a paced
+                // restore command, here one that admits every member.
+                fleet.manager.paced_elapsed_for_test = Some(Duration::ZERO);
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::RestorePacedExportPolicies {
+                        replacements: batch_replacements(&fleet.members, &next),
+                        cost: Some(crate::update::PacedMemberCost::default()),
+                        reply,
+                    });
+                let outcome = response.try_recv().unwrap().unwrap();
+                assert_eq!(outcome.pending, Vec::<PeerId>::new());
+            } else if operation == "restore" {
                 let (reply, mut response) = oneshot::channel();
                 fleet
                     .manager

@@ -713,6 +713,10 @@ fn tagged_per_member(
 /// its budget admits (two here), so the longest single command must not grow
 /// with the moved members; one turn carrying the whole cohort grows members
 /// × rows.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture walks the cohort forward and back the peer manager's way, pinning the wire after each"
+)]
 fn residual_cohort_reload(size: usize, arm: ResidualArm) -> Work {
     const OLD: u32 = 0xFC00_0001;
     const NEW: u32 = 0xFC00_0011;
@@ -795,7 +799,71 @@ fn residual_cohort_reload(size: usize, arm: ResidualArm) -> Work {
         vec![RESIDUAL_ROWS; size],
         "{arm:?} size {size}: re-exported tables"
     );
-    Work::from([("longest command checkpoints", longest)])
+    // Roll the cohort back the peer manager's way: the rollback batch, which
+    // acknowledges each residual member as deferred, then paced restore
+    // commands for those. The longest restore command must not grow with the
+    // restored members either.
+    let restores = |peers: &[PeerId]| {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(arm.chain(OLD)),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut longest_restore = checkpoints_in(|| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements: restores(&all),
+            reply,
+        });
+        pending = response
+            .try_recv()
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .filter(|receipt| {
+                matches!(
+                    receipt,
+                    crate::PeerExportPolicyRestoreReceipt::Deferred { .. }
+                )
+            })
+            .map(crate::PeerExportPolicyRestoreReceipt::peer)
+            .collect();
+    })[ALL];
+    while !pending.is_empty() {
+        let mut outcome = None;
+        let command = checkpoints_in(|| {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::RestorePacedExportPolicies {
+                replacements: restores(&pending),
+                cost: Some(TWO_PER_COMMAND),
+                reply,
+            });
+            outcome = Some(response.try_recv().unwrap().unwrap());
+        });
+        longest_restore = longest_restore.max(command[ALL]);
+        pending = outcome.unwrap().pending;
+    }
+    assert!(
+        manager.dirty_peers.is_empty(),
+        "{arm:?} size {size}: members left dirty after the restore"
+    );
+    assert!(
+        all.iter()
+            .all(|peer| manager.export_chains.get(peer) == Some(&Some(arm.chain(OLD)))),
+        "{arm:?} size {size}: a member is not back on its prior chain"
+    );
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; size],
+        "{arm:?} size {size}: restored tables"
+    );
+    Work::from([
+        ("longest command checkpoints", longest),
+        ("longest restore command checkpoints", longest_restore),
+    ])
 }
 
 #[test]
@@ -821,6 +889,140 @@ fn residual_cohort_reload_longest_command_is_flat_in_moved_members() {
              member's move\nall arms (small, large): {counts:?}",
         );
     }
+}
+
+/// A rollback of the same cohort: the longest restore command is flat in the
+/// restored members, where one rollback turn over the whole list grows
+/// members x rows.
+#[test]
+fn residual_cohort_restore_longest_command_is_flat_in_restored_members() {
+    let unit = "longest restore command checkpoints";
+    // The mixed-destinations members return from two groups to one, so the
+    // rollback batch restores them as shared unicast cohorts in its own
+    // turn, as the forward batch moves any shared cohort: nothing is
+    // deferred, and that turn's per-member delta is not what this bounds.
+    let counts: Vec<(ResidualArm, usize, usize)> = ResidualArm::ALL
+        .into_iter()
+        .filter(|arm| !matches!(arm, ResidualArm::MixedDestinations))
+        .map(|arm| {
+            (
+                arm,
+                residual_cohort_reload(SMALL, arm)[unit],
+                residual_cohort_reload(LARGE, arm)[unit],
+            )
+        })
+        .collect();
+    for &(arm, small, large) in &counts {
+        assert!(small > 0, "{arm:?}: no work counted");
+        assert!(
+            large < small * 2,
+            "{arm:?}: the longest single restore command grew {small} -> {large} from {SMALL} \
+             to {LARGE} restored members at {RESIDUAL_ROWS} rows; one turn carries more than \
+             one member's restore\nall arms (small, large): {counts:?}",
+        );
+    }
+}
+
+/// A rollback is never abandoned: its batch and its paced restore commands
+/// run even when the caller has dropped the reply. A member that leaves the
+/// RIB mid-restore is skipped, not waited on, and re-registers with the
+/// session's restored chain.
+#[test]
+fn paced_restore_runs_without_its_caller_and_skips_a_departed_member() {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    let arm = ResidualArm::Vpn;
+    let all: Vec<PeerId> = (0..4).map(member).collect();
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let up = |peer: PeerId, tag: u32| {
+        let (outbound_tx, receiver) = mpsc::channel(4096);
+        let mut up = test_peer_up(peer, 1, outbound_tx);
+        if let RibUpdate::PeerUp {
+            export_policy,
+            sendable_families,
+            ..
+        } = &mut up
+        {
+            *export_policy = Some(arm.chain(tag));
+            *sendable_families = arm.families();
+        }
+        (up, receiver)
+    };
+    // Members start on the candidate chain, as after a completed forward walk.
+    let _receivers: Vec<_> = all
+        .iter()
+        .map(|&peer| {
+            let (up, receiver) = up(peer, NEW);
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    arm.seed(&mut manager);
+    let restores = |peers: &[PeerId]| {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(arm.chain(OLD)),
+            })
+            .collect::<Vec<_>>()
+    };
+    let on_chain = |manager: &RibManager, peer: PeerId, tag: u32| {
+        manager.export_chains.get(&peer) == Some(&Some(arm.chain(tag)))
+    };
+
+    // The batch, its caller gone: every member is a residual sender, so all
+    // stay on the candidate chain for the paced commands.
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+        replacements: restores(&all),
+        reply,
+    });
+    assert!(all.iter().all(|&peer| on_chain(&manager, peer, NEW)));
+
+    // One member's session drops before its restore command.
+    let departed = all[2];
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: departed,
+        session_id: 1,
+    });
+    drain_route_chunks(&mut manager);
+
+    // A paced restore command whose caller is gone still restores its
+    // members: two per command here, newest first.
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    manager.handle_update(RibUpdate::RestorePacedExportPolicies {
+        replacements: restores(&[all[3], all[1]]),
+        cost: Some(TWO_PER_COMMAND),
+        reply,
+    });
+    assert!(
+        on_chain(&manager, all[3], OLD) && on_chain(&manager, all[1], OLD),
+        "a restore command was skipped because its caller dropped the reply"
+    );
+    assert!(on_chain(&manager, all[0], NEW), "not yet restored");
+
+    // The departed member is reported skipped; the rest of the list is restored.
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::RestorePacedExportPolicies {
+        replacements: restores(&[departed, all[0]]),
+        cost: Some(TWO_PER_COMMAND),
+        reply,
+    });
+    let outcome = response.try_recv().unwrap().unwrap();
+    assert_eq!(
+        (outcome.skipped, outcome.applied, outcome.pending),
+        (vec![departed], 1, Vec::new())
+    );
+    assert!(on_chain(&manager, all[0], OLD));
+
+    // Its session was restored first, so it comes back with the prior chain.
+    let (up, _receiver) = up(departed, OLD);
+    manager.handle_update(up);
+    assert!(on_chain(&manager, departed, OLD));
 }
 
 /// Update-group tables no member belongs to.

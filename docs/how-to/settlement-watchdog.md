@@ -543,10 +543,14 @@ detached), with a few semantics of its own:
   once. All retries in the operation share two seconds of retry time; export,
   import and RIB work between state checks does not use it up. Confirmed
   non-Established state, session-task loss, or exhaustion compensates. The RIB
-  side registers one reverse-order exact rollback batch before Route Refresh;
-  only validated ordered receipts clear pending debt. A late batch stays
-  daemon-owned after the local two-minute wait, but an unproved repair remains
-  `known_divergence` and takes the normal recovery-fence path.
+  side registers an exact reverse-order rollback before Route Refresh: one
+  batch per prior chain, then paced restore commands for the peers whose
+  restore resyncs a whole table. Only validated ordered receipts clear pending
+  debt. The local wait is a stall detector, not a total: it ends two minutes
+  after the restore last completed a RIB command, so a slow restore that keeps
+  completing commands is waited for, inside the owner's settlement budget. A
+  stalled restore stays daemon-owned after that wait, but an unproved repair
+  remains `known_divergence` and takes the normal recovery-fence path.
 - **What changed versus the pre-watchdog daemon:** a reload whose
   acknowledgements are lost, or whose reconcile result is not
   authoritative, now fences and exits 70 instead of logging an error

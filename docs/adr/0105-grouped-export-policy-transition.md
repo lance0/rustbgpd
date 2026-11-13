@@ -252,6 +252,58 @@ member of a batch that was sent, whatever its reply, is in the restore batch.
 The limit that remains: peers with pairwise distinct export changes
 still cost one full-table RIB command each under the two-minute budget.
 
+**Amended:** 2026-11-13 — the rollback restore is paced, and its wait
+detects a stall instead of bounding the total. This replaces the one
+synchronous rollback turn named as a limit in the two amendments above and
+changes section 4's rollback paragraphs as follows. Measured before this
+change, a rollback of about 80 peers with distinct export chains at a full
+table was one RIB turn of 66 to 68 seconds. The detached rollback task still
+owns the whole RIB side of a rollback partition. It now sends one
+`RestorePeerExportPoliciesAuthoritatively` batch per prior chain, newest
+first. That batch restores shared cohorts in its turn, exactly as the
+forward batch moves them, and acknowledges each residual member whose
+session sends any family with a `Deferred` receipt, leaving its installed
+chain in place. The task restores those members with
+`RestorePacedExportPolicies` commands before it sends the next batch: the
+paced command's body, turn budget, window and reply, except that the RIB
+applies it even when its caller has dropped the reply. Every command is sent
+only after the previous reply, so UPDATEs, queries and timers run between
+them, and the longest rollback turn is one prior chain's shared cohorts, the
+members the paced budget admits, or one member. The task returns one
+`Restored` or `NotFound` receipt per member, newest first; a member that
+left the RIB before its command ran is `NotFound`, which closes its debt
+under the unchanged rule (a positive session-state observation), and its
+next registration carries the session's already-restored chain.
+
+Three properties change with it. First, only the first rollback command is
+enqueued before the rollback Route Refreshes. Refresh-generated route work
+and peer lifecycle events can now run between restore commands; a member
+not yet restored exports them under the candidate chain it already had,
+until its own command resyncs its whole table under the prior chain. The
+end state is the same. Second, the wait for the task expires
+`RIB_BATCH_REPLY_TIMEOUT` after the task last completed a RIB command, and
+never before the transaction's lazy rollback deadline. A paced restore of N
+members takes about as long as the forward walk that applied them, so one
+total two-minute rollback deadline would turn a slow, succeeding rollback
+into a `known_divergence` fence, which drops every session. The restore's
+work list is fixed when it starts, so a restore that keeps completing
+commands terminates; one that completes none for two minutes is a stalled
+RIB and is fenced as before, with retry intent armed and the task still
+owning the late repair. A partition whose restore succeeded renews the
+shared rollback deadline for the next partition on the same rule. The outer
+bound is the owner's fixed 30-minute settlement budget, which this does not
+change. Third, the peer manager holds the transaction for the whole restore,
+which can now be minutes; it serves readiness and, where the owner admits
+them, operator reads throughout, and logs the restore's start, its progress
+every ten seconds and its end. No metric reports restore progress: the only
+related series is the clean transition's
+`bgp_rib_policy_transition_in_progress`, which does not cover it.
+
+The limit that remains: one member's restore is one RIB turn. A member that
+is alone in its update group rebuilds a group table and resyncs its own
+table in that turn; bounding it below one member needs a resumable
+replacement, which ADR-0111 examined and rejected.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

@@ -3907,6 +3907,7 @@ impl RibManager {
             | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyPacedExportPolicies { .. }
             | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. }
+            | RibUpdate::RestorePacedExportPolicies { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::ReevaluatePeerExportPolicies { .. }
             | RibUpdate::InstallConditionalAdvertisements { .. }
@@ -5458,6 +5459,14 @@ impl RibManager {
                 replacements,
                 reply,
             } => self.handle_restore_peer_export_policies_authoritatively(replacements, reply),
+            RibUpdate::RestorePacedExportPolicies {
+                replacements,
+                cost,
+                reply,
+            } => {
+                // Never skipped on a closed reply: see the command's contract.
+                let _ = reply.send(self.apply_paced_export_policies(replacements, cost));
+            }
             RibUpdate::PrepareExportPolicyDestination {
                 peer,
                 export_policy,

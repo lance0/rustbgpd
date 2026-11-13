@@ -2412,6 +2412,13 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          under await_with_readiness, bounded by the walk's forward deadline",
     ),
     (
+        "policy.rs::restore_export_policies_in_rib",
+        2,
+        "not the actor: the body of the detached rollback task, which owns the restore batch \
+         and each paced restore command to the end; the actor awaits the task under \
+         await_with_readiness (restore_resolved_policies)",
+    ),
+    (
         "notifications.rs::defer_retired_session_down",
         1,
         "try_send never waits; a full lane transfers the exact retired owner's late end to the existing deferred FIFO",

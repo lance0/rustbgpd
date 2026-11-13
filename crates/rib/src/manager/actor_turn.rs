@@ -125,7 +125,8 @@ impl ActorTurn {
             RibUpdate::ReplacePeerExportPolicies { replacements, .. }
             | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { replacements, .. }
             | RibUpdate::ApplyPacedExportPolicies { replacements, .. }
-            | RibUpdate::RestorePeerExportPoliciesAuthoritatively { replacements, .. } => {
+            | RibUpdate::RestorePeerExportPoliciesAuthoritatively { replacements, .. }
+            | RibUpdate::RestorePacedExportPolicies { replacements, .. } => {
                 (None, Some(replacements.len()))
             }
             RibUpdate::ReevaluatePeerExportPolicies { peers, .. } => (None, Some(peers.len())),
