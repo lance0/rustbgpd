@@ -790,6 +790,9 @@ provenance, not kernel-enforced exclusivity).
 systemctl status rustbgpd            # is it running?
 journalctl -u rustbgpd -f            # follow logs
 systemctl reload rustbgpd            # SIGHUP → config reload
+sudo rbgp reload                     # SIGHUP, wait, print the outcome receipt
+rbgp config last-reload              # outcome of the latest settled reload
+rbgp config diff /etc/rustbgpd/config.toml  # installed file vs running config
 systemctl restart rustbgpd           # full restart (state drained)
 ```
 
@@ -1358,7 +1361,8 @@ These cover the config lifecycle, from bootstrap to reload:
 | `rustbgpd --check --strict <file>` | The same check, but any warning exits 1 instead of 0 — for CI and deployment gates that must not accept a valid-but-risky config. A clean check still exits 0. `--strict` without `--check` is an error (exit 2). |
 | `rbgp policy check [--fail-on-empty] [--deny-lints[=LINT,...]] [-j] <file.rpol>` | Compile a `.rpol` file and run its `test` blocks offline, without a daemon — a CI or editor gate for policy files. Exit 0 = clean, 1 = compile error, 2 = failing test (or no tests under `--fail-on-empty`), 3 = coverage below a requested threshold, 4 = a lint denied by `--deny-lints`. `-j` prints one `rbgp-policy-check/1.0` document with located findings. See [policy check as a CI and editor gate](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate). |
 | `rustbgpd --migrate-config <pin-legacy\|prepare-secure\|downgrade-v0.64> --offline [--dry-run] <file>` | Rewrite the RFC 8212 posture representation in place, offline (Linux only). `pin-legacy` writes epoch 1 + explicit `false`; `prepare-secure` writes epoch 2 + explicit `true`; `downgrade-v0.64` preserves the effective boolean, removes the epoch, and requires `--validator` naming an exact v0.64.0 binary. `--dry-run` performs the same validation proof and discards the stage. `--offline` is an operator assertion, not a daemon probe — stop or quiesce the daemon first. |
-| `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class and the `SIGHUP reload route`. Exit 0 = no actionable changes, 1 = actionable changes, 2 = load error. This is a static file-vs-file compare — to compare against the running daemon's view, use `rbgp config diff`. |
+| `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class and the `SIGHUP reload route`. Exit 0 = no actionable changes, 1 = actionable changes, 2 = load error. This is a static file-vs-file compare: once the candidate is installed over `<current>`, it reports no changes. To compare against the running daemon's view, use `rbgp config diff`. |
+| `rbgp config diff <candidate>` | Compare a candidate file against the running daemon's config snapshot, with the same reload-class annotations. Run it on the installed file after a reload to see what did not take effect, such as restart-required edits. Exit 0 = no changes, 2 = changes present, 1 = error. The 1 and 2 codes are the reverse of `rustbgpd --diff`. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
 
 The validation pipeline is the same in all three places: TOML parse
@@ -1854,7 +1858,7 @@ short version for first deployment:
 |---|---|
 | Session won't establish | `rbgp neighbor <addr>` + `journalctl -u rustbgpd -p warning` (or, from JSON logs, `journalctl -u rustbgpd -o cat \| jq -c 'select(.level=="WARN" or .level=="ERROR")'`) |
 | Routes received but not installed | `rbgp rib`, then `rbgp rib received <peer> --rejected`; for the statement-level trace, `rbgp policy explain --neighbor <peer> --prefix <CIDR> --direction import` (opt-in: needs `[policy.explain] enabled = true`) |
-| Reload didn't change behavior | `rustbgpd --diff <file>` + cross-reference [reload matrix](../reference/reload-matrix.md) |
+| Reload didn't change behavior | `rbgp config last-reload` for the outcome (`known_partial` lists unapplied identities), then `rbgp config diff /etc/rustbgpd/config.toml` for edits the running config does not hold, such as restart-required fields; cross-reference the [reload matrix](../reference/reload-matrix.md). `rustbgpd --diff` compares two files, so it reports no changes once the new file is installed |
 | FIB programming failures | `bgp_fib_kernel_failures_total` Prometheus counter + `journalctl -u rustbgpd -g 'failed to apply general FIB route op'` |
 | FIB or BLACKHOLE planning stops before kernel access | `increase(bgp_dataplane_reconcile_planning_failures_total[10m]) > 0` + matching structured warning; status remains the last successful snapshot |
 | EVPN-specific issues | [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) |
