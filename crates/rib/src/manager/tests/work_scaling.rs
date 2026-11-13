@@ -1133,6 +1133,98 @@ fn shared_pair_longest_batch_is_flat_in_pair_size() {
     );
 }
 
+/// A rollback names every member the failed walk captured, and most of them
+/// the RIB never moved. Restoring an ungrouped member to the chain it already
+/// has installed must cost no resync: three untouched members together cost
+/// less than the one member that does move. That one registered under the
+/// candidate chain mid-walk, so the chain the RIB has installed for it is not
+/// the prior one, and it is still restored: the shortcut reads the installed
+/// chain, not what the caller believes was sent.
+#[test]
+fn restoring_an_untouched_ungrouped_member_costs_no_resync() {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    const SIZE: usize = 4;
+    let arm = ResidualArm::Ungrouped;
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let register = |manager: &mut RibManager, index: usize, session_id: u64, tag: u32| {
+        let (outbound_tx, receiver) = mpsc::channel(4096);
+        let mut up = test_peer_up(member(index), session_id, outbound_tx);
+        if let RibUpdate::PeerUp {
+            export_policy,
+            peer_asn,
+            sendable_families,
+            ..
+        } = &mut up
+        {
+            *export_policy = Some(arm.chain(tag));
+            *peer_asn = 65_100 + u32::try_from(index).unwrap();
+            *sendable_families = arm.families();
+        }
+        manager.handle_update(up);
+        receiver
+    };
+    let mut receivers: Vec<_> = (0..SIZE)
+        .map(|index| register(&mut manager, index, 1, OLD))
+        .collect();
+    assert_eq!(manager.grouped_member_of(member(0)), None, "setup");
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; SIZE]
+    );
+    // Member 0 flaps and registers under the candidate chain, as a member
+    // whose session accepted it mid-walk does.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: member(0),
+        session_id: 1,
+    });
+    receivers[0] = register(&mut manager, 0, 2, NEW);
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| NEW)[0],
+        RESIDUAL_ROWS,
+        "the registration exported under the candidate chain"
+    );
+    let mut restore = |peers: std::ops::Range<usize>| {
+        let mut receipts = Vec::new();
+        let work = checkpoints_in(|| {
+            receipts = manager
+                .restore_export_policy_replacements_synchronously(
+                    peers
+                        .map(|index| crate::PeerExportPolicyReplacement {
+                            peer: member(index),
+                            export_policy: Some(arm.chain(OLD)),
+                        })
+                        .collect(),
+                )
+                .unwrap();
+        })[ALL];
+        assert!(
+            receipts.iter().all(|receipt| matches!(
+                receipt,
+                crate::PeerExportPolicyRestoreReceipt::Restored { .. }
+            )),
+            "{receipts:?}"
+        );
+        work
+    };
+    let untouched = restore(1..SIZE);
+    let moved = restore(0..1);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS, 0, 0, 0],
+        "only the member that registered under the candidate chain is re-exported, on its prior chain"
+    );
+    assert!(
+        untouched < moved,
+        "restoring {} untouched ungrouped members cost {untouched} checkpoints; one member's \
+         real restore costs {moved}",
+        SIZE - 1
+    );
+}
+
 /// A pair whose target chain reads a dataset shares only its first batch.
 /// That batch builds the destination group; a later batch finds it occupied,
 /// and the batched transition does not read an occupied group's staged view

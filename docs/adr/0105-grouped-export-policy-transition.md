@@ -284,7 +284,17 @@ owns the whole RIB side of a rollback partition. It now sends one
 first. That batch restores shared cohorts in its turn, exactly as the
 forward batch moves them, and acknowledges each residual member whose
 session sends any family with a `Deferred` receipt, leaving its installed
-chain in place. The task restores those members with
+chain in place. A member whose installed chain already equals the prior one
+is `Restored` at once, in the batch and in a paced command alike, with no
+regroup and no resync: a rollback names every member the failed walk
+captured, and the RIB never moved most of them. The test is the chain the
+RIB has installed when the command runs, not what the peer manager sent, so
+a member that registered under the candidate chain during the walk is not
+equal and is restored like any other. The forward batch and its paced walk
+share that body and the same shortcut; there it applies only to a member
+that registered under the candidate chain before its batch, whose
+registration already exported under it. The task restores the `Deferred`
+members with
 `RestorePacedExportPolicies` commands before it sends the next batch: the
 paced command's body, turn budget, window and reply, except that the RIB
 applies it even when its caller has dropped the reply. Every command is sent

@@ -5,8 +5,9 @@
   distinct export policies at a full table held the RIB for 66 to 68
   seconds, during which no UPDATE, query or timer ran. The rollback now
   restores peers that return to a shared policy as one batch per policy and
-  the rest a few per RIB command, so other work runs between commands. The
-  rollback is still never abandoned, and a peer whose session drops during
+  the rest a few per RIB command, so other work runs between commands. A
+  peer the failed reload had not yet moved in the RIB costs the rollback no
+  re-export. The rollback is still never abandoned, and a peer whose session drops during
   it is skipped and comes back up on the restored policy. One case is not
   yet paced: peers that return from many different policies to one shared
   policy are still restored in a single turn.
