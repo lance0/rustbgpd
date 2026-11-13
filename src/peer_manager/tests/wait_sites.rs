@@ -2408,8 +2408,9 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
     (
         "policy.rs::admit_rib_command_before",
         1,
-        "returns the admission to its caller: the paced walk awaits it inside the step it runs \
-         under await_with_readiness, bounded by the walk's forward deadline",
+        "returns the admission to its caller: the authoritative batch and the paced walk await \
+         it inside the step each runs under await_with_readiness, bounded by the walk's forward \
+         deadline",
     ),
     (
         "policy.rs::restore_export_policies_in_rib",
