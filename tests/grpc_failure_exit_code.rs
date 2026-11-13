@@ -1243,6 +1243,219 @@ fn rpki_client_panic_restarts_that_client_and_leaves_bgp_and_other_caches_up() {
     assert!(reports[0].contains("injected RTR client task panic"));
 }
 
+/// A daemon with `fault` injected into its RPKI subsystem, one synchronized
+/// RTR session per cache and an Established BGP session.
+struct RpkiFaultDaemon {
+    _temp: tempfile::TempDir,
+    daemon: Daemon,
+    caches: Vec<std::net::SocketAddr>,
+    rtr: Vec<TcpStream>,
+    bgp: TcpStream,
+    metrics_port: u16,
+}
+
+impl RpkiFaultDaemon {
+    /// The caches synchronize in order, each with the one-VRP table at
+    /// serial 100 whose End of Data sets a 1 s retry interval.
+    fn start(fault: &str, caches: usize) -> Self {
+        use rustbgpd_rpki::rtr_codec::RtrPdu;
+
+        let temp = private_tempdir();
+        let listeners: Vec<_> = (0..caches)
+            .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind RTR cache"))
+            .collect();
+        let caches: Vec<_> = listeners
+            .iter()
+            .map(|listener| listener.local_addr().unwrap())
+            .collect();
+        let config_path =
+            write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+        let mut config = std::fs::read_to_string(&config_path)
+            .expect("read test config")
+            .replace(
+                "listen_port = 0",
+                "listen_port = 0\nlisten_addresses = [\"127.0.0.1\"]",
+            );
+        config.push_str(
+            "\n[[neighbors]]\naddress = \"127.0.0.1\"\nremote_asn = 65020\n\
+             graceful_restart = false\n[rpki]\n",
+        );
+        for cache in &caches {
+            config.push_str(&format!("[[rpki.cache_servers]]\naddress = \"{cache}\"\n"));
+        }
+        std::fs::write(&config_path, config).expect("write RPKI fault config");
+        let mut daemon = spawn_daemon_with_env(
+            temp.path(),
+            &config_path,
+            Some(("RUSTBGPD_TEST_RPKI_TASK_EXIT", fault)),
+        );
+        let is_metrics = |line: &str| line.contains("metrics server listening");
+        let metrics_port = wait_for_logged_port(&mut daemon, is_metrics);
+        // One cache at a time, each applied before the next answers, so the
+        // manager accepts their End of Data in this order whatever the load.
+        let rtr = listeners
+            .iter()
+            .zip(&caches)
+            .map(|(listener, cache)| {
+                let mut session = accept_rtr(listener, &mut daemon);
+                assert_eq!(read_rtr_pdu(&mut session), RtrPdu::ResetQuery);
+                write_rtr_full_table(&mut session, 100);
+                let ready = format!("bgp_rpki_cache_end_of_data_ready{{cache=\"{cache}\"}} 1");
+                wait_for_metric_row(&mut daemon, metrics_port, &ready);
+                session
+            })
+            .collect();
+        let bgp_port = wait_for_logged_port(&mut daemon, |line| !is_metrics(line));
+        Self {
+            _temp: temp,
+            daemon,
+            caches,
+            rtr,
+            bgp: establish_bgp(bgp_port),
+            metrics_port,
+        }
+    }
+
+    fn wait_for_metric(&mut self, row: &str) -> String {
+        wait_for_metric_row(&mut self.daemon, self.metrics_port, row)
+    }
+
+    fn cache_row(&self, metric: &str, cache: usize, value: u8) -> String {
+        format!("{metric}{{cache=\"{}\"}} {value}", self.caches[cache])
+    }
+
+    /// The daemon runs, the BGP session is up and nothing fatal was logged.
+    fn assert_routing_untouched(&mut self) {
+        let logs = self.daemon.logs();
+        for absent in [
+            "RPKI subsystem task exited unexpectedly",
+            "initiating coordinated shutdown",
+        ] {
+            assert!(!logs.contains(absent), "unexpected {absent:?}\n{logs}");
+        }
+        assert_connection_stays_open(&mut self.bgp, true, &logs);
+        assert!(
+            matches!(self.daemon.child.try_wait(), Ok(None)),
+            "rustbgpd must keep running\n{logs}"
+        );
+    }
+
+    /// SIGTERM ends the daemon with exit code 0.
+    fn assert_clean_stop(mut self) {
+        let sigterm = Command::new("kill")
+            .args(["-TERM", &self.daemon.child.id().to_string()])
+            .status()
+            .expect("send SIGTERM");
+        assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+        let status = self.daemon.wait_within(Duration::from_secs(120));
+        let logs = self.daemon.logs();
+        assert_eq!(status.code(), Some(0), "SIGTERM must exit 0\n{logs}");
+    }
+}
+
+/// A panic raised while the VRP manager handles one cache's update, here
+/// in its End of Data observer, ends neither the daemon nor BGP nor either
+/// RTR session. The update was already applied, so the tables stay, no cache
+/// becomes resync pending and no Reset Query is sent; the panic is counted.
+/// The crate's tests cover a panic before the update is applied, which
+/// leaves the previous data in use and asks that cache for a full table.
+#[test]
+fn rpki_manager_update_panic_keeps_bgp_up_and_the_tables_in_use() {
+    // The second accepted End of Data, the second cache's, panics.
+    let mut f = RpkiFaultDaemon::start("vrp_manager_update_panic", 2);
+    let after = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1");
+    for expected in [
+        f.cache_row("bgp_rpki_cache_resync_pending", 0, 0),
+        f.cache_row("bgp_rpki_cache_resync_pending", 1, 0),
+        f.cache_row("bgp_rpki_cache_end_of_data_ready", 1, 1),
+        "bgp_rpki_vrp_count{afi=\"ipv4\"} 1".to_string(),
+        "bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 0".to_string(),
+        "bgp_rpki_task_restarts_total{task=\"aspa_forwarder\"} 0".to_string(),
+    ] {
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
+    }
+
+    let logs = f.daemon.logs();
+    for message in [
+        "injected VRP manager update panic",
+        "VRP manager panicked handling a message; continuing with its state as before it",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    f.assert_routing_untouched();
+    for session in &mut f.rtr {
+        assert_connection_stays_open(session, false, &logs);
+    }
+    f.assert_clean_stop();
+}
+
+/// A panic in the VRP table forwarder ends neither the daemon nor BGP nor
+/// the RTR session: the forwarder forwards the table it was handling again,
+/// so the RIB ends up with both VRPs.
+#[test]
+fn rpki_forwarder_panic_keeps_bgp_up_and_forwards_the_table_again() {
+    use rustbgpd_rpki::rtr_codec::{RTR_VERSION_2, RtrPdu};
+
+    // The second table the forwarder handles panics it.
+    let mut f = RpkiFaultDaemon::start("vrp_forwarder_panic", 1);
+    f.wait_for_metric("bgp_rpki_vrp_count{afi=\"ipv4\"} 1");
+    let mut frame = Vec::new();
+    RtrPdu::SerialNotify {
+        session_id: 7,
+        serial: 101,
+    }
+    .encode_with_version(&mut frame, RTR_VERSION_2)
+    .unwrap();
+    f.rtr[0].write_all(&frame).expect("write Serial Notify");
+    assert_eq!(
+        read_rtr_pdu(&mut f.rtr[0]),
+        RtrPdu::SerialQuery {
+            session_id: 7,
+            serial: 100
+        }
+    );
+    frame.clear();
+    for pdu in [
+        RtrPdu::CacheResponse { session_id: 7 },
+        RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: "198.51.100.0".parse().unwrap(),
+            asn: 65001,
+        },
+        RtrPdu::EndOfData {
+            session_id: 7,
+            serial: 101,
+            refresh: 3600,
+            retry: 1,
+            expire: 7200,
+        },
+    ] {
+        pdu.encode_with_version(&mut frame, RTR_VERSION_2).unwrap();
+    }
+    f.rtr[0].write_all(&frame).expect("write RTR delta");
+
+    f.wait_for_metric("bgp_rpki_vrp_count{afi=\"ipv4\"} 2");
+    let after = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 1");
+    for expected in [
+        f.cache_row("bgp_rpki_cache_resync_pending", 0, 0),
+        "bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 0".to_string(),
+    ] {
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
+    }
+    let logs = f.daemon.logs();
+    for message in [
+        "injected VRP forwarder panic",
+        "validation-table forwarder panicked; forwarding the latest table again in full",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    f.assert_routing_untouched();
+    assert_connection_stays_open(&mut f.rtr[0], false, &logs);
+    f.assert_clean_stop();
+}
+
 #[test]
 fn rpki_manager_panic_is_attributed_and_exits_nonzero() {
     let temp = private_tempdir();

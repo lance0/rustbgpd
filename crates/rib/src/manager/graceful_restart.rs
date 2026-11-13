@@ -758,11 +758,13 @@ impl RibManager {
         super::retire_hash_set(&mut rtc_affected, &mut inventory);
     }
 
+    /// Returns the work done: route revalidations and routes whose state
+    /// changed.
     pub(super) fn handle_rpki_cache_update(
         &mut self,
         table: Arc<VrpTable>,
         delta: Option<Vec<rustbgpd_rpki::VrpEntry>>,
-    ) {
+    ) -> (u64, u64) {
         let started = std::time::Instant::now();
         // The delta arm assumes every stored `validation_state` reflects the
         // previously distributed snapshot. Before the first table there is
@@ -775,7 +777,7 @@ impl RibManager {
         let mode = if delta.is_some() { "delta" } else { "full" };
         self.vrp_table = Some(table);
         let Some(table) = self.vrp_table.as_ref().map(Arc::clone) else {
-            return;
+            return (0, 0);
         };
         let vrps = table.len();
         self.metrics
@@ -838,6 +840,7 @@ impl RibManager {
             elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "RPKI cache update re-validation complete"
         );
+        (routes_revalidated, changed_routes)
     }
 
     pub(super) fn handle_aspa_cache_update(

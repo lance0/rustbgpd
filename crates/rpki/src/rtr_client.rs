@@ -405,6 +405,9 @@ pub struct RtrClient {
     /// Told each time the client restarts after a panic; see
     /// [`Self::with_restart_observer`].
     restart_observer: Option<Box<dyn Fn() + Send + Sync>>,
+    /// The manager's resync request count this client has answered; see
+    /// [`Self::take_resync_request`].
+    resync_seen: u64,
     /// Opens every transport connection to the cache; see
     /// [`Self::with_dialer`]. `None` is a plain `TcpStream::connect`.
     dialer: Option<RtrDialer>,
@@ -413,7 +416,7 @@ pub struct RtrClient {
 /// Drive `future` to completion, or to `None` if it panics. The panic hook
 /// has already reported the panic; the future is dropped without another
 /// poll.
-async fn catch_panic<F: Future>(future: F) -> Option<F::Output> {
+pub(crate) async fn catch_panic<F: Future>(future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|cx| {
         // Unwind safety: the panicked future is never polled again, and its
@@ -541,6 +544,7 @@ impl RtrClient {
             held_charge: None,
             expire_observer: None,
             restart_observer: None,
+            resync_seen: 0,
             dialer: None,
         }
     }
@@ -748,7 +752,36 @@ impl RtrClient {
         self.handle_disconnected_session(false).await;
     }
 
+    /// Whether the manager has asked for a full table since the last call.
+    /// It asks after losing one of this cache's updates: the held epoch then
+    /// describes data the manager does not have, so the epoch is dropped and
+    /// the next query is a Reset Query. The data's expiry instant is kept;
+    /// the manager enforces the earlier one of the data it still holds.
+    fn take_resync_request(&mut self) -> bool {
+        let Some(handle) = &self.enhanced_tx else {
+            return false;
+        };
+        let requested = handle
+            .1
+            .borrow()
+            .get(&self.config.server_addr)
+            .copied()
+            .unwrap_or(0);
+        if requested == self.resync_seen {
+            return false;
+        }
+        self.resync_seen = requested;
+        self.epoch = None;
+        true
+    }
+
     fn prepare_fresh_connection_attempt(&mut self) {
+        if self.take_resync_request() {
+            info!(
+                server = %self.config.server_addr,
+                "RTR resynchronization requested by the VRP manager; next query is a Reset Query"
+            );
+        }
         // Reconnect at the version the held data was validated under.
         // Re-probing v2 while holding a v1 epoch wedges against v1-only
         // caches (StayRTR, GoRTR): they answer the v2 query with a
@@ -1182,24 +1215,27 @@ impl RtrClient {
     /// leaves undelivered data's deadline on the previously delivered data;
     /// and the assignment still comes first, so delivered data always has a
     /// deadline. The expire observer, the only foreign code, runs before any
-    /// of the state below changes.
+    /// of the state below changes. Returns the expiry instant, which travels
+    /// with the update so the manager can enforce it for data it holds.
     fn commit_end_of_data(
         &mut self,
         (refresh, retry, expire): (u32, u32, u32),
         held_records: usize,
         session_id: u16,
         serial: u32,
-    ) {
+    ) -> TokioInstant {
         self.apply_eod_timers(refresh, retry, expire);
         self.held_records = held_records;
         let now = TokioInstant::now();
+        let expires_at = now + self.expire_interval;
         self.last_end_of_data_at = Some(now);
-        self.data_expires_at = Some(now + self.expire_interval);
+        self.data_expires_at = Some(expires_at);
         self.epoch = Some(CacheEpoch {
             version: self.negotiated_version,
             session_id,
             serial,
         });
+        expires_at
     }
 
     /// Clamp one End of Data timer to its §6 maximum, warning with both
@@ -1372,8 +1408,23 @@ impl RtrClient {
         let mut expire_sleep = Box::pin(tokio::time::sleep_until(
             self.data_expires_at.unwrap_or(fallback_expiry),
         ));
+        let mut resync_requests = self.enhanced_tx.as_ref().map(|handle| handle.1.clone());
 
         loop {
+            if self.take_resync_request() {
+                // Paced by the retry interval, so a manager that loses
+                // every table from this cache costs one transfer per
+                // interval. A Serial Notify may bring the query forward.
+                let at = TokioInstant::now() + self.retry_interval;
+                info!(
+                    server = %self.config.server_addr,
+                    retry_interval = ?self.retry_interval,
+                    "RTR resynchronization requested by the VRP manager; sending a Reset Query after the retry interval"
+                );
+                if at < refresh_sleep.deadline() {
+                    refresh_sleep.as_mut().reset(at);
+                }
+            }
             if let Some(query) = self.handle_idle_pdus(parse_buf)? {
                 return Ok(query);
             }
@@ -1399,6 +1450,18 @@ impl RtrClient {
                 }
                 () = expire_sleep.as_mut(), if has_expiry => {
                     return Err(RtrError::Expired);
+                }
+                open = async {
+                    match resync_requests.as_mut() {
+                        Some(requests) => requests.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // Read at the top of the loop. A closed channel means
+                    // the manager is gone and never asks again.
+                    if !open {
+                        resync_requests = None;
+                    }
                 }
             }
         }
@@ -1760,7 +1823,7 @@ impl RtrClient {
                             }
 
                             if self.enhanced_tx.is_some() {
-                                let update = match update {
+                                let mut update = match update {
                                     VrpUpdate::FullTable {
                                         server,
                                         entries,
@@ -1774,6 +1837,9 @@ impl RtrClient {
                                         session_id,
                                         serial,
                                         accepted_at: Instant::now(),
+                                        // Set once the End of Data is
+                                        // committed, below.
+                                        expires_at: TokioInstant::now(),
                                     },
                                     VrpUpdate::IncrementalUpdate {
                                         server,
@@ -1792,17 +1858,21 @@ impl RtrClient {
                                         session_id,
                                         serial,
                                         accepted_at: Instant::now(),
+                                        // Set once the End of Data is
+                                        // committed, below.
+                                        expires_at: TokioInstant::now(),
                                     },
                                     VrpUpdate::ServerDown { .. } => {
                                         unreachable!("End of Data never emits ServerDown")
                                     }
                                 };
-                                self.commit_end_of_data(
+                                let expires_at = self.commit_end_of_data(
                                     (refresh, retry, expire),
                                     held_records,
                                     session_id,
                                     serial,
                                 );
+                                update.set_expires_at(expires_at);
                                 self.send_enhanced(update).await;
                             } else {
                                 // The legacy channel cannot carry the
@@ -6355,5 +6425,155 @@ mod tests {
 
         client_handle.abort();
         let _ = client_handle.await;
+    }
+
+    /// A full table of host prefixes with the given End of Data timers.
+    fn timed_table(serial: u32, hosts: &[u8], retry: u32, expire: u32) -> Vec<RtrPdu> {
+        let mut pdus = host_prefixes_and_end_of_data(serial, hosts);
+        *pdus.last_mut().unwrap() = RtrPdu::EndOfData {
+            session_id: 7,
+            serial,
+            refresh: 3600,
+            retry,
+            expire,
+        };
+        pdus
+    }
+
+    fn host_entry_32(last: u8) -> VrpEntry {
+        entry(Ipv4Addr::new(203, 0, 113, last), 32, 32, 65001)
+    }
+
+    /// The manager loses one serial delta to a panic. The cache's previous
+    /// table stays published; the client is driven to a Reset Query on the
+    /// same session exactly one retry interval later (not left sending
+    /// Serial Queries whose answers the manager drops); the full table ends
+    /// the wait and is published once, with the difference between the two
+    /// tables as its delta; and serial queries resume from it.
+    #[tokio::test(start_paused = true)]
+    async fn lost_update_is_resynchronized_with_a_reset_query_after_the_retry_interval() {
+        use std::sync::Mutex;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attachment, handle, _queries) = CacheInventoryAttachment::new([addr]);
+        let (vrp_tx, vrp_rx) = mpsc::channel(8);
+        let (table_tx, mut table_rx) = mpsc::channel(8);
+        let resyncs = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&resyncs);
+        let manager = crate::VrpManager::new(vrp_rx, table_tx)
+            .with_cache_inventory(attachment)
+            .with_resync_observer(move |_, pending| seen.lock().unwrap().push(pending));
+        let faults = Arc::clone(&manager.injected_faults);
+        let manager = tokio::spawn(manager.run());
+        let client =
+            RtrClient::new(test_config(addr, 3600, 600, 7200), vrp_tx).with_cache_inventory(handle);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(&mut stream, &timed_table(100, &[1], 5, 600)).await;
+        assert_eq!(table_rx.recv().await.unwrap().table.len(), 1);
+
+        faults.store(1, Ordering::SeqCst);
+        notify_and_expect_serial_query(&mut stream, 101, 100).await;
+        let mut delta = timed_table(101, &[2], 5, 600);
+        delta.remove(0);
+        delta.insert(0, RtrPdu::CacheResponse { session_id: 7 });
+        write_pdus(&mut stream, &delta).await;
+        let lost_at = TokioInstant::now();
+
+        let query = timeout(Duration::from_secs(60), read_pdu(&mut stream))
+            .await
+            .expect("the client was not driven to resynchronize");
+        assert_eq!(query, RtrPdu::ResetQuery);
+        assert_eq!(lost_at.elapsed(), Duration::from_secs(5));
+        assert_eq!(*resyncs.lock().unwrap(), [true]);
+        assert!(table_rx.try_recv().is_err(), "nothing published while held");
+
+        write_pdus(&mut stream, &timed_table(101, &[2, 3], 5, 600)).await;
+        let update = table_rx.recv().await.unwrap();
+        let mut delta = update
+            .delta
+            .expect("the replacing table carries its difference");
+        delta.sort();
+        assert_eq!(delta, [1, 2, 3].map(host_entry_32));
+        assert_eq!(update.table.len(), 2);
+        assert_eq!(*resyncs.lock().unwrap(), [true, false]);
+        assert!(table_rx.try_recv().is_err(), "published once");
+
+        // The epoch is back: the next query is a Serial Query again.
+        notify_and_expect_serial_query(&mut stream, 102, 101).await;
+
+        client_handle.abort();
+        manager.abort();
+    }
+
+    /// A manager that loses every table from a cache keeps that cache's
+    /// last applied data only until its original expiry, although the
+    /// client's own clock is renewed by each End of Data it believes it
+    /// delivered. The client asks again once per retry interval, never
+    /// faster.
+    #[tokio::test(start_paused = true)]
+    async fn manager_that_loses_every_table_drops_the_held_data_at_its_original_expiry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attachment, handle, _queries) = CacheInventoryAttachment::new([addr]);
+        let (vrp_tx, vrp_rx) = mpsc::channel(8);
+        let (table_tx, mut table_rx) = mpsc::channel(8);
+        let manager = crate::VrpManager::new(vrp_rx, table_tx).with_cache_inventory(attachment);
+        let faults = Arc::clone(&manager.injected_faults);
+        let manager = tokio::spawn(manager.run());
+        let client =
+            RtrClient::new(test_config(addr, 3600, 600, 7200), vrp_tx).with_cache_inventory(handle);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(&mut stream, &timed_table(100, &[1], 7, 120)).await;
+        assert_eq!(table_rx.recv().await.unwrap().table.len(), 1);
+        let accepted_at = TokioInstant::now();
+
+        // Every later table is lost: the cache arms one fault per answer.
+        let resets = Arc::new(AtomicUsize::new(0));
+        let (reset_count, cache_faults) = (Arc::clone(&resets), Arc::clone(&faults));
+        let cache = tokio::spawn(async move {
+            cache_faults.store(1, Ordering::SeqCst);
+            write_pdu(
+                &mut stream,
+                RtrPdu::SerialNotify {
+                    session_id: 7,
+                    serial: 101,
+                },
+            )
+            .await;
+            loop {
+                let query = read_pdu(&mut stream).await;
+                if query == RtrPdu::ResetQuery {
+                    reset_count.fetch_add(1, Ordering::SeqCst);
+                }
+                cache_faults.store(1, Ordering::SeqCst);
+                write_pdus(&mut stream, &timed_table(101, &[2], 7, 120)).await;
+            }
+        });
+
+        // Bounded, so a manager that never drops the data fails the test.
+        let update = timeout(Duration::from_secs(1000), table_rx.recv())
+            .await
+            .expect("the held data was never dropped")
+            .unwrap();
+        assert_eq!(
+            accepted_at.elapsed(),
+            Duration::from_secs(120),
+            "dropped at the expiry of the last applied End of Data"
+        );
+        assert!(update.table.is_empty());
+        assert_eq!(update.delta, Some(vec![host_entry_32(1)]));
+        // One Reset Query per 7 s retry interval since the first loss.
+        assert_eq!(resets.load(Ordering::SeqCst), 17);
+
+        cache.abort();
+        client_handle.abort();
+        manager.abort();
     }
 }

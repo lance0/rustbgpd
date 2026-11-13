@@ -11,11 +11,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::FxHashSet;
-use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant as TokioInstant;
+use tracing::{debug, error, info, warn};
 
 use crate::aspa::{AspaRecord, AspaTable};
-use crate::rtr_client::{Reservation, VrpUpdate};
+use crate::rtr_client::{Reservation, VrpUpdate, catch_panic};
 use crate::vrp::{VrpEntry, VrpTable};
 
 const CACHE_QUERY_CAPACITY: usize = 16;
@@ -107,6 +108,9 @@ struct ServerVrpTable {
     /// Record-budget charge for this cache's VRP and ASPA data, released
     /// when the table is replaced or removed.
     charge: Option<Reservation>,
+    /// When the owning client's expire interval ends for this data, as its
+    /// last applied update reported it. `None` on the legacy update channel.
+    expires_at: Option<TokioInstant>,
 }
 
 impl ServerVrpTable {
@@ -172,6 +176,7 @@ pub(crate) enum EnhancedVrpUpdate {
         session_id: u16,
         serial: u32,
         accepted_at: Instant,
+        expires_at: TokioInstant,
     },
     Incremental {
         server: SocketAddr,
@@ -184,12 +189,40 @@ pub(crate) enum EnhancedVrpUpdate {
         session_id: u16,
         serial: u32,
         accepted_at: Instant,
+        expires_at: TokioInstant,
     },
 }
 
+impl EnhancedVrpUpdate {
+    /// Set a data update's expiry instant; a plain assignment, so the client
+    /// can call it between committing its End of Data and sending.
+    pub(crate) fn set_expires_at(&mut self, at: TokioInstant) {
+        if let Self::Full { expires_at, .. } | Self::Incremental { expires_at, .. } = self {
+            *expires_at = at;
+        }
+    }
+}
+
+/// How many times the manager has asked each cache's client for a full
+/// table. A client answers a count above the one it last saw.
+pub(crate) type ResyncRequests = HashMap<SocketAddr, u64>;
+
 /// Cloneable sender used by RTR clients to report cache updates to the manager.
 #[derive(Clone)]
-pub struct CacheUpdateHandle(pub(crate) mpsc::Sender<EnhancedVrpUpdate>);
+pub struct CacheUpdateHandle(
+    pub(crate) mpsc::Sender<EnhancedVrpUpdate>,
+    pub(crate) watch::Receiver<ResyncRequests>,
+);
+
+// The handle and the attachment were unwind safe before they carried the
+// resync watch, and still are: they hold only channel endpoints and plain
+// collections, and a panic while one is borrowed leaves nothing half
+// written (the watch value is replaced under its own lock, which does not
+// poison).
+impl std::panic::UnwindSafe for CacheUpdateHandle {}
+impl std::panic::RefUnwindSafe for CacheUpdateHandle {}
+impl std::panic::UnwindSafe for CacheInventoryAttachment {}
+impl std::panic::RefUnwindSafe for CacheInventoryAttachment {}
 
 /// Inventory state and receivers owned by one [`VrpManager`].
 ///
@@ -201,6 +234,11 @@ pub struct CacheInventoryAttachment {
     query_rx: mpsc::Receiver<CacheQuery>,
     query_open: bool,
     states: BTreeMap<SocketAddr, InternalCacheState>,
+    resync_tx: watch::Sender<ResyncRequests>,
+    /// Caches whose next applied data update must be a full table: the
+    /// manager lost an update from them, so it no longer knows what a serial
+    /// delta applies to. What it holds from them stays in use until then.
+    resync_pending: HashSet<SocketAddr>,
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +266,7 @@ impl CacheInventoryAttachment {
     ) -> (Self, CacheUpdateHandle, CacheQueryHandle) {
         let (update_tx, update_rx) = mpsc::channel(256);
         let (query_tx, query_rx) = mpsc::channel(CACHE_QUERY_CAPACITY);
+        let (resync_tx, resync_rx) = watch::channel(ResyncRequests::new());
         let states = servers
             .into_iter()
             .map(|server| {
@@ -246,8 +285,10 @@ impl CacheInventoryAttachment {
                 query_rx,
                 query_open: true,
                 states,
+                resync_tx,
+                resync_pending: HashSet::new(),
             },
-            CacheUpdateHandle(update_tx),
+            CacheUpdateHandle(update_tx, resync_rx),
             CacheQueryHandle(query_tx),
         )
     }
@@ -258,16 +299,22 @@ impl CacheInventoryAttachment {
 pub struct RpkiTableUpdate {
     /// The new merged VRP table snapshot.
     pub table: Arc<VrpTable>,
-    /// The VRP entries announced or withdrawn since the previously
-    /// distributed snapshot, when this update came from an RTR incremental
-    /// (serial) sync. The merged table is a union of per-server sets, so any
-    /// entry that differs between consecutive distributed snapshots is
-    /// guaranteed to appear in this list — a route's validation outcome can
-    /// only change if its prefix is covered by one of these entries, which
-    /// lets the RIB manager revalidate just the covered routes.
+    /// A superset of the VRP entries that differ between the previously
+    /// distributed snapshot and this one, whatever produced the update. The
+    /// merged table is a union of per-server sets, so a route's validation
+    /// outcome can only change if its prefix is covered by one of these
+    /// entries, which lets the RIB manager revalidate just the covered
+    /// routes.
     ///
-    /// `None` means no delta is known (full cache snapshot, cache reset,
-    /// resync, server loss) and consumers must revalidate everything.
+    /// For a full table that replaces a server's previous one, and for the
+    /// removal of a server's data (flush or expiry), the list is exactly the
+    /// entries that joined or left the merged table: an entry another server
+    /// still holds is not in it. For an RTR incremental (serial) sync it is
+    /// every entry the server announced or withdrawn.
+    ///
+    /// `None` means there is no baseline to compare with (a server's first
+    /// table, also after its data was flushed or expired) and consumers
+    /// must revalidate everything.
     pub delta: Option<Vec<VrpEntry>>,
 }
 
@@ -276,12 +323,50 @@ pub struct RpkiTableUpdate {
 pub struct AspaTableUpdate {
     /// The new merged ASPA table snapshot.
     pub table: Arc<AspaTable>,
-    /// Customer ASNs announced or withdrawn by an RTR incremental update.
-    /// `None` requires a full revalidation (full snapshot or server loss).
+    /// A superset of the customer ASNs whose merged provider set differs
+    /// from the previously distributed snapshot: the customers one server
+    /// announced or withdrew in an incremental update, those whose record
+    /// differs between a server's replacing full table and its previous
+    /// one, or those a removed server held. Another server's record for the
+    /// same customer is not taken into account.
+    ///
+    /// `None` requires a full revalidation (a server's first table).
     pub changed_customer_asns: Option<FxHashSet<u32>>,
 }
 
 type EndOfDataObserver = Box<dyn Fn(SocketAddr, Option<Instant>) + Send + Sync>;
+
+/// What the inventory channel adds to a data update: applied in the same
+/// commit as the data it describes.
+struct Accepted {
+    charge: Reservation,
+    expires_at: TokioInstant,
+    metadata: AcceptedMetadata,
+}
+
+/// One update, built and not yet installed; see [`VrpManager::stage`].
+struct Staged {
+    server: SocketAddr,
+    incremental: bool,
+    /// The cache's next sets; `None` removes them.
+    vrps: Option<ServerVrpTable>,
+    aspas: Option<HashMap<u32, Vec<u32>>>,
+    /// The merged tables to distribute, when they change.
+    vrp_update: Option<RpkiTableUpdate>,
+    aspa_update: Option<AspaTableUpdate>,
+    accepted: Option<Accepted>,
+}
+
+/// The inventory messages by what a panic in their handling can cost.
+#[derive(Clone, Copy)]
+enum UpdateClass {
+    /// Connectivity only: no validation data involved.
+    Session,
+    /// A full table or a serial delta, lost if its handling panics.
+    Data,
+    /// A flush or an expiry, which must still take effect.
+    Removal,
+}
 
 /// Merges VRP and ASPA data from multiple RTR cache servers.
 pub struct VrpManager {
@@ -308,7 +393,12 @@ pub struct VrpManager {
     readiness_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
     connectivity_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
     end_of_data_observer: Option<EndOfDataObserver>,
+    fault_observer: Option<Box<dyn Fn() + Send + Sync>>,
+    resync_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
     cache_inventory: Option<CacheInventoryAttachment>,
+    /// Upcoming [`Self::injected_fault`] calls that panic.
+    #[cfg(test)]
+    pub(crate) injected_faults: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl VrpManager {
@@ -329,7 +419,11 @@ impl VrpManager {
             readiness_observer: None,
             connectivity_observer: None,
             end_of_data_observer: None,
+            fault_observer: None,
+            resync_observer: None,
             cache_inventory: None,
+            #[cfg(test)]
+            injected_faults: Arc::default(),
         }
     }
 
@@ -393,6 +487,45 @@ impl VrpManager {
         self
     }
 
+    /// Observe each panic the manager recovers from; see [`Self::run`].
+    #[must_use]
+    pub fn with_fault_observer(mut self, observer: impl Fn() + Send + Sync + 'static) -> Self {
+        self.fault_observer = Some(Box::new(observer));
+        self
+    }
+
+    /// Observe a configured cache becoming resync pending (`true`) and its
+    /// next full table being applied (`false`). While pending, the manager
+    /// keeps using what it last accepted from that cache, until that data's
+    /// expiry; see [`Self::run`].
+    #[must_use]
+    pub fn with_resync_observer(
+        mut self,
+        observer: impl Fn(SocketAddr, bool) + Send + Sync + 'static,
+    ) -> Self {
+        self.resync_observer = Some(Box::new(observer));
+        self
+    }
+
+    /// Where a test makes the manager panic: before any state changes.
+    #[cfg_attr(
+        not(test),
+        expect(clippy::unused_self, reason = "test-only fault hook")
+    )]
+    fn injected_fault(&self) {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let faults = &self.injected_faults;
+            if faults
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                panic!("injected VRP manager fault");
+            }
+        }
+    }
+
     /// Report the cache's current accepted instant to the End-of-Data
     /// observer, from the same state [`Self::cache_list`] serves.
     fn notify_end_of_data(&self, server: SocketAddr) {
@@ -403,8 +536,20 @@ impl VrpManager {
         else {
             return;
         };
+        let accepted_at = state.accepted.as_ref().map(|m| m.accepted_at);
         if let Some(observer) = &self.end_of_data_observer {
-            observer(server, state.accepted.as_ref().map(|m| m.accepted_at));
+            self.observe(|| observer(server, accepted_at));
+        }
+    }
+
+    /// Call an embedder's observer. A panic in it is counted and logged as a
+    /// fault and costs only that notification: every observer runs after the
+    /// state it reports was installed, so the panic says nothing about the
+    /// update and must not be handled as a lost one.
+    fn observe(&self, notify: impl FnOnce()) {
+        // Unwind safety: the manager's state does not depend on observers.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(notify)).is_err() {
+            self.record_fault("observer", None);
         }
     }
 
@@ -418,11 +563,33 @@ impl VrpManager {
         };
         state.connected = connected;
         if let Some(observer) = &self.connectivity_observer {
-            observer(server, connected);
+            self.observe(|| observer(server, connected));
         }
     }
 
     /// Main event loop.
+    ///
+    /// With a [`CacheInventoryAttachment`], a panic while handling one of
+    /// its messages does not end the manager. Every update is built before
+    /// any of it is installed, so the per-cache sets and the published
+    /// tables are as they were before the message:
+    ///
+    /// - A lost full table or serial delta leaves the cache's previous data
+    ///   in use and marks the cache resync pending. Its client is asked for
+    ///   a full table and sends a Reset Query after its retry interval;
+    ///   until that table is applied, the cache's serial deltas are dropped,
+    ///   and the manager drops the data it holds at the expiry instant that
+    ///   came with it, because the client's own clock now belongs to the
+    ///   update that was lost (RFC 8210 section 6: data is not retained past
+    ///   the expire interval).
+    /// - A lost flush or expiry is carried out again; the cache's data
+    ///   leaves the tables. A second panic there ends the manager.
+    /// - A panic in an observer is counted as a fault and costs only that
+    ///   notification; the update it reported is already installed.
+    /// - A lost connectivity change or inventory query costs only itself.
+    ///
+    /// Updates on the legacy channel are not covered: without the attachment
+    /// there is no way to ask a client for a full table.
     pub async fn run(mut self) {
         let mut legacy_updates_open = true;
         let mut enhanced_updates_open = self.cache_inventory.is_some();
@@ -437,21 +604,48 @@ impl VrpManager {
             if !legacy_updates_open && !enhanced_updates_open {
                 break;
             }
+            let held_expiry = self.pending_expiry();
             let Some(inventory) = self.cache_inventory.as_mut() else {
                 continue;
             };
             tokio::select! {
                 biased;
+                // First, so held data leaves at its instant whatever else
+                // is queued.
+                server = async {
+                    match held_expiry {
+                        Some((at, server)) => {
+                            tokio::time::sleep_until(at).await;
+                            server
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    warn!(
+                        %server,
+                        "data held for a cache awaiting resynchronization reached its expiry"
+                    );
+                    self.receive(EnhancedVrpUpdate::Expired { server }).await;
+                }
                 update = self.update_rx.recv(), if legacy_updates_open => match update {
                     Some(update) => self.handle_update(update).await,
                     None => legacy_updates_open = false,
                 },
                 update = inventory.update_rx.recv(), if enhanced_updates_open => match update {
-                    Some(update) => self.handle_enhanced_update(update).await,
+                    Some(update) => self.receive(update).await,
                     None => enhanced_updates_open = false,
                 },
                 query = inventory.query_rx.recv(), if inventory.query_open => match query {
-                    Some(query) => { let _ = query.reply.send(self.cache_list()); }
+                    Some(query) => {
+                        // Unwind safety: `cache_list` only reads.
+                        let list = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.cache_list()
+                        }));
+                        match list {
+                            Ok(list) => { let _ = query.reply.send(list); }
+                            Err(_) => self.record_fault("cache inventory query", None),
+                        }
+                    }
                     None => inventory.query_open = false,
                 },
             }
@@ -459,7 +653,119 @@ impl VrpManager {
         info!("VRP manager shutting down");
     }
 
+    /// The earliest expiry among the data held for resync-pending caches.
+    fn pending_expiry(&self) -> Option<(TokioInstant, SocketAddr)> {
+        self.cache_inventory
+            .as_ref()?
+            .resync_pending
+            .iter()
+            .filter_map(|server| Some((self.server_tables.get(server)?.expires_at?, *server)))
+            .min()
+    }
+
+    /// Handle one inventory message, recovering from a panic in it as
+    /// [`Self::run`] describes.
+    async fn receive(&mut self, update: EnhancedVrpUpdate) {
+        let (server, class, what) = match &update {
+            EnhancedVrpUpdate::Connected { server }
+            | EnhancedVrpUpdate::Disconnected {
+                server,
+                flush: false,
+            } => (*server, UpdateClass::Session, "connectivity change"),
+            EnhancedVrpUpdate::Disconnected {
+                server,
+                flush: true,
+            } => (*server, UpdateClass::Removal, "flush"),
+            EnhancedVrpUpdate::Expired { server } => (*server, UpdateClass::Removal, "expiry"),
+            EnhancedVrpUpdate::Full { server, .. } => (*server, UpdateClass::Data, "full table"),
+            EnhancedVrpUpdate::Incremental { server, .. } => {
+                (*server, UpdateClass::Data, "serial delta")
+            }
+        };
+        // Unwind safety: the panicked future is never polled again. A data
+        // update or a removal mutates only in `commit`, after everything
+        // that can panic has run, so the per-cache sets, their charges and
+        // deadlines, the inventory rows and the published tables are those
+        // of before the message or, for a panic in an observer afterwards,
+        // of the fully applied message. A dropped update releases its own
+        // record charge.
+        if catch_panic(self.handle_enhanced_update(update))
+            .await
+            .is_some()
+        {
+            return;
+        }
+        self.record_fault(what, Some(server));
+        match class {
+            UpdateClass::Session => {}
+            UpdateClass::Data => self.request_resync(server),
+            UpdateClass::Removal => {
+                // Not caught: if the tables cannot be rebuilt without this
+                // cache, nothing can make its data leave on time, and the
+                // manager ends instead of holding it.
+                self.remove_cache(server).await;
+                self.observe_removed(server);
+                // No resync request: a client that sends a flush or an
+                // expiry has already dropped its epoch, so its next query
+                // is a Reset Query, and the manager expires data only for
+                // a cache that is already pending.
+            }
+        }
+    }
+
+    fn record_fault(&self, what: &'static str, server: Option<SocketAddr>) {
+        error!(
+            what,
+            server = server.map(tracing::field::display),
+            "VRP manager panicked handling a message; continuing with its state as before it"
+        );
+        // Unwind safety: the observer is the embedder's, and the manager's
+        // state does not depend on it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(observer) = &self.fault_observer {
+                observer();
+            }
+        }));
+    }
+
+    /// Ask `server`'s client for a full table and hold what the cache last
+    /// delivered until it arrives.
+    fn request_resync(&mut self, server: SocketAddr) {
+        let Some(inventory) = self.cache_inventory.as_mut() else {
+            return;
+        };
+        inventory.resync_pending.insert(server);
+        inventory
+            .resync_tx
+            .send_modify(|requests| *requests.entry(server).or_default() += 1);
+        if let Some(observer) = &self.resync_observer {
+            self.observe(|| observer(server, true));
+        }
+    }
+
+    /// Drop `server`'s accepted state and data and redistribute.
+    async fn remove_cache(&mut self, server: SocketAddr) {
+        // Staged first: a panic there leaves the inventory row untouched.
+        let staged = self.stage(VrpUpdate::ServerDown { server }, None);
+        if let Some(state) = self
+            .cache_inventory
+            .as_mut()
+            .and_then(|i| i.states.get_mut(&server))
+        {
+            state.accepted = None;
+        }
+        self.distribute(staged).await;
+    }
+
+    fn observe_removed(&self, server: SocketAddr) {
+        if let Some(observer) = &self.readiness_observer {
+            self.observe(|| observer(server, false));
+        }
+        self.notify_end_of_data(server);
+    }
+
     fn cache_list(&self) -> CacheList {
+        self.injected_fault();
         let Some(inventory) = &self.cache_inventory else {
             return CacheList {
                 rows: Vec::new(),
@@ -505,29 +811,14 @@ impl VrpManager {
             EnhancedVrpUpdate::Connected { server } => self.set_connected(server, true),
             EnhancedVrpUpdate::Disconnected { server, flush } => {
                 self.set_connected(server, false);
-                if flush
-                    && let Some(state) = self
-                        .cache_inventory
-                        .as_mut()
-                        .and_then(|i| i.states.get_mut(&server))
-                {
-                    state.accepted = None;
-                }
                 if flush {
-                    self.handle_update(VrpUpdate::ServerDown { server }).await;
-                    self.notify_end_of_data(server);
+                    self.remove_cache(server).await;
+                    self.observe_removed(server);
                 }
             }
             EnhancedVrpUpdate::Expired { server } => {
-                if let Some(state) = self
-                    .cache_inventory
-                    .as_mut()
-                    .and_then(|i| i.states.get_mut(&server))
-                {
-                    state.accepted = None;
-                }
-                self.handle_update(VrpUpdate::ServerDown { server }).await;
-                self.notify_end_of_data(server);
+                self.remove_cache(server).await;
+                self.observe_removed(server);
             }
             EnhancedVrpUpdate::Full {
                 server,
@@ -538,25 +829,28 @@ impl VrpManager {
                 session_id,
                 serial,
                 accepted_at,
+                expires_at,
             } => {
-                self.handle_update(VrpUpdate::FullTable {
-                    server,
-                    entries,
-                    aspa_records,
-                })
+                // The replaced table releases its charge when it is dropped;
+                // this one holds the new data's.
+                self.handle_accepted_update(
+                    VrpUpdate::FullTable {
+                        server,
+                        entries,
+                        aspa_records,
+                    },
+                    Some(Accepted {
+                        charge,
+                        expires_at,
+                        metadata: AcceptedMetadata {
+                            version: Some(version),
+                            session_id: Some(session_id),
+                            serial: Some(serial),
+                            accepted_at,
+                        },
+                    }),
+                )
                 .await;
-                // The replaced table released its charge; this one holds
-                // the new data's.
-                if let Some(table) = self.server_tables.get_mut(&server) {
-                    table.charge = Some(charge);
-                }
-                self.set_accepted(
-                    server,
-                    Some(version),
-                    Some(session_id),
-                    Some(serial),
-                    accepted_at,
-                );
                 self.notify_end_of_data(server);
             }
             EnhancedVrpUpdate::Incremental {
@@ -570,88 +864,144 @@ impl VrpManager {
                 session_id,
                 serial,
                 accepted_at,
+                expires_at,
             } => {
-                self.handle_update(VrpUpdate::IncrementalUpdate {
-                    server,
-                    announced,
-                    withdrawn,
-                    aspa_announced,
-                    aspa_withdrawn,
-                })
-                .await;
-                // The delta's withdrawals are applied; only its
-                // announcements stay charged with the table.
-                let mut charge = charge;
-                charge.release_withdrawn();
-                if let Some(table) = self.server_tables.get_mut(&server) {
-                    match &mut table.charge {
-                        Some(held) => held.absorb(charge),
-                        held => *held = Some(charge),
-                    }
+                if self
+                    .cache_inventory
+                    .as_ref()
+                    .is_some_and(|i| i.resync_pending.contains(&server))
+                {
+                    // An earlier update from this cache was lost, so this
+                    // delta's base is not the set held here. Dropping it
+                    // releases its charge; the full table that is on its
+                    // way replaces the set.
+                    warn!(%server, serial, "serial delta dropped: cache is awaiting resynchronization");
+                    return;
                 }
-                self.set_accepted(
-                    server,
-                    Some(version),
-                    Some(session_id),
-                    Some(serial),
-                    accepted_at,
-                );
+                self.handle_accepted_update(
+                    VrpUpdate::IncrementalUpdate {
+                        server,
+                        announced,
+                        withdrawn,
+                        aspa_announced,
+                        aspa_withdrawn,
+                    },
+                    Some(Accepted {
+                        charge,
+                        expires_at,
+                        metadata: AcceptedMetadata {
+                            version: Some(version),
+                            session_id: Some(session_id),
+                            serial: Some(serial),
+                            accepted_at,
+                        },
+                    }),
+                )
+                .await;
                 self.notify_end_of_data(server);
             }
         }
     }
 
-    fn set_accepted(
-        &mut self,
-        server: SocketAddr,
-        version: Option<u8>,
-        session_id: Option<u16>,
-        serial: Option<u32>,
-        accepted_at: Instant,
-    ) {
-        if let Some(state) = self
-            .cache_inventory
-            .as_mut()
-            .and_then(|i| i.states.get_mut(&server))
-        {
-            state.accepted = Some(AcceptedMetadata {
-                version,
-                session_id,
-                serial,
-                accepted_at,
-            });
+    /// Apply one update in two steps: [`Self::stage`] builds everything that
+    /// can fail, then [`Self::commit`] installs it with plain inserts. A
+    /// panic while staging leaves every per-cache set and both published
+    /// tables exactly as they were before the update.
+    async fn handle_update(&mut self, update: VrpUpdate) {
+        self.handle_accepted_update(update, None).await;
+    }
+
+    async fn handle_accepted_update(&mut self, update: VrpUpdate, accepted: Option<Accepted>) {
+        let staged = self.stage(canonical_update(update), accepted);
+        let server = staged.server;
+        let ready = staged.vrps.is_some();
+        self.distribute(staged).await;
+        if let Some(observer) = &self.readiness_observer {
+            self.observe(|| observer(server, ready));
         }
     }
 
-    async fn handle_update(&mut self, update: VrpUpdate) {
-        let update = canonical_update(update);
-        let (server, ready, vrp_delta, changed_customer_asns) = match update {
+    /// Commit a staged update and send the tables it changed.
+    async fn distribute(&mut self, staged: Staged) {
+        let (vrp_update, aspa_update, resynchronized) = self.commit(staged);
+        if let Some(update) = vrp_update {
+            info!(
+                v4 = update.table.v4_count(),
+                v6 = update.table.v6_count(),
+                total = update.table.len(),
+                "VRP table updated"
+            );
+            let _ = self.rib_tx.send(update).await;
+        }
+        if let (Some(update), Some(aspa_tx)) = (aspa_update, &self.aspa_rib_tx) {
+            info!(records = update.table.len(), "ASPA table updated");
+            let _ = aspa_tx.send(update).await;
+        }
+        if let (Some(server), Some(observer)) = (resynchronized, &self.resync_observer) {
+            self.observe(|| observer(server, false));
+        }
+    }
+
+    /// Build the cache's next contribution and the merged tables it leads
+    /// to, without changing any state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one update's sets, tables and deltas are built together, before any is installed"
+    )]
+    fn stage(&self, update: VrpUpdate, accepted: Option<Accepted>) -> Staged {
+        self.injected_fault();
+        let old_vrps = |server| self.server_tables.get(server);
+        let old_aspas = |server| self.server_aspa_tables.get(server);
+        // Whether a cache other than `server` holds `entry`: such an entry
+        // stays in the merged table whatever `server` does with it.
+        let held_elsewhere = |server: SocketAddr, entry: &VrpEntry| {
+            self.server_tables
+                .iter()
+                .any(|(other, table)| *other != server && table.entries.contains(entry))
+        };
+        let (server, incremental, vrps, aspas, vrp_delta, changed_customer_asns) = match update {
             VrpUpdate::FullTable {
                 server,
                 entries,
                 aspa_records,
             } => {
-                self.set_accepted(server, None, None, None, Instant::now());
                 info!(
                     %server,
                     vrps = entries.len(),
                     aspa = aspa_records.len(),
                     "full table from cache"
                 );
-                self.server_tables
-                    .insert(server, ServerVrpTable::from_entries(entries));
+                let vrps = ServerVrpTable::from_entries(entries);
                 // Later PDUs for the same customer ASN replace earlier
                 // ones within a full table (8210bis replacement semantics).
-                self.server_aspa_tables.insert(
-                    server,
-                    aspa_records
-                        .into_iter()
-                        .map(|r| (r.customer_asn, r.provider_asns))
-                        .collect(),
-                );
-                // A full snapshot replaces the server's whole set — there is
-                // no bounded changed-entry list, so downstream must rescan.
-                (server, true, None, None)
+                let aspas: HashMap<u32, Vec<u32>> = aspa_records
+                    .into_iter()
+                    .map(|r| (r.customer_asn, r.provider_asns))
+                    .collect();
+                // A table that replaces this cache's previous one changes
+                // the merged table by exactly the entries the two differ in
+                // that no other cache holds (only this cache's set changes,
+                // and the merged table is the union), so those are the
+                // delta. A cache's first table has no previous set to
+                // compare with, and downstream rescans.
+                // The ASPA set below is not narrowed the same way: the RIB
+                // scans every route for an ASPA update and uses the set only
+                // to skip detailed validation, so its size costs nothing.
+                let vrp_delta = old_vrps(&server).map(|old| {
+                    old.entries
+                        .symmetric_difference(&vrps.entries)
+                        .filter(|entry| !held_elsewhere(server, entry))
+                        .cloned()
+                        .collect()
+                });
+                let changed = old_aspas(&server).map(|old| {
+                    old.keys()
+                        .chain(aspas.keys())
+                        .filter(|customer| old.get(customer) != aspas.get(customer))
+                        .copied()
+                        .collect()
+                });
+                (server, false, Some(vrps), Some(aspas), vrp_delta, changed)
             }
             VrpUpdate::IncrementalUpdate {
                 server,
@@ -660,7 +1010,6 @@ impl VrpManager {
                 aspa_announced,
                 aspa_withdrawn,
             } => {
-                self.set_accepted(server, None, None, None, Instant::now());
                 debug!(
                     %server,
                     vrps_announced = announced.len(),
@@ -676,7 +1025,17 @@ impl VrpManager {
                 // "announce X then withdraw X" in one serial would leave X
                 // present. Robustness-only: correct caches never send both
                 // sides for one record in one serial.
-                let table = self.server_tables.entry(server).or_default();
+                // ponytail: the delta is applied to a copy of the cache's
+                // set, the same order of work as the merged rebuild below;
+                // apply in place with an undo list if deltas ever get hot.
+                let mut table =
+                    old_vrps(&server).map_or_else(ServerVrpTable::default, |old| ServerVrpTable {
+                        entries: old.entries.clone(),
+                        v4_count: old.v4_count,
+                        v6_count: old.v6_count,
+                        charge: None,
+                        expires_at: None,
+                    });
                 for w in &withdrawn {
                     table.remove(w);
                 }
@@ -693,7 +1052,7 @@ impl VrpManager {
                 // carries an empty provider set on the wire) removes the
                 // customer ASN; an announce replaces the customer's entire
                 // provider set.
-                let aspa_table = self.server_aspa_tables.entry(server).or_default();
+                let mut aspa_table = old_aspas(&server).cloned().unwrap_or_default();
                 let changed_customer_asns = aspa_announced
                     .iter()
                     .chain(&aspa_withdrawn)
@@ -705,25 +1064,137 @@ impl VrpManager {
                 for a in aspa_announced {
                     aspa_table.insert(a.customer_asn, a.provider_asns);
                 }
-                (server, true, Some(delta), Some(changed_customer_asns))
+                (
+                    server,
+                    true,
+                    Some(table),
+                    Some(aspa_table),
+                    Some(delta),
+                    Some(changed_customer_asns),
+                )
             }
             VrpUpdate::ServerDown { server } => {
                 info!(%server, "cache server down — removing entries");
-                self.server_tables.remove(&server);
-                self.server_aspa_tables.remove(&server);
-                // ponytail: the removed set IS the exact delta, but server
-                // loss is rare and multi-cache overlap makes it usually a
-                // no-op distribution; wire it through if it ever shows up.
-                (server, false, None, None)
+                // Only this cache's set leaves, so the delta is what it
+                // alone held: with two caches serving the same data, one
+                // of them expiring changes almost nothing. A cache that
+                // held nothing changes nothing.
+                let vrp_delta = Some(
+                    old_vrps(&server)
+                        .map(|old| {
+                            old.entries
+                                .iter()
+                                .filter(|entry| !held_elsewhere(server, entry))
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                );
+                let changed = Some(
+                    old_aspas(&server)
+                        .map(|old| old.keys().copied().collect())
+                        .unwrap_or_default(),
+                );
+                (server, false, None, None, vrp_delta, changed)
             }
         };
-
-        self.rebuild_and_distribute_vrp(vrp_delta).await;
-        self.rebuild_and_distribute_aspa(changed_customer_asns)
-            .await;
-        if let Some(observer) = &self.readiness_observer {
-            observer(server, ready);
+        let vrp_update = self.stage_vrp_table(server, vrps.as_ref(), vrp_delta);
+        let aspa_update = self.stage_aspa_table(server, aspas.as_ref(), changed_customer_asns);
+        Staged {
+            server,
+            incremental,
+            vrps,
+            aspas,
+            vrp_update,
+            aspa_update,
+            accepted,
         }
+    }
+
+    /// Install a staged update. Only map inserts and removals: nothing here
+    /// can panic part-way, so the per-cache sets and the published tables
+    /// always describe one accepted state.
+    ///
+    /// Returns the tables to distribute and, when a full table just ended
+    /// the cache's wait for resynchronization, the cache.
+    fn commit(
+        &mut self,
+        staged: Staged,
+    ) -> (
+        Option<RpkiTableUpdate>,
+        Option<AspaTableUpdate>,
+        Option<SocketAddr>,
+    ) {
+        let Staged {
+            server,
+            incremental,
+            vrps,
+            aspas,
+            vrp_update,
+            aspa_update,
+            accepted,
+        } = staged;
+        let mut resynchronized = None;
+        match vrps {
+            Some(mut table) => {
+                if incremental && let Some(old) = self.server_tables.get_mut(&server) {
+                    // A delta extends the data it applies to: the charge
+                    // and the deadline stay with it.
+                    table.charge = old.charge.take();
+                    table.expires_at = old.expires_at;
+                }
+                let metadata = match accepted {
+                    Some(Accepted {
+                        mut charge,
+                        expires_at,
+                        metadata,
+                    }) => {
+                        // The delta's withdrawals are applied; only its
+                        // announcements stay charged with the table.
+                        charge.release_withdrawn();
+                        match &mut table.charge {
+                            Some(held) => held.absorb(charge),
+                            held => *held = Some(charge),
+                        }
+                        table.expires_at = Some(expires_at);
+                        metadata
+                    }
+                    None => AcceptedMetadata {
+                        version: None,
+                        session_id: None,
+                        serial: None,
+                        accepted_at: Instant::now(),
+                    },
+                };
+                self.server_tables.insert(server, table);
+                if let Some(inventory) = self.cache_inventory.as_mut() {
+                    if let Some(state) = inventory.states.get_mut(&server) {
+                        state.accepted = Some(metadata);
+                    }
+                    if !incremental && inventory.resync_pending.remove(&server) {
+                        resynchronized = Some(server);
+                    }
+                }
+            }
+            None => {
+                self.server_tables.remove(&server);
+            }
+        }
+        match aspas {
+            Some(table) => {
+                self.server_aspa_tables.insert(server, table);
+            }
+            None => {
+                self.server_aspa_tables.remove(&server);
+            }
+        }
+        if let Some(update) = &vrp_update {
+            self.current_table = Some(Arc::clone(&update.table));
+        }
+        if let Some(update) = &aspa_update {
+            self.current_aspa_table = Some(Arc::clone(&update.table));
+        }
+        (vrp_update, aspa_update, resynchronized)
     }
 
     // Full rebuild (clone + sort of every entry) on every update, even a
@@ -732,54 +1203,58 @@ impl VrpManager {
     // O(total log total) on a single manager task off the hot path.
     // ponytail: revisit with per-family incremental table maintenance only if
     // caches ever stream high-rate deltas.
-    async fn rebuild_and_distribute_vrp(&mut self, delta: Option<Vec<VrpEntry>>) {
-        // A pre-accept disconnect must not initialize an authoritative table.
-        if self.current_table.is_none() && self.server_tables.is_empty() {
-            return;
-        }
-        let merged: Vec<VrpEntry> = self
+    /// The merged VRP table once `server`'s set is `next` (`None`: removed),
+    /// or `None` when there is nothing new to distribute.
+    fn stage_vrp_table(
+        &self,
+        server: SocketAddr,
+        next: Option<&ServerVrpTable>,
+        delta: Option<Vec<VrpEntry>>,
+    ) -> Option<RpkiTableUpdate> {
+        let mut tables = self
             .server_tables
-            .values()
-            .flat_map(|v| v.iter().cloned())
-            .collect();
-
-        let new_table = Arc::new(VrpTable::new(merged));
+            .iter()
+            .filter(|(other, _)| **other != server)
+            .map(|(_, table)| table)
+            .chain(next)
+            .peekable();
+        // A pre-accept disconnect must not initialize an authoritative table.
+        if self.current_table.is_none() && tables.peek().is_none() {
+            return None;
+        }
+        let merged: Vec<VrpEntry> = tables.flat_map(|v| v.iter().cloned()).collect();
+        let table = Arc::new(VrpTable::new(merged));
 
         // Dropping a suppressed update's delta is sound: suppression proves
         // the merged table did not change, so the last *distributed* snapshot
         // still equals the table any later delta is computed against.
-        if self.current_table.as_ref() == Some(&new_table) {
+        if self.current_table.as_ref() == Some(&table) {
             debug!("VRP table unchanged — skipping distribution");
-            return;
+            return None;
         }
-
-        info!(
-            v4 = new_table.v4_count(),
-            v6 = new_table.v6_count(),
-            total = new_table.len(),
-            "VRP table updated"
-        );
-        self.current_table = Some(Arc::clone(&new_table));
-        let _ = self
-            .rib_tx
-            .send(RpkiTableUpdate {
-                table: new_table,
-                delta,
-            })
-            .await;
+        Some(RpkiTableUpdate { table, delta })
     }
 
-    async fn rebuild_and_distribute_aspa(&mut self, changed_customer_asns: Option<FxHashSet<u32>>) {
-        let Some(ref aspa_tx) = self.aspa_rib_tx else {
-            return;
-        };
-        if self.current_aspa_table.is_none() && self.server_aspa_tables.is_empty() {
-            return;
-        }
-
-        let merged: Vec<AspaRecord> = self
+    /// The merged ASPA table once `server`'s records are `next`, as for
+    /// [`Self::stage_vrp_table`].
+    fn stage_aspa_table(
+        &self,
+        server: SocketAddr,
+        next: Option<&HashMap<u32, Vec<u32>>>,
+        changed_customer_asns: Option<FxHashSet<u32>>,
+    ) -> Option<AspaTableUpdate> {
+        self.aspa_rib_tx.as_ref()?;
+        let mut tables = self
             .server_aspa_tables
-            .values()
+            .iter()
+            .filter(|(other, _)| **other != server)
+            .map(|(_, table)| table)
+            .chain(next)
+            .peekable();
+        if self.current_aspa_table.is_none() && tables.peek().is_none() {
+            return None;
+        }
+        let merged: Vec<AspaRecord> = tables
             .flat_map(|per_customer| {
                 per_customer.iter().map(|(customer, providers)| AspaRecord {
                     customer_asn: *customer,
@@ -787,22 +1262,15 @@ impl VrpManager {
                 })
             })
             .collect();
-
-        let new_table = Arc::new(AspaTable::new(merged));
-
-        if self.current_aspa_table.as_ref() == Some(&new_table) {
+        let table = Arc::new(AspaTable::new(merged));
+        if self.current_aspa_table.as_ref() == Some(&table) {
             debug!("ASPA table unchanged — skipping distribution");
-            return;
+            return None;
         }
-
-        info!(records = new_table.len(), "ASPA table updated");
-        self.current_aspa_table = Some(Arc::clone(&new_table));
-        let _ = aspa_tx
-            .send(AspaTableUpdate {
-                table: new_table,
-                changed_customer_asns,
-            })
-            .await;
+        Some(AspaTableUpdate {
+            table,
+            changed_customer_asns,
+        })
     }
 
     /// Number of connected cache servers with data.
@@ -851,6 +1319,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// An expiry no test reaches unless it means to.
+    fn far_expiry() -> TokioInstant {
+        TokioInstant::now() + Duration::from_secs(7200)
+    }
 
     fn entry(addr: Ipv4Addr, prefix_len: u8, max_len: u8, asn: u32) -> VrpEntry {
         VrpEntry {
@@ -1097,7 +1570,11 @@ mod tests {
 
         let update = rib_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 1);
-        assert!(update.delta.is_none(), "server loss must not carry a delta");
+        assert_eq!(
+            update.delta,
+            Some(vec![entry(Ipv4Addr::new(10, 0, 0, 0), 24, 24, 65001)]),
+            "server loss changes exactly what that server held"
+        );
     }
 
     #[tokio::test]
@@ -1288,7 +1765,11 @@ mod tests {
 
         mgr.handle_update(VrpUpdate::ServerDown { server: server1() })
             .await;
-        assert!(aspa_rx.try_recv().unwrap().changed_customer_asns.is_none());
+        assert_eq!(
+            aspa_rx.try_recv().unwrap().changed_customer_asns.unwrap(),
+            FxHashSet::from_iter([65001]),
+            "server loss changes exactly the customers that server held"
+        );
     }
 
     #[tokio::test]
@@ -1451,6 +1932,7 @@ mod tests {
             .await;
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Full {
             charge: test_charge(),
+            expires_at: far_expiry(),
             server: server1(),
             entries: vec![
                 entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496),
@@ -1519,6 +2001,7 @@ mod tests {
             session_id: 7,
             serial: 12,
             accepted_at: Instant::now(),
+            expires_at: far_expiry(),
         })
         .await;
         assert_eq!(
@@ -1571,6 +2054,7 @@ mod tests {
             session_id: 7,
             serial: 11,
             accepted_at: Instant::now(),
+            expires_at: far_expiry(),
         };
         let state = |gauges: &Mutex<HashMap<(&str, SocketAddr), bool>>| {
             let gauges = gauges.lock().unwrap();
@@ -1642,6 +2126,7 @@ mod tests {
             session_id: 7,
             serial: 11,
             accepted_at: Instant::now(),
+            expires_at: far_expiry(),
         };
 
         mgr.handle_enhanced_update(full(3)).await;
@@ -1671,6 +2156,7 @@ mod tests {
             session_id: 7,
             serial: 12,
             accepted_at: Instant::now(),
+            expires_at: far_expiry(),
         };
         assert_eq!(budget.used(), 5);
         mgr.handle_enhanced_update(delta).await;
@@ -1710,6 +2196,7 @@ mod tests {
             session_id: 7,
             serial: 11,
             accepted_at,
+            expires_at: far_expiry(),
         };
         let last = || *events.lock().unwrap().last().unwrap();
 
@@ -1743,6 +2230,7 @@ mod tests {
             session_id: 7,
             serial: 12,
             accepted_at: second,
+            expires_at: far_expiry(),
         })
         .await;
         assert_eq!(last(), (server1(), Some(second)));
@@ -1897,6 +2385,7 @@ mod tests {
                 session_id: 7,
                 serial: 11,
                 accepted_at: Instant::now(),
+                expires_at: far_expiry(),
             })
             .await
             .unwrap();
@@ -1946,5 +2435,428 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    // ── Recovery from a panic in one message ─────────────────────────
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::rtr_client::RecordBudget;
+
+    struct Recovering {
+        mgr: VrpManager,
+        rib_rx: mpsc::Receiver<RpkiTableUpdate>,
+        aspa_rx: mpsc::Receiver<AspaTableUpdate>,
+        updates: CacheUpdateHandle,
+        queries: CacheQueryHandle,
+        budget: Arc<RecordBudget>,
+        faults: Arc<AtomicUsize>,
+        resyncs: Arc<Mutex<Vec<(SocketAddr, bool)>>>,
+        observer_panics: Arc<AtomicBool>,
+    }
+
+    /// A manager with two configured caches, each holding one table that
+    /// expires 120 s from now, and every observer attached.
+    async fn recovering() -> Recovering {
+        let (_legacy_tx, legacy_rx) = mpsc::channel(16);
+        let (rib_tx, rib_rx) = mpsc::channel(16);
+        let (aspa_tx, aspa_rx) = mpsc::channel(16);
+        let (attachment, updates, queries) = CacheInventoryAttachment::new([server1(), server2()]);
+        let faults = Arc::new(AtomicUsize::new(0));
+        let resyncs = Arc::new(Mutex::new(Vec::new()));
+        let observer_panics = Arc::new(AtomicBool::new(false));
+        let (fault_count, resync_log, panics) = (
+            Arc::clone(&faults),
+            Arc::clone(&resyncs),
+            Arc::clone(&observer_panics),
+        );
+        let resync_panics = Arc::clone(&observer_panics);
+        let mgr = VrpManager::new(legacy_rx, rib_tx)
+            .with_cache_inventory(attachment)
+            .with_aspa_tx(aspa_tx)
+            .with_fault_observer(move || {
+                fault_count.fetch_add(1, Ordering::SeqCst);
+            })
+            .with_resync_observer(move |server, pending| {
+                resync_log.lock().unwrap().push((server, pending));
+                assert!(
+                    pending || !resync_panics.load(Ordering::SeqCst),
+                    "injected observer panic"
+                );
+            })
+            .with_connectivity_observer(move |_, _| {
+                assert!(!panics.load(Ordering::SeqCst), "injected observer panic");
+            });
+        let mut fixture = Recovering {
+            mgr,
+            rib_rx,
+            aspa_rx,
+            updates,
+            queries,
+            budget: RecordBudget::new(1000),
+            faults,
+            resyncs,
+            observer_panics,
+        };
+        for (server, last) in [(server1(), 1), (server2(), 2)] {
+            let update = fixture.full(server, &[last, 9], 120);
+            fixture.mgr.receive(update).await;
+        }
+        fixture.drain();
+        fixture
+    }
+
+    fn host(last: u8) -> VrpEntry {
+        entry(Ipv4Addr::new(203, 0, 113, last), 32, 32, 65001)
+    }
+
+    impl Recovering {
+        fn full(&self, server: SocketAddr, hosts: &[u8], expires_in: u64) -> EnhancedVrpUpdate {
+            EnhancedVrpUpdate::Full {
+                server,
+                entries: hosts.iter().copied().map(host).collect(),
+                aspa_records: vec![AspaRecord {
+                    customer_asn: u32::from(hosts[0]),
+                    provider_asns: vec![64_500],
+                }],
+                charge: Reservation::charged(&self.budget, hosts.len(), 0),
+                version: 2,
+                session_id: 7,
+                serial: 100,
+                accepted_at: Instant::now(),
+                expires_at: TokioInstant::now() + Duration::from_secs(expires_in),
+            }
+        }
+
+        fn delta(&self, server: SocketAddr, announce: u8, withdraw: u8) -> EnhancedVrpUpdate {
+            EnhancedVrpUpdate::Incremental {
+                server,
+                announced: vec![host(announce)],
+                withdrawn: vec![host(withdraw)],
+                aspa_announced: vec![],
+                aspa_withdrawn: vec![],
+                charge: Reservation::charged(&self.budget, 1, 1),
+                version: 2,
+                session_id: 7,
+                serial: 101,
+                accepted_at: Instant::now(),
+                expires_at: TokioInstant::now() + Duration::from_secs(1000),
+            }
+        }
+
+        fn drain(&mut self) {
+            while self.rib_rx.try_recv().is_ok() {}
+            while self.aspa_rx.try_recv().is_ok() {}
+        }
+
+        fn inject(&self, faults: usize) {
+            self.mgr.injected_faults.store(faults, Ordering::SeqCst);
+        }
+
+        fn pending(&self) -> Vec<SocketAddr> {
+            let inventory = self.mgr.cache_inventory.as_ref().unwrap();
+            let mut pending: Vec<_> = inventory.resync_pending.iter().copied().collect();
+            pending.sort();
+            pending
+        }
+
+        /// Everything a lost message must leave alone: each cache's sets,
+        /// deadline and charge, both published tables, the inventory rows
+        /// and the record budget.
+        fn state(&self) -> impl PartialEq + std::fmt::Debug + use<> {
+            let per_cache: BTreeMap<_, _> = self
+                .mgr
+                .server_tables
+                .iter()
+                .map(|(server, table)| {
+                    let mut entries: Vec<_> = table.entries.iter().cloned().collect();
+                    entries.sort();
+                    let mut aspas: Vec<_> = self.mgr.server_aspa_tables[server]
+                        .iter()
+                        .map(|(customer, providers)| (*customer, providers.clone()))
+                        .collect();
+                    aspas.sort();
+                    let charge = table.charge.as_ref().map(|charge| format!("{charge:?}"));
+                    (*server, (entries, aspas, table.expires_at, charge))
+                })
+                .collect();
+            let published = self
+                .mgr
+                .current_table
+                .as_ref()
+                .map(|table| [1, 2, 3, 4, 9].map(|last| covers(table, last)));
+            let published_aspa = self
+                .mgr
+                .current_aspa_table
+                .as_ref()
+                .map(|table| table.len());
+            (
+                per_cache,
+                published,
+                published_aspa,
+                self.mgr.cache_list(),
+                self.budget.used(),
+            )
+        }
+    }
+
+    fn covers(table: &VrpTable, last: u8) -> bool {
+        let prefix = rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, last), 32);
+        table.validate(&rustbgpd_wire::Prefix::V4(prefix), 65001)
+            == rustbgpd_wire::RpkiValidation::Valid
+    }
+
+    /// A panic while a full table or a serial delta is being applied loses
+    /// that update and nothing else: no set, deadline, charge, inventory row
+    /// or published table changes, nothing is distributed, and the cache is
+    /// asked to resynchronize.
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_a_data_update_leaves_state_as_before_and_requests_a_resync() {
+        let mut f = recovering().await;
+        let before = f.state();
+        let table = Arc::clone(f.mgr.current_table.as_ref().unwrap());
+
+        f.inject(1);
+        let update = f.full(server1(), &[3, 4], 500);
+        f.mgr.receive(update).await;
+        assert_eq!(f.state(), before);
+        assert!(Arc::ptr_eq(f.mgr.current_table.as_ref().unwrap(), &table));
+        assert_eq!(f.pending(), [server1()]);
+
+        f.inject(1);
+        let update = f.delta(server2(), 5, 2);
+        f.mgr.receive(update).await;
+        assert_eq!(f.state(), before);
+        assert_eq!(f.pending(), [server1(), server2()]);
+
+        assert!(f.rib_rx.try_recv().is_err() && f.aspa_rx.try_recv().is_err());
+        assert_eq!(f.faults.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *f.resyncs.lock().unwrap(),
+            [(server1(), true), (server2(), true)]
+        );
+        let requests = f.updates.1.borrow().clone();
+        assert_eq!(requests[&server1()], 1);
+        assert_eq!(requests[&server2()], 1);
+    }
+
+    /// A panic in a connectivity change, here in the embedder's observer,
+    /// costs only that notification: no data moves and no resync is asked.
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_a_connectivity_change_touches_no_data() {
+        let mut f = recovering().await;
+        let before = f.state();
+        f.observer_panics.store(true, Ordering::SeqCst);
+        f.mgr
+            .receive(EnhancedVrpUpdate::Disconnected {
+                server: server1(),
+                flush: false,
+            })
+            .await;
+        f.observer_panics.store(false, Ordering::SeqCst);
+        assert_eq!(f.state(), before);
+        assert_eq!(f.faults.load(Ordering::SeqCst), 1);
+        assert_eq!(f.pending(), Vec::<SocketAddr>::new());
+        assert!(f.rib_rx.try_recv().is_err());
+    }
+
+    /// An observer that panics when told a cache has resynchronized does
+    /// not undo the resynchronization: the full table is installed and
+    /// published, the cache is no longer pending, and no further full table
+    /// is asked of it.
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_the_resynchronized_notification_leaves_the_cache_resynchronized() {
+        let mut f = recovering().await;
+        f.inject(1);
+        let lost = f.delta(server1(), 3, 1);
+        f.mgr.receive(lost).await;
+        assert_eq!(f.pending(), [server1()]);
+
+        f.observer_panics.store(true, Ordering::SeqCst);
+        let resync = f.full(server1(), &[3, 4], 500);
+        f.mgr.receive(resync).await;
+        f.observer_panics.store(false, Ordering::SeqCst);
+
+        assert_eq!(f.pending(), Vec::<SocketAddr>::new());
+        assert_eq!(f.updates.1.borrow()[&server1()], 1, "no second request");
+        assert!(covers(&f.rib_rx.try_recv().expect("published").table, 3));
+        assert_eq!(
+            f.faults.load(Ordering::SeqCst),
+            2,
+            "the loss and the observer"
+        );
+        // Serial deltas are applied again.
+        let applied = f.delta(server1(), 5, 3);
+        f.mgr.receive(applied).await;
+        assert!(covers(&f.rib_rx.try_recv().unwrap().table, 5));
+    }
+
+    /// The two types an embedder holds across its own unwinding code keep
+    /// the auto traits they were published with.
+    #[test]
+    fn inventory_handles_stay_unwind_safe() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<CacheUpdateHandle>();
+        assert_unwind_safe::<CacheInventoryAttachment>();
+    }
+
+    /// A panic in an inventory query loses that query: the caller gets an
+    /// error, the manager keeps running and answers the next one.
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_an_inventory_query_fails_only_that_query() {
+        let f = recovering().await;
+        f.inject(1);
+        let (faults, queries) = (Arc::clone(&f.faults), f.queries.clone());
+        let _updates = f.updates.clone();
+        let manager = tokio::spawn(f.mgr.run());
+        assert_eq!(queries.list().await, Err(CacheQueryError));
+        let list = queries.list().await.expect("the manager is still running");
+        assert_eq!(list.rows.len(), 2);
+        assert_eq!(faults.load(Ordering::SeqCst), 1);
+        assert!(!manager.is_finished());
+    }
+
+    /// A panic while a cache's data is being removed must not keep the
+    /// data: the removal is carried out again, the remaining caches' table
+    /// is published with what left as its delta, and the cache owes a full
+    /// table.
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_an_expiry_still_removes_the_data() {
+        for flush in [false, true] {
+            let mut f = recovering().await;
+            f.inject(1);
+            let removal = if flush {
+                EnhancedVrpUpdate::Disconnected {
+                    server: server1(),
+                    flush: true,
+                }
+            } else {
+                EnhancedVrpUpdate::Expired { server: server1() }
+            };
+            f.mgr.receive(removal).await;
+
+            let update = f.rib_rx.try_recv().expect("the removal is published");
+            assert!(f.rib_rx.try_recv().is_err(), "published once");
+            assert!(!covers(&update.table, 1) && covers(&update.table, 2));
+            assert!(covers(&update.table, 9), "the other cache still holds it");
+            // Exactly what left the merged table: the other cache still
+            // holds host 9.
+            assert_eq!(update.delta, Some(vec![host(1)]));
+            assert!(!f.mgr.server_tables.contains_key(&server1()));
+            assert!(!f.mgr.server_aspa_tables.contains_key(&server1()));
+            assert!(f.mgr.cache_list().rows[0].accepted.is_none());
+            assert_eq!(f.budget.used(), 2, "the removed table's charge is released");
+            assert_eq!(f.faults.load(Ordering::SeqCst), 1);
+            // The client that sent the removal has no epoch left, so no
+            // resync is asked of it.
+            assert_eq!(f.pending(), Vec::<SocketAddr>::new());
+        }
+    }
+
+    /// If the tables cannot be rebuilt without the cache either, the
+    /// manager ends instead of holding data it can no longer expire.
+    #[tokio::test(start_paused = true)]
+    async fn a_removal_that_panics_twice_ends_the_manager() {
+        let mut f = recovering().await;
+        f.inject(2);
+        let ended = tokio::spawn(async move {
+            f.mgr
+                .receive(EnhancedVrpUpdate::Expired { server: server1() })
+                .await;
+        })
+        .await;
+        assert!(ended.unwrap_err().is_panic());
+    }
+
+    /// While a cache is resync pending its serial deltas are dropped (their
+    /// base is the lost update, not the set held here) and release their
+    /// charge. Only that cache's full table ends the wait, and it is
+    /// published once with exactly the entries the two tables differ in.
+    #[tokio::test(start_paused = true)]
+    async fn pending_cache_drops_serial_deltas_until_its_full_table() {
+        let mut f = recovering().await;
+        f.inject(1);
+        let lost = f.delta(server1(), 3, 1);
+        f.mgr.receive(lost).await;
+        let before = f.state();
+
+        // The delta after the lost one, and another cache's full table,
+        // leave the cache pending.
+        let next = f.delta(server1(), 4, 9);
+        f.mgr.receive(next).await;
+        assert_eq!(f.state(), before);
+        let other = f.full(server2(), &[2, 9], 120);
+        f.mgr.receive(other).await;
+        assert_eq!(f.pending(), [server1()]);
+        assert!(
+            f.rib_rx.try_recv().is_err(),
+            "nothing changed, nothing published"
+        );
+
+        let resync = f.full(server1(), &[3, 4], 500);
+        f.mgr.receive(resync).await;
+        assert_eq!(f.pending(), Vec::<SocketAddr>::new());
+        assert_eq!(
+            *f.resyncs.lock().unwrap(),
+            [(server1(), true), (server1(), false)]
+        );
+        let update = f.rib_rx.try_recv().expect("one publication");
+        assert!(f.rib_rx.try_recv().is_err());
+        let mut delta = update
+            .delta
+            .expect("a replacing table carries its difference");
+        delta.sort();
+        // Host 9 left this cache's set too, but the other cache still has
+        // it, so it did not leave the merged table.
+        assert_eq!(delta, [host(1), host(3), host(4)]);
+        assert_eq!(
+            [1, 2, 3, 4, 9].map(|last| covers(&update.table, last)),
+            [false, true, true, true, true]
+        );
+        // A delta is applied again once the cache is no longer pending.
+        let applied = f.delta(server1(), 5, 3);
+        f.mgr.receive(applied).await;
+        assert!(covers(&f.rib_rx.try_recv().unwrap().table, 5));
+    }
+
+    /// A full table equal to the one it replaces changes nothing and is not
+    /// distributed, so a resynchronization with unchanged data costs the
+    /// RIB no work.
+    #[tokio::test(start_paused = true)]
+    async fn identical_replacing_table_is_not_distributed() {
+        let mut f = recovering().await;
+        let same = f.full(server1(), &[1, 9], 120);
+        f.mgr.receive(same).await;
+        assert!(f.rib_rx.try_recv().is_err() && f.aspa_rx.try_recv().is_err());
+    }
+
+    /// The manager drops a pending cache's held data at the expiry instant
+    /// that came with it. The client cannot: it renewed its own clock for
+    /// the update that was lost.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_of_a_pending_cache_leaves_at_its_original_expiry() {
+        let mut f = recovering().await;
+        let start = TokioInstant::now();
+        f.inject(1);
+        // The lost update would have renewed the deadline to 1000 s.
+        let lost = f.delta(server1(), 3, 1);
+        f.mgr.receive(lost).await;
+        // The other cache is not pending: its own client expires it.
+        let updates = f.updates.clone();
+        let mut rib_rx = f.rib_rx;
+        let manager = tokio::spawn(f.mgr.run());
+
+        // Bounded, so a manager that never drops the data fails the test.
+        let update = tokio::time::timeout(Duration::from_secs(1000), rib_rx.recv())
+            .await
+            .expect("the held data was never dropped")
+            .unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(120));
+        assert!(!covers(&update.table, 1) && covers(&update.table, 2));
+        // Nothing else leaves on the manager's clock.
+        tokio::time::sleep(Duration::from_secs(5000)).await;
+        assert!(rib_rx.try_recv().is_err());
+        drop(updates);
+        manager.abort();
     }
 }

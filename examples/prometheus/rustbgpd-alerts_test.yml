@@ -2627,6 +2627,76 @@ tests:
                 See the daemon log and rbgp doctor
                 evpn.es.bond3.core_isolation.
 
+  # ── RpkiTaskRestarted ─────────────────────────────────────────
+  # One recovered panic at 5m: fires while the increase is inside the 15m
+  # window, and clears once the window has passed it.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rpki_task_restarts_total{instance="rs1:9179",task="vrp_manager"}'
+        values: "0x4 1x40"
+      - series: 'bgp_rpki_task_restarts_total{instance="rs1:9179",task="vrp_forwarder"}'
+        values: "0x45"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RpkiTaskRestarted
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RpkiTaskRestarted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: rs1:9179
+              task: vrp_manager
+            exp_annotations:
+              summary: "RPKI vrp_manager recovered from a panic on rs1:9179"
+              description: >-
+                bgp_rpki_task_restarts_total{task="vrp_manager"} on
+                rs1:9179 increased in the last 15 minutes. BGP
+                sessions are not affected and the validation tables in use were
+                kept. The daemon ERROR log and its panic report name the cause;
+                check bgp_rpki_cache_resync_pending for a cache that now owes a
+                full table.
+      - eval_time: 25m
+        alertname: RpkiTaskRestarted
+        exp_alerts: []
+
+  # ── RpkiCacheResyncPending ────────────────────────────────────
+  # A cache that resynchronizes within the retry interval never fires; one
+  # pending from 5m onward fires once the 15m `for` has passed, and clears
+  # when its full table is applied.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rpki_cache_resync_pending{cache="192.0.2.10:3323", instance="rs1:9179"}'
+        values: "0x4 1x2 0x40"
+      - series: 'bgp_rpki_cache_resync_pending{cache="192.0.2.11:3323", instance="rs1:9179"}'
+        values: "0x4 1x25 0x10"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: RpkiCacheResyncPending
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: RpkiCacheResyncPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: rs1:9179
+              cache: 192.0.2.11:3323
+            exp_annotations:
+              summary: "RPKI cache 192.0.2.11:3323 has owed a full table for 15 minutes"
+              description: >-
+                rustbgpd on rs1:9179 has waited 15 minutes for a
+                full table from cache 192.0.2.11:3323 after a recovered VRP
+                manager panic. Until its expire, validation uses that cache's
+                last applied data, unrefreshed
+                (bgp_rpki_cache_end_of_data_age_seconds against
+                bgp_rpki_cache_effective_expire_seconds); after it the cache
+                contributes nothing. Check
+                bgp_rpki_task_restarts_total{task="vrp_manager"} for repeated
+                panics, and run rbgp rpki caches for the cache's session state.
+      - eval_time: 32m
+        alertname: RpkiCacheResyncPending
+        exp_alerts: []
+
   # ── BgpManagementServerCrashed ───────────────────────────────
   # One crash at 5m: fires while the increase is inside the 15m window,
   # and clears once the window has passed it.
