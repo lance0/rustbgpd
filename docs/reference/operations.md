@@ -1214,7 +1214,7 @@ rename.
     [fences and exits 70](#runtime-config-settlement-fail-stop). The
     supervisor restarts it from the edited file.
 
-Either way, `rbgp doctor` reports `daemon.config_freshness` yellow until a
+Either way, `rbgp doctor` reports `daemon.config_freshness.<pid>` yellow until a
 SIGHUP adopts the edit. After that, mutations write the file again.
 
 The check starts at boot, including after a commit-confirm boot revert. When
@@ -1329,11 +1329,48 @@ part of the ordered teardown and exits 0.
 ### Metrics/readiness server exits unexpectedly
 
 When `prometheus_addr` is configured, the HTTP server behind `/metrics`,
-`/readyz` and `/livez` is supervised like the gRPC server. Its accept loop ends
-only when the listening socket becomes unusable (`listener socket unusable;
-stopping its accept loop`). The daemon then logs `metrics/readiness server
-exited unexpectedly`, performs the ordinary coordinated shutdown and exits 1
-for `Restart=on-failure`, rather than running on without its health surface.
+`/readyz` and `/livez` is restarted in place if it ends on its own. A failure
+of this server says nothing about routing state, so the daemon never exits
+for it: BGP sessions, routes and the gRPC API are unaffected. Each unexpected
+exit or failed start adds one to
+`bgp_management_server_crashes_total{server="metrics"}` and, unless the
+daemon is shutting down, logs `metrics/readiness server exited unexpectedly;
+restarting it in place` with the cause and the delay.
+
+- After a panic, a server thread that could not start, or a listener that
+  could not join the server's runtime, the next run serves the same bound
+  socket. The port stays bound throughout, and connections
+  made during the gap wait in the kernel backlog for the next run.
+- An accept loop that ended (`listener socket unusable; stopping its accept
+  loop`) cannot recover on that socket, so the daemon closes it and binds the
+  configured address again at once. If that bind fails it logs
+  `metrics/readiness listener could not be bound again` and retries before
+  each restart; requests are refused until a bind succeeds.
+
+The delay starts at 100 ms and doubles per restart to a 10 second cap; a run
+that stayed up for 60 seconds starts over at 100 ms. There is no restart
+limit. If every restart fails, the daemon keeps running BGP with the listener
+down and logs each attempt.
+
+While the server is down nothing can report it: the signal is the failed
+scrape or probe. The counter shows the crash once the server is back, and
+the shipped `BgpManagementServerCrashed` rule fires on any increase.
+`bgp_rib_stalled` keeps its last value until the restarted server's sampler
+runs. The systemd watchdog, `READY=1` and the gRPC `GetHealth` RPC do not
+depend on this server.
+
+The 10 second cap keeps one restart gap under the failure window of the
+[documented Kubernetes liveness probe](../how-to/deployment.md#kubernetes-probes)
+(three consecutive failures, 10 seconds apart). A server that can never
+restart still fails that probe, and Kubernetes then restarts the daemon.
+An operator who wants BGP to outlive that must point liveness at something
+other than this listener or raise `failureThreshold`.
+
+No restart begins after coordinated shutdown has started: a server that ends
+during teardown, or whose restart was still waiting when teardown began,
+stays down and logs `metrics/readiness server not restarted: the daemon is
+shutting down`. A failure to bind the configured address at
+startup still fails startup.
 
 ### Injection lease expiry task exits unexpectedly
 
@@ -2026,8 +2063,9 @@ one beside it, so `group_left` joins never match two identities for one peer.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers both an operator disable and a max-prefix shutdown latch, even though the configuration still says enabled; `bgp_max_prefix_latched` separates the two |
+| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers an operator disable, a max-prefix shutdown latch and a session-crash latch, even though the configuration still says enabled. `bgp_max_prefix_latched` separates the max-prefix latch; no gauge separates the session-crash latch, which the neighbor's last error names |
 | `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable, or until the timed hold-down expires into a successful restart or, under strict BFD, into the BFD withhold; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
+| `bgp_session_task_crashes_total{peer,interface}` | Session tasks of this peer, or of its inbound collision candidates, that ended without a shutdown request (a panic or a run-loop error). Seeded at 0. The peer manager restarts the session (or retires a dynamic peer or candidate as if it went Idle) after the first and second crash within ten minutes, and latches the neighbor disabled on the third, counted across dynamic reconnects; `last_error` names the latest crash while latched or for ten minutes after it. A reconfigure keeps the latch; explicit enable or deleting the neighbor clears it. Reaped with the other exact peer-identity series |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
 | `bgp_peer_session_state{peer,interface,state}` | Exact active-primary one-hot FSM state; `state` is `idle`, `connect`, `active`, `open_sent`, `open_confirm`, or `established` |
 | `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` | Configured identity of each exact peer, always `1`. Join it onto any per-peer family with `* on (instance, peer, interface) group_left(remote_asn, description, peer_group) bgp_peer_info` so dashboards and alerts name the member instead of the bare address. `remote_asn` is the configured ASN, or the ASN learned from OPEN for an accept-any dynamic range (`0` until then); `description` falls back to the neighbor address when none is configured, and dynamic peers without a range description carry `dynamic:<peer_group>`; `peer_group` is empty for ungrouped neighbors. `description` and `peer_group` are scrubbed — control characters dropped, surrounding whitespace trimmed, and bounded to 128 characters |
@@ -2206,6 +2244,7 @@ name it.
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it. `BgpPolicyTransitionFallback` fires when either fallback outcome increased in the last 15 minutes |
 | `bgp_readiness_probe_failures_total{reason}` | Failed `/readyz` probes, one per `503` response, by the closed `reason` set described under [HTTP probes](#http-probes): `deadline`, `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`, `rib_timeout`, `rib_stalled`, `daemon_unavailable`. All seven series are exported at 0 from startup |
+| `bgp_management_server_crashes_total{server}` | Unexpected exits and failed starts of a management server. The daemon restarts the server in place unless it is shutting down. `server` is `metrics`: the `/metrics`, `/readyz` and `/livez` HTTP server (see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)). Exported at 0 from startup. The server that reports the counter is the one that crashed, so an increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerCrashed` fires on any increase |
 | `bgp_rib_stalled` | 1 while the daemon's latest sample of the RIB actor (every 5 seconds, 5-second deadline, independent of `/readyz` requests) got a stalled readiness answer: one export-policy transition, selection-deferral release or peer teardown has run 30 seconds or more. 0 after a ready answer and at startup. A sample that gets no answer leaves the value unchanged; silence is covered by `bgp_systemd_watchdog_pings_skipped_total`. The gauge is always exported but sampled only when the telemetry listener is configured and startup completed; without a sampler it stays 0. `BgpReadinessRibStalled` fires when it reads 1 on every evaluation for ten minutes |
 | `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
@@ -3192,13 +3231,16 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
-| `metrics/readiness server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
-| `metrics/readiness thread panicked` | WARN | The metrics/readiness thread panicked outside its serving task; logged when teardown joins it, after the panic report |
+| `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap), with `exit` naming the cause. Counted in `bgp_management_server_crashes_total{server="metrics"}` |
+| `metrics/readiness listener could not be bound again` | WARN | After an unusable listening socket was closed, binding `prometheus_addr` again failed with `error`. Retried before each restart |
+| `metrics/readiness server not restarted: the daemon is shutting down` | WARN | The server ended during coordinated shutdown, or shutdown began while its restart was waiting, and it stays down for the rest of the shutdown. The crash is still counted |
+| `metrics/readiness supervisor exited unexpectedly; /metrics, /readyz and /livez stay down until the daemon restarts` | ERROR | The task that restarts the server ended, which is a defect. Not fatal: BGP keeps running without the listener |
+| `metrics/readiness thread panicked` | WARN | The metrics/readiness thread panicked outside its serving task; logged when the thread is joined before its restart, after the panic report |
 | `End-of-RIB left to the resync tick: the release of its last hold did not send it` | WARN | The resync tick found an End-of-RIB toward `peer` for `families` that nothing held and that no refused send explains, and sent it. The hold that ended last should have sent the marker itself, so it was delayed by at most one tick. Logged once per marker, whether or not the peer's writer had room; a refused send is retried without another log line |
 | `injection lease expiry task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
-| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). The daemon then fail-stops through gRPC server or metrics/readiness server supervision |
+| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then fail-stops the daemon through gRPC server supervision; the metrics/readiness listener is closed and its address bound again |
 | `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
 | `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
 | `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |
@@ -3240,27 +3282,35 @@ records for a later outage.
    daemon is waiting out the deferred reconnect that follows an unplanned
    teardown. Each consecutive NOTIFICATION teardown (sent or received,
    including an OPEN exchange that ends in one, such as an ASN mismatch or
-   a repeated hold-timer expiry) doubles that wait, starting from
+   a repeated hold-timer expiry), and each time the peer drops TCP without a
+   NOTIFICATION in `OpenConfirm` or `Established`, doubles that wait, starting from
    `connect_retry_secs` (default 5 s) and capped at 300 s. The wait is also
    `reconnect_in_seconds` in the JSON output and in `NeighborState`. The API
    field is absent on older daemons, while JSON omits it when absent or zero.
-   The wait covers both directions. From the second consecutive NOTIFICATION
-   teardown, an inbound connection from the neighbor during the wait is
+   The wait covers both directions for NOTIFICATION teardowns. From the
+   second NOTIFICATION teardown in the streak, an inbound connection from the neighbor during the wait is
    closed without an OPEN and counted as
    `bgp_inbound_connections_dropped_total{reason="notification_backoff"}`,
    with a throttled log line naming the streak and the remaining wait; a
    pending collision candidate is dropped instead of promoted. After the
    first teardown an inbound connection is still accepted at once, and the
    session that replaces the waiting one keeps its streak, so a neighbor that
-   always reconnects to us escalates the same way.
+   always reconnects to us escalates the same way. TCP drops lengthen the
+   wait but never hold inbound connections, so a neighbor we cannot dial, or
+   one restarting with graceful restart, is not refused.
    The streak clears after the session stays Established for five minutes, on
    `rbgp neighbor <addr> enable` while the session is in Idle, or on an
-   administrative reset. TCP misses
-   in `Connect` or `Active` keep the fast initial retries followed by the
-   existing exponential curve; a TCP loss after `Established` uses the
-   configured fixed Idle interval. Neither advances the NOTIFICATION streak.
+   administrative reset. In `Connect` or `Active`, a refused dial gets two
+   1 s retries and then the same doubling curve; a dial that gets no answer
+   doubles the interval from `connect_retry_secs` on each miss, up to 300 s.
+   A dial that times out first (the 30 s connect timeout or the kernel's SYN
+   retries) waits for the rest of that interval, so the curve is not cut
+   short.
+   These dial misses do not advance the reconnect streak. Every retry wait is
+   jittered down by up to 25% (RFC 4271 §10), so the reported wait can be
+   shorter than the doubled value.
    A max-prefix shutdown stays latched until an explicit enable. There is no
-   configuration knob for the NOTIFICATION curve.
+   configuration knob for these curves or the jitter.
 
 2. **Check logs for the peer:**
    ```bash

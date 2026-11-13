@@ -171,20 +171,25 @@ fn assert_one_rpki_failure_receipt(logs: &str, expected_task: &str) {
 
 fn write_rib_fault_config(dir: &Path) -> PathBuf {
     let config_path = write_config(dir, DAEMON_CHOOSES, DAEMON_CHOOSES);
-    let config = std::fs::read_to_string(&config_path)
+    add_loopback_neighbor(&config_path);
+    config_path
+}
+
+/// Listen on 127.0.0.1 only and configure the loopback test peer (AS 65020).
+fn add_loopback_neighbor(config_path: &Path) {
+    let config = std::fs::read_to_string(config_path)
         .expect("read test config")
         .replace(
             "listen_port = 0",
             "listen_port = 0\nlisten_addresses = [\"127.0.0.1\"]",
         );
     std::fs::write(
-        &config_path,
+        config_path,
         format!(
             "{config}\n[[neighbors]]\naddress = \"127.0.0.1\"\nremote_asn = 65020\ngraceful_restart = false\n"
         ),
     )
-    .expect("write RIB fault config");
-    config_path
+    .expect("write loopback neighbor config");
 }
 
 fn write_rpki_fault_config(dir: &Path) -> PathBuf {
@@ -295,6 +300,12 @@ fn read_bgp_message(stream: &mut TcpStream) -> Message {
 }
 
 fn establish_bgp_and_observe_shutdown(port: u16) {
+    observe_administrative_shutdown(&mut establish_bgp(port));
+}
+
+/// Complete the OPEN/KEEPALIVE exchange as AS 65020 and return the session's
+/// connection once the daemon's KEEPALIVE arrived.
+fn establish_bgp(port: u16) -> TcpStream {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect BGP peer");
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -313,19 +324,83 @@ fn establish_bgp_and_observe_shutdown(port: u16) {
     stream
         .write_all(&encode_message(&Message::Keepalive).unwrap())
         .expect("write KEEPALIVE");
-
-    let mut established = false;
     loop {
         match read_bgp_message(&mut stream) {
-            Message::Keepalive => established = true,
+            Message::Keepalive => return stream,
             Message::Notification(notification) => {
-                assert!(established, "shutdown followed an established session");
-                assert_eq!(notification.code, NotificationCode::Cease);
-                assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
-                return;
+                panic!("session refused before it was established: {notification:?}")
             }
             _ => {}
         }
+    }
+}
+
+/// Read the established session until the daemon's shutdown NOTIFICATION. A
+/// connection the daemon closed or reset earlier fails the read.
+fn observe_administrative_shutdown(stream: &mut TcpStream) {
+    loop {
+        if let Message::Notification(notification) = read_bgp_message(stream) {
+            assert_eq!(notification.code, NotificationCode::Cease);
+            assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
+            return;
+        }
+    }
+}
+
+/// The port in the `addr` field of the first log line carrying `message`.
+fn wait_for_logged_port_with_message(daemon: &mut Daemon, message: &str) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let logs = daemon.logs();
+        if let Some(port) = logs
+            .lines()
+            .filter(|line| line.contains(message))
+            .filter_map(|line| line.split(r#""addr":"127.0.0.1:"#).nth(1))
+            .find_map(|rest| rest.split('"').next()?.parse().ok())
+        {
+            return port;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!("rustbgpd exited before logging {message:?}: {status}\n{logs}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("rustbgpd never logged {message:?}\n{}", daemon.logs());
+}
+
+/// One HTTP GET against the daemon's metrics/readiness listener.
+fn http_get(port: u16, path: &str) -> std::io::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+/// Poll `/metrics` until it carries `row`; the listener may refuse or stall
+/// a request while its server restarts.
+fn wait_for_metric_row(daemon: &mut Daemon, port: u16, row: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let scrape = http_get(port, "/metrics");
+        if let Ok(scrape) = &scrape
+            && scrape.contains(row)
+        {
+            return scrape.clone();
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited while waiting for {row:?}: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "/metrics never carried {row:?}; last scrape: {scrape:?}\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -820,10 +895,6 @@ fn operations_key_log_table_covers_supervised_failures() {
         ),
         ("peer_mgr_handle", "peer manager task exited unexpectedly"),
         (
-            "metrics_handle",
-            "metrics/readiness server exited unexpectedly",
-        ),
-        (
             "lease_expiry_handle",
             "injection lease expiry task exited unexpectedly",
         ),
@@ -862,6 +933,28 @@ fn operations_key_log_table_covers_supervised_failures() {
             "missing exact operations row {expected_row:?}"
         );
     }
+
+    // The metrics/readiness server is restarted in place: neither it nor its
+    // supervisor ending may enter coordinated shutdown.
+    let metrics_arm = production
+        .split_once("            result = &mut metrics_handle, if !metrics_supervisor_exited => {")
+        .expect("the metrics/readiness supervisor arm must stay guarded against a second poll")
+        .1
+        .split_once("\n            }")
+        .unwrap()
+        .0;
+    assert!(!metrics_arm.contains("component_failed"), "{metrics_arm}");
+    assert!(!metrics_arm.contains("break"), "{metrics_arm}");
+    for row in [
+        "| `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | ",
+        "| `metrics/readiness supervisor exited unexpectedly; /metrics, /readyz and /livez stay down until the daemon restarts` | ERROR | ",
+    ] {
+        assert!(
+            key_log_table.lines().any(|line| line.starts_with(row)),
+            "missing operations row {row:?}"
+        );
+    }
+    assert!(!key_log_table.contains("| `metrics/readiness server exited unexpectedly` |"));
 
     let rpki_diagnostic = "RPKI subsystem task exited unexpectedly";
     assert_eq!(production.matches(rpki_diagnostic).count(), 1);
@@ -1494,10 +1587,12 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
     assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
     assert!(help.contains("gRPC server, BGP listener task, BGP accept-forwarding task,"));
-    assert!(help.contains("metrics/readiness server, or injection lease expiry task exit)"));
+    assert!(help.contains("or injection lease expiry task exit)"));
+    assert!(!help.contains("metrics/readiness server"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, metrics/readiness\nserver, or injection lease expiry task exited unexpectedly"));
+    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, or injection\nlease expiry task exited unexpectedly"));
+    assert!(!man.contains("metrics/readiness\nserver"));
 }
 
 #[test]
@@ -1534,32 +1629,110 @@ fn metrics_listener_bind_failure_exits_nonzero() {
     );
 }
 
+/// A metrics/readiness server that ends on its own is restarted in place
+/// and never ends the daemon. The listener is broken only after a BGP session
+/// is Established; that session's connection then stays open until the
+/// SIGTERM sent at the end, `/readyz` answers 200 again and the restart is
+/// counted.
 #[test]
-fn metrics_listener_unusable_after_startup_uses_common_shutdown_and_exits_nonzero() {
+fn metrics_server_exit_restarts_in_place_and_keeps_bgp_sessions_established() {
     let temp = private_tempdir();
     let config_path =
         write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    add_loopback_neighbor(&config_path);
+    let fault_path = temp.path().join("metrics-fault.sock");
+    let fault_listener =
+        std::os::unix::net::UnixListener::bind(&fault_path).expect("bind fault socket");
+    fault_listener.set_nonblocking(true).unwrap();
     let mut daemon = spawn_daemon_with_env(
         temp.path(),
         &config_path,
-        Some(("RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE", "1")),
+        Some((
+            "RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE",
+            fault_path.to_str().expect("UTF-8 temp path"),
+        )),
     );
-    let status = daemon.wait_within(Duration::from_secs(30));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut fault = loop {
+        match fault_listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("accept fault connection: {error}"),
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited before arming the fault: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fault never armed\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    fault.set_nonblocking(false).unwrap();
+    let mut armed = [0];
+    fault.read_exact(&mut armed).expect("read armed byte");
+    assert_eq!(armed, [1]);
+
+    let metrics_port = wait_for_logged_port_with_message(&mut daemon, "metrics server listening");
+    let mut peer = establish_bgp(wait_for_logged_port_with_message(
+        &mut daemon,
+        "BGP listener bound",
+    ));
+    let established = "bgp_peer_session_established{interface=\"\",peer=\"127.0.0.1\"} 1\n";
+    let before = wait_for_metric_row(&mut daemon, metrics_port, established);
+    assert!(
+        before.contains("bgp_management_server_crashes_total{server=\"metrics\"} 0\n"),
+        "the restart counter must be exported at 0\n{before}"
+    );
+    let readyz = http_get(metrics_port, "/readyz").expect("/readyz before the fault");
+    assert!(readyz.starts_with("HTTP/1.1 200 OK"), "{readyz}");
+
+    fault.write_all(&[1]).expect("trigger the listener fault");
+
+    // Only the restarted server can report its own restart.
+    let after = wait_for_metric_row(
+        &mut daemon,
+        metrics_port,
+        "bgp_management_server_crashes_total{server=\"metrics\"} 1\n",
+    );
+    assert!(
+        after.contains(established),
+        "the session must stay Established\n{after}"
+    );
+    let readyz = http_get(metrics_port, "/readyz").expect("/readyz after the restart");
+    assert!(readyz.starts_with("HTTP/1.1 200 OK"), "{readyz}");
     let logs = daemon.logs();
     for message in [
-        "metrics server listening",
         "listener socket unusable; stopping its accept loop",
-        "metrics/readiness server exited unexpectedly",
-        "initiating shutdown due to metrics/readiness server failure",
-        "initiating coordinated shutdown",
-        "rustbgpd exiting",
+        "metrics/readiness server exited unexpectedly; restarting it in place",
     ] {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
+    assert!(!logs.contains("initiating coordinated shutdown"), "{logs}");
+
+    let sigterm = Command::new("kill")
+        .args(["-TERM", &daemon.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+    // The first NOTIFICATION on the original connection is the requested stop.
+    observe_administrative_shutdown(&mut peer);
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
     assert_eq!(
         status.code(),
-        Some(1),
-        "metrics/readiness server exit must exit 1, got {status}\n{logs}"
+        Some(0),
+        "a restarted metrics/readiness server must not fail the later stop\n{logs}"
+    );
+    assert_eq!(
+        logs.matches("metrics/readiness server exited unexpectedly")
+            .count(),
+        1,
+        "{logs}"
     );
 }
 

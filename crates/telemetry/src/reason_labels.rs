@@ -606,9 +606,9 @@ impl std::fmt::Display for InboundConnectionDropReason {
 ///   `rbgp rib received <peer> --rejected`;
 /// - the retention-store log lines.
 ///
-/// Max-prefix is deliberately absent: exceeding the limit tears the
-/// session down (ADR-0108), so there is no per-route rejection to
-/// retain.
+/// Max-prefix is deliberately absent: exceeding a limit either tears the
+/// session down or, under `block`, withholds the route without retaining
+/// it (ADR-0108), so there is no per-route rejection to retain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImportRejectReason {
     /// The import policy chain denied the route (including RPKI/ASPA

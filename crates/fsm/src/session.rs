@@ -158,7 +158,12 @@ impl Session {
                 self.enter_idle_silent()
             }
 
+            // The dial got no answer within the ConnectRetry interval. RFC
+            // 4271 §8.2.2 leaves ConnectRetryCounter alone here; it is
+            // counted as a miss anyway, so a peer that silently drops SYNs
+            // backs off on the same capped curve as one that refuses them.
             Event::ConnectRetryTimerExpires => {
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StartTimer(TimerType::ConnectRetry, self.connect_retry_duration()),
@@ -873,6 +878,29 @@ mod tests {
             a,
             Action::InitiateTcpConnection
         )));
+    }
+
+    /// A dial that never gets an answer (SYNs dropped, no RST) counts as a
+    /// miss: each `ConnectRetryTimerExpires` in Connect doubles the next
+    /// interval from the configured base up to the cap, and a later
+    /// `ManualStart` from Idle starts again at the base.
+    #[test]
+    fn unanswered_dial_retry_interval_grows_and_caps() {
+        let mut s = Session::new(test_config());
+        let base = s.config.connect_retry_secs;
+        assert_eq!(base, 30);
+        let first = s.handle_event(Event::ManualStart);
+        let mut got = vec![connect_retry_timer_secs(&first).unwrap()];
+        for _ in 0..6 {
+            let actions = s.handle_event(Event::ConnectRetryTimerExpires);
+            assert_eq!(s.state(), SessionState::Connect);
+            got.push(connect_retry_timer_secs(&actions).unwrap());
+        }
+        assert_eq!(got, vec![30, 60, 120, 240, 300, 300, 300]);
+
+        s.handle_event(Event::ManualStop { reason: None });
+        let restart = s.handle_event(Event::ManualStart);
+        assert_eq!(connect_retry_timer_secs(&restart), Some(base));
     }
 
     #[test]

@@ -484,6 +484,19 @@ that are stood up once at startup. Three fields are not restart-required:
 `honor_graceful_shutdown`, `honor_blackhole` (with a FIB-discard caveat), and
 `dynamic_neighbor_limit`.
 
+A restart-required `[global]` edit is reported by field, with its old and new
+value, on every surface: the SIGHUP `[global] changed` `ERROR` line carries a
+`fields` value such as `router_id: 10.0.0.1 → 10.0.0.9, telemetry.log_format:
+json → text`; `rustbgpd --diff` lists each field under `[global] changed` and
+in the JSON `global_changes` array; and a config transaction's
+`restart_required_sections` (shown by `rbgp config plan` and
+`rbgp config diff --history N`) adds one `[global].<field>` name after
+`[global]`, without values. Fields reported on
+their own terms stay out of that list on every surface: the honor knobs and
+`dynamic_neighbor_limit` (hot-applied), the BLACKHOLE FIB discard knobs (their
+own `ERROR` and `blackhole_fib_discard_changed`), and `ebgp_requires_policy`
+(the RFC 8212 posture line).
+
 | Field | Class | Notes |
 |---|---|---|
 | root `config_epoch` | restart-required | ADR-0119 semantic epoch. Omission means epoch 1. A SIGHUP reports and pins raw/effective/source drift with the RFC 8212 boolean tuple. Epoch 2 with an omitted boolean resolves to the activated secure default: effective `true`, source `epoch_2_default`. Exception: a SIGHUP of a file carrying exactly the canonical form of the running tuple (the explicit effective epoch and boolean the daemon writes after a runtime mutation) keeps the running tuple without logging an `ERROR`, because the effective posture did not change. A partial edit or a changed effective value is still pinned and logged. |

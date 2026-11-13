@@ -196,9 +196,29 @@ rs-config-render --context "$STATE/context.yml" \
 rustbgpd --check --strict "$STATE/candidate/config.toml"
 # The generated rpol resolves dataset paths relative to this tree. Install the
 # config, policy, and datasets together; never update only one directory.
-rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
+# One rsync, filtered to the renderer's own outputs: it deletes a stale
+# policy, dataset or looking-glass artifact the new render no longer emits
+# (including the whole datasets/ tree when no client has one), and leaves
+# token files, TLS keys and other operator files in /etc/rustbgpd alone.
+rsync -a --delete \
+    --include='/config.toml' --include='/render-receipt.json' \
+    --include='/birdwatcher-reject-communities.json' \
+    --include='/policy/***' --include='/datasets/***' --exclude='*' \
+    "$STATE/candidate/" /etc/rustbgpd/
 systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
+
+The filter names everything the renderer can emit: `config.toml`,
+`render-receipt.json`, the `policy/` and `datasets/` trees, and
+`birdwatcher-reject-communities.json`, which exists only while a client uses
+`reject_policy: tag_and_reject`. `datasets/` exists only while a client has an
+origin, prefix or blackhole-cover dataset. A file the render omits is deleted
+from `/etc/rustbgpd`, so nothing stale survives, and every file outside the
+filter is kept. The `policy/` and `datasets/` directories must hold only
+renderer output, because `--delete` removes anything else in them; keep gRPC
+token files, TLS material and other operator files outside those two trees.
+The looking-glass adapter reads its reject-communities file only at startup,
+so restart it after a render that changes that file.
 
 Before the first cutover — or any time you want to see what a refresh
 will change — compare the candidate with the running daemon:

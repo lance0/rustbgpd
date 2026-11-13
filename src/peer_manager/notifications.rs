@@ -9,6 +9,56 @@ use futures::{FutureExt as _, StreamExt as _};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tokio::time::Instant;
 
+/// Crashes of one peer's session task within [`SESSION_CRASH_WINDOW`] that
+/// latch the peer disabled. One crash is a restart; a third crash within the
+/// window means the failure recurs, for example on every UPDATE the peer
+/// resends after each restart, and restarting again would only repeat it.
+pub(super) const SESSION_CRASH_LATCH: usize = 3;
+/// How long a session-task crash counts toward [`SESSION_CRASH_LATCH`]. Ten
+/// minutes covers several reconnects at the default 120-second `ConnectRetry`
+/// interval, so a crash that recurs once per established session is latched
+/// even when each reconnect waits out `ConnectRetry`.
+pub(super) const SESSION_CRASH_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Session tasks of one peer that ended without a shutdown request. The
+/// manager keeps it by [`PeerKey`], like a max-prefix latch, so it survives
+/// the sessions it restarts, a reconfigure that replaces the peer, and a
+/// dynamic peer's removal and reconnect. Explicit enable or deleting the
+/// neighbor clears it; an unlatched record lapses with its window.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SessionCrashes {
+    /// When each crash within the window was handled, oldest first.
+    recent: VecDeque<Instant>,
+    /// The neighbor's `last_error` for the latest crash.
+    last_error: String,
+    /// The [`SESSION_CRASH_LATCH`]th crash within the window latched the
+    /// peer disabled. Only an explicit enable or deletion clears it.
+    latched: bool,
+}
+
+impl SessionCrashes {
+    /// Whether these crashes latched the neighbor disabled.
+    pub(super) fn latched(&self) -> bool {
+        self.latched
+    }
+
+    /// Latched, or the latest crash is still within the window.
+    fn current(&self, now: Instant) -> bool {
+        self.latched
+            || self
+                .recent
+                .back()
+                .is_some_and(|at| now.duration_since(*at) < SESSION_CRASH_WINDOW)
+    }
+
+    /// The latest crash's error and whether it latched the neighbor, while
+    /// the record is current.
+    pub(super) fn error(&self) -> Option<(&str, bool)> {
+        self.current(Instant::now())
+            .then_some((self.last_error.as_str(), self.latched))
+    }
+}
+
 struct NotificationRetirement {
     peer: PeerKey,
     sessions: Vec<(u64, PeerHandle, &'static str)>,
@@ -119,12 +169,14 @@ impl PeerManager {
     /// A failed Stop enqueue cannot leave a candidate's sibling primary live:
     /// abort it, fence its old RIB ownership, and install a fresh disabled Idle
     /// actor so the max-prefix latch remains fail-closed but explicit Enable is
-    /// still a usable recovery operation.
+    /// still a usable recovery operation. A primary whose task already ended
+    /// is replaced the same way. Returns the replaced task's panic message,
+    /// if it panicked.
     pub(super) async fn replace_unstoppable_primary(
         &mut self,
         peer_key: &rustbgpd_api::peer_types::PeerKey,
-    ) {
-        let Some((
+    ) -> Option<String> {
+        let (
             old_session_id,
             superseded,
             mut transport,
@@ -132,7 +184,7 @@ impl PeerManager {
             export_policy,
             gshut,
             tcp_ao_generation,
-        )) = self.peers.get(peer_key).map(|managed| {
+        ) = self.peers.get(peer_key).map(|managed| {
             (
                 managed.session_id(),
                 managed
@@ -144,10 +196,7 @@ impl PeerManager {
                 managed.advertise_graceful_shutdown,
                 managed.tcp_ao_rotation.applied,
             )
-        })
-        else {
-            return;
-        };
+        })?;
 
         self.admit_deferred_rib_updates_for(peer_key).await;
         transport.supersedes_session = superseded;
@@ -167,18 +216,15 @@ impl PeerManager {
             SessionIdentity::primary(new_session_id),
             tcp_ao_generation,
         );
-        let Some((aborted, _)) = self
+        let (aborted, _) = self
             .peers
-            .replace_handle(peer_key, replacement, new_session_id)
-        else {
-            return;
-        };
+            .replace_handle(peer_key, replacement, new_session_id)?;
         // Join cancellation before publishing PeerDown, so the old actor
         // emits nothing new behind the fence. What it already held follows
         // from its own hand-off, ending with its PeerDown when it was
         // Established; the RIB drops route messages from a session it no
         // longer registers.
-        aborted.abort_for_transport_safety_and_wait().await;
+        let panic = aborted.join_exited().await;
 
         // The aborted session retires itself in the RIB, but this send stays:
         // it is on this actor's ordered lane, ahead of the barrier or Enable
@@ -208,6 +254,261 @@ impl PeerManager {
         }
         self.unregister_session(old_session_id);
         self.register_session(new_session_id, peer_key);
+        panic
+    }
+
+    /// Whether a repeating session-task crash latched `peer` disabled until
+    /// an explicit enable.
+    pub(super) fn session_crash_latched(&self, peer: &PeerKey) -> bool {
+        self.session_crashes
+            .get(peer)
+            .is_some_and(|crashes| crashes.latched)
+    }
+
+    /// The neighbor's `last_error` for its latest session-task crash, and
+    /// whether the crashes latched it, while the peer is latched or that
+    /// crash is within the window.
+    pub(super) fn session_crash_error(&self, peer: &PeerKey) -> Option<(&str, bool)> {
+        self.session_crashes
+            .get(peer)
+            .and_then(SessionCrashes::error)
+    }
+
+    /// Take `peer`'s crash record, to carry an interface-only neighbor's to
+    /// its next endpoint, under a new key.
+    pub(super) fn take_session_crashes(&mut self, peer: &PeerKey) -> Option<SessionCrashes> {
+        self.session_crashes.remove(peer)
+    }
+
+    /// Install a carried crash record under the neighbor's new key.
+    pub(super) fn restore_session_crashes(&mut self, peer: &PeerKey, crashes: SessionCrashes) {
+        self.session_crashes.insert(peer.clone(), crashes);
+    }
+
+    /// Forget `peer`'s session-task crashes: an explicit enable, or the
+    /// neighbor is gone.
+    pub(super) fn clear_session_crashes(&mut self, peer: &PeerKey) {
+        self.session_crashes.remove(peer);
+    }
+
+    /// Record one crash of `peer_key`'s session task and set its
+    /// `last_error`. Returns the crashes within the window, whether this one
+    /// latches the peer, and the error. `cause` is already scrubbed.
+    fn record_session_crash(&mut self, peer_key: &PeerKey, cause: &str) -> (usize, bool, String) {
+        let now = Instant::now();
+        // Records outlive their peers (a dynamic peer reconnects under the
+        // same key), so lapsed ones are dropped here, where records are made.
+        self.session_crashes
+            .retain(|key, crashes| key == peer_key || crashes.current(now));
+        let unix_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        // The recovery names the neighbor as `rbgp neighbor` selects it: an
+        // interface-only neighbor by its interface, which outlives the
+        // learned endpoint the record may move away from.
+        let selector = match peer_key.interface.as_deref() {
+            Some(interface) if self.interface_only_owns(Some(interface)) => interface.to_owned(),
+            _ => peer_key.label(),
+        };
+        let crashes = self.session_crashes.entry(peer_key.clone()).or_default();
+        while crashes
+            .recent
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= SESSION_CRASH_WINDOW)
+        {
+            crashes.recent.pop_front();
+        }
+        crashes.recent.push_back(now);
+        let count = crashes.recent.len();
+        let latch = count >= SESSION_CRASH_LATCH;
+        crashes.latched |= latch;
+        let window_minutes = SESSION_CRASH_WINDOW.as_secs() / 60;
+        let error = if latch {
+            format!(
+                "session task crashed at unix time {unix_seconds} ({cause}), {count} times in \
+                 {window_minutes} minutes; peer latched disabled; run 'rbgp neighbor {selector} \
+                 enable' to restart it"
+            )
+        } else {
+            format!(
+                "session task crashed at unix time {unix_seconds} ({cause}); restarted, \
+                 {count} of {SESSION_CRASH_LATCH} crashes in {window_minutes} minutes before \
+                 the peer is latched disabled"
+            )
+        };
+        crashes.last_error.clone_from(&error);
+        (count, latch, error)
+    }
+
+    /// Latch `peer_key` disabled after its [`SESSION_CRASH_LATCH`]th crash,
+    /// as a max-prefix shutdown does: an armed max-prefix restart can no
+    /// longer re-enable it, a pending inbound candidate is retired rather
+    /// than promoted, and with `stop_primary` the live primary is stopped. A
+    /// dynamic peer already being retired is kept, disabled, by its
+    /// retirement.
+    fn latch_crashed_peer(
+        &mut self,
+        peer_key: &PeerKey,
+        error: String,
+        stop_primary: bool,
+        retirements: &mut Vec<NotificationRetirement>,
+    ) {
+        self.invalidate_max_prefix_restart(peer_key);
+        self.publish_peer_lifecycle_event(
+            peer_key,
+            rustbgpd_api::peer_types::SessionLifecycleEventType::PeerDisabled,
+            error,
+        );
+        let stop_primary = self
+            .peers
+            .get(peer_key)
+            .filter(|_| stop_primary)
+            .map(|managed| (managed.session_id(), managed.handle().commands_sender()));
+        let Some(managed) = self.peers.get_mut(peer_key) else {
+            return;
+        };
+        managed.enabled = false;
+        let pending = managed.pending_inbound.take();
+        self.publish_peer_admin_enabled_metric(peer_key, false);
+        self.set_bfd_peer_disabled(peer_key.address, true);
+        let sessions: Vec<_> = pending
+            .into_iter()
+            .map(|pending| {
+                self.retiring_sessions
+                    .insert(pending.session_id, peer_key.clone());
+                (
+                    pending.session_id,
+                    pending.handle,
+                    "session-crash latch pending inbound",
+                )
+            })
+            .collect();
+        if stop_primary.is_some() || !sessions.is_empty() {
+            retirements.push(NotificationRetirement {
+                peer: peer_key.clone(),
+                sessions,
+                stop_primary,
+                dynamic: None,
+            });
+        }
+    }
+
+    /// A session task ended without a shutdown request. Every crash counts
+    /// toward the peer's latch: its [`SESSION_CRASH_LATCH`]th within
+    /// [`SESSION_CRASH_WINDOW`] latches the peer disabled until an explicit
+    /// enable.
+    ///
+    /// A pending inbound candidate, or an enabled dynamic peer, is handled as
+    /// if the session fell back to Idle. Any other primary is replaced by a
+    /// fresh session, which is started again when the peer is a static one,
+    /// enabled and not latched. A disabled or dampening-blocked dynamic peer
+    /// thus keeps a live session for a later enable.
+    ///
+    /// The replacement publishes the dead session's `PeerDown` on this
+    /// actor's ordered RIB lane before the new session gets its `Start`, so
+    /// the dead epoch is closed in the RIB before the new one's `PeerUp`.
+    async fn handle_session_task_exit(
+        &mut self,
+        session_id: u64,
+        role: rustbgpd_transport::SessionRole,
+        peer_addr: std::net::IpAddr,
+        cause: String,
+        retirements: &mut Vec<NotificationRetirement>,
+    ) {
+        // An error or panic message is arbitrary text: log and keep one
+        // bounded line of it.
+        let scrub = rustbgpd_telemetry::metrics::scrub_info_label;
+        let cause = scrub(&cause);
+        let Some(peer_key) = self.peer_key_for_session(session_id) else {
+            debug!(peer = %peer_addr, session_id, ?role, "ignoring task exit of unknown session");
+            return;
+        };
+        let Some(managed) = self.peers.get(&peer_key) else {
+            return;
+        };
+        let primary = managed.session_id() == session_id;
+        let pending = managed
+            .pending_inbound
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == session_id);
+        if !primary && !pending {
+            // A retiring session: its owner joins it.
+            debug!(peer = %peer_addr, session_id, ?role, %cause, "ignoring task exit of a retiring session");
+            return;
+        }
+        let dynamic = managed.is_dynamic;
+        let enabled = managed.enabled;
+        let blocked = managed
+            .transport_config
+            .dampening_admission
+            .as_ref()
+            .is_some_and(rustbgpd_rib::dampening::DampeningAdmission::is_blocked);
+        self.metrics.record_session_task_crash(
+            &self.peer_metric_label(&peer_key),
+            peer_key.interface.as_deref().unwrap_or(""),
+        );
+        if pending || (dynamic && enabled && !blocked) {
+            // Recorded first: a latched dynamic peer's retirement keeps it.
+            let (count, latch, error) = self.record_session_crash(&peer_key, &cause);
+            warn!(peer = %peer_addr, session_id, ?role, %cause, count, "session task ended without a shutdown request; retiring it");
+            Box::pin(self.handle_one_session_notification(
+                SessionNotification::BackToIdle {
+                    session_id,
+                    role,
+                    peer_addr,
+                },
+                retirements,
+            ))
+            .await;
+            if latch {
+                // A crashed candidate's primary can be live.
+                self.latch_crashed_peer(&peer_key, error, pending, retirements);
+                warn!(peer = %peer_addr, session_id, %cause, count, "session task crashed repeatedly; peer latched disabled until an explicit enable");
+            }
+            return;
+        }
+
+        self.note_unnumbered_session_idle(&peer_key);
+        let panic = self.replace_unstoppable_primary(&peer_key).await;
+        let cause = panic.map_or(cause, |message| scrub(&format!("panicked: {message}")));
+        let (count, latch, error) = self.record_session_crash(&peer_key, &cause);
+
+        if latch {
+            self.latch_crashed_peer(&peer_key, error, false, retirements);
+            warn!(peer = %peer_addr, session_id, %cause, count, "session task crashed repeatedly; peer latched disabled until an explicit enable");
+            return;
+        }
+        if dynamic {
+            self.mark_unadmitted_disabled_dynamic(&peer_key);
+            warn!(peer = %peer_addr, session_id, %cause, "session task of a disabled or dampening-blocked dynamic peer crashed; replaced, not started");
+            return;
+        }
+        if !enabled {
+            warn!(peer = %peer_addr, session_id, %cause, "session task of a disabled peer crashed; replaced, not started");
+            return;
+        }
+        if self.bfd_should_withhold(&peer_addr) {
+            // A BFD session that stays Up sends no new edge: republishing the
+            // desired state asks the BFD actor for the acknowledgement that
+            // releases the hold, as enable does.
+            self.set_bfd_peer_disabled(peer_addr, false);
+            self.mark_bfd_withheld(peer_addr);
+            warn!(peer = %peer_addr, session_id, %cause, "session task crashed; replaced, strict BFD withholds the restart until BFD Up");
+            return;
+        }
+        // The replacement's command channel is new and empty.
+        let started = self.peers.get(&peer_key).is_some_and(|managed| {
+            managed
+                .handle()
+                .commands_sender()
+                .try_send(rustbgpd_transport::PeerCommand::Start)
+                .is_ok()
+        });
+        if started {
+            warn!(peer = %peer_addr, session_id, %cause, count, "session task crashed; restarted the session");
+        } else {
+            warn!(peer = %peer_addr, session_id, %cause, "session task crashed; the replacement did not accept Start");
+        }
     }
 
     /// The Idle primary's state, queried only when a candidate is pending.
@@ -1013,6 +1314,15 @@ impl PeerManager {
                     reason,
                 });
             }
+            SessionNotification::TaskExited {
+                session_id,
+                role,
+                peer_addr,
+                cause,
+            } => {
+                self.handle_session_task_exit(session_id, role, peer_addr, cause, retirements)
+                    .await;
+            }
             SessionNotification::MaxPrefixExceeded {
                 session_id,
                 role,
@@ -1177,6 +1487,7 @@ impl PeerManager {
 
         if barrier_failed
             || self.max_prefix_latches.contains_key(peer_key)
+            || self.session_crash_latched(peer_key)
             || managed
                 .transport_config
                 .dampening_admission
@@ -1299,6 +1610,7 @@ fn session_notification_id(notification: &SessionNotification) -> u64 {
         SessionNotification::OpenReceived { session_id, .. }
         | SessionNotification::BackToIdle { session_id, .. }
         | SessionNotification::MaxPrefixExceeded { session_id, .. }
-        | SessionNotification::MaxPrefixWarning { session_id, .. } => *session_id,
+        | SessionNotification::MaxPrefixWarning { session_id, .. }
+        | SessionNotification::TaskExited { session_id, .. } => *session_id,
     }
 }

@@ -502,7 +502,7 @@ parity instead of identical per-key event sequences:
 | Regroup interrupted by an already dirty member or failed admission | The retained old baseline and exact pending duties must converge to the new group view despite incomplete earlier delivery |
 | Ordinary announce fallback after partial shared-encoder failure/cancellation | Previously sent identical announcements may repeat when the announce inventory restarts; completed withdrawals/markers must not restart |
 
-**Amendment (ADR-0145 slice 1b): private-family owed keys.**
+**Amendment (slice 1b): private-family owed keys.**
 
 When a receiver's outbound credit is exhausted, the RIB records an owed key for
 a private (per-peer Adj-RIB-Out) family instead of staging it. It later stages

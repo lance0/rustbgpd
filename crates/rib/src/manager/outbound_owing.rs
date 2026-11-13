@@ -1,4 +1,4 @@
-//! Owed-key sets for private families (ADR-0145 slice 1b).
+//! Owed-key sets for private families (ADR-0099 amendment, slice 1b).
 //!
 //! When a receiver's row credit is spent, a pass over a private family (one
 //! the peer holds in its own Adj-RIB-Out) records *which keys* the peer is

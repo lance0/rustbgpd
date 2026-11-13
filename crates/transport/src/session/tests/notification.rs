@@ -1242,7 +1242,7 @@ async fn healthy_established_session_forgets_notification_idle_backoff() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn tcp_failures_keep_fixed_retries_alongside_notification_idle_backoff() {
+async fn tcp_misses_keep_fast_retries_and_peer_tcp_loss_joins_idle_backoff() {
     let mut session = make_test_session(65001, 65002);
     notification_cycle(&mut session).await;
     assert_eq!(notification_cycle(&mut session).await, 60);
@@ -1267,19 +1267,250 @@ async fn tcp_failures_keep_fixed_retries_alongside_notification_idle_backoff() {
     }
     assert_eq!(session.notification_idle_failures, 2);
 
-    // An Established session lost to a TCP failure keeps the configured
-    // Idle wait and neither advances nor forgets the NOTIFICATION streak.
+    // An Established session the peer closes without a NOTIFICATION joins
+    // the same streak.
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.drive_fsm(Event::TcpConnectionConfirmed).await;
     session.drive_fsm(peer_open(65002)).await;
     session.drive_fsm(Event::KeepaliveReceived).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
-    session.drive_fsm(Event::TcpConnectionFails).await;
+    session.handle_tcp_read_result(Ok(0)).await;
     assert_eq!(session.fsm.state(), SessionState::Idle);
-    assert_eq!(pending_reconnect_secs(&session), 30);
-    assert_eq!(session.notification_idle_failures, 2);
+    assert_eq!(pending_reconnect_secs(&session), 120);
+    assert_eq!(streak_counts(&session), (2, 1));
+    assert_eq!(notification_cycle(&mut session).await, 240);
+}
+
+/// `(NOTIFICATION, peer TCP loss)` counts of the reconnect streak.
+fn streak_counts(session: &PeerSession) -> (u32, u32) {
+    (
+        session.notification_idle_failures,
+        session.tcp_loss_idle_failures,
+    )
+}
+
+/// Bring the session up over a fresh stream to `state` (`OpenConfirm` or
+/// `Established`), then let the peer drop TCP without a NOTIFICATION, through
+/// `loss`. Returns the wait armed for the next reconnect.
+async fn peer_tcp_loss_cycle(
+    session: &mut PeerSession,
+    state: SessionState,
+    loss: std::io::Result<usize>,
+) -> u64 {
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session.drive_fsm(peer_open(65002)).await;
+    if state == SessionState::Established {
+        session.drive_fsm(Event::KeepaliveReceived).await;
+    }
+    assert_eq!(session.fsm.state(), state);
+    session.handle_tcp_read_result(loss).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    pending_reconnect_secs(session)
+}
+
+/// A peer that accepts TCP and then drops it without a NOTIFICATION, after
+/// OPEN or after Established, by EOF or by a reset, backs off on the same
+/// capped streak as a NOTIFICATION teardown.
+/// Mutation-red: without the peer-TCP-loss latch every wait stays at 30.
+#[tokio::test(start_paused = true)]
+async fn peer_tcp_loss_after_connect_escalates_idle_backoff_up_to_cap() {
+    let mut session = make_test_session(65001, 65002);
+    let mut waits = Vec::new();
+    for state in [SessionState::OpenConfirm, SessionState::Established] {
+        for loss in [
+            Ok(0),
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            Ok(0),
+        ] {
+            waits.push(peer_tcp_loss_cycle(&mut session, state, loss).await);
+        }
+    }
+    assert_eq!(waits, [30, 60, 120, 240, 300, 300]);
+    assert_eq!(streak_counts(&session), (0, 6));
+
+    // A session that stays up for the healthy window starts over.
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    tokio::time::advance(fsm::HEALTHY_ESTABLISHED).await;
+    session.handle_tcp_read_result(Ok(0)).await;
+    assert_eq!(
+        (pending_reconnect_secs(&session), streak_counts(&session)),
+        (30, (0, 1))
+    );
+}
+
+/// Two peer TCP drops lengthen the Idle wait but leave the NOTIFICATION
+/// count, which alone arms the inbound hold, at zero; the reported state
+/// shows a pending wait without the hold's streak.
+/// Mutation-red: counting TCP drops as NOTIFICATIONs reports 2.
+#[tokio::test(start_paused = true)]
+async fn peer_tcp_drops_back_off_without_arming_the_inbound_hold() {
+    let mut session = make_test_session(65001, 65002);
+    let mut waits = Vec::new();
+    for _ in 0..2 {
+        waits.push(peer_tcp_loss_cycle(&mut session, SessionState::Established, Ok(0)).await);
+    }
+    assert_eq!(waits, [30, 60]);
+    assert_eq!(streak_counts(&session), (0, 2));
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    let state = state.await.unwrap();
+    assert!(state.reconnect_in_secs > 0);
+    assert_eq!(state.notification_idle_failures, 0);
+}
+
+/// NOTIFICATION teardowns in a streak that also holds TCP drops still reach
+/// the inbound hold's count, and every failure lengthens the wait.
+/// Mutation-red: counting every escalation as a TCP drop leaves 0.
+#[tokio::test(start_paused = true)]
+async fn notification_streak_still_arms_the_inbound_hold_beside_tcp_drops() {
+    let mut session = make_test_session(65001, 65002);
+    assert_eq!(
+        peer_tcp_loss_cycle(&mut session, SessionState::Established, Ok(0)).await,
+        30
+    );
+    assert_eq!(notification_cycle(&mut session).await, 60);
     assert_eq!(notification_cycle(&mut session).await, 120);
+    assert_eq!(streak_counts(&session), (2, 1));
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(state.await.unwrap().notification_idle_failures, 2);
+}
+
+/// A writer I/O error from Established is a peer-side TCP loss and joins
+/// the streak.
+/// Mutation-red: without the writer-I/O latch the waits stay `[30, 30]`.
+#[tokio::test(start_paused = true)]
+async fn writer_io_loss_from_established_escalates_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    let mut waits = Vec::new();
+    for _ in 0..2 {
+        session.reconnect_timer = None;
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        session
+            .handle_writer_exit(Ok(Err(super::super::writer::WriterExit::Io(
+                std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+            ))))
+            .await;
+        assert_eq!(session.fsm.state(), SessionState::Idle);
+        waits.push(pending_reconnect_secs(&session));
+    }
+    assert_eq!(waits, [30, 60]);
+    assert_eq!(streak_counts(&session), (0, 2));
+}
+
+/// The operator-reset drain path: a writer I/O error during the linger
+/// after a local Cease/8 teardown is that teardown, not a peer loss, so the
+/// reset still ends with an empty streak.
+/// Mutation-red: latching it regardless leaves `(30, (0, 1))`.
+#[tokio::test(start_paused = true)]
+async fn writer_io_after_signaled_teardown_is_not_a_peer_loss() {
+    let mut session = make_test_session(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    // As the reset arm leaves it before `finish_drain_teardown`.
+    session.pending_outbound_teardown_cause =
+        Some(crate::handle::SessionFailureCause::OutboundSaturation);
+    session.local_notification_teardown = false;
+    session
+        .handle_writer_exit(Ok(Err(super::super::writer::WriterExit::Io(
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        ))))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(
+        (pending_reconnect_secs(&session), streak_counts(&session)),
+        (30, (0, 0))
+    );
+}
+
+/// A dial that times out (the connect timeout beating a longer
+/// `ConnectRetry` interval) is an unanswered miss: the session stays in
+/// Connect on the running timer, whose expiry doubles the interval. A
+/// refused dial still takes the fast-retry path.
+/// Mutation-red: treating the timeout as a refusal moves to Active with a
+/// 1 s retry.
+#[tokio::test(start_paused = true)]
+async fn connect_timeout_keeps_the_unanswered_dial_curve() {
+    let mut session = make_test_session(65001, 65002);
+    session.drive_fsm(Event::ManualStart).await;
+    if let Some(task) = session.connect_task.take() {
+        task.abort();
+    }
+    let retry_secs = |session: &PeerSession| {
+        session
+            .timers
+            .connect_retry
+            .as_ref()
+            .expect("ConnectRetry runs in Connect")
+            .deadline()
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_secs()
+    };
+    assert_eq!(retry_secs(&session), 30);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    session
+        .handle_connect_error(&std::io::Error::from(std::io::ErrorKind::TimedOut))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    assert_eq!(retry_secs(&session), 20, "the running timer is kept");
+    let mut intervals = Vec::new();
+    for _ in 0..4 {
+        session.drive_fsm(Event::ConnectRetryTimerExpires).await;
+        if let Some(task) = session.connect_task.take() {
+            task.abort();
+        }
+        intervals.push(retry_secs(&session));
+        session
+            .handle_connect_error(&std::io::Error::from(std::io::ErrorKind::TimedOut))
+            .await;
+        assert_eq!(session.fsm.state(), SessionState::Connect);
+    }
+    assert_eq!(intervals, [60, 120, 240, 300]);
+
+    session
+        .handle_connect_error(&std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Active);
+}
+
+/// The armed Idle reconnect wait is jittered into RFC 4271 §10's 0.75..=1.0
+/// range of the escalated wait, and varies between falls.
+#[tokio::test(start_paused = true)]
+async fn idle_reconnect_wait_is_jittered_within_bounds() {
+    crate::timer::TEST_RANDOM_JITTER.set(true);
+    let mut waits = std::collections::BTreeSet::new();
+    for _ in 0..16 {
+        let mut session = make_test_session(65001, 65002);
+        session.notification_idle_failures = 5;
+        peer_tcp_loss_cycle(&mut session, SessionState::Established, Ok(0)).await;
+        let wait = session
+            .reconnect_timer
+            .as_ref()
+            .unwrap()
+            .deadline()
+            .saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            wait >= Duration::from_secs(225) && wait <= Duration::from_secs(300),
+            "{wait:?}"
+        );
+        waits.insert(wait);
+    }
+    crate::timer::TEST_RANDOM_JITTER.set(false);
+    assert!(waits.len() > 1, "Idle reconnect wait is not jittered");
 }
 
 #[tokio::test(start_paused = true)]
@@ -1409,18 +1640,15 @@ async fn local_outbound_cease8_escalates_notification_idle_backoff() {
         ),
         (120, 3)
     );
-    // A later plain TCP loss is not a NOTIFICATION teardown.
+    // A later peer TCP loss without a NOTIFICATION joins the streak too.
     session.reconnect_timer = None;
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.handle_tcp_read_result(Ok(0)).await;
     assert_eq!(
-        (
-            pending_reconnect_secs(&session),
-            session.notification_idle_failures
-        ),
-        (30, 3)
+        (pending_reconnect_secs(&session), streak_counts(&session)),
+        (240, (3, 1))
     );
 }
 
@@ -1558,13 +1786,11 @@ async fn stop_then_start_after_cease8_does_not_leak_the_latch() {
     session.drive_fsm(peer_open(65002)).await;
     session.drive_fsm(Event::KeepaliveReceived).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
+    // The peer's EOF is the first failure of a new streak.
     session.handle_tcp_read_result(Ok(0)).await;
     assert_eq!(
-        (
-            pending_reconnect_secs(&session),
-            session.notification_idle_failures
-        ),
-        (30, 0)
+        (pending_reconnect_secs(&session), streak_counts(&session)),
+        (30, (0, 1))
     );
 }
 

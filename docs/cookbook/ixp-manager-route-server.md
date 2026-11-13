@@ -102,11 +102,18 @@ no HTTP client and never sees the API key in this mode:
 
 ```console
 umask 077
+sudo -u rustbgpd sh -c 'printf "X-IXP-Manager-API-Key: %s\n" \
+  "$(cat /var/lib/rustbgpd/ixp-manager/api-key)" \
+  > /var/lib/rustbgpd/ixp-manager/api-key-header'
 sudo -u rustbgpd curl --fail --silent --show-error \
-  -H "X-IXP-Manager-API-Key: $(cat /var/lib/rustbgpd/ixp-manager/api-key)" \
+  -H @/var/lib/rustbgpd/ixp-manager/api-key-header \
   -o /var/lib/rustbgpd/ixp-manager/router.json \
   https://ixp.example.net/admin/api/v4/router/gen-config/rs1-ipv4
 ```
+
+The mode-0600 header file keeps the key off `curl`'s command line, where `ps`
+would show it to every local user; `printf` is a shell builtin, so the key
+never reaches an argument vector either.
 
 Render into an absent (or empty, mode-0700) candidate directory. IXP
 Manager mode runs the selected binary as `rustbgpd --version` and then

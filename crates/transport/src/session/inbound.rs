@@ -4020,6 +4020,32 @@ impl PeerSession {
                 withdrawn.push((prefix, path_id));
             }
         }
+        // Retain the policy denies (body + MP unicast), clear any stale
+        // reject for identities accepted this UPDATE, then refresh the
+        // gauge once. Empty when retention is disabled. Runs before
+        // `Block`: a policy-accepted identity that `Block` then withholds
+        // is no longer a policy reject.
+        for (prefix, path_id, entry) in rejected_retained {
+            self.retain_rejected_route(prefix, path_id, entry);
+        }
+        if self.reject_retention_enabled {
+            if !self.rejected_routes.is_empty() {
+                for route in &announced {
+                    let afi = match route.prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.rejected_routes.remove(&ImportDecisionKey {
+                        afi,
+                        safi: Safi::Unicast,
+                        prefix: route.prefix,
+                        path_id: route.path_id,
+                    });
+                }
+            }
+            self.metrics
+                .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
+        }
         // `Block`: withhold net-new prefixes beyond a full bound before
         // they are accounted or delivered; withdrawals above already freed
         // their slots.
@@ -4060,30 +4086,6 @@ impl PeerSession {
         for route in &announced {
             self.forget_rejected_path(route.prefix, route.path_id);
             self.remember_known_path(route.prefix, route.path_id);
-        }
-        // LAN-472: retain the policy denies (body + MP unicast), clear
-        // any stale reject for identities accepted this UPDATE, then
-        // refresh the gauge once. Empty when retention is disabled.
-        for (prefix, path_id, entry) in rejected_retained {
-            self.retain_rejected_route(prefix, path_id, entry);
-        }
-        if self.reject_retention_enabled {
-            if !self.rejected_routes.is_empty() {
-                for route in &announced {
-                    let afi = match route.prefix {
-                        Prefix::V4(_) => Afi::Ipv4,
-                        Prefix::V6(_) => Afi::Ipv6,
-                    };
-                    self.rejected_routes.remove(&ImportDecisionKey {
-                        afi,
-                        safi: Safi::Unicast,
-                        prefix: route.prefix,
-                        path_id: route.path_id,
-                    });
-                }
-            }
-            self.metrics
-                .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for key in &flowspec_withdrawn {
             self.forget_flowspec(key);
