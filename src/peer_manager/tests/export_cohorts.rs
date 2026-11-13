@@ -3173,3 +3173,141 @@ async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
         "the refused second batch restores all 250 captured members, then the cohort"
     );
 }
+
+/// A rollback partition that restored renews the shared rollback budget for
+/// the partition after it. The remainder partition here restores through
+/// three 50 s paced commands, ending 150 s into the rollback and past the
+/// 120 s budget anchored at its first command; the cohort partition's
+/// restore batch then takes another 60 s. Both partitions restore and the
+/// rollback is exact. Without the renewal the cohort partition's wait would
+/// start already expired and report a timeout although the RIB answered
+/// every command.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the paced RIB stub, both rollback partitions and the timing proof"
+)]
+async fn restored_rollback_partition_renews_the_budget_for_the_next_partition() {
+    let peer = |last| IpAddr::V4(Ipv4Addr::new(10, 39, 7, last));
+    let cohort = [1, 2, 3, 4].map(peer);
+    let pair = [5, 6, 7].map(peer);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let rib_task = tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        let mut seen: Vec<(&'static str, Vec<IpAddr>, u64)> = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            let at = started.elapsed().as_secs();
+            match update {
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    let _ = reply.send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "force cross-partition rollback",
+                    )));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let members = replacement_addrs(&replacements);
+                    let is_cohort = members == cohort;
+                    seen.push(("batch", members, at));
+                    if is_cohort {
+                        // The second partition: one slow shared batch.
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        let _ = reply.send(Ok(restored_receipts(&replacements)));
+                    } else {
+                        // The first partition: every member is handed to the
+                        // paced restore.
+                        let _ = reply.send(Ok(replacements
+                            .iter()
+                            .rev()
+                            .map(|replacement| {
+                                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Deferred {
+                                    peer: replacement.peer,
+                                }
+                            })
+                            .collect()));
+                    }
+                }
+                RibUpdate::RestorePacedExportPolicies {
+                    replacements,
+                    reply,
+                    ..
+                } => {
+                    seen.push(("paced", replacement_addrs(&replacements), at));
+                    tokio::time::sleep(Duration::from_secs(50)).await;
+                    // One member restored per command.
+                    let _ = reply.send(Ok(rustbgpd_rib::PacedApplyOutcome {
+                        pending: replacements[1..]
+                            .iter()
+                            .map(|replacement| replacement.peer)
+                            .collect(),
+                        skipped: Vec::new(),
+                        applied: 1,
+                        cost: None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        seen
+    });
+    let mut manager = test_peer_manager();
+    manager.rib_tx = rib_tx;
+    let installs = Arc::new(AtomicUsize::new(0));
+    let all: Vec<IpAddr> = cohort.into_iter().chain(pair).collect();
+    for &address in &all {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            established_export_policy_test_session(address, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    let started = tokio::time::Instant::now();
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            all.iter()
+                .map(|&address| export_pair_target(address, usize::from(pair.contains(&address))))
+                .collect(),
+        )
+        .await;
+    let elapsed = started.elapsed();
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("force cross-partition rollback")
+                && error.contains("already-applied peers restored")
+                && error.contains("committed cohort restored")
+                && !error.contains("policy_rollback_batch_timeout")
+        }),
+        "both partitions restored, so the rollback must be exact: {result:?}"
+    );
+    assert_eq!(
+        elapsed,
+        Duration::from_secs(210),
+        "three 50 s paced commands, then the cohort's 60 s batch"
+    );
+    for &address in &all {
+        let state = manager.peers.get(&key(address)).unwrap();
+        assert!(
+            state.export_policy.is_none() && !state.pending_export_apply,
+            "{address} must finish on its prior export policy with no retry intent"
+        );
+        manager.delete_peer(key(address), false).await.unwrap();
+    }
+    drop(manager);
+    assert_eq!(
+        rib_task.await.unwrap(),
+        vec![
+            ("batch", pair.to_vec(), 0),
+            ("paced", vec![pair[2]], 0),
+            ("paced", vec![pair[1], pair[0]], 50),
+            ("paced", vec![pair[0]], 100),
+            // 150 s into the rollback, past the budget its first command
+            // anchored.
+            ("batch", cohort.to_vec(), 150),
+        ]
+    );
+}
