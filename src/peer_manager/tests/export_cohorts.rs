@@ -1971,13 +1971,14 @@ async fn authoritative_remainder_batches_each_shared_export_pair() {
         commands,
         vec![
             ("cohort", cohort.to_vec()),
-            // The single keeps its place in the caller-order walk; the pairs'
-            // RIB steps follow it, one batch each.
-            ("single", vec![single]),
+            // Units run in the caller's order of their first target: each
+            // pair where its first member stands, its later members pulled
+            // forward into its one batch, then the single in its own place.
             ("batch", pair_b.to_vec()),
             ("batch", pair_c.to_vec()),
+            ("single", vec![single]),
         ],
-        "one RIB command per shared export pair, not one per member"
+        "one RIB command per shared export pair, not one per member, in first-target order"
     );
 }
 
@@ -2772,7 +2773,8 @@ async fn remainder_pair_deferred_refresh_failure_rolls_the_walk_back() {
 
 /// One export-only snapshot whose remainder is one shared pair of 250
 /// members behind a cohort of 251. Returns the snapshot result, the cohort,
-/// the pair and the RIB commands; the pair's batch that starts at member
+/// the pair, the RIB commands and the session installs of the pair's third
+/// batch (members 200 and later); the pair's batch that starts at member
 /// `fail_batch_from` is refused.
 async fn run_large_remainder_pair(
     fail_batch_from: Option<usize>,
@@ -2781,6 +2783,7 @@ async fn run_large_remainder_pair(
     Vec<IpAddr>,
     Vec<IpAddr>,
     RecordedRibCommands,
+    usize,
 ) {
     let peer = |index: usize| {
         IpAddr::V4(Ipv4Addr::new(
@@ -2829,11 +2832,17 @@ async fn run_large_remainder_pair(
     let mut manager = test_peer_manager();
     manager.rib_tx = rib_tx;
     let installs = Arc::new(AtomicUsize::new(0));
+    let third_batch_installs = Arc::new(AtomicUsize::new(0));
     for &address in cohort.iter().chain(&pair) {
+        let installs = if pair[200..].contains(&address) {
+            &third_batch_installs
+        } else {
+            &installs
+        };
         insert_test_managed_peer(
             &mut manager,
             address,
-            established_export_policy_test_session(address, Arc::clone(&installs), None),
+            established_export_policy_test_session(address, Arc::clone(installs), None),
             false,
         );
     }
@@ -2850,18 +2859,29 @@ async fn run_large_remainder_pair(
         manager.delete_peer(key(address), false).await.unwrap();
     }
     drop(manager);
-    (result, cohort, pair, rib_task.await.unwrap())
+    (
+        result,
+        cohort,
+        pair,
+        rib_task.await.unwrap(),
+        third_batch_installs.load(Ordering::SeqCst),
+    )
 }
 
 /// A shared pair larger than `PAIR_BATCH_MEMBERS` is sent as several RIB
-/// batches in caller order, so no one batch turn grows with the pair; a
-/// failure in a later batch restores every captured member of the pair,
-/// whichever batch it was in, including the members of a batch that was
-/// never sent.
+/// batches in caller order, so no one batch turn grows with the pair. Each
+/// batch's session legs run just ahead of it, not ahead of the walk: a
+/// failure in a later batch restores the members of the batches reached,
+/// and the sessions of a batch the walk never reached were never given the
+/// candidate chain.
 #[tokio::test]
 async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
-    let (result, _, pair, commands) = run_large_remainder_pair(None).await;
+    let (result, _, pair, commands, third_batch_installs) = run_large_remainder_pair(None).await;
     result.expect("a 250-member pair commits");
+    assert_eq!(
+        third_batch_installs, 50,
+        "each of the third batch's 50 sessions takes the candidate export chain once"
+    );
     assert_eq!(
         commands,
         vec![
@@ -2872,7 +2892,8 @@ async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
         "a 250-member pair takes three batches of at most 100 members, in caller order"
     );
 
-    let (result, cohort, pair, commands) = run_large_remainder_pair(Some(100)).await;
+    let (result, cohort, pair, commands, third_batch_installs) =
+        run_large_remainder_pair(Some(100)).await;
     assert!(
         result.as_ref().is_err_and(|error| {
             error.contains("batch refused")
@@ -2886,9 +2907,15 @@ async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
         vec![
             ("batch", pair[..100].to_vec()),
             ("batch", pair[100..200].to_vec()),
-            ("restore", pair),
+            ("restore", pair[..200].to_vec()),
             ("restore", cohort),
         ],
-        "the refused second batch restores all 250 captured members, then the cohort"
+        "the refused second batch restores the 200 members of the two batches reached, then the cohort"
+    );
+    // LOAD-BEARING: running every member's session legs ahead of the first
+    // batch hot-applies these 50 sessions and then has to restore them.
+    assert_eq!(
+        third_batch_installs, 0,
+        "the third batch's sessions were never hot-applied: the walk failed before reaching them"
     );
 }

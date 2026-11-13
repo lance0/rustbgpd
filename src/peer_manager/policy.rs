@@ -1615,18 +1615,22 @@ impl PeerManager {
         }
     }
 
-    /// Apply targets in their supplied order. This is the authoritative
-    /// transaction used for an unpartitioned snapshot and for a partition's
-    /// stable remainder. It never recursively selects a cohort.
+    /// Apply targets as units, in the supplied order of each unit's first
+    /// target. This is the authoritative transaction used for an
+    /// unpartitioned snapshot and for a partition's stable remainder. It
+    /// never recursively selects a cohort.
     ///
-    /// A target whose export pair is its own is applied whole, one peer at a
-    /// time: session legs, its `ReplacePeerExportPolicy` RIB step, its Route
-    /// Refresh. Established targets that share an export pair run only their
-    /// session legs in that walk. Their RIB steps then go, one pair at a
-    /// time, through the batch entry point the cohort handoff uses, so the
-    /// RIB shares the destination build and the old-to-new delta across the
-    /// pair instead of resyncing a full table per member; their Route
-    /// Refreshes follow that pair's commit. Every RIB command of
+    /// A target whose export pair is its own is a unit applied whole: session
+    /// legs, its `ReplacePeerExportPolicy` RIB step, its Route Refresh. The
+    /// targets that share an export pair run together where the pair's first
+    /// member stands, in groups of at most `PAIR_BATCH_MEMBERS`, and a group
+    /// is a unit too: its members' session legs, then their RIB steps as one
+    /// batch through the entry point the cohort handoff uses, so the RIB
+    /// shares the destination build and the old-to-new delta across the
+    /// group instead of resyncing a full table per member, then their Route
+    /// Refreshes. A session therefore holds the candidate chains ahead of its
+    /// RIB step and refresh for one unit, not for the walk, and a failure has
+    /// touched only the sessions of the units reached. Every RIB command of
     /// the walk shares the transaction's forward budget.
     #[expect(
         clippy::too_many_lines,
@@ -1641,101 +1645,120 @@ impl PeerManager {
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         let pair_of = self.shared_export_pairs(&targets);
+        // The order rule: units run in the caller's order of each unit's
+        // first target. A target that keeps the per-peer command is a unit
+        // of its own; the members of a shared export pair run together, in
+        // caller order, where the pair's first member stands.
+        let mut units: Vec<(Option<usize>, Vec<ResolvedPeerPolicy>)> = Vec::new();
+        for (target, pair) in targets.into_iter().zip(pair_of) {
+            match pair.and_then(|pair| units.iter_mut().find(|(unit, _)| *unit == Some(pair))) {
+                Some((_, members)) => members.push(target),
+                None => units.push((pair, vec![target])),
+            }
+        }
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
-        // Deferred RIB steps: (export pair, index into `applied`, plan).
-        let mut planned: Vec<(usize, usize, PolicyRollbackPeerPlan)> = Vec::new();
-        for (target, pair) in targets.into_iter().zip(pair_of) {
-            let peer_key = PeerKey::new(target.address, target.interface.clone());
-            let prior = {
-                let Some(managed) = self.peers.get(&peer_key) else {
-                    // Not currently live — skip; absent from returned priors.
-                    continue;
+        // A pair goes in groups of at most `PAIR_BATCH_MEMBERS`, and each
+        // group completes before the next starts: its members' session legs,
+        // its RIB batch, then its Route Refreshes. A failure therefore finds
+        // the candidate chains only on the sessions of the groups reached so
+        // far, and `applied` holds exactly those.
+        let groups: Vec<(Option<usize>, &[ResolvedPeerPolicy])> = units
+            .iter()
+            .flat_map(|(pair, members)| {
+                members
+                    .chunks(PAIR_BATCH_MEMBERS)
+                    .map(move |group| (*pair, group))
+            })
+            .collect();
+        for (pair, group) in groups {
+            // This group's deferred RIB steps: (index into `applied`, plan).
+            let mut planned: Vec<(usize, PolicyRollbackPeerPlan)> = Vec::new();
+            for target in group {
+                let peer_key = PeerKey::new(target.address, target.interface.clone());
+                let prior = {
+                    let Some(managed) = self.peers.get(&peer_key) else {
+                        // Not currently live — skip; absent from returned priors.
+                        continue;
+                    };
+                    CapturedResolvedPolicy {
+                        policy: ResolvedPeerPolicy {
+                            address: target.address,
+                            interface: target.interface.clone(),
+                            import_policy: managed.import_policy.clone(),
+                            export_policy: managed.export_policy.clone(),
+                        },
+                        pending_refresh: managed.pending_refresh,
+                        pending_export_apply: managed.pending_export_apply,
+                        adj_rib_in_may_have_moved: false,
+                        known_down: managed.policy_known_down,
+                    }
                 };
-                CapturedResolvedPolicy {
-                    policy: ResolvedPeerPolicy {
-                        address: target.address,
-                        interface: target.interface.clone(),
-                        import_policy: managed.import_policy.clone(),
-                        export_policy: managed.export_policy.clone(),
-                    },
-                    pending_refresh: managed.pending_refresh,
-                    pending_export_apply: managed.pending_export_apply,
-                    adj_rib_in_may_have_moved: false,
-                    known_down: managed.policy_known_down,
-                }
-            };
-            applied.push(prior);
-            let applied_idx = applied.len() - 1;
-            let mut plan = None;
-            if let Err(apply_error) = self
-                .update_runtime_policies_for_peer_key(
-                    peer_key.clone(),
-                    target.import_policy.clone(),
-                    target.export_policy.clone(),
-                    RefreshFailureHandling::Fatal,
-                    pair.map(|_| &mut plan),
-                    require_clean_convergence.then_some(&mut context.clean_state_window),
-                    Some(&mut context.forward),
-                    context.operator_reads,
-                )
-                .await
-            {
-                // A failure at the Route Refresh step may have left one family
-                // already re-requested under the candidate chain, so this
-                // peer's rollback owes a refresh back even though its forward
-                // apply did not complete.
-                applied[applied_idx].adj_rib_in_may_have_moved = apply_error.refresh_delivery_began;
-                return Err(self
-                    .fail_authoritative_walk(
-                        applied,
-                        context,
-                        require_clean_convergence,
-                        target.address,
-                        &apply_error,
+                applied.push(prior);
+                let applied_idx = applied.len() - 1;
+                let mut plan = None;
+                if let Err(apply_error) = self
+                    .update_runtime_policies_for_peer_key(
+                        peer_key.clone(),
+                        target.import_policy.clone(),
+                        target.export_policy.clone(),
+                        RefreshFailureHandling::Fatal,
+                        pair.map(|_| &mut plan),
+                        require_clean_convergence.then_some(&mut context.clean_state_window),
+                        Some(&mut context.forward),
+                        context.operator_reads,
                     )
-                    .await);
+                    .await
+                {
+                    // A failure at the Route Refresh step may have left one family
+                    // already re-requested under the candidate chain, so this
+                    // peer's rollback owes a refresh back even though its forward
+                    // apply did not complete.
+                    applied[applied_idx].adj_rib_in_may_have_moved =
+                        apply_error.refresh_delivery_began;
+                    return Err(self
+                        .fail_authoritative_walk(
+                            applied,
+                            context,
+                            require_clean_convergence,
+                            target.address,
+                            &apply_error,
+                        )
+                        .await);
+                }
+                // A planned peer has fired no refresh yet: its flag is set once
+                // its deferred refresh step has run.
+                applied[applied_idx].adj_rib_in_may_have_moved = plan.is_none();
+                if let Some(plan) = plan {
+                    planned.push((applied_idx, plan));
+                }
+                // The apply classified the peer from its state query outcome; its verdict is
+                // authoritative for the convergence-debt scan and adds no extra
+                // session round trip.
+                applied[applied_idx].known_down = self
+                    .peers
+                    .get(&peer_key)
+                    .is_some_and(|managed| managed.policy_known_down);
+                self.drain_operator_queries(context.operator_reads).await;
             }
-            // A planned peer has fired no refresh yet: its flag is set once
-            // its deferred refresh step has run.
-            applied[applied_idx].adj_rib_in_may_have_moved = plan.is_none();
-            if let (Some(pair), Some(plan)) = (pair, plan) {
-                planned.push((pair, applied_idx, plan));
+            if planned.is_empty() {
+                continue;
             }
-            // The apply classified the peer from its state query outcome; its verdict is
-            // authoritative for the convergence-debt scan and adds no extra
-            // session round trip.
-            applied[applied_idx].known_down = self
-                .peers
-                .get(&peer_key)
-                .is_some_and(|managed| managed.policy_known_down);
-            self.drain_operator_queries(context.operator_reads).await;
-        }
-
-        // The deferred RIB steps, one shared export pair at a time in
-        // first-occurrence order, each pair in batches of at most
-        // `PAIR_BATCH_MEMBERS`: a later batch's members join the destination
-        // group the first one built. A failure leaves it unknown which of
-        // that batch's members the RIB moved; the rollback restores every
-        // captured prior either way, including members whose batch was never
-        // sent, since a member can register with the RIB mid-walk and that
-        // registration installs the chain its session already holds.
-        let mut pairs: Vec<usize> = planned.iter().map(|(pair, _, _)| *pair).collect();
-        pairs.sort_unstable();
-        pairs.dedup();
-        for pair in pairs {
-            let members: Vec<&(usize, usize, PolicyRollbackPeerPlan)> = planned
-                .iter()
-                .filter(|(member, _, _)| *member == pair)
-                .collect();
-            for batch in members.chunks(PAIR_BATCH_MEMBERS) {
-                let peer_keys: Vec<PeerKey> = batch
+            // The group's deferred RIB steps as one batch: a later group of
+            // the pair joins the destination group the first one built. A
+            // failure leaves it unknown which of the batch's members the RIB
+            // moved; the rollback restores every captured prior either way,
+            // since a member can also register with the RIB mid-walk and
+            // that registration installs the chain its session already
+            // holds.
+            {
+                let peer_keys: Vec<PeerKey> = planned
                     .iter()
-                    .map(|(_, _, plan)| plan.peer_key.clone())
+                    .map(|(_, plan)| plan.peer_key.clone())
                     .collect();
-                let replacements: Vec<PeerExportPolicyReplacement> = batch
+                let replacements: Vec<PeerExportPolicyReplacement> = planned
                     .iter()
-                    .map(|(_, _, plan)| PeerExportPolicyReplacement {
+                    .map(|(_, plan)| PeerExportPolicyReplacement {
                         peer: self.rib_peer_of(&plan.peer_key),
                         export_policy: plan
                             .export_restore
@@ -1769,11 +1792,15 @@ impl PeerManager {
                         .await);
                 }
             }
-            // This pair's Route Refreshes follow its own commit, not the
-            // whole walk: until a member's refresh, its `AdjRibIn` holds
-            // routes accepted under the old import chain. They are deferred
-            // past the RIB step exactly as the cohort defers its members'.
-            for (_, applied_idx, plan) in members {
+            // The group's Route Refreshes follow its own commit, not the
+            // pair's or the walk's: until a member's refresh, its `AdjRibIn`
+            // holds routes accepted under the old import chain. They are
+            // deferred past the RIB step exactly as the cohort defers its
+            // members'. A refresh between two groups of one pair is the same
+            // event as one between two pairs: the routes it re-admits reach
+            // a member still awaiting its batch under the old export chain,
+            // and that member's batch then moves it on the delta.
+            for (applied_idx, plan) in &planned {
                 if plan.refresh_failure.is_some()
                     && let Err(apply_error) = self
                         .dispatch_deferred_refresh(
