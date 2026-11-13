@@ -489,6 +489,12 @@ impl PeerManager {
                 let accepted_dynamic_range = range.accepted_attribution();
                 let mut accepted_tcp_ao_keyring = range.tcp_ao.clone();
                 let dynamic_peer_key = PeerKey::new(peer_ip, None);
+                // Its retirement keeps a latched peer, disabled, so this only
+                // closes the window while that retirement is in progress.
+                if self.session_crash_latched(&dynamic_peer_key) {
+                    info!(peer = %peer_ip, "dynamic neighbor latched disabled after repeated session-task crashes, dropping");
+                    return;
+                }
 
                 // Resolve the dynamic neighbor config from the peer group
                 // `remote_asn` here is the range's configured value, so an

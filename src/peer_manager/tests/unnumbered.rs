@@ -7817,3 +7817,23 @@ async fn inbound_learning_whose_mailbox_fills_after_its_rebind_still_binds() {
     assert_eq!(dropped(&h, "rib_cleanup_pending"), 0.0);
     assert_eq!(dropped(&h, "unconfigured"), 0.0);
 }
+
+/// A crashed session task of an interface-only neighbor goes down like any
+/// session that falls to Idle: discovery hears that the binding's session
+/// failed, and the port no longer counts it as established.
+/// Red proof: replacing the crashed primary without noting the idle session
+/// reports nothing.
+#[tokio::test]
+async fn a_crashed_session_task_reports_the_binding_down_to_discovery() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.drain();
+
+    let crash = super::session_crash::install_crashing_primary(&mut h.mgr, &key);
+    super::session_crash::crash_primary(&mut h.mgr, crash).await;
+
+    assert_eq!(h.drain(), [Command::SessionFailed("swp1".into())]);
+}

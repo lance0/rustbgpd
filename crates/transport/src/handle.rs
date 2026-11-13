@@ -355,7 +355,9 @@ pub enum SessionNotification {
     /// The session task ended without a shutdown request: it panicked, or
     /// its run loop returned an error. The task sends this after the
     /// session's drop has queued its RIB and BMP hand-off. A task canceled
-    /// by an abort sends nothing: whoever aborted it already owns it.
+    /// by an abort sends nothing: whoever aborted it already owns it. No run
+    /// loop path returns an error today; one that does later is a crash
+    /// here, not a silent stop.
     TaskExited {
         /// Peer-manager scoped session generation.
         session_id: u64,

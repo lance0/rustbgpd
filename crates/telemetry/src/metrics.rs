@@ -4814,6 +4814,15 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Export this exact peer's session-task crash counter, at 0 when it has
+    /// none yet, so the first crash is an increase.
+    pub fn seed_session_task_crashes(&self, peer: &str, interface: &str) {
+        let _ = self
+            .0
+            .session_task_crashes
+            .with_label_values(&[peer, interface]);
+    }
+
     /// Publish the configured identity of one exact `(peer, interface)` peer
     /// for `group_left` joins from dashboards and alert rules.
     ///

@@ -850,7 +850,7 @@ impl PeerManager {
             self.current_config.rfc8212_posture().policy_effective,
         );
         info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
-        apply_session_crash(&mut info, managed.session_crashes().last_error.as_deref());
+        apply_session_crash(&mut info, self.session_crash_error(peer));
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
@@ -882,7 +882,7 @@ impl PeerManager {
                 self.current_config.rfc8212_posture().policy_effective,
             );
             info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
-            apply_session_crash(&mut info, managed.session_crashes().last_error.as_deref());
+            apply_session_crash(&mut info, self.session_crash_error(peer));
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
@@ -1017,7 +1017,7 @@ impl PeerManager {
                         info
                     },
                     md5_configured: managed.transport_config.md5_password.is_some(),
-                    crash: managed.session_crashes().last_error.clone(),
+                    crash: self.session_crash_error(peer).map(str::to_owned),
                     latch: self
                         .max_prefix_latches
                         .get(peer)

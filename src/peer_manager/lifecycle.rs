@@ -359,6 +359,9 @@ impl PeerManager {
             interface,
             self.max_prefix_latches.contains_key(peer),
         );
+        // At 0 before the first crash, so `increase()` sees that one too.
+        self.metrics
+            .seed_session_task_crashes(&peer_label, interface);
         self.metrics
             .set_peer_session_established(&peer_label, interface, false);
         self.metrics
@@ -590,14 +593,17 @@ impl PeerManager {
                 latch.generation == generation
                     && latch.deadline.is_some_and(|deadline| deadline <= now)
             });
-            let peer_matches = self.peers.get(&peer).is_some_and(|managed| {
-                !managed.enabled
-                    && managed.pending_inbound.is_none()
-                    && managed.max_prefix_restart_seconds.is_some()
-                    && (!managed.is_dynamic
-                        || self.dynamic_peer_still_allowed_by_current_ranges(managed))
-                    && self.dynamic_restart_policy_still_current(managed)
-            });
+            // A session-crash latch holds until explicit enable: the
+            // hold-down's one automatic restart must not lift it.
+            let peer_matches = !self.session_crash_latched(&peer)
+                && self.peers.get(&peer).is_some_and(|managed| {
+                    !managed.enabled
+                        && managed.pending_inbound.is_none()
+                        && managed.max_prefix_restart_seconds.is_some()
+                        && (!managed.is_dynamic
+                            || self.dynamic_peer_still_allowed_by_current_ranges(managed))
+                        && self.dynamic_restart_policy_still_current(managed)
+                });
             if !latch_matches || !peer_matches {
                 let _ = self.invalidate_max_prefix_restart_without_recompute(&peer);
                 continue;
@@ -1045,7 +1051,10 @@ impl PeerManager {
         emit_presence: bool,
     ) -> Result<(), PeerLifecycleError> {
         let peer_key = PeerKey::new(config.address, config.interface.clone());
-        let enabled = enabled && !self.max_prefix_latches.contains_key(&peer_key);
+        // A reconfigure replaces the peer; neither latch is lifted by it.
+        let enabled = enabled
+            && !self.max_prefix_latches.contains_key(&peer_key)
+            && !self.session_crash_latched(&peer_key);
         let is_link_local = matches!(config.address, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
         match (is_link_local, config.interface.as_ref()) {
             (true, None) => {
@@ -2697,6 +2706,7 @@ impl PeerManager {
             // crossed max-prefix while it was being joined. Reconfigure keeps
             // the latch for the replacement generation.
             self.remove_max_prefix_latch(&peer);
+            self.clear_session_crashes(&peer);
         }
         if shutdown.joined() {
             info!(peer = %address, "peer deleted");
@@ -2999,9 +3009,7 @@ impl PeerManager {
         self.publish_peer_admin_enabled_metric(&peer, true);
         self.remove_max_prefix_latch(&peer);
         // Enable is also the recovery from a session-crash latch.
-        if let Some(crashes) = self.peers.session_crashes_mut(&peer) {
-            *crashes = super::peer_table::SessionCrashes::default();
-        }
+        self.clear_session_crashes(&peer);
         self.publish_peer_lifecycle_event(
             &peer,
             SessionLifecycleEventType::PeerEnabled,
