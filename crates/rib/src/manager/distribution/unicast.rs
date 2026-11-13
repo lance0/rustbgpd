@@ -15,6 +15,7 @@ use super::{
     validate_route_rpki,
 };
 use crate::PeerId;
+use crate::fast_hash::FastSet;
 use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::update::InjectOutcome;
 
@@ -1713,7 +1714,11 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let mut affected = HashSet::new();
+        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
+        // and holds at most that chunk's NLRI, so a peer crafting colliding
+        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
+        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected = FastSet::default();
         let mut removed = 0;
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
@@ -1812,7 +1817,11 @@ impl RibManager {
         );
         let aspa_contexts =
             matches!(aspa, Revalidation::With(Some(_))).then(crate::route::AspaContextId::snapshot);
-        let mut affected = HashSet::new();
+        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
+        // and holds at most that chunk's NLRI, so a peer crafting colliding
+        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
+        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected = FastSet::default();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut replaced = 0;
 

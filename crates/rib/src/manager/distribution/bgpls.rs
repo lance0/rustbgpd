@@ -221,9 +221,9 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "family selection, checkpointed staging, and commit retain their shared mutation order"
     )]
-    pub(in crate::manager) fn recompute_and_distribute_bgpls(
+    pub(in crate::manager) fn recompute_and_distribute_bgpls<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<crate::route::BgpLsRouteKey>,
+        affected: &HashSet<crate::route::BgpLsRouteKey, S>,
     ) {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {

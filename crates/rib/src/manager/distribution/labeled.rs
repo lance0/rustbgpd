@@ -735,9 +735,9 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "labeled recompute keeps loc-rib selection and per-peer ORR/Add-Path staging together"
     )]
-    pub(in crate::manager) fn recompute_and_distribute_labeled(
+    pub(in crate::manager) fn recompute_and_distribute_labeled<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<LabeledRibRouteKey>,
+        affected: &HashSet<LabeledRibRouteKey, S>,
         source: Option<super::ReceiveSource>,
     ) {
         let readiness = self.replacement_readiness.clone();

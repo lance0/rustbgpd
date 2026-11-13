@@ -8,7 +8,7 @@
 use crate::PeerId;
 use crate::fast_hash::ShardedMap;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 use std::mem::size_of;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1074,9 +1074,9 @@ impl RibManager {
     }
 
     /// An empty input retains nothing, so it opens no readiness owner.
-    fn with_deferred_selection_recording<T>(
+    fn with_deferred_selection_recording<T, S: BuildHasher>(
         &mut self,
-        affected: &HashSet<T>,
+        affected: &HashSet<T, S>,
         work: impl FnOnce(&mut Self),
     ) {
         if affected.is_empty() || !self.deferred_selection_recording_active() {
@@ -1103,16 +1103,19 @@ impl RibManager {
         }
     }
 
-    pub(super) fn record_deferred_unicast(&mut self, affected: &HashSet<rustbgpd_wire::Prefix>) {
+    pub(super) fn record_deferred_unicast<S: BuildHasher>(
+        &mut self,
+        affected: &HashSet<rustbgpd_wire::Prefix, S>,
+    ) {
         self.with_deferred_selection_recording(affected, |manager| {
             manager
                 .record_deferred_unicast_bounded(affected, manager.deferred_selection_keys.limits);
         });
     }
 
-    fn record_deferred_unicast_bounded(
+    fn record_deferred_unicast_bounded<S: BuildHasher>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::Prefix>,
+        affected: &HashSet<rustbgpd_wire::Prefix, S>,
         limits: DeferredSelectionLimits,
     ) {
         let Some(selection) = self
@@ -1194,7 +1197,10 @@ impl RibManager {
         });
     }
 
-    pub(super) fn record_deferred_evpn(&mut self, affected: &HashSet<rustbgpd_wire::EvpnRouteKey>) {
+    pub(super) fn record_deferred_evpn<S: BuildHasher>(
+        &mut self,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
+    ) {
         self.with_deferred_selection_recording(affected, |manager| {
             if manager.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
                 let readiness = manager.replacement_readiness.clone();
@@ -1224,7 +1230,10 @@ impl RibManager {
         });
     }
 
-    pub(super) fn record_deferred_vpn(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
+    pub(super) fn record_deferred_vpn<S: BuildHasher>(
+        &mut self,
+        affected: &HashSet<crate::route::VpnRibRouteKey, S>,
+    ) {
         self.with_deferred_selection_recording(affected, |manager| {
             let Some(selection) = manager
                 .selection_deferral
@@ -1264,9 +1273,9 @@ impl RibManager {
         });
     }
 
-    pub(super) fn record_deferred_labeled(
+    pub(super) fn record_deferred_labeled<S: BuildHasher>(
         &mut self,
-        affected: &HashSet<crate::route::LabeledRibRouteKey>,
+        affected: &HashSet<crate::route::LabeledRibRouteKey, S>,
     ) {
         self.with_deferred_selection_recording(affected, |manager| {
             let Some(selection) = manager
@@ -1307,9 +1316,9 @@ impl RibManager {
         });
     }
 
-    pub(super) fn record_deferred_bgpls(
+    pub(super) fn record_deferred_bgpls<S: BuildHasher>(
         &mut self,
-        affected: &HashSet<crate::route::BgpLsRouteKey>,
+        affected: &HashSet<crate::route::BgpLsRouteKey, S>,
     ) {
         self.with_deferred_selection_recording(affected, |manager| {
             let Some(selection) = manager

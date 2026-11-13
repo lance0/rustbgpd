@@ -32,7 +32,7 @@ mod peer_lifecycle;
 mod queries;
 mod replacement_summaries;
 use crate::PeerId;
-use crate::fast_hash::ShardedMap;
+use crate::fast_hash::{FastSet, ShardedMap};
 use peer_lifecycle::{PeerUpRegistration, SessionTeardownDisposition};
 mod route_refresh;
 mod selection_deferral;
@@ -6552,7 +6552,11 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let mut affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
+        // FxHash, not SipHash: this set lives for one UPDATE and holds at
+        // most that message's NLRI, so a peer crafting colliding keys slows
+        // only its own UPDATE, by a bounded amount. Same tradeoff as the
+        // route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected: FastSet<crate::route::BgpLsRouteKey> = FastSet::default();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut displaced = 0usize;
         // Selection reconsiders every announced key; the ORR cache is owed a
@@ -6625,7 +6629,11 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let mut affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        // FxHash, not SipHash: this set lives for one UPDATE and holds at
+        // most that message's NLRI, so a peer crafting colliding keys slows
+        // only its own UPDATE, by a bounded amount. Same tradeoff as the
+        // route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected: FastSet<crate::route::VpnRibRouteKey> = FastSet::default();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut displaced = 0usize;
         let source = distribution::ReceiveSource {
@@ -6698,7 +6706,11 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let mut affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
+        // FxHash, not SipHash: this set lives for one UPDATE and holds at
+        // most that message's NLRI, so a peer crafting colliding keys slows
+        // only its own UPDATE, by a bounded amount. Same tradeoff as the
+        // route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected: FastSet<crate::route::LabeledRibRouteKey> = FastSet::default();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut displaced = 0usize;
         let source = distribution::ReceiveSource {

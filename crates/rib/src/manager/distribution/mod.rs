@@ -8671,10 +8671,10 @@ impl RibManager {
     /// 6. Challenger ties the best → only possible for the same peer/path
     ///    identity (case 2 covers that owner) and unreachable cross-peer →
     ///    conservative full rescan.
-    pub(super) fn recompute_best_after_announce(
+    pub(super) fn recompute_best_after_announce<S: std::hash::BuildHasher>(
         &mut self,
         peer: PeerId,
-        affected: &HashSet<Prefix>,
+        affected: &HashSet<Prefix, S>,
     ) -> HashSet<Prefix> {
         use std::cmp::Ordering;
 
@@ -8755,9 +8755,9 @@ impl RibManager {
     /// current best's own Adj-RIB-In entry still exists, the minimum of a
     /// shrunken set that still contains the old minimum is unchanged →
     /// skip. If the best was withdrawn (or no best exists), full rescan.
-    pub(super) fn recompute_best_after_withdraw(
+    pub(super) fn recompute_best_after_withdraw<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<Prefix>,
+        affected: &HashSet<Prefix, S>,
     ) -> HashSet<Prefix> {
         self.record_deferred_unicast(affected);
         let needs_full: HashSet<Prefix> = affected

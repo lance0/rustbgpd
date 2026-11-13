@@ -31,7 +31,12 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
-        let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
+        // and holds at most that chunk's NLRI, so a peer crafting colliding
+        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
+        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected: crate::fast_hash::FastSet<rustbgpd_wire::EvpnRouteKey> =
+            crate::fast_hash::FastSet::default();
         let mut removed_stale_count = 0usize;
         let evpn_len = {
             let rib = self
@@ -91,7 +96,12 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
-        let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        // FxHash, not SipHash: this set lives for one chunk of one UPDATE
+        // and holds at most that chunk's NLRI, so a peer crafting colliding
+        // keys slows only its own UPDATE, by a bounded amount. Same tradeoff
+        // as the route maps (`adj_rib_in` rationale, ADR-0098 item 7).
+        let mut affected: crate::fast_hash::FastSet<rustbgpd_wire::EvpnRouteKey> =
+            crate::fast_hash::FastSet::default();
         let mut removed_stale_count = 0usize;
         let mut replaced = 0usize;
         let evpn_len = {
@@ -741,9 +751,9 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
-    pub(in crate::manager) fn recompute_and_distribute_evpn(
+    pub(in crate::manager) fn recompute_and_distribute_evpn<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
     ) {
         self.recompute_and_distribute_evpn_inner(affected, false);
     }
@@ -752,9 +762,9 @@ impl RibManager {
     /// the private fanout parks at a receiver boundary once it has used the
     /// flush budget, in [`RibManager::pending_evpn_fanout`], and the route
     /// chunk queue finishes it before any later chunk or message.
-    pub(in crate::manager) fn recompute_and_distribute_evpn_paced(
+    pub(in crate::manager) fn recompute_and_distribute_evpn_paced<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
     ) {
         self.recompute_and_distribute_evpn_inner(affected, true);
     }
@@ -763,9 +773,9 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "one best-path pass preserves displaced group values until every owned and private consumer has admitted or captured OLD"
     )]
-    fn recompute_and_distribute_evpn_inner(
+    fn recompute_and_distribute_evpn_inner<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey, S>,
         paced: bool,
     ) {
         use crate::route::EvpnRibRoute;

@@ -804,9 +804,9 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "VPN recompute keeps the candidate choice, loc-rib selection and the Loc-RIB tap together"
     )]
-    pub(in crate::manager) fn recompute_and_distribute_vpn(
+    pub(in crate::manager) fn recompute_and_distribute_vpn<S: std::hash::BuildHasher>(
         &mut self,
-        affected: &HashSet<VpnRibRouteKey>,
+        affected: &HashSet<VpnRibRouteKey, S>,
         source: Option<super::ReceiveSource>,
     ) {
         let readiness = self.replacement_readiness.clone();
