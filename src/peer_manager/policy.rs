@@ -2686,6 +2686,10 @@ impl PeerManager {
         // interned-attr-equal replacements). Members whose import chain was
         // unchanged get no refresh at all, exactly as today.
         let deferred_refresh_started = Instant::now();
+        // The transition was one RIB wait with no seam: a dynamic member
+        // whose task ended during it is held here, before the first refresh
+        // probes its session.
+        self.serve_walk_events(&mut context.forward).await;
         for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
             if import_deltas[index]
                 && !self.adopt_policies_of_held_task_exit(
@@ -3429,6 +3433,10 @@ impl PeerManager {
         let mut errors: Vec<String> = Vec::new();
         let mut failure_code = None;
         let mut plans = Vec::new();
+        // The forward step that failed was a wait with no seam: a dynamic
+        // peer whose task ended during it is held here, before the first
+        // restore step probes its session.
+        self.serve_walk_events(&mut context.rollback).await;
         for prior in priors.into_iter().rev() {
             let address = prior.policy.address;
             let peer_key = PeerKey::new(address, prior.policy.interface.clone());
