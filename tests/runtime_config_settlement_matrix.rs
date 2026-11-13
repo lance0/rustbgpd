@@ -1806,6 +1806,52 @@ fn an_owned_mutation_in_flight_across_a_grpc_server_restart_reports_only_its_set
     daemon.assert_running();
 }
 
+/// A plan token issued before the gRPC server restarts is still good after
+/// it: the streamed-plan state belongs to the daemon, not to one run of the
+/// server. With a state per run the restarted server would not know the
+/// token and the apply would be refused.
+#[test]
+fn a_plan_token_issued_before_a_grpc_server_restart_applies_after_it() {
+    let _ = rbgp_binary();
+    let lab = Lab::new(MatrixRow::Apply, 0, 0x706c_616e);
+    let mut daemon = lab.spawn_with_env(
+        "plain",
+        false,
+        &[("RUSTBGPD_TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER", "1")],
+    );
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let grpc_tcp = bound_grpc_addr(&daemon.log()).expect("bound gRPC TCP listener");
+    let candidate = lab.candidate("planned-before-restart");
+    let (snapshot, plan) = lab.plan(&candidate);
+
+    let trigger = TcpStream::connect(grpc_tcp).expect("first gRPC TCP connection");
+    daemon.wait_log(
+        "gRPC server exited unexpectedly; restarting it in place",
+        "",
+    );
+    daemon.wait_log("gRPC server restarted", "");
+    drop(trigger);
+
+    let output = lab.run(&[
+        "--json",
+        "config",
+        "apply",
+        candidate.to_str().unwrap(),
+        "--expected-runtime-snapshot-token",
+        &snapshot,
+        "--plan-token",
+        &plan,
+    ]);
+    assert!(
+        output.status.success(),
+        "the plan token did not survive the restart\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    lab.assert_disk("planned-before-restart", true);
+    daemon.assert_running();
+}
+
 /// Row (c), signal first: the fence is observed before the held owner is
 /// released, so its later settlement attempt loses and the exit is still 70.
 fn escalation_row_signal_lands_first(ordinal: usize) {

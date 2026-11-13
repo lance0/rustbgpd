@@ -11,8 +11,9 @@
   `503 not ready: gRPC server is restarting`. Each exit or failed restart
   counts in `bgp_management_server_crashes_total{server="grpc"}`, exported at
   0. Requests in flight on connections that were already open run to their
-  own answer, and a runtime-config mutation that had begun still settles
-  under the settlement watchdog. A listener that cannot bind or start at
+  own answer, plan tokens issued before a restart stay valid after it, and a
+  runtime-config mutation that had begun still settles under the settlement
+  watchdog. A listener that cannot bind or start at
   startup still fails startup. See
   [gRPC server dies unexpectedly](../docs/reference/operations.md#grpc-server-dies-unexpectedly).
   **Operator-visible:** the daemon no longer exits 1 for the gRPC server, and

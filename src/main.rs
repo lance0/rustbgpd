@@ -7022,6 +7022,7 @@ async fn run<T>(
         stream_plan_runtime_state_directory: stream_plan_runtime_state_authority(
             runtime_state_directory.as_deref(),
         ),
+        stream_plan: rustbgpd_api::server::StreamPlanSlot::default(),
         config_mutation_gate: Some(config_mutation_gate.clone()),
         runtime_config_lock: runtime_config_lock.clone(),
         runtime_config_settlement: runtime_config_settlement.clone(),
