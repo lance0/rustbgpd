@@ -7,7 +7,8 @@
   collision candidate is retired as if its session went Idle. A third crash
   of the same neighbor within ten minutes, counted across restarts, dynamic
   reconnects and inbound candidates, latches it disabled instead until
-  `rbgp neighbor <peer> enable`; a reconfigure keeps the latch.
+  `rbgp neighbor <peer> enable`; a reconfigure, or an interface-only
+  neighbor's move to a new link-local address, keeps the latch.
   **Operator-visible:** the neighbor's `last_error` names the crash, its time
   and the panic message while the peer is latched or for ten minutes after
   the crash, and the new `bgp_session_task_crashes_total{peer,interface}`

@@ -1754,6 +1754,49 @@ async fn operator_and_max_prefix_state_survive_endpoint_retirement() {
     assert!(!h.mgr.max_prefix_latches.contains_key(&new));
 }
 
+/// A session-crash latch belongs to the neighbor too: a new learned
+/// address carries it, with its error, and leaves nothing under the old
+/// endpoint, so an enable at the new one lifts it for good.
+/// Red proof: leaving the record under the old endpoint's key binds the
+/// new one disabled without the latch or its error.
+#[tokio::test(start_paused = true)]
+async fn a_session_crash_latch_moves_with_a_new_learned_address() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let old = swp1_key(2);
+    for _ in 0..super::session_crash::SESSION_CRASH_LATCH {
+        let crash = super::session_crash::install_crashing_primary(&mut h.mgr, &old);
+        super::session_crash::crash_primary(&mut h.mgr, crash).await;
+    }
+    assert!(h.mgr.session_crash_latched(&old));
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&old));
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    let new = swp1_key(3);
+    assert!(!h.mgr.peers[&new].enabled);
+    assert!(h.mgr.session_crash_latched(&new), "carried");
+    assert!(!h.mgr.session_crash_latched(&old), "nothing left behind");
+    let info = h.mgr.get_peer_info(&new).await.unwrap();
+    assert!(
+        info.last_error.contains("latched disabled"),
+        "{}",
+        info.last_error
+    );
+
+    // Enabled at the new endpoint, the neighbor comes back enabled at the
+    // old one.
+    h.mgr.enable_peer(new.clone()).await.unwrap();
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.peers[&old].enabled);
+    assert!(!h.mgr.session_crash_latched(&old));
+}
+
 /// An operator disable alone (no latch) also survives a carrier flap.
 #[tokio::test]
 async fn an_operator_disable_survives_a_carrier_flap() {

@@ -8,7 +8,8 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_transport::{SessionIdentity, SessionTaskExitNotice, TransportError};
 use rustbgpd_wire::{Afi, Safi};
 
-use crate::peer_manager::notifications::{SESSION_CRASH_LATCH, SESSION_CRASH_WINDOW};
+pub(super) use crate::peer_manager::notifications::SESSION_CRASH_LATCH;
+use crate::peer_manager::notifications::SESSION_CRASH_WINDOW;
 
 const PEER: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -380,6 +381,36 @@ async fn a_reconfigure_keeps_the_crash_latch_and_its_error() {
     );
 }
 
+/// A reconfigure that clears the configured `admin_down` asks for the peer
+/// enabled; a crash latch still keeps it down, with its error.
+/// Red proof: without the latch check in `add_peer_impl` the reconfigured
+/// peer comes up enabled.
+#[tokio::test(start_paused = true)]
+async fn a_reconfigure_clearing_admin_down_keeps_a_crash_latched_peer_down() {
+    let mut mgr = test_peer_manager();
+    let mut config = make_config(PEER, 65002);
+    config.admin_down = Some("maintenance".to_string());
+    mgr.add_peer(config.clone(), false).await.unwrap();
+    assert!(!mgr.peers[&key(PEER)].enabled);
+    for _ in 0..SESSION_CRASH_LATCH {
+        let trigger = install_crashing_primary(&mut mgr, &key(PEER));
+        crash_primary(&mut mgr, trigger).await;
+    }
+    assert!(mgr.session_crash_latched(&key(PEER)));
+
+    config.admin_down = None;
+    mgr.reconfigure_peer(config).await.unwrap();
+
+    assert!(mgr.peers[&key(PEER)].admin_down.is_none());
+    assert!(!mgr.peers[&key(PEER)].enabled, "the crash latch holds");
+    let info = mgr.get_peer_info(&key(PEER)).await.unwrap();
+    assert!(
+        info.last_error.contains("latched disabled"),
+        "{}",
+        info.last_error
+    );
+}
+
 /// A dynamic peer is removed when its session ends and comes back as a new
 /// peer on reconnect. Its crash record is the manager's, so the third crash
 /// across reconnects latches it, and its retirement keeps it, disabled,
@@ -404,7 +435,24 @@ async fn a_dynamic_peer_that_crashes_on_every_reconnect_is_latched() {
     assert!(mgr.session_crash_latched(&key(PEER)));
     let managed = &mgr.peers[&key(PEER)];
     assert!(managed.is_dynamic && !managed.enabled, "kept, disabled");
+    let kept_id = managed.session_id();
     assert_eq!(crash_count(&mgr), Some(1.0), "the retained peer's series");
+
+    // The remote dials again: the retained, disabled peer refuses it.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server, remote) = listener.accept().await.unwrap();
+    let mut client = client.await.unwrap();
+    mgr.accept_inbound(server, remote, None, None).await;
+    let mut buf = [0_u8; 64];
+    let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+        .await
+        .expect("the refused connection closes");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    let managed = &mgr.peers[&key(PEER)];
+    assert!(!managed.enabled && managed.pending_inbound.is_none());
+    assert_eq!(managed.session_id(), kept_id);
 }
 
 /// The crash latch is final until enable: it retires a pending inbound
@@ -480,6 +528,13 @@ async fn a_max_prefix_restart_leaves_a_crash_latched_peer_down() {
     }
     assert!(mgr.session_crash_latched(&key(PEER)));
     mgr.install_max_prefix_latch(key(PEER), 0, "max-prefix limit exceeded".into(), Some(30));
+    // The crash latch's error names the recovery the neighbor waits for.
+    let info = mgr.get_peer_info(&key(PEER)).await.unwrap();
+    assert!(
+        info.last_error.contains("latched disabled"),
+        "{}",
+        info.last_error
+    );
 
     tokio::time::advance(Duration::from_secs(31)).await;
     mgr.handle_due_max_prefix_restarts().await;

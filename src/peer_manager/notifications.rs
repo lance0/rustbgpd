@@ -25,7 +25,7 @@ pub(super) const SESSION_CRASH_WINDOW: std::time::Duration = std::time::Duration
 /// the sessions it restarts, a reconfigure that replaces the peer, and a
 /// dynamic peer's removal and reconnect. Explicit enable or deleting the
 /// neighbor clears it; an unlatched record lapses with its window.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct SessionCrashes {
     /// When each crash within the window was handled, oldest first.
     recent: VecDeque<Instant>,
@@ -37,6 +37,11 @@ pub(super) struct SessionCrashes {
 }
 
 impl SessionCrashes {
+    /// Whether these crashes latched the neighbor disabled.
+    pub(super) fn latched(&self) -> bool {
+        self.latched
+    }
+
     /// Latched, or the latest crash is still within the window.
     fn current(&self, now: Instant) -> bool {
         self.latched
@@ -253,13 +258,25 @@ impl PeerManager {
             .is_some_and(|crashes| crashes.latched)
     }
 
-    /// The neighbor's `last_error` for its latest session-task crash, while
-    /// the peer is latched or that crash is within the window.
-    pub(super) fn session_crash_error(&self, peer: &PeerKey) -> Option<&str> {
+    /// The neighbor's `last_error` for its latest session-task crash, and
+    /// whether the crashes latched it, while the peer is latched or that
+    /// crash is within the window.
+    pub(super) fn session_crash_error(&self, peer: &PeerKey) -> Option<(&str, bool)> {
         self.session_crashes
             .get(peer)
             .filter(|crashes| crashes.current(Instant::now()))
-            .map(|crashes| crashes.last_error.as_str())
+            .map(|crashes| (crashes.last_error.as_str(), crashes.latched))
+    }
+
+    /// Take `peer`'s crash record, to carry an interface-only neighbor's to
+    /// its next endpoint, under a new key.
+    pub(super) fn take_session_crashes(&mut self, peer: &PeerKey) -> Option<SessionCrashes> {
+        self.session_crashes.remove(peer)
+    }
+
+    /// Install a carried crash record under the neighbor's new key.
+    pub(super) fn restore_session_crashes(&mut self, peer: &PeerKey, crashes: SessionCrashes) {
+        self.session_crashes.insert(peer.clone(), crashes);
     }
 
     /// Forget `peer`'s session-task crashes: an explicit enable, or the
@@ -270,7 +287,7 @@ impl PeerManager {
 
     /// Record one crash of `peer_key`'s session task and set its
     /// `last_error`. Returns the crashes within the window, whether this one
-    /// latches the peer, and the error.
+    /// latches the peer, and the error. `cause` is already scrubbed.
     fn record_session_crash(&mut self, peer_key: &PeerKey, cause: &str) -> (usize, bool, String) {
         let now = Instant::now();
         // Records outlive their peers (a dynamic peer reconnects under the
@@ -280,8 +297,6 @@ impl PeerManager {
         let unix_seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
-        // A panic message is arbitrary text: keep one bounded line of it.
-        let cause = rustbgpd_telemetry::metrics::scrub_info_label(cause);
         let crashes = self.session_crashes.entry(peer_key.clone()).or_default();
         while crashes
             .recent
@@ -388,6 +403,10 @@ impl PeerManager {
         cause: String,
         retirements: &mut Vec<NotificationRetirement>,
     ) {
+        // An error or panic message is arbitrary text: log and keep one
+        // bounded line of it.
+        let scrub = rustbgpd_telemetry::metrics::scrub_info_label;
+        let cause = scrub(&cause);
         let Some(peer_key) = self.peer_key_for_session(session_id) else {
             debug!(peer = %peer_addr, session_id, ?role, "ignoring task exit of unknown session");
             return;
@@ -439,7 +458,7 @@ impl PeerManager {
 
         self.note_unnumbered_session_idle(&peer_key);
         let panic = self.replace_unstoppable_primary(&peer_key).await;
-        let cause = panic.map_or(cause, |message| format!("panicked: {message}"));
+        let cause = panic.map_or(cause, |message| scrub(&format!("panicked: {message}")));
         let (count, latch, error) = self.record_session_crash(&peer_key, &cause);
 
         if latch {

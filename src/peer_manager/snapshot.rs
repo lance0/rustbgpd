@@ -451,11 +451,14 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
     info.slow_peer = state.slow_peer;
 }
 
-/// A session-task crash the manager handled is the neighbor's `last_error`
-/// until a session reports a newer error.
-fn apply_session_crash(info: &mut PeerInfo, crash: Option<&str>) {
-    if let Some(crash) = crash
-        && info.last_error.is_empty()
+/// A session-task crash the manager handled, as `(error, latched)`, is the
+/// neighbor's `last_error` when nothing else reports one. A crash latch
+/// overrides any other error, a max-prefix latch's included: it alone
+/// names the recovery the neighbor waits for. Applied after the max-prefix
+/// overlay.
+fn apply_session_crash(info: &mut PeerInfo, crash: Option<(&str, bool)>) {
+    if let Some((crash, latched)) = crash
+        && (latched || info.last_error.is_empty())
     {
         crash.clone_into(&mut info.last_error);
     }
@@ -489,7 +492,8 @@ pub(super) fn apply_max_prefix_latch(
 struct DetachedPeerRow {
     info: PeerInfo,
     md5_configured: bool,
-    crash: Option<String>,
+    /// The crash error and whether it latched the neighbor.
+    crash: Option<(String, bool)>,
     latch: Option<(String, Option<tokio::time::Instant>)>,
     /// `None` when the session's command channel had already closed.
     state: Option<oneshot::Receiver<PeerSessionState>>,
@@ -524,10 +528,15 @@ async fn complete_detached_list_peers(
             {
                 apply_session_state(&mut info, md5_configured, &state);
             }
-            apply_session_crash(&mut info, crash.as_deref());
             if let Some((error, deadline)) = &latch {
                 apply_max_prefix_latch(&mut info, error, *deadline);
             }
+            apply_session_crash(
+                &mut info,
+                crash
+                    .as_ref()
+                    .map(|(error, latched)| (error.as_str(), *latched)),
+            );
             infos.push(info);
         }
         infos
@@ -850,10 +859,10 @@ impl PeerManager {
             self.current_config.rfc8212_posture().policy_effective,
         );
         info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
-        apply_session_crash(&mut info, self.session_crash_error(peer));
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
+        apply_session_crash(&mut info, self.session_crash_error(peer));
         self.apply_configured_identity(&mut info, peer, &self.non_numeric_remote_asn_modes());
         Some(info)
     }
@@ -882,10 +891,10 @@ impl PeerManager {
                 self.current_config.rfc8212_posture().policy_effective,
             );
             info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
-            apply_session_crash(&mut info, self.session_crash_error(peer));
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
+            apply_session_crash(&mut info, self.session_crash_error(peer));
             self.apply_configured_identity(&mut info, peer, &modes);
             infos.push(info);
         }
@@ -1017,7 +1026,9 @@ impl PeerManager {
                         info
                     },
                     md5_configured: managed.transport_config.md5_password.is_some(),
-                    crash: self.session_crash_error(peer).map(str::to_owned),
+                    crash: self
+                        .session_crash_error(peer)
+                        .map(|(error, latched)| (error.to_owned(), latched)),
                     latch: self
                         .max_prefix_latches
                         .get(peer)
