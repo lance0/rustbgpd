@@ -122,6 +122,22 @@ fn sample_bgpls_route(peer_filter: &str) -> server_proto::BgpLsRouteEntry {
     }
 }
 
+/// `google.rpc.Status` details only, for the mock's gate-fault reply.
+#[derive(Clone, PartialEq, prost::Message)]
+struct GateRpcStatus {
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+/// `google.rpc.ErrorInfo` reason and domain.
+#[derive(Clone, PartialEq, prost::Message)]
+struct GateErrorInfo {
+    #[prost(string, tag = "1")]
+    reason: String,
+    #[prost(string, tag = "2")]
+    domain: String,
+}
+
 #[derive(Default)]
 pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
@@ -129,6 +145,9 @@ pub(crate) struct MockState {
     pub(crate) health_calls: AtomicUsize,
     pub(crate) health_daemon_version: Mutex<Option<String>>,
     pub(crate) health_failures_remaining: AtomicUsize,
+    /// When set, `GetHealth` fails as a daemon-gate fault: `UNAVAILABLE`
+    /// with this `google.rpc.ErrorInfo` reason in the `rustbgpd` domain.
+    pub(crate) health_gate_reason: Mutex<Option<&'static str>>,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
     pub(crate) global_read_stall: AtomicBool,
@@ -1212,6 +1231,24 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         }
         if consume_failure(&self.state.health_failures_remaining) {
             return Err(Status::unavailable("transient health failure"));
+        }
+        if let Some(reason) = *self.state.health_gate_reason.lock().await {
+            use prost::Message as _;
+            let info = GateErrorInfo {
+                reason: reason.to_string(),
+                domain: "rustbgpd".to_string(),
+            };
+            let details = GateRpcStatus {
+                details: vec![prost_types::Any {
+                    type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+                    value: info.encode_to_vec(),
+                }],
+            };
+            return Err(Status::with_details(
+                tonic::Code::Unavailable,
+                "daemon is shutting down",
+                details.encode_to_vec().into(),
+            ));
         }
         Ok(Response::new(server_proto::HealthResponse {
             healthy: true,

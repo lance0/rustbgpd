@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::health_probe::DaemonGate;
+use crate::health_probe::{DaemonGate, DaemonNotReady};
 use crate::server::{RuntimeConfigCoordinator, RuntimeConfigCoordinatorPermit};
 
 /// Debug-only, filesystem-mediated control for deterministic settlement tests.
@@ -909,7 +909,6 @@ const FENCE_REASON_DIVERGENCE: u8 = 3;
 const FENCE_REASON_PUBLICATION: u8 = 4;
 const FENCE_REASON_ACKNOWLEDGEMENT: u8 = 5;
 const FENCE_REASON_OPERATOR: u8 = 6;
-const RECOVERY_NOT_READY: &str = "runtime config settlement requires supervised recovery";
 const SIGHUP_RELOAD_STEP_NOT_RECORDED: &str = "not_recorded";
 const SIGHUP_RELOAD_STEP_NOT_APPLICABLE: &str = "not_applicable";
 const WARNING_HALF_BUDGET: Duration = Duration::from_mins(15);
@@ -1942,7 +1941,9 @@ fn propagate_fence(operation: &OperationInner) {
     if operation.propagation_claimed.swap(true, Ordering::AcqRel) {
         return;
     }
-    operation.daemon_gate.mark_not_ready(RECOVERY_NOT_READY);
+    operation
+        .daemon_gate
+        .mark_not_ready(DaemonNotReady::RecoveryFence);
     operation.daemon_gate.begin_shutdown();
     operation.coordinator.close();
     if let Some(admission) = operation

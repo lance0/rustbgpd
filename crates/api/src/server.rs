@@ -2193,6 +2193,7 @@ async fn run_tcp_listener(
         )
         .with_peer_manager_readiness(peer_mgr_readiness_tx)
         .with_rib_readiness(rib_readiness_tx)
+        .with_gate(daemon_gate.clone())
         .with_incarnation(injection_leases.incarnation()),
         interceptor.clone(),
     ));
@@ -2481,6 +2482,7 @@ async fn run_uds_listener(
         )
         .with_peer_manager_readiness(peer_mgr_readiness_tx)
         .with_rib_readiness(rib_readiness_tx)
+        .with_gate(daemon_gate.clone())
         .with_incarnation(injection_leases.incarnation()),
         interceptor.clone(),
     ));

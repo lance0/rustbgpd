@@ -478,7 +478,7 @@ async fn handle_connection(
                     text_response("200 OK", "ready\n")
                 }
                 Ok(Err(error)) => {
-                    metrics.record_readiness_probe_failure(readiness_failure_reason(&error));
+                    metrics.record_readiness_probe_failure(readiness_failure_reason(error));
                     warn!(
                         %error,
                         accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
@@ -544,7 +544,7 @@ async fn handle_connection(
 }
 
 /// Groups the probe error into the counter's closed reason set.
-fn readiness_failure_reason(error: &CoreReadinessError) -> ReadinessProbeFailureReason {
+fn readiness_failure_reason(error: CoreReadinessError) -> ReadinessProbeFailureReason {
     match error {
         CoreReadinessError::PeerManagerUnavailable
         | CoreReadinessError::PeerManagerDroppedReply => {
@@ -1228,11 +1228,13 @@ pub(crate) mod tests {
             ),
             (CoreReadinessError::RibPeerTeardownStalled, R::RibStalled),
             (
-                CoreReadinessError::DaemonUnavailable("shutdown"),
+                CoreReadinessError::DaemonUnavailable(
+                    rustbgpd_api::health_probe::DaemonNotReady::ShuttingDown,
+                ),
                 R::DaemonUnavailable,
             ),
         ] {
-            assert_eq!(readiness_failure_reason(&error), reason, "{error}");
+            assert_eq!(readiness_failure_reason(error), reason, "{error}");
         }
     }
 
@@ -1527,7 +1529,7 @@ pub(crate) mod tests {
     async fn rib_stall_sample_ignores_the_daemon_gate() {
         let (probe, mut rib_rx) = readiness_lane_probe();
         let gate = rustbgpd_api::health_probe::DaemonGate::new();
-        gate.mark_not_ready("test fault");
+        gate.mark_not_ready(rustbgpd_api::health_probe::DaemonNotReady::RecoveryFence);
         let probe = probe.with_gate(gate);
         let metrics = BgpMetrics::new();
         sample_once(

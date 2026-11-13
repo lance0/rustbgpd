@@ -3389,7 +3389,8 @@ fn last_sighup_reload_check(response: &GetLastSighupReloadResponse) -> Check {
 /// Issue `GetHealth`, retrying once after `retry_delay` when the first reply is
 /// `UNAVAILABLE` (a core-probe deadline miss or a transient transport error).
 /// Returns the final outcome plus the first miss when a retry happened. Every
-/// other error, including the client-side read deadline, is returned at once.
+/// other error, including the client-side read deadline and a daemon-gate
+/// fault (shutdown, recovery fence), is returned at once.
 async fn get_health_with_retry<T, F, Fut>(
     retry_delay: Duration,
     mut call: F,
@@ -3399,7 +3400,10 @@ where
     Fut: std::future::Future<Output = Result<T, tonic::Status>>,
 {
     match call().await {
-        Err(miss) if miss.code() == tonic::Code::Unavailable => {
+        Err(miss)
+            if miss.code() == tonic::Code::Unavailable
+                && crate::commands::control::health_gate_reason(&miss).is_none() =>
+        {
             tokio::time::sleep(retry_delay).await;
             (call().await, Some(miss))
         }
@@ -3441,13 +3445,21 @@ fn daemon_healthy_check(
         }
         Err(error) => (
             CheckStatus::Fail,
-            match first_miss {
-                Some(miss) => format!(
+            match (
+                crate::commands::control::health_gate_reason(error),
+                first_miss,
+            ) {
+                (Some(reason), _) => format!(
+                    "daemon not ready ({reason}): {}; readiness stays red until the daemon \
+                     exits",
+                    error.message()
+                ),
+                (None, Some(miss)) => format!(
                     "health RPC failed: {error} (retried once after the first attempt was \
                      unavailable: {})",
                     miss.message()
                 ),
-                None => format!("health RPC failed: {error}"),
+                (None, None) => format!("health RPC failed: {error}"),
             },
         ),
     };
@@ -8831,6 +8843,47 @@ paths = ["x"]
             detail.contains("unavailable: transient health failure"),
             "{detail}"
         );
+    }
+
+    /// A daemon-gate fault (shutdown, recovery fence) is red at once, names
+    /// its reason, and is not retried: it lasts until the daemon exits.
+    #[tokio::test]
+    async fn daemon_gate_fault_is_red_without_retry() {
+        for reason in ["DAEMON_SHUTTING_DOWN", "RUNTIME_CONFIG_RECOVERY_FENCE"] {
+            let server = spawn_mock_server(None).await;
+            *server.state.health_gate_reason.lock().await = Some(reason);
+            let dir = tempfile::tempdir().unwrap();
+            let bundle_path = dir.path().join("bundle.tar.gz");
+            run_with_deadlines(
+                connect(&server.addr, None).await,
+                &DoctorOptions {
+                    output: Some(&bundle_path),
+                    log_file: None,
+                    daemon_address: &server.addr,
+                    token_file_configured: false,
+                    json: true,
+                    pre_upgrade: None,
+                },
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            let files = extract_bundle(&bundle_path);
+            let manifest: serde_json::Value =
+                serde_json::from_str(find(&files, "manifest.json")).unwrap();
+            let check = manifest_check(&manifest, "daemon.healthy");
+            assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(check["status"], "fail", "{check}");
+            assert!(
+                check["detail"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("daemon not ready ({reason}): ")),
+                "{check}"
+            );
+        }
     }
 
     #[tokio::test]

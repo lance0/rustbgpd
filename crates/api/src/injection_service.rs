@@ -891,23 +891,23 @@ const LEASE_ERROR_DOMAIN: &str = "rustbgpd";
 /// `google.rpc.Status`, the payload of the `grpc-status-details-bin`
 /// trailer. Declared here so the existing `prost` encodes it.
 #[derive(Clone, PartialEq, prost::Message)]
-struct RpcStatus {
+pub(crate) struct RpcStatus {
     #[prost(int32, tag = "1")]
-    code: i32,
+    pub(crate) code: i32,
     #[prost(string, tag = "2")]
-    message: String,
+    pub(crate) message: String,
     #[prost(message, repeated, tag = "3")]
-    details: Vec<prost_types::Any>,
+    pub(crate) details: Vec<prost_types::Any>,
 }
 
 /// `google.rpc.ErrorInfo` without `metadata`, which a lease conflict leaves
 /// empty.
 #[derive(Clone, PartialEq, prost::Message)]
-struct ErrorInfo {
+pub(crate) struct ErrorInfo {
     #[prost(string, tag = "1")]
-    reason: String,
+    pub(crate) reason: String,
     #[prost(string, tag = "2")]
-    domain: String,
+    pub(crate) domain: String,
 }
 
 /// `FAILED_PRECONDITION` for an ADR-0141 ownership or generation refusal,
@@ -923,7 +923,7 @@ const WALK_INVALIDATED: &str = "WALK_INVALIDATED";
 
 /// `code` with a `google.rpc.ErrorInfo` detail naming `reason` in the
 /// `rustbgpd` domain.
-fn status_with_reason(code: tonic::Code, reason: &str, message: String) -> Status {
+pub(crate) fn status_with_reason(code: tonic::Code, reason: &str, message: String) -> Status {
     use prost::Message as _;
     let info = ErrorInfo {
         reason: reason.to_string(),
