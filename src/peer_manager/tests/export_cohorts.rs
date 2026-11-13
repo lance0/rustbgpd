@@ -3052,20 +3052,45 @@ async fn remainder_pair_deferred_refresh_failure_rolls_the_walk_back() {
     );
 }
 
-/// One export-only snapshot whose remainder is one shared pair of 250
-/// members behind a cohort of 251. Returns the snapshot result, the cohort,
-/// the pair, the RIB commands and the session installs of the pair's third
-/// batch (members 200 and later); the pair's batch that starts at member
-/// `fail_batch_from` is refused.
-async fn run_large_remainder_pair(
+/// How [`run_large_remainder_pair`] lays out its snapshot.
+#[derive(Clone, Copy, Default)]
+struct LargePairLayout {
+    /// The pair's batch that starts at this member is refused.
     fail_batch_from: Option<usize>,
-) -> (
-    Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String>,
-    Vec<IpAddr>,
-    Vec<IpAddr>,
-    RecordedRibCommands,
-    usize,
-) {
+    /// The pair's import chain moves too, so each member owes a Route
+    /// Refresh after its batch.
+    import_change: bool,
+    /// A unit of its own (a distinct export chain) follows pair members 49,
+    /// 149 and 199 in caller order.
+    units_between: bool,
+}
+
+/// What [`run_large_remainder_pair`] observed.
+struct LargePairRun {
+    result: Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String>,
+    cohort: Vec<IpAddr>,
+    pair: Vec<IpAddr>,
+    /// The units listed between the pair's members, in caller order.
+    between: Vec<IpAddr>,
+    commands: RecordedRibCommands,
+    /// The Route Refreshes the pair's sessions had sent as each RIB batch
+    /// arrived, and in all.
+    refreshes_at_batch: Vec<u32>,
+    refreshes: u32,
+    /// Session installs of the pair's third batch (members 200 and later).
+    third_batch_installs: usize,
+    /// Session installs of the units listed between the pair's members.
+    between_installs: usize,
+}
+
+/// One snapshot whose remainder is one shared pair of 250 members behind a
+/// cohort of 251, laid out by `layout`. A snapshot that fails must leave
+/// every peer on its prior import and export chains.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the recording RIB stub, three session kinds and the exactness check"
+)]
+async fn run_large_remainder_pair(layout: LargePairLayout) -> LargePairRun {
     let peer = |index: usize| {
         IpAddr::V4(Ipv4Addr::new(
             10,
@@ -3076,77 +3101,180 @@ async fn run_large_remainder_pair(
     };
     let cohort: Vec<IpAddr> = (0..251).map(peer).collect();
     let pair: Vec<IpAddr> = (251..501).map(peer).collect();
-    let refused = fail_batch_from.map(|member| pair[member]);
+    let between: Vec<IpAddr> = if layout.units_between {
+        (501..504).map(peer).collect()
+    } else {
+        Vec::new()
+    };
+    let refused = layout.fail_batch_from.map(|member| pair[member]);
+    let pair_counters = Arc::new(FakePeerCounters::default());
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
-    let rib_task = tokio::spawn(async move {
-        let mut seen: RecordedRibCommands = Vec::new();
-        while let Some(update) = rib_rx.recv().await {
-            match update {
-                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
-                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+    let rib_task = tokio::spawn({
+        let pair_counters = Arc::clone(&pair_counters);
+        async move {
+            let mut seen: RecordedRibCommands = Vec::new();
+            let mut refreshes_at_batch = Vec::new();
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                    }
+                    RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                        replacements,
+                        reply,
+                    } => {
+                        let members = replacement_addrs(&replacements);
+                        let fails = Some(members[0]) == refused;
+                        seen.push(("batch", members));
+                        refreshes_at_batch.push(pair_counters.route_refresh.load(Ordering::SeqCst));
+                        let _ = reply.send(if fails {
+                            Err(rustbgpd_rib::RibCommandError::internal("batch refused"))
+                        } else {
+                            Ok(Vec::new())
+                        });
+                    }
+                    RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                        replacements,
+                        reply,
+                    } => {
+                        seen.push(("restore", replacement_addrs(&replacements)));
+                        let _ = reply.send(Ok(restored_receipts(&replacements)));
+                    }
+                    _ => {}
                 }
-                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-                    replacements,
-                    reply,
-                } => {
-                    let members = replacement_addrs(&replacements);
-                    let fails = Some(members[0]) == refused;
-                    seen.push(("batch", members));
-                    let _ = reply.send(if fails {
-                        Err(rustbgpd_rib::RibCommandError::internal("batch refused"))
-                    } else {
-                        Ok(Vec::new())
-                    });
-                }
-                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
-                    replacements,
-                    reply,
-                } => {
-                    seen.push(("restore", replacement_addrs(&replacements)));
-                    let _ = reply.send(Ok(restored_receipts(&replacements)));
-                }
-                _ => {}
             }
+            (seen, refreshes_at_batch)
         }
-        seen
     });
     let mut manager = test_peer_manager();
     manager.rib_tx = rib_tx;
     let installs = Arc::new(AtomicUsize::new(0));
     let third_batch_installs = Arc::new(AtomicUsize::new(0));
-    for &address in cohort.iter().chain(&pair) {
-        let installs = if pair[200..].contains(&address) {
-            &third_batch_installs
+    let between_installs = Arc::new(AtomicUsize::new(0));
+    for &address in cohort.iter().chain(&pair).chain(&between) {
+        let handle = if layout.import_change && pair.contains(&address) {
+            acking_counted_policy_handle(address, Arc::clone(&pair_counters))
         } else {
-            &installs
+            let installs = if pair[200..].contains(&address) {
+                &third_batch_installs
+            } else if between.contains(&address) {
+                &between_installs
+            } else {
+                &installs
+            };
+            established_export_policy_test_session(address, Arc::clone(installs), None)
         };
-        insert_test_managed_peer(
-            &mut manager,
-            address,
-            established_export_policy_test_session(address, Arc::clone(installs), None),
-            false,
-        );
+        insert_test_managed_peer(&mut manager, address, handle, false);
     }
-    let result = manager
-        .apply_resolved_policy_snapshot(
-            cohort
-                .iter()
-                .map(|&address| export_pair_target(address, 0))
-                .chain(pair.iter().map(|&address| export_pair_target(address, 1)))
-                .collect(),
-        )
-        .await;
-    for &address in cohort.iter().chain(&pair) {
+    let import_next = validation_policy_chain(ImportValidationDependency::Rpki);
+    let mut targets: Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy> = cohort
+        .iter()
+        .map(|&address| export_pair_target(address, 0))
+        .collect();
+    let mut between_iter = between.iter().copied().enumerate();
+    for (member, &address) in pair.iter().enumerate() {
+        let mut target = export_pair_target(address, 1);
+        if layout.import_change {
+            target.import_policy = Some(import_next.clone());
+        }
+        targets.push(target);
+        if [49, 149, 199].contains(&member)
+            && let Some((unit, address)) = between_iter.next()
+        {
+            targets.push(export_pair_target(address, 2 + unit));
+        }
+    }
+    let result = manager.apply_resolved_policy_snapshot(targets).await;
+    for &address in cohort.iter().chain(&pair).chain(&between) {
+        if result.is_err() {
+            let state = manager.peers.get(&key(address)).unwrap();
+            assert!(
+                state.import_policy.is_none() && state.export_policy.is_none(),
+                "{address} must finish on its prior chains"
+            );
+        }
         manager.delete_peer(key(address), false).await.unwrap();
     }
     drop(manager);
-    (
+    let (commands, refreshes_at_batch) = rib_task.await.unwrap();
+    LargePairRun {
         result,
         cohort,
         pair,
-        rib_task.await.unwrap(),
-        third_batch_installs.load(Ordering::SeqCst),
-    )
+        between,
+        commands,
+        refreshes_at_batch,
+        refreshes: pair_counters.route_refresh.load(Ordering::SeqCst),
+        third_batch_installs: third_batch_installs.load(Ordering::SeqCst),
+        between_installs: between_installs.load(Ordering::SeqCst),
+    }
+}
+
+/// A large pair whose import chain also moves sends each group's Route
+/// Refreshes right after that group's batch, not after the pair's last
+/// group: the refreshes a batch finds already sent are those of the groups
+/// before it.
+#[tokio::test]
+async fn large_remainder_pair_refreshes_each_group_after_its_batch() {
+    let run = run_large_remainder_pair(LargePairLayout {
+        import_change: true,
+        ..LargePairLayout::default()
+    })
+    .await;
+    run.result
+        .expect("a 250-member pair with an import change commits");
+    assert_eq!(
+        run.commands,
+        vec![
+            ("batch", run.pair[..100].to_vec()),
+            ("batch", run.pair[100..200].to_vec()),
+            ("batch", run.pair[200..].to_vec()),
+        ]
+    );
+    assert_eq!(
+        run.refreshes_at_batch,
+        vec![0, 100, 200],
+        "each group's Route Refreshes are sent before the next group's batch"
+    );
+    assert_eq!(run.refreshes, 250, "one Route Refresh per member");
+}
+
+/// A pair whose members are not contiguous in caller order runs where its
+/// first member stands, so a failure in its second group restores the pair
+/// members of the groups reached and the cohort, and never touches the units
+/// listed between the pair's members: the walk had not reached them.
+#[tokio::test]
+async fn non_contiguous_pair_failure_leaves_the_units_between_its_members_untouched() {
+    let run = run_large_remainder_pair(LargePairLayout {
+        fail_batch_from: Some(100),
+        units_between: true,
+        ..LargePairLayout::default()
+    })
+    .await;
+    assert!(
+        run.result.as_ref().is_err_and(|error| {
+            error.contains("batch refused")
+                && error.contains("already-applied peers restored")
+                && error.contains("committed cohort restored")
+        }),
+        "{:?}",
+        run.result
+    );
+    assert_eq!(
+        run.commands,
+        vec![
+            ("batch", run.pair[..100].to_vec()),
+            ("batch", run.pair[100..200].to_vec()),
+            ("restore", run.pair[..200].to_vec()),
+            ("restore", run.cohort.clone()),
+        ],
+        "only the pair's two groups reached and the cohort are restored"
+    );
+    assert_eq!(run.between.len(), 3);
+    assert_eq!(
+        run.between_installs, 0,
+        "no unit listed between the pair's members was hot-applied"
+    );
 }
 
 /// A shared pair larger than `PAIR_BATCH_MEMBERS` is sent as several RIB
@@ -3157,7 +3285,13 @@ async fn run_large_remainder_pair(
 /// candidate chain.
 #[tokio::test]
 async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
-    let (result, _, pair, commands, third_batch_installs) = run_large_remainder_pair(None).await;
+    let LargePairRun {
+        result,
+        pair,
+        commands,
+        third_batch_installs,
+        ..
+    } = run_large_remainder_pair(LargePairLayout::default()).await;
     result.expect("a 250-member pair commits");
     assert_eq!(
         third_batch_installs, 50,
@@ -3173,8 +3307,18 @@ async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
         "a 250-member pair takes three batches of at most 100 members, in caller order"
     );
 
-    let (result, cohort, pair, commands, third_batch_installs) =
-        run_large_remainder_pair(Some(100)).await;
+    let LargePairRun {
+        result,
+        cohort,
+        pair,
+        commands,
+        third_batch_installs,
+        ..
+    } = run_large_remainder_pair(LargePairLayout {
+        fail_batch_from: Some(100),
+        ..LargePairLayout::default()
+    })
+    .await;
     assert!(
         result.as_ref().is_err_and(|error| {
             error.contains("batch refused")
