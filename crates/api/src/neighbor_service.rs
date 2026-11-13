@@ -1009,7 +1009,7 @@ fn admin_state_to_proto(info: &PeerInfo) -> proto::NeighborAdminState {
         AdminDownReason::Operator => proto::NeighborAdminState::OperatorDisabled,
         AdminDownReason::ConfigAdminDown => proto::NeighborAdminState::ConfigAdminDown,
         AdminDownReason::MaxPrefixLatched => proto::NeighborAdminState::MaxPrefixLatched,
-        AdminDownReason::DampeningCapacity => proto::NeighborAdminState::DampeningCapacity,
+        AdminDownReason::SessionCrashLatched => proto::NeighborAdminState::SessionCrashLatched,
     }
 }
 
@@ -5805,8 +5805,8 @@ mod tests {
                 Admin::MaxPrefixLatched,
             ),
             (
-                Some(AdminDownReason::DampeningCapacity),
-                Admin::DampeningCapacity,
+                Some(AdminDownReason::SessionCrashLatched),
+                Admin::SessionCrashLatched,
             ),
         ] {
             info.admin_down_reason = reason;

@@ -1267,16 +1267,27 @@ and which owner did:
 - `MAX_PREFIX_LATCHED`: a max-prefix shutdown latch. `EnableNeighbor`, or the
   single automatic attempt that `max_prefix_restart_seconds` arms, clears it.
   An explicit disable keeps the latch.
-- `DAMPENING_CAPACITY`: the neighbor's route-flap dampening source exceeded the
-  dampening capacity. `EnableNeighbor` clears it.
-- `UNSPECIFIED`: an older daemon that does not report it.
+- `SESSION_CRASH_LATCHED`: the neighbor's session task crashed three times
+  within ten minutes and the daemon latched it down. Only `EnableNeighbor`
+  clears it; an explicit disable, a reconfigure and an armed max-prefix
+  restart keep it.
+- `UNSPECIFIED`: an older daemon that does not report it, or a retention-only
+  row, which has no neighbor to hold.
 
-A held-down neighbor reports `state` `IDLE` and is not trying to connect.
-Disabling a session sends a Cease without replacing `last_error`, so for every
-owner except `MAX_PREFIX_LATCHED` that field is the failure from before the
-hold, not its cause; for a latch it is the max-prefix breach. The
-`bgp_peer_admin_enabled` and `bgp_max_prefix_latched` gauges carry the same
-state.
+When more than one owner holds a neighbor, `admin_state` names the first of
+`SESSION_CRASH_LATCHED`, `MAX_PREFIX_LATCHED`, `CONFIG_ADMIN_DOWN` and
+`OPERATOR_DISABLED`. A latch outranks the others because only an explicit
+enable lifts it, and the crash latch outranks the max-prefix latch because a
+max-prefix restart cannot lift it. A configured `admin_down` outranks a later
+operator disable.
+
+A held-down neighbor settles to `state` `IDLE` and is not trying to connect.
+Disabling a session sends a Cease without replacing `last_error`, so for
+`OPERATOR_DISABLED` and `CONFIG_ADMIN_DOWN` that field is the failure from
+before the hold, not its cause. For the two latches it is the latch message:
+the max-prefix breach, or the crash with its time and the recovery command.
+`bgp_peer_admin_enabled` carries the same enabled or held-down state, without
+the owner; `bgp_max_prefix_latched` separates the max-prefix latch.
 
 ### Interface-only neighbors
 

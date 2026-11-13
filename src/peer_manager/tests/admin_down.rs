@@ -351,15 +351,17 @@ async fn failed_admin_down_stop_enqueue_is_retried_by_the_next_reload() {
 async fn neighbor_rows_report_the_owner_of_an_administrative_hold() {
     use rustbgpd_api::peer_types::AdminDownReason;
 
-    let mut mgr = test_peer_manager();
-    let reason = |mgr: &PeerManager, addr: IpAddr| {
-        let managed = &mgr.peers[&key(addr)];
-        let mut info = super::snapshot::build_peer_info(&key(addr), managed, None, false);
-        if let Some(latch) = mgr.max_prefix_latches.get(&key(addr)) {
-            super::snapshot::apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
-        }
+    async fn reason(mgr: &PeerManager, addr: IpAddr) -> (bool, Option<AdminDownReason>, String) {
+        let info = mgr
+            .list_peers()
+            .await
+            .into_iter()
+            .find(|info| info.address == addr)
+            .unwrap();
         (info.enabled, info.admin_down_reason, info.last_error)
-    };
+    }
+
+    let mut mgr = test_peer_manager();
 
     // Config admin_down.
     let configured = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 21));
@@ -374,19 +376,19 @@ async fn neighbor_rows_report_the_owner_of_an_administrative_hold() {
         Some(AdminDownReason::ConfigAdminDown)
     );
     mgr.enable_peer(key(configured)).await.unwrap();
-    assert_eq!(reason(&mgr, configured).1, None);
+    assert_eq!(reason(&mgr, configured).await.1, None);
 
     // Operator disable, then enable.
     let operator = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 22));
     let (handle, _starts, _stops) = recording_admin_handle();
     insert_test_managed_peer(&mut mgr, operator, handle, false);
-    assert_eq!(reason(&mgr, operator).1, None);
+    assert_eq!(reason(&mgr, operator).await.1, None);
     mgr.disable_peer(key(operator), None).await.unwrap();
     let info = mgr.get_peer_info(&key(operator)).await.unwrap();
     assert!(!info.enabled);
     assert_eq!(info.admin_down_reason, Some(AdminDownReason::Operator));
     mgr.enable_peer(key(operator)).await.unwrap();
-    assert_eq!(reason(&mgr, operator), (true, None, String::new()));
+    assert_eq!(reason(&mgr, operator).await, (true, None, String::new()));
 
     // A max-prefix latch overrides the reason and supplies the error, and an
     // explicit disable keeps it latched.
@@ -405,14 +407,14 @@ async fn neighbor_rows_report_the_owner_of_an_administrative_hold() {
         Some(AdminDownReason::MaxPrefixLatched),
         "max-prefix limit exceeded".to_string(),
     );
-    assert_eq!(reason(&mgr, latched), expected);
+    assert_eq!(reason(&mgr, latched).await, expected);
     let info = mgr.get_peer_info(&key(latched)).await.unwrap();
     assert_eq!(
         (info.enabled, info.admin_down_reason, info.last_error),
         expected
     );
     mgr.disable_peer(key(latched), None).await.unwrap();
-    assert_eq!(reason(&mgr, latched), expected);
+    assert_eq!(reason(&mgr, latched).await, expected);
     mgr.enable_peer(key(latched)).await.unwrap();
-    assert_eq!(reason(&mgr, latched), (true, None, String::new()));
+    assert_eq!(reason(&mgr, latched).await, (true, None, String::new()));
 }

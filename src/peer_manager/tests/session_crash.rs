@@ -4,6 +4,7 @@
 use super::collision::{read_bgp_message, send_bgp_message};
 use super::*;
 
+use rustbgpd_api::peer_types::{AdminDownReason, PeerInfo};
 use rustbgpd_rib::RibManager;
 use rustbgpd_transport::{SessionIdentity, SessionTaskExitNotice, TransportError};
 use rustbgpd_wire::{Afi, Safi};
@@ -528,12 +529,18 @@ async fn a_max_prefix_restart_leaves_a_crash_latched_peer_down() {
     }
     assert!(mgr.session_crash_latched(&key(PEER)));
     mgr.install_max_prefix_latch(key(PEER), 0, "max-prefix limit exceeded".into(), Some(30));
-    // The crash latch's error names the recovery the neighbor waits for.
+    // The crash latch's error names the recovery the neighbor waits for,
+    // and the admin state names the same owner.
+    // Mutation-red: applying the max-prefix owner last reads MaxPrefixLatched.
     let info = mgr.get_peer_info(&key(PEER)).await.unwrap();
     assert!(
         info.last_error.contains("latched disabled"),
         "{}",
         info.last_error
+    );
+    assert_eq!(
+        info.admin_down_reason,
+        Some(rustbgpd_api::peer_types::AdminDownReason::SessionCrashLatched)
     );
 
     tokio::time::advance(Duration::from_secs(31)).await;
@@ -541,4 +548,65 @@ async fn a_max_prefix_restart_leaves_a_crash_latched_peer_down() {
 
     assert!(!mgr.peers[&key(PEER)].enabled, "the crash latch holds");
     assert!(mgr.session_crash_latched(&key(PEER)));
+}
+
+/// `PEER`'s administrative owner as each neighbor read reports it:
+/// `GetNeighborState`, the in-place `ListNeighbors` and the detached one.
+async fn admin_owners(mgr: &mut PeerManager) -> [Option<AdminDownReason>; 3] {
+    let single = mgr.get_peer_info(&key(PEER)).await.unwrap();
+    let listed = mgr.list_peers().await;
+    if mgr.operator_rx.is_none() {
+        let (_operator_tx, operator_rx) = mpsc::channel(4);
+        mgr.operator_rx = Some(operator_rx);
+    }
+    let (reply, detached) = oneshot::channel();
+    assert!(mgr.detach_list_peers(reply).is_ok(), "detached");
+    let detached = detached.await.unwrap();
+    let row = |infos: &[PeerInfo]| {
+        infos
+            .iter()
+            .find(|info| info.address == PEER)
+            .unwrap()
+            .admin_down_reason
+    };
+    [single.admin_down_reason, row(&listed), row(&detached)]
+}
+
+/// The crash latch is its own administrative owner on every neighbor read:
+/// set by the latching crash, kept through an explicit disable, cleared by
+/// enable. Crashes that have not latched leave an operator disable as the
+/// owner.
+/// Red proof: without the overlay's owner the latched reads say Operator.
+#[tokio::test(start_paused = true)]
+async fn a_crash_latched_peer_reports_its_own_admin_state() {
+    use AdminDownReason::{Operator, SessionCrashLatched};
+    let mut mgr = manager_with_peer();
+    for _ in 1..SESSION_CRASH_LATCH {
+        let trigger = install_crashing_primary(&mut mgr, &key(PEER));
+        crash_primary(&mut mgr, trigger).await;
+    }
+    assert_eq!(admin_owners(&mut mgr).await, [None; 3]);
+    mgr.disable_peer(key(PEER), None).await.unwrap();
+    assert_eq!(
+        admin_owners(&mut mgr).await,
+        [Some(Operator); 3],
+        "unlatched crashes do not own the hold"
+    );
+
+    let mut mgr = manager_with_peer();
+    for _ in 0..SESSION_CRASH_LATCH {
+        let trigger = install_crashing_primary(&mut mgr, &key(PEER));
+        crash_primary(&mut mgr, trigger).await;
+    }
+    assert!(mgr.session_crash_latched(&key(PEER)));
+    assert_eq!(admin_owners(&mut mgr).await, [Some(SessionCrashLatched); 3]);
+    mgr.disable_peer(key(PEER), None).await.unwrap();
+    assert_eq!(
+        admin_owners(&mut mgr).await,
+        [Some(SessionCrashLatched); 3],
+        "an explicit disable keeps the latch"
+    );
+
+    mgr.enable_peer(key(PEER)).await.unwrap();
+    assert_eq!(admin_owners(&mut mgr).await, [None; 3]);
 }

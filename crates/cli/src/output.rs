@@ -323,9 +323,9 @@ pub struct JsonNeighbor {
     pub discovery_state: Option<&'static str>,
     pub state: String,
     /// Administrative state: `enabled`, `operator_disabled`,
-    /// `config_admin_down`, `max_prefix_latched` or `dampening_capacity`.
+    /// `config_admin_down`, `max_prefix_latched` or `session_crash_latched`.
     /// While held down, `state` is `Idle` and `last_error` is the failure
-    /// from before the hold (the breach itself for `max_prefix_latched`).
+    /// from before the hold (the latch message for the two latches).
     /// Omitted from a daemon that does not report it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admin_state: Option<&'static str>,
@@ -949,7 +949,7 @@ pub(crate) fn admin_state_label(n: &proto::NeighborState) -> Option<&'static str
         Ok(proto::NeighborAdminState::OperatorDisabled) => Some("operator_disabled"),
         Ok(proto::NeighborAdminState::ConfigAdminDown) => Some("config_admin_down"),
         Ok(proto::NeighborAdminState::MaxPrefixLatched) => Some("max_prefix_latched"),
-        Ok(proto::NeighborAdminState::DampeningCapacity) => Some("dampening_capacity"),
+        Ok(proto::NeighborAdminState::SessionCrashLatched) => Some("session_crash_latched"),
         _ => None,
     }
 }
@@ -963,16 +963,16 @@ pub(crate) fn admin_down_detail(n: &proto::NeighborState) -> Option<&'static str
         Ok(proto::NeighborAdminState::MaxPrefixLatched) => {
             Some("latched down after max-prefix shutdown")
         }
-        Ok(proto::NeighborAdminState::DampeningCapacity) => {
-            Some("disabled after dampening capacity was exceeded")
+        Ok(proto::NeighborAdminState::SessionCrashLatched) => {
+            Some("latched down after repeated session task crashes")
         }
         _ => None,
     }
 }
 
-/// The session state for human output, with `(Admin)` or `(PfxCt)` when
-/// the daemon holds the neighbor down, so it does not read as an Idle
-/// session that is trying to connect. A stale row keeps its `Stale`.
+/// The session state for human output, with `(Admin)`, `(PfxCt)` or
+/// `(Crash)` when the daemon holds the neighbor down, so it does not read as
+/// an Idle session the daemon will start. A stale row keeps its `Stale`.
 pub(crate) fn neighbor_state_label(n: &proto::NeighborState) -> String {
     let state = format_state_with_stale(n.state, n.stale);
     match admin_hold_suffix(n) {
@@ -997,10 +997,10 @@ fn admin_hold_suffix(n: &proto::NeighborState) -> Option<&'static str> {
     match proto::NeighborAdminState::try_from(n.admin_state) {
         Ok(
             proto::NeighborAdminState::OperatorDisabled
-            | proto::NeighborAdminState::ConfigAdminDown
-            | proto::NeighborAdminState::DampeningCapacity,
+            | proto::NeighborAdminState::ConfigAdminDown,
         ) => Some("Admin"),
         Ok(proto::NeighborAdminState::MaxPrefixLatched) => Some("PfxCt"),
+        Ok(proto::NeighborAdminState::SessionCrashLatched) => Some("Crash"),
         _ => None,
     }
 }

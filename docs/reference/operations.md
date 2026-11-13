@@ -1658,15 +1658,25 @@ inherited by dynamic peers follow the same rules. Session-generation
 replacement, explicit disable, neighbor removal, and dynamic-range replacement
 cancel an existing countdown rather than carrying it into new policy.
 
-Any other administrative hold-down reads as `Idle (Admin)` in `rbgp neighbor`
-and its detail view, with `Admin State` naming the owner (`disabled by
-operator`, `disabled by config admin_down`, or `disabled after dampening
-capacity was exceeded`). The JSON `admin_state` is `operator_disabled`,
-`config_admin_down` or `dampening_capacity`, and `enabled` otherwise; `state`
-stays `Idle`. Disabling a session does not replace its error, so the detail
+An operator disable or a configured `admin_down` reads as `Idle (Admin)` in
+`rbgp neighbor` and its detail view, with `Admin State` naming the owner
+(`disabled by operator` or `disabled by config admin_down`). A neighbor whose
+session task crashed three times within ten minutes reads as `Idle (Crash)`,
+with `Admin State` `latched down after repeated session task crashes` and a
+`Last Error` that names the crash, its time and the enable command. The JSON
+`admin_state` is `operator_disabled`, `config_admin_down`,
+`session_crash_latched` or `max_prefix_latched`, and `enabled` otherwise;
+`state` stays `Idle`. When several owners hold one neighbor, the crash latch
+wins, then the max-prefix latch, then `admin_down`, then the operator (see
+[Administrative state](api.md#administrative-state)). Disabling a session
+does not replace its error, so for an operator or `admin_down` hold the detail
 view labels it `Error Before Disable`: it is the failure from before the hold,
-not why the neighbor is down. A plain `Idle` with no admin suffix is a session
-that is trying to connect.
+not why the neighbor is down. A plain `Idle` with no suffix is not held down
+administratively; the daemon starts it when nothing else withholds it (strict
+BFD, or an interface-only neighbor with no bound link-local address).
+`rbgp doctor` reports a crash latch, or a max-prefix latch with no armed
+restart, as a stuck peer that names the latch and the last error, rather than
+as administratively disabled.
 
 Before an explicit enable, inspect the latch:
 
@@ -2063,7 +2073,7 @@ one beside it, so `group_left` joins never match two identities for one peer.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers an operator disable, a max-prefix shutdown latch and a session-crash latch, even though the configuration still says enabled. `bgp_max_prefix_latched` separates the max-prefix latch; no gauge separates the session-crash latch, which the neighbor's last error names |
+| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers an operator disable, a max-prefix shutdown latch and a session-crash latch, even though the configuration still says enabled. `bgp_max_prefix_latched` separates the max-prefix latch; no gauge separates the session-crash latch, which the neighbor's `admin_state` (`session_crash_latched`) and last error name |
 | `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable, or until the timed hold-down expires into a successful restart or, under strict BFD, into the BFD withhold; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
 | `bgp_session_task_crashes_total{peer,interface}` | Session tasks of this peer, or of its inbound collision candidates, that ended without a shutdown request (a panic or a run-loop error). Seeded at 0. The peer manager restarts the session (or retires a dynamic peer or candidate as if it went Idle) after the first and second crash within ten minutes, and latches the neighbor disabled on the third, counted across dynamic reconnects; `last_error` names the latest crash while latched or for ten minutes after it. A reconfigure keeps the latch; explicit enable or deleting the neighbor clears it. Reaped with the other exact peer-identity series |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |

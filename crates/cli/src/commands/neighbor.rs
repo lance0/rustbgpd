@@ -1091,12 +1091,11 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
     rows.field(0, "Flap Count", n.flap_count);
     if !n.last_error.is_empty() {
         // An administrative hold-down sends a Cease without replacing the
-        // error, so outside a max-prefix latch it predates the hold.
+        // error, so outside a latch it predates the hold.
         let label = match crate::proto::NeighborAdminState::try_from(n.admin_state) {
             Ok(
                 crate::proto::NeighborAdminState::OperatorDisabled
-                | crate::proto::NeighborAdminState::ConfigAdminDown
-                | crate::proto::NeighborAdminState::DampeningCapacity,
+                | crate::proto::NeighborAdminState::ConfigAdminDown,
             ) => "Error Before Disable",
             _ => "Last Error",
         };
@@ -2096,11 +2095,11 @@ mod tests {
                 "Error Before Disable:",
             ),
             (
-                Admin::DampeningCapacity,
-                Some("Idle (Admin)"),
-                Some("disabled after dampening capacity was exceeded"),
-                Some("dampening_capacity"),
-                "Error Before Disable:",
+                Admin::SessionCrashLatched,
+                Some("Idle (Crash)"),
+                Some("latched down after repeated session task crashes"),
+                Some("session_crash_latched"),
+                "Last Error:",
             ),
             (
                 Admin::MaxPrefixLatched,

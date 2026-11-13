@@ -783,8 +783,16 @@ fn peer_checks(
     session_evidence: SessionHistoryEvidence,
     now: u64,
     last_error: &str,
+    admin_state: Option<&str>,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
+    // A latch holds the neighbor down until an explicit enable, so it is a
+    // stuck peer even when the retained history ends in a disable.
+    let latch = match admin_state {
+        Some("session_crash_latched") => Some("latched down after repeated session task crashes"),
+        Some("max_prefix_latched") => Some("latched down after max-prefix shutdown"),
+        _ => None,
+    };
     if stale {
         checks.push(Check {
             name: format!("peer.{address}.session"),
@@ -808,13 +816,15 @@ fn peer_checks(
                 output::format_duration(uptime_seconds)
             ),
         });
-    } else if matches!(
-        session_evidence,
-        SessionHistoryEvidence::Retained {
-            latest_admin_state: Some(RetainedAdminState::Disabled),
-            ..
-        }
-    ) {
+    } else if latch.is_none()
+        && matches!(
+            session_evidence,
+            SessionHistoryEvidence::Retained {
+                latest_admin_state: Some(RetainedAdminState::Disabled),
+                ..
+            }
+        )
+    {
         checks.push(Check {
             name: format!("peer.{address}.session"),
             status: CheckStatus::Ok,
@@ -853,10 +863,11 @@ fn peer_checks(
         } else {
             format!("; last error: {last_error}")
         };
+        let latch = latch.map_or_else(String::new, |latch| format!(" ({latch})"));
         checks.push(Check {
             name: format!("peer.{address}.session"),
             status,
-            detail: format!("peer {address} in {state} {since}{cause}"),
+            detail: format!("peer {address} in {state}{latch} {since}{cause}"),
         });
     }
     if slow_peer {
@@ -4619,6 +4630,7 @@ async fn run_with_deadlines(
                             session_evidence,
                             now,
                             &record.support.last_error,
+                            record.support.admin_state,
                         )
                         .into_iter()
                         .chain(outbound_registration_check(
@@ -5733,6 +5745,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            None,
         );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Ok);
@@ -5751,7 +5764,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let diagnose = |stale, countdown, evidence| {
             peer_checks(
                 "10.0.0.2", "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence,
-                1_000_000, "",
+                1_000_000, "", None,
             )
         };
 
@@ -5779,6 +5792,76 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         );
         assert_eq!(disabled[0].status, CheckStatus::Ok);
         assert!(disabled[0].detail.contains("administratively disabled"));
+    }
+
+    /// A latched neighbor is stuck until an explicit enable, even when its
+    /// latch (or a later disable) left a retained `peer_disabled` event.
+    /// Load-bearing: dropping the latch guard reports both as green
+    /// "administratively disabled"; dropping the label loses the latch name.
+    #[test]
+    fn latched_peers_are_not_reported_as_administratively_disabled() {
+        let error = "session task crashed at unix time 1 (panicked), 3 times in 10 minutes";
+        for (admin_state, latch) in [
+            (
+                "session_crash_latched",
+                "latched down after repeated session task crashes",
+            ),
+            (
+                "max_prefix_latched",
+                "latched down after max-prefix shutdown",
+            ),
+        ] {
+            let checks = peer_checks(
+                "10.0.0.2",
+                "10.0.0.2",
+                "Idle",
+                false,
+                None,
+                false,
+                "",
+                0,
+                0,
+                retained_session_evidence_with_admin(
+                    Some(1),
+                    None,
+                    Some(RetainedAdminState::Disabled),
+                ),
+                1_000_000,
+                error,
+                Some(admin_state),
+            );
+            assert_eq!(checks[0].status, CheckStatus::Fail, "{admin_state}");
+            assert_eq!(
+                checks[0].detail,
+                format!(
+                    "peer 10.0.0.2 in Idle ({latch}) for {}; last error: {error}",
+                    output::format_duration(1_000_000 - 1)
+                ),
+            );
+        }
+        // An operator or config hold stays green.
+        for admin_state in ["operator_disabled", "config_admin_down"] {
+            let checks = peer_checks(
+                "10.0.0.2",
+                "10.0.0.2",
+                "Idle",
+                false,
+                None,
+                false,
+                "",
+                0,
+                0,
+                retained_session_evidence_with_admin(
+                    Some(1),
+                    None,
+                    Some(RetainedAdminState::Disabled),
+                ),
+                1_000_000,
+                error,
+                Some(admin_state),
+            );
+            assert_eq!(checks[0].status, CheckStatus::Ok, "{admin_state}");
+        }
     }
 
     /// Load-bearing blocking predicate and scope proof: removing the
@@ -6340,6 +6423,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(transitioned), None),
             now,
             "",
+            None,
         );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Fail);
@@ -6366,6 +6450,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(now - STUCK_PEER_SECS + 1), None),
             now,
             "",
+            None,
         );
         assert!(checks[0].status == CheckStatus::Warn);
     }
@@ -6393,6 +6478,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             ),
             now,
             "",
+            None,
         );
 
         assert_eq!(checks.len(), 3);
@@ -6427,6 +6513,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Enabled)),
             1_000_000,
             "",
+            None,
         );
 
         assert_eq!(checks.len(), 1);
@@ -6452,6 +6539,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            None,
         );
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("unknown duration"));
@@ -6475,6 +6563,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            None,
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Warn);
@@ -6504,6 +6593,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(now - 30), Some(now - 30)),
             now,
             "",
+            None,
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Fail);
@@ -6653,6 +6743,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Disabled)),
             1_000_000,
             "",
+            None,
         );
         // LAN-668 red proof: retained disabled intent must not turn a stale
         // timeout placeholder green.
@@ -6679,6 +6770,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            None,
         );
 
         assert_eq!(checks.len(), 2);
@@ -6700,6 +6792,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            None,
         );
         assert_eq!(ungrouped[1].detail, expected);
 
@@ -6718,6 +6811,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            None,
         );
         assert!(
             fabric[1]
@@ -9172,6 +9266,7 @@ paths = ["x"]
         slow.slow_peer = true;
         slow.update_group = "slow_peer".to_string();
         slow.is_dynamic = true;
+        slow.admin_state = rustbgpd_api::proto::NeighborAdminState::OperatorDisabled as i32;
         slow.accepted_dynamic_range = Some(rustbgpd_api::proto::AcceptedDynamicNeighborRange {
             prefix: "10.0.0.0/24".to_string(),
             peer_group: "ix-members".to_string(),
@@ -9282,6 +9377,7 @@ paths = ["x"]
         // projection from the support snapshot makes its assertion red.
         assert_eq!(peers[0]["slow_peer"], true);
         assert_eq!(peers[0]["is_dynamic"], true);
+        assert_eq!(peers[0]["admin_state"], "operator_disabled");
         assert_eq!(
             peers[0]["accepted_dynamic_range"],
             serde_json::json!({

@@ -1786,6 +1786,11 @@ async fn a_session_crash_latch_moves_with_a_new_learned_address() {
         "{}",
         unbound.last_error
     );
+    // Mutation-red: without the crash overlay's owner it reads Operator.
+    assert_eq!(
+        unbound.admin_down_reason,
+        Some(rustbgpd_api::peer_types::AdminDownReason::SessionCrashLatched)
+    );
     h.links_changed(snapshot(true, &[("swp1", 7, true)]));
     h.bind("swp1", Some(endpoint(3, 7))).await;
     let new = swp1_key(3);
@@ -2852,6 +2857,16 @@ async fn a_rebind_follows_a_changed_admin_down_and_keeps_an_operator_toggle() {
     };
     let mut h = harness(&[], &[("swp1", 7, true)]);
     h.reload(config(true, 90)).await;
+    // Unbound, the configured hold is the row's owner.
+    // Mutation-red: reporting every unbound hold as an operator disable.
+    let unbound = h.mgr.unbound_interface_only_infos();
+    assert_eq!(
+        (unbound[0].enabled, unbound[0].admin_down_reason),
+        (
+            false,
+            Some(rustbgpd_api::peer_types::AdminDownReason::ConfigAdminDown)
+        )
+    );
     h.bind("swp1", Some(endpoint(2, 7))).await;
     assert!(!h.mgr.peers[&swp1_key(2)].enabled, "configured down");
 

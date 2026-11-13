@@ -829,10 +829,11 @@ existing fields and keep their spelling; a consumer joining the two maps one
 vocabulary to the other rather than comparing strings directly.
 A neighbor the daemon holds down keeps `state` `Idle` and adds `admin_state`
 (`operator_disabled`, `config_admin_down`, `max_prefix_latched` or
-`dampening_capacity`; `enabled` otherwise). Human output shows it as
-`Idle (Admin)`, or `Idle (PfxCt)` for a max-prefix latch, and the detail view
-adds `Admin State` and labels the retained error `Error Before Disable`
-outside a latch, since disabling a session does not replace it.
+`session_crash_latched`; `enabled` otherwise). Human output shows it as
+`Idle (Admin)`, `Idle (PfxCt)` for a max-prefix latch or `Idle (Crash)` for a
+session-crash latch, and the detail view adds `Admin State` and labels the
+retained error `Error Before Disable` outside a latch, since disabling a
+session does not replace it.
 
 RPC-backed JSON views use exhaustive generated-message fixtures and complete
 serialized expectations. A new protobuf field requires an explicit projection

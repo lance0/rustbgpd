@@ -2967,7 +2967,9 @@ pub struct PeerInfo {
     pub interface_only: Option<InterfaceOnlyState>,
 }
 
-/// The owner holding a disabled neighbor down.
+/// The owner holding a disabled neighbor down. When several hold it, the
+/// first of: session crash latch, max-prefix latch, config `admin_down`,
+/// operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminDownReason {
     /// A runtime operator disable.
@@ -2976,8 +2978,8 @@ pub enum AdminDownReason {
     ConfigAdminDown,
     /// A max-prefix shutdown latch.
     MaxPrefixLatched,
-    /// A route-flap dampening source-capacity disable.
-    DampeningCapacity,
+    /// The latch after repeated session task crashes.
+    SessionCrashLatched,
 }
 
 /// How a neighbor's `remote_asn` matches the ASN in the peer's OPEN.
