@@ -806,7 +806,7 @@ fn allowed_dataset(listed: bool) -> rustbgpd_policy::datasets::DatasetData {
 
 /// rpol policy `p` from `policy`, bound to a prefix dataset `allowed` that
 /// lists the local route's prefix when `listed`.
-fn allowed_dataset_chain(
+pub(super) fn allowed_dataset_chain(
     policy: &str,
     listed: bool,
 ) -> (PolicyChain, Arc<rustbgpd_policy::datasets::DatasetHandle>) {

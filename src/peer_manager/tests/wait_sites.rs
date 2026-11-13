@@ -429,7 +429,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ExportRestored,
     },
     WaitSite {
-        site: "policy.rs::try_apply_export_only_policy_cohort",
+        site: "policy.rs::dispatch_deferred_refresh",
         awaits: "PeerCommand::QueryState before the deferred Route Refresh (non-clean reload)",
         drive: Drive::ForwardCohort {
             import_delta: true,
@@ -2408,8 +2408,9 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
     (
         "policy.rs::admit_rib_command_before",
         1,
-        "returns the admission to its caller: the paced walk awaits it inside the step it runs \
-         under await_with_readiness, bounded by the walk's forward deadline",
+        "returns the admission to its caller: the authoritative batch and the paced walk await \
+         it inside the step each runs under await_with_readiness, bounded by the walk's forward \
+         deadline",
     ),
     (
         "notifications.rs::defer_retired_session_down",
