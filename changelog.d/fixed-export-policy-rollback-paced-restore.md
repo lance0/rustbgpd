@@ -4,13 +4,14 @@
   its own prior export policy in one RIB turn. Measured before this change, rolling back about 80 peers with
   distinct export policies at a full table held the RIB for 66 to 68
   seconds, during which no UPDATE, query or timer ran. The rollback now
-  restores peers that return to a shared policy as one batch per policy and
-  the rest a few per RIB command, so other work runs between commands. A
-  peer the failed reload had not yet moved in the RIB costs the rollback no
-  re-export. The rollback is still never abandoned, and a peer whose session drops during
-  it is skipped and comes back up on the restored policy. One case is not
-  yet paced: peers that return from many different policies to one shared
-  policy are still restored in a single turn.
+  restores peers that return to a shared policy in batches of at most 100
+  per policy and the rest a few per RIB command, so other work runs between
+  commands. A peer the failed reload had not yet moved in the RIB costs the
+  rollback no re-export. The rollback is still never abandoned, and a peer
+  whose session drops during it is skipped and comes back up on the restored
+  policy. One case is paced only by that batch limit: up to 100 peers that
+  return from many different policies to one shared policy are restored in
+  one turn.
   **Operator-visible:** the rollback wait is now a stall detector. It gives
   up, and the daemon fences with `known_divergence`, only when the restore
   completes no RIB command for two minutes; a slow restore that keeps making

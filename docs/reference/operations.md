@@ -950,11 +950,11 @@ is 100 ms. Only a typed timeout is retried, at most once, and all such retries
 share one absolute two-second window for the operation. A positive
 non-Established reply, a departed session task, or retry exhaustion rolls the
 policy change back. RIB compensation is registered before rollback Route
-Refresh work is issued and runs newest first: one batch per prior policy, then
-a few peers per RIB command for the peers whose restore resyncs a whole table.
-A local timeout does not cancel the repair: the late receiver remains
-daemon-owned and retry flags stay armed until a later operation proves
-convergence.
+Refresh work is issued and runs newest first: one batch per prior policy, at
+most 100 peers each, then a few peers per RIB command for the peers whose
+restore resyncs a whole table. A local timeout does not cancel the repair: the
+late receiver remains daemon-owned and retry flags stay armed until a later
+operation proves convergence.
 
 How long an export-policy change takes depends on its shape. Peers that move
 between the same pair of export policies are applied together, so their cost
