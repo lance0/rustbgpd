@@ -2998,6 +2998,10 @@ impl PeerManager {
         managed.enabled = true;
         self.publish_peer_admin_enabled_metric(&peer, true);
         self.remove_max_prefix_latch(&peer);
+        // Enable is also the recovery from a session-crash latch.
+        if let Some(crashes) = self.peers.session_crashes_mut(&peer) {
+            *crashes = super::peer_table::SessionCrashes::default();
+        }
         self.publish_peer_lifecycle_event(
             &peer,
             SessionLifecycleEventType::PeerEnabled,

@@ -33,7 +33,20 @@ pub(super) struct ManagedPeer {
     handle: PeerHandle,
     session_id: u64,
     recovery_reset: Option<super::recovery::SessionRecoveryReset>,
+    crashes: SessionCrashes,
     state: ManagedPeerState,
+}
+
+/// Session tasks of one peer that ended without a shutdown request. Kept
+/// across the replacement sessions it restarts; an explicit enable or
+/// removing the peer clears it.
+#[derive(Debug, Default)]
+pub(super) struct SessionCrashes {
+    /// When each crash was handled, oldest first. Older than the latch
+    /// window is pruned at the next crash.
+    pub(super) recent: std::collections::VecDeque<tokio::time::Instant>,
+    /// The neighbor's `last_error` while no session reports a newer one.
+    pub(super) last_error: Option<String>,
 }
 
 impl ManagedPeer {
@@ -42,6 +55,7 @@ impl ManagedPeer {
             handle,
             session_id,
             recovery_reset: None,
+            crashes: SessionCrashes::default(),
             state,
         }
     }
@@ -49,6 +63,11 @@ impl ManagedPeer {
     /// The current session's handle.
     pub(super) fn handle(&self) -> &PeerHandle {
         &self.handle
+    }
+
+    /// Session tasks of this peer that ended without a shutdown request.
+    pub(super) fn session_crashes(&self) -> &SessionCrashes {
+        &self.crashes
     }
 
     /// The current session's peer-manager identity.
@@ -221,6 +240,11 @@ impl PeerTable {
         self.datasets = Arc::new([]);
         self.publish();
         drained
+    }
+
+    /// The peer's session-crash record; `None` when it is not managed.
+    pub(super) fn session_crashes_mut(&mut self, key: &PeerKey) -> Option<&mut SessionCrashes> {
+        self.peers.get_mut(key).map(|peer| &mut peer.crashes)
     }
 
     /// Make `handle` the peer's current session and return the one it

@@ -352,6 +352,81 @@ pub enum SessionNotification {
         /// the first.
         crossings: u64,
     },
+    /// The session task ended without a shutdown request: it panicked, or
+    /// its run loop returned an error. The task sends this after the
+    /// session's drop has queued its RIB and BMP hand-off. A task canceled
+    /// by an abort sends nothing: whoever aborted it already owns it.
+    TaskExited {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when spawned.
+        role: SessionRole,
+        /// IP address of the remote peer.
+        peer_addr: IpAddr,
+        /// `panicked`, or the run loop's error.
+        cause: String,
+    },
+}
+
+/// Reports a session task that ends without a shutdown request as a
+/// [`SessionNotification::TaskExited`]. Create it before the session, so the
+/// session's drop runs first, and pass the run loop's result to
+/// [`Self::finish`]. Dropping it while unwinding reports a panic; dropping
+/// it otherwise (a canceled task) reports nothing.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct SessionTaskExitNotice {
+    notify: Option<SessionNotificationSender>,
+    identity: SessionIdentity,
+    peer_addr: IpAddr,
+}
+
+impl SessionTaskExitNotice {
+    /// Watch one session task. Without a sender it reports nothing.
+    #[must_use]
+    pub fn new(
+        notify: Option<SessionNotificationSender>,
+        identity: SessionIdentity,
+        peer_addr: IpAddr,
+    ) -> Self {
+        Self {
+            notify,
+            identity,
+            peer_addr,
+        }
+    }
+
+    /// The run loop returned: report an error, then pass the result on.
+    ///
+    /// # Errors
+    ///
+    /// Returns the run loop's own error unchanged.
+    pub fn finish(mut self, result: Result<(), TransportError>) -> Result<(), TransportError> {
+        if let Err(error) = &result {
+            self.send(error.to_string());
+        }
+        self.notify = None;
+        result
+    }
+
+    fn send(&mut self, cause: String) {
+        if let Some(notify) = self.notify.take() {
+            let _ = notify.send(SessionNotification::TaskExited {
+                session_id: self.identity.id,
+                role: self.identity.role,
+                peer_addr: self.peer_addr,
+                cause,
+            });
+        }
+    }
+}
+
+impl Drop for SessionTaskExitNotice {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.send("panicked".to_owned());
+        }
+    }
 }
 
 /// Release accounting with the queued value, including when Tokio destroys it
@@ -1623,6 +1698,24 @@ impl PeerHandle {
         let _ = self.task.await;
     }
 
+    /// Join a session task that already ended on its own, for example after
+    /// its [`SessionNotification::TaskExited`], and return its panic message
+    /// if it panicked. The abort is a no-op for a finished task and bounds
+    /// the join for one that has not quite returned.
+    #[doc(hidden)]
+    pub async fn join_exited(self) -> Option<String> {
+        self.task.abort();
+        let error = self.task.await.err()?;
+        if !error.is_panic() {
+            return None;
+        }
+        let payload = error.into_panic();
+        payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+    }
+
     /// Abort and join before reading the actor's final RIB registration owner.
     /// An actor that never registered may still own its predecessor's retention.
     #[doc(hidden)]
@@ -1897,6 +1990,11 @@ impl PeerHandle {
         };
         let publisher = EstablishedPublisher(established.clone());
         let span = peer_session_span(&config);
+        let exit = SessionTaskExitNotice::new(
+            session_notify_tx.clone(),
+            session_identity,
+            config.remote_addr.ip(),
+        );
         let task = tokio::spawn(
             async move {
                 let mut session = PeerSession::new_at_tcp_ao_generation(
@@ -1918,7 +2016,10 @@ impl PeerHandle {
                 session.set_import_policy_counters(import_publication);
                 session.gr_retained_connection = retained_connection;
                 session.established = publisher;
-                session.run().await
+                let result = session.run().await;
+                // The session's drop queues its hand-off before the notice.
+                drop(session);
+                exit.finish(result)
             }
             .instrument(span),
         );
@@ -2082,6 +2183,11 @@ impl PeerHandle {
         };
         let publisher = EstablishedPublisher(established.clone());
         let span = peer_session_span(&config);
+        let exit = SessionTaskExitNotice::new(
+            session_notify_tx.clone(),
+            session_identity,
+            config.remote_addr.ip(),
+        );
         let task = tokio::spawn(
             async move {
                 let mut session = PeerSession::new_inbound_with_identity_and_lifecycle(
@@ -2106,7 +2212,10 @@ impl PeerHandle {
                 session.set_import_policy_counters(import_publication);
                 session.gr_retained_connection = retained_connection;
                 session.established = publisher;
-                session.run().await
+                let result = session.run().await;
+                // The session's drop queues its hand-off before the notice.
+                drop(session);
+                exit.finish(result)
             }
             .instrument(span),
         );
@@ -3855,7 +3964,81 @@ mod tests {
             SessionNotification::BackToIdle { session_id, .. } => (*session_id, 1),
             SessionNotification::MaxPrefixExceeded { session_id, .. } => (*session_id, 2),
             SessionNotification::MaxPrefixWarning { session_id, .. } => (*session_id, 3),
+            SessionNotification::TaskExited { session_id, .. } => (*session_id, 4),
         }
+    }
+
+    fn injected_panic() -> Result<(), TransportError> {
+        panic!("injected session panic")
+    }
+
+    /// The exit notice reports a panic and an error return, and nothing for
+    /// a clean return or an abort. `join_exited` returns the panic message.
+    /// Mutation-red: checking only the error return misses the panic, and
+    /// sending from every drop reports the aborted task.
+    #[tokio::test]
+    async fn session_task_exit_notice_reports_panics_and_errors_only() {
+        let (sender, mut receiver) = session_notification_channel(BgpMetrics::new());
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let watched = |id| {
+            SessionTaskExitNotice::new(Some(sender.clone()), SessionIdentity::primary(id), peer)
+        };
+        let (keep_open, open_rx) = mpsc::channel::<PeerCommand>(1);
+
+        let exit = watched(1);
+        let clean = tokio::spawn(async move { exit.finish(Ok(())) });
+        clean.await.unwrap().unwrap();
+        let exit = watched(2);
+        let failed = tokio::spawn(async move {
+            exit.finish(Err(TransportError::Io(std::io::Error::other("boom"))))
+        });
+        assert!(failed.await.unwrap().is_err());
+        let exit = watched(3);
+        let (fail, failure) = oneshot::channel::<()>();
+        let panicked = tokio::spawn(async move {
+            let _exit = exit;
+            let _ = failure.await;
+            injected_panic()
+        });
+        let panicked = PeerHandle::from_parts(keep_open.clone(), panicked);
+        let exit = watched(4);
+        let aborted = tokio::spawn(async move {
+            let _exit = exit;
+            std::future::pending::<Result<(), TransportError>>().await
+        });
+        let aborted = PeerHandle::from_parts(keep_open, aborted);
+        tokio::task::yield_now().await;
+        fail.send(()).unwrap();
+
+        let mut exits = Vec::new();
+        while exits.len() < 2 {
+            let notification = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .expect("the exits are reported")
+                .unwrap();
+            let SessionNotification::TaskExited {
+                session_id, cause, ..
+            } = notification
+            else {
+                panic!("unexpected {notification:?}");
+            };
+            exits.push((session_id, cause));
+        }
+        // The notice is sent while the task unwinds, so its join is the panic.
+        assert_eq!(
+            panicked.join_exited().await.as_deref(),
+            Some("injected session panic")
+        );
+        assert_eq!(aborted.join_exited().await, None);
+        drop(open_rx);
+        assert!(receiver.try_recv().is_err(), "the abort reports nothing");
+        assert_eq!(
+            exits,
+            [
+                (2, "I/O error: boom".to_owned()),
+                (3, "panicked".to_owned())
+            ]
+        );
     }
 
     #[tokio::test]

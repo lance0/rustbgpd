@@ -617,6 +617,7 @@ struct BgpMetricsInner {
     session_established: IntCounterVec,
     peer_admin_enabled: IntGaugeVec,
     max_prefix_latched: IntGaugeVec,
+    session_task_crashes: IntCounterVec,
     peer_session_established: IntGaugeVec,
     peer_session_state: IntGaugeVec,
     peer_info: IntGaugeVec,
@@ -1022,6 +1023,16 @@ impl BgpMetrics {
                 "bgp_peer_admin_enabled",
                 "Effective peer administrative state (1 = enabled, 0 = disabled by \
                  operator or latched off by a max-prefix shutdown)",
+            ),
+            &["peer", "interface"],
+        )
+        .expect("valid metric definition");
+
+        let session_task_crashes = IntCounterVec::new(
+            Opts::new(
+                "bgp_session_task_crashes_total",
+                "Session tasks of this peer that ended without a shutdown request \
+                 (a panic or a run-loop error) and were restarted or latched down",
             ),
             &["peer", "interface"],
         )
@@ -3247,6 +3258,9 @@ impl BgpMetrics {
             .register(Box::new(max_prefix_latched.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(session_task_crashes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(peer_session_established.clone()))
             .expect("metric not already registered");
         registry
@@ -3986,6 +4000,7 @@ impl BgpMetrics {
             session_established,
             peer_admin_enabled,
             max_prefix_latched,
+            session_task_crashes,
             peer_session_established,
             peer_session_state,
             peer_info,
@@ -4438,6 +4453,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_admin_enabled, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_latched, peer);
+        Self::reap_peer_series_from_vec(&self.0.session_task_crashes, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_state, peer);
         {
@@ -4651,6 +4667,7 @@ impl BgpMetrics {
         let labels = &[peer, interface];
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
         let _ = self.0.max_prefix_latched.remove_label_values(labels);
+        let _ = self.0.session_task_crashes.remove_label_values(labels);
         let _ = self.0.peer_session_established.remove_label_values(labels);
         {
             let mut identities = self
@@ -4786,6 +4803,15 @@ impl BgpMetrics {
             .max_prefix_latched
             .with_label_values(&[peer, interface])
             .set(i64::from(latched));
+    }
+
+    /// Count one session task of this exact peer that ended without a
+    /// shutdown request.
+    pub fn record_session_task_crash(&self, peer: &str, interface: &str) {
+        self.0
+            .session_task_crashes
+            .with_label_values(&[peer, interface])
+            .inc();
     }
 
     /// Publish the configured identity of one exact `(peer, interface)` peer
