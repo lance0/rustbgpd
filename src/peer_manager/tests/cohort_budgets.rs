@@ -597,29 +597,53 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
     assert!(!peer_state.pending_refresh);
 }
 
-/// The walk budget is one absolute deadline for the whole walk, not a fresh
-/// one per peer. A fleet-wide fallback whose cumulative RIB time exceeds the
-/// budget must still be rejected — otherwise the change above reads as
-/// "the walk timeout was removed", and a 1000-peer walk would tolerate hours.
-///
-/// Every peer here replies well inside a fresh `RIB_BATCH_REPLY_TIMEOUT`, so
-/// the rejection can only come from the budget they share.
-///
-/// LOAD-BEARING: anchoring the deadline inside the per-peer call (or handing
-/// each peer its own `RIB_BATCH_REPLY_TIMEOUT`) makes this apply succeed.
-#[tokio::test(start_paused = true)]
-async fn forward_walk_rib_budget_is_shared_across_the_whole_walk() {
+/// Drive a three-peer authoritative walk (pairwise distinct export chains, so
+/// no cohort and no shared pair) against a RIB stub that takes two thirds of
+/// `RIB_BATCH_REPLY_TIMEOUT` per command. With `stall_at`, that command
+/// (counted from 1) is never answered. Returns the snapshot result, the
+/// forward commands the stub received and the elapsed time.
+async fn timed_forward_walk(stall_at: Option<usize>) -> (Result<(), String>, usize, Duration) {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    const PEER_COUNT: u8 = 3;
-    // Each peer alone fits inside the walk budget; two together exhaust it.
     let per_peer_delay = RIB_BATCH_REPLY_TIMEOUT * 2 / 3;
-
-    let peers = (1..=PEER_COUNT)
+    let peers = (1..=3)
         .map(|last| IpAddr::V4(Ipv4Addr::new(10, 41, 1, last)))
         .collect::<Vec<_>>();
     let attempts = Arc::new(AtomicUsize::new(0));
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
+    let served = Arc::new(AtomicUsize::new(0));
+    let stub_served = Arc::clone(&served);
+    let rib_task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    if stall_at == Some(stub_served.fetch_add(1, Ordering::SeqCst) + 1) {
+                        held.push(reply);
+                        continue;
+                    }
+                    tokio::time::sleep(per_peer_delay).await;
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let _ = reply.send(Ok(replacements
+                        .iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
+                }
+                // Peer teardown after the walk.
+                _ => {}
+            }
+        }
+    });
     let (_command_tx, command_rx) = mpsc::channel(16);
     let mut manager = PeerManager::new(
         command_rx,
@@ -639,72 +663,67 @@ async fn forward_walk_rib_budget_is_shared_across_the_whole_walk() {
             false,
         );
     }
+    let started = tokio::time::Instant::now();
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            peers
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, address)| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(distinct_deny_policy_chain(index)),
+                })
+                .collect(),
+        )
+        .await
+        .map(|_| ());
+    let elapsed = started.elapsed();
+    for peer in peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(manager);
+    rib_task.abort();
+    (result, served.load(Ordering::SeqCst), elapsed)
+}
 
-    // Distinct target chains: no two peers are export-identical, so cohort
-    // selection finds no two-member group and the whole fleet walks.
-    let apply = manager.apply_resolved_policy_snapshot(
-        peers
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, address)| ResolvedPeerPolicy {
-                address,
-                interface: None,
-                import_policy: None,
-                export_policy: Some(distinct_deny_policy_chain(index)),
-            })
-            .collect(),
-    );
-    let drive_rib = async {
-        let mut served = 0_usize;
-        // The walk stops at the peer that exhausts the shared budget, so only
-        // the commands actually issued are answered; the rollback aggregate
-        // that follows ends the dialogue.
-        loop {
-            match rib_rx.recv().await.unwrap() {
-                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
-                    served += 1;
-                    tokio::time::sleep(per_peer_delay).await;
-                    let _ = reply.send(Ok(()));
-                }
-                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
-                    replacements,
-                    reply,
-                } => {
-                    let _ = reply.send(Ok(replacements
-                        .iter()
-                        .rev()
-                        .map(
-                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
-                                peer: replacement.peer,
-                            },
-                        )
-                        .collect()));
-                    break served;
-                }
-                _ => panic!("unexpected RIB command during the forward walk"),
-            }
-        }
-    };
-    let (result, served) = tokio::time::timeout(RIB_BATCH_REPLY_TIMEOUT * 3, async {
-        tokio::join!(apply, drive_rib)
-    })
-    .await
-    .expect("the walk must reject and complete its rollback within the bound");
+/// Elapsed time alone does not roll a forward walk back. Every command here
+/// completes inside the stall timeout, and the walk as a whole takes twice
+/// `RIB_BATCH_REPLY_TIMEOUT`; it commits.
+///
+/// LOAD-BEARING: one absolute deadline for the whole walk refuses the third
+/// command and rolls the reload back.
+#[tokio::test(start_paused = true)]
+async fn forward_walk_commits_past_the_stall_timeout_while_every_unit_completes() {
+    let (result, served, elapsed) = timed_forward_walk(None).await;
     assert!(
-        per_peer_delay < RIB_BATCH_REPLY_TIMEOUT,
-        "every individual reply must fit inside a fresh budget, so only a \
-         shared one can reject this walk"
+        result.is_ok(),
+        "a walk whose every command completes must commit: {result:?}"
     );
+    assert_eq!(served, 3);
+    assert_eq!(elapsed, RIB_BATCH_REPLY_TIMEOUT * 2);
+}
+
+/// A unit that never completes is a stall: the walk rolls back
+/// `RIB_BATCH_REPLY_TIMEOUT` after its last completed unit, issues no further
+/// command, and the rollback is exact.
+#[tokio::test(start_paused = true)]
+async fn forward_walk_rolls_back_when_a_unit_stalls() {
+    let (result, served, elapsed) = timed_forward_walk(Some(2)).await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("already-applied peers restored") && !error.contains("also failed")
+        }),
+        "a stalled walk must roll back to an exact compensation: {result:?}"
+    );
+    assert_eq!(served, 2, "no command follows the one that stalled");
+    // The first command completed at two thirds of the timeout; the stall is
+    // measured from there.
     assert_eq!(
-        served, 2,
-        "the second reply exhausts the shared budget; the third command must not be issued"
-    );
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.contains("shared policy-walk budget")),
-        "a walk whose cumulative RIB time exceeds the budget must still be rejected: {result:?}"
+        elapsed,
+        RIB_BATCH_REPLY_TIMEOUT * 2 / 3 + RIB_BATCH_REPLY_TIMEOUT
     );
 }
 

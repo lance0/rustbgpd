@@ -385,13 +385,18 @@ impl PolicySnapshotFailure {
     }
 }
 
-/// One absolute RIB budget covering a whole `O(peers)` policy walk, anchored
-/// on first use rather than at construction so session-side work that runs
-/// before the first RIB command does not consume it.
+/// The RIB budget of an `O(peers)` policy walk, anchored on first use rather
+/// than at construction so session-side work that runs before the first RIB
+/// command does not consume it.
 ///
-/// A serial walk must bound its RIB waits in total, not per peer: a fresh
-/// per-peer deadline multiplies by the fleet size and therefore bounds
-/// nothing, which is the opposite of what an actor-liveness deadline is for.
+/// A walk that never calls [`Self::progressed`] is bounded in total: every
+/// RIB wait shares the one absolute deadline (the honor-knob fan-outs and
+/// the RFC 8212 presence proofs). The export-policy snapshot's forward walk
+/// and its rollback call `progressed` after each completed unit, which makes
+/// the budget a stall detector: it expires `RIB_BATCH_REPLY_TIMEOUT` after
+/// the last completed unit, so a walk that keeps completing units finishes
+/// however long it takes, inside the owner's settlement budget, and only a
+/// RIB that stops answering ends it.
 #[derive(Default)]
 pub(super) struct LazyRibBudget(Option<tokio::time::Instant>);
 
@@ -495,7 +500,7 @@ impl std::fmt::Display for PolicyRollbackFailure {
 
 fn paced_budget_expired() -> String {
     format!(
-        "RIB manager did not reply within the {:?} shared policy-walk budget while applying paced export policies",
+        "RIB manager did not reply within the {:?} policy-walk stall timeout while applying paced export policies",
         super::RIB_BATCH_REPLY_TIMEOUT
     )
 }
@@ -563,7 +568,7 @@ pub(super) fn paced_remaining(
         .then_some(pending)
 }
 
-/// How often a long restore reports its progress.
+/// How often a long policy walk or restore reports its progress.
 const RESTORE_PROGRESS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The RIB half of one policy rollback partition, run as a detached task so
@@ -1360,8 +1365,9 @@ impl PeerManager {
         // whole edit rather than being discovered mid-fanout and unwound.
         let preflight_started = Instant::now();
         // One forward RIB budget for the whole transaction: the presence
-        // proofs below and the authoritative walk's per-peer applies both
-        // queue on the RIB's primary lane, so they are bounded in total.
+        // proofs below and the authoritative walk's applies both queue on
+        // the RIB's primary lane. The walk renews it after each completed
+        // unit, so it bounds a stalled RIB, not the walk's total time.
         let mut context = PolicySnapshotContext {
             forward: LazyRibBudget::default(),
             rollback: LazyRibBudget::default(),
@@ -1818,12 +1824,11 @@ impl PeerManager {
                         .and_then(|(export_policy, _)| export_policy.clone()),
                 })
                 .collect();
-            let deadline = context.forward.deadline();
             self.apply_export_policy_replacements_authoritatively(
                 &peer_keys,
                 &replacements,
-                deadline,
-                context,
+                &mut context.forward,
+                context.operator_reads,
             )
             .await
             .map_err(|message| {
@@ -1853,7 +1858,10 @@ impl PeerManager {
     /// RIB shares the destination build and the old-to-new delta across the
     /// pair instead of resyncing a full table per member; their Route
     /// Refreshes follow once every pair has committed. Every RIB command of
-    /// the walk shares the transaction's forward budget.
+    /// the walk is bounded by the transaction's forward budget, which the
+    /// walk renews after each completed unit: the walk rolls back when a
+    /// peer fails its step or the RIB completes no unit for
+    /// `RIB_BATCH_REPLY_TIMEOUT`, never on elapsed time alone.
     #[expect(
         clippy::too_many_lines,
         reason = "the walk keeps prior capture, the session legs, the deferred RIB steps and their refreshes in one rollback owner"
@@ -1866,6 +1874,11 @@ impl PeerManager {
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         let pair_of = self.shared_export_pairs(&targets);
+        let (walk_started, total_targets) = (Instant::now(), targets.len());
+        let mut progress_logged = walk_started;
+        if total_targets > 0 {
+            info!(targets = total_targets, "authoritative policy walk started");
+        }
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         // Deferred RIB steps: (export pair, index into `applied`, plan).
@@ -1938,6 +1951,19 @@ impl PeerManager {
                 .peers
                 .get(&peer_key)
                 .is_some_and(|managed| managed.policy_known_down);
+            // This target completed, so the RIB is serving the walk: the
+            // next unit is given a full stall timeout of its own.
+            context.forward.progressed();
+            if progress_logged.elapsed() >= RESTORE_PROGRESS_LOG_INTERVAL {
+                progress_logged = Instant::now();
+                info!(
+                    targets = total_targets,
+                    walked = applied.len(),
+                    elapsed_ms =
+                        u64::try_from(walk_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "authoritative policy walk in progress"
+                );
+            }
             self.drain_operator_queries(context.operator_reads).await;
         }
 
@@ -2497,8 +2523,8 @@ impl PeerManager {
                 self.apply_export_policy_replacements_authoritatively(
                     &peer_keys,
                     &replacements,
-                    tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT,
-                    context,
+                    &mut LazyRibBudget::default(),
+                    context.operator_reads,
                 )
                 .await
             }
@@ -2731,12 +2757,13 @@ impl PeerManager {
     /// paced RIB commands. Each command applies the members that fit the
     /// RIB's turn budget and returns the rest, so other RIB work runs between
     /// commands instead of waiting behind one turn that grows with members ×
-    /// rows. The batch and every command of that walk share the caller's
-    /// `deadline`, never renewed per command: a cohort handoff passes one
-    /// `RIB_BATCH_REPLY_TIMEOUT` budget of its own, anchored when the batch
-    /// is sent, and the authoritative remainder passes the transaction's
-    /// forward budget, anchored at its own first command. Any failure,
-    /// including that budget expiring mid-walk, returns
+    /// rows. The batch and every command of that walk are bounded by the
+    /// caller's `budget`, renewed after each completed command, so it expires
+    /// only when the RIB completes none for `RIB_BATCH_REPLY_TIMEOUT`: a
+    /// cohort handoff passes a budget of its own, anchored when the batch is
+    /// sent, and the authoritative remainder passes the transaction's
+    /// forward budget. Any failure, including that budget expiring mid-walk,
+    /// returns
     /// `Err` and the caller restores every captured prior; a peer that left
     /// the RIB comes back skipped, as its reconnect installs the session's
     /// accepted chain.
@@ -2746,10 +2773,11 @@ impl PeerManager {
         &mut self,
         peer_keys: &[PeerKey],
         replacements: &[PeerExportPolicyReplacement],
-        deadline: tokio::time::Instant,
-        context: &mut PolicySnapshotContext,
+        budget: &mut LazyRibBudget,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), String> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
+        let deadline = budget.deadline();
         let rib_tx = self.rib_tx.clone();
         let batch = async {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -2767,33 +2795,31 @@ impl PeerManager {
             }
         };
         let outcome = self
-            .await_with_readiness(
-                tokio::time::timeout_at(deadline, batch),
-                context.operator_reads,
-            )
+            .await_with_readiness(tokio::time::timeout_at(deadline, batch), operator_reads)
             .await;
         self.drain_readiness_queries().await;
         let deferred = outcome.map_err(|_| {
             format!(
-                "RIB manager did not reply within the {:?} shared policy-walk budget while applying the authoritative export-policy batch",
+                "RIB manager did not reply within the {:?} policy-walk stall timeout while applying the authoritative export-policy batch",
                 super::RIB_BATCH_REPLY_TIMEOUT
             )
         })??;
-        self.walk_paced_export_policies(peer_keys, replacements, &deferred, deadline, context)
+        budget.progressed();
+        self.walk_paced_export_policies(peer_keys, replacements, &deferred, budget, operator_reads)
             .await
     }
 
     /// The paced walk over the members the authoritative batch handed back:
     /// each `ApplyPacedExportPolicies` command applies as many of the
     /// remaining members as fit the RIB's turn budget and returns the rest,
-    /// under the cohort batch's deadline.
+    /// under the batch's stall budget.
     async fn walk_paced_export_policies(
         &mut self,
         peer_keys: &[PeerKey],
         replacements: &[PeerExportPolicyReplacement],
         deferred: &[PeerId],
-        deadline: tokio::time::Instant,
-        context: &mut PolicySnapshotContext,
+        budget: &mut LazyRibBudget,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), String> {
         let index_of: std::collections::HashMap<_, _> = replacements
             .iter()
@@ -2832,6 +2858,7 @@ impl PeerManager {
                 })
                 .collect();
             let rib_tx = self.rib_tx.clone();
+            let deadline = budget.deadline();
             let command = sent
                 .iter()
                 .map(|(_, replacement)| replacement.clone())
@@ -2855,12 +2882,10 @@ impl PeerManager {
                 }
             };
             let outcome = self
-                .await_with_readiness(
-                    tokio::time::timeout_at(deadline, step),
-                    context.operator_reads,
-                )
+                .await_with_readiness(tokio::time::timeout_at(deadline, step), operator_reads)
                 .await
                 .map_err(|_| paced_budget_expired())??;
+            budget.progressed();
             let sent_peers: Vec<PeerId> = sent.iter().map(|(_, r)| r.peer).collect();
             let positions = paced_remaining(&sent_peers, &outcome).ok_or_else(|| {
                 "RIB paced export-policy reply does not account for every sent member in caller order"
@@ -2876,7 +2901,7 @@ impl PeerManager {
                 .map(|position| sent[position].0)
                 .chain(rest)
                 .collect();
-            self.drain_operator_queries(context.operator_reads).await;
+            self.drain_operator_queries(operator_reads).await;
         }
         if commands > 0 {
             info!(
@@ -2893,8 +2918,8 @@ impl PeerManager {
     /// dedicated readiness lane.
     ///
     /// `rib_budget` is `Some` when this command is one step of an
-    /// `O(peers)` policy walk: every step of that walk shares the one absolute
-    /// deadline so the walk is bounded in total. `None` is the single-peer
+    /// `O(peers)` policy walk and waits no later than that walk's budget
+    /// (see [`LazyRibBudget`] for which walks renew it). `None` is the single-peer
     /// step of an owned hot update ([`Self::update_runtime_policies_fatal`]):
     /// both halves wait for the RIB, bounded by the settlement owner, since
     /// the dequeued replacement cannot be cancelled and a miss there fences.

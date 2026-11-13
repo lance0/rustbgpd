@@ -320,9 +320,10 @@ const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 /// pend, and an export-policy replacement then performs a full Loc-RIB
 /// distribution pass of its own — seconds at route-server scale under load.
 /// Five seconds is therefore only defensible for one command whose latency
-/// an operator is waiting on directly. Every `O(peers)` policy walk shares
-/// one [`RIB_BATCH_REPLY_TIMEOUT`] budget across all of its steps instead,
-/// so the walk is bounded in total rather than per peer.
+/// an operator is waiting on directly. Every `O(peers)` policy walk is
+/// bounded by a [`RIB_BATCH_REPLY_TIMEOUT`] budget instead: shared across
+/// all steps of a knob fan-out, and measured from the last completed step
+/// in an export-policy snapshot's walk and its rollback.
 const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ordered primary-lane RIB updates queued while the mailbox was full, so a
@@ -472,10 +473,12 @@ impl DeferredRibUpdates {
     }
 }
 
-/// Hard deadline for the batched authoritative export-policy apply
-/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`) together with
-/// the paced commands that follow it for members the batch deferred,
-/// and for the other `O(peers)` RIB walks of one policy transaction. One
+/// Stall timeout for the RIB walks of one policy transaction: the batched
+/// authoritative export-policy apply
+/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`), the paced
+/// commands that follow it, the per-peer remainder steps and the rollback
+/// restore each get this long after the previous one completed; the other
+/// `O(peers)` RIB walks share it as one absolute deadline. One
 /// command carries the whole fallback cohort, so unlike the inline replies
 /// above it legitimately performs a destination-table build plus a
 /// cohort-wide emission — seconds at route-server scale. Twice the clean

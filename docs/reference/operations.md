@@ -949,11 +949,32 @@ state is a fail-closed proof rather than a best-effort hint. The ordinary query
 is 100 ms. Only a typed timeout is retried, at most once, and all such retries
 share one absolute two-second window for the operation. A positive
 non-Established reply, a departed session task, or retry exhaustion rolls the
-policy change back. RIB compensation is registered as one reverse-order exact
-batch before rollback Route Refresh work is issued and may use the normal
-two-minute batch-reply bound. A local timeout does not cancel the queued repair:
-the late receiver remains daemon-owned and retry flags stay armed until a later
-operation proves convergence.
+policy change back. RIB compensation is registered before rollback Route
+Refresh work is issued and runs newest first: one batch per prior policy, then
+a few peers per RIB command for the peers whose restore resyncs a whole table.
+A local timeout does not cancel the repair: the late receiver remains
+daemon-owned and retry flags stay armed until a later operation proves
+convergence.
+
+How long an export-policy change takes depends on its shape. Peers that move
+between the same pair of export policies are applied together, so their cost
+is close to one table per policy pair. Peers whose export change is their own
+(per-neighbor export policies) cost one full-table RIB command each, so the
+change scales with distinct policy chains times table size: at a full table,
+on the order of a second or more per such peer. Elapsed time does not roll
+the change back. Neither the forward walk nor a rollback has a total deadline;
+each is bounded by a two-minute stall timeout, measured from the last RIB
+command that completed, inside the 30-minute settlement budget described in
+[the settlement watchdog guide](../how-to/settlement-watchdog.md). A change
+is rolled back when a peer refuses or fails its step, or when the RIB
+completes no command for two minutes; a rollback that stalls the same way
+fences. The log reports a long walk with `authoritative policy walk started`
+and `authoritative policy walk in progress` every ten seconds, and the
+`reload generation phase timing` line when it ends; a rollback logs `policy
+rollback: restoring export policies in the RIB`, a progress line every ten
+seconds and `policy rollback: export policies restored in the RIB`. A SIGHUP
+that arrives meanwhile is coalesced as described above. A peer whose session
+drops during the walk is skipped and comes up with the new policy.
 
 On the sequential route, reload halts at the first step failure. A typed
 authoritative receipt records the exact successful peer effects, and the

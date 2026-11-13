@@ -8,9 +8,7 @@
   into several policy groups no longer runs out of the two-minute walk budget
   and rolls the reload back at a few hundred changed peers. A compensated
   SIGHUP generation replays its prior chains the same way. A peer whose
-  export change is its own still takes one RIB command, so a reload that
-  changes about a hundred peers with per-neighbor export policies at a full
-  table can still exceed that budget and roll back.
+  export change is its own still takes one RIB command.
   **Operator-visible:** for those grouped peers the Route Refresh that
   follows an import-policy change is now sent after the group's RIB batch,
   not between peers, and the `authoritative_batch_phase` log line appears

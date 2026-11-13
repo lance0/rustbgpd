@@ -304,6 +304,30 @@ is alone in its update group rebuilds a group table and resyncs its own
 table in that turn; bounding it below one member needs a resumable
 replacement, which ADR-0111 examined and rejected.
 
+**Amended:** 2026-11-13 — the forward walks stop rolling back on elapsed
+time. Section 4 and the amendments above describe one two-minute budget for
+the authoritative remainder and one for a cohort fallback's batch and paced
+walk, each an absolute deadline for the whole walk. Measured at a full
+table, that deadline rolled back a reload of roughly 80 or more peers with
+distinct export chains although every RIB command was completing, and the
+rollback then repeated the same work in reverse. Both forward budgets are
+now stall detectors, on the rule the rollback wait uses: after each
+completed unit (a remainder target, a pair's batch, a paced command) the
+budget expires `RIB_BATCH_REPLY_TIMEOUT` later. A walk that keeps completing
+units commits however long it takes; a walk whose RIB completes no unit for
+two minutes rolls back, as does one where a peer refuses or fails its step.
+Expiry still admits no further command, and an admitted command stays ahead
+of its rollback. The RFC 8212 presence proofs that precede a walk and the
+honor-knob fan-outs keep an absolute shared budget. The peer manager holds
+the transaction for the whole walk, so mutations and lifecycle commands wait
+longer behind a large reload than they did; readiness and admitted operator
+reads are served throughout. The outer bound is the owner's fixed 30-minute
+settlement budget: at about 1.5 seconds per distinct-chain peer at a full
+table, a forward walk alone reaches it near 1,200 such peers, and a walk
+that fails late and must be restored reaches it near 600. Reaching it fences
+the daemon, so that budget, not this change, is the limit to revisit before
+a route server carries that many per-neighbor export policies.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

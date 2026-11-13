@@ -3312,13 +3312,14 @@ async fn paced_handoff_mid_walk_failure_restores_every_prior() {
     }
 }
 
-/// The cohort batch and every paced command share one budget of their own:
-/// the cohort walk alone exceeding it fails and restores. A batch that takes
-/// 70 s leaves 50 s for the walk: a command answering 70 s later is past the
-/// budget, so the reload restores instead of issuing the next one. A fresh
-/// deadline per command would accept it.
+/// The cohort batch and its paced commands are bounded by a stall timeout,
+/// not by a total: a batch that takes 70 s and two commands that each answer
+/// 70 s after the previous one are all accepted, 210 s into the walk. The
+/// next command is never answered, so the walk ends `RIB_BATCH_REPLY_TIMEOUT`
+/// after the last completed command and the reload restores. A deadline
+/// renewed only by the batch would refuse the second command's answer.
 #[tokio::test(start_paused = true)]
-async fn paced_handoff_walk_shares_the_batch_budget() {
+async fn paced_handoff_walk_is_bounded_by_a_stall_timeout() {
     let (mut manager, mut rib_rx, peers, _installs) = paced_handoff_fixture(46, 3);
     let next = deny_policy_chain();
     let apply = manager.apply_resolved_policy_snapshot(paced_targets(&peers, &next));
@@ -3345,21 +3346,39 @@ async fn paced_handoff_walk_shares_the_batch_budget() {
             .map(|replacement| replacement.peer)
             .collect();
         reply.send(Ok(ids.clone())).unwrap();
-        let (_, late) = expect_paced(&mut rib_rx, &ids[..1], &next).await;
+        let (_, slow) = expect_paced(&mut rib_rx, &ids[..1], &next).await;
         tokio::time::sleep(Duration::from_secs(70)).await;
         assert!(
-            late.send(Ok(paced_reply(&[], 1, 1))).is_err(),
-            "the command's wait ended at the shared deadline, 50 s after it was sent"
+            slow.send(Ok(paced_reply(&[], 1, 1))).is_ok(),
+            "a command that completes 70 s after the previous one is inside the stall timeout"
+        );
+        let (_, slower) = expect_paced(&mut rib_rx, &ids[1..], &next).await;
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        assert!(
+            slower.send(Ok(paced_reply(&ids[2..], 1, 1))).is_ok(),
+            "each completed command renews the stall timeout"
+        );
+        let (_, stalled) = expect_paced(&mut rib_rx, &ids[2..], &next).await;
+        tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            stalled.send(Ok(paced_reply(&[], 1, 1))).is_err(),
+            "the command's wait ended at the stall timeout"
         );
         answer_restore(&mut rib_rx, &peers).await;
     };
+    let started = tokio::time::Instant::now();
     let (result, ()) = tokio::join!(apply, drive_rib);
     assert!(
         result
             .as_ref()
-            .is_err_and(|error| error.contains("shared policy-walk budget")
+            .is_err_and(|error| error.contains("policy-walk stall timeout")
                 && error.contains("already-applied peers restored")),
         "{result:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(210) + RIB_BATCH_REPLY_TIMEOUT,
+        "the stall is measured from the last completed command: {:?}",
+        started.elapsed()
     );
     for peer in peers {
         assert!(

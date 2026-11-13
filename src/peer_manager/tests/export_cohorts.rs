@@ -1838,8 +1838,8 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
 /// shared by two or more Established remainder peers costs one authoritative
 /// batch, and only a peer whose pair is its own keeps its per-peer command.
 /// Each RIB command here takes 35 s, so the remainder (two pairs of two and
-/// one single) fits the two-minute forward budget as three commands; one
-/// command per member would be five, and the budget would roll it back.
+/// one single) is three commands and 105 s; one command per member would be
+/// five.
 #[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
@@ -1965,7 +1965,7 @@ async fn authoritative_remainder_batches_each_shared_export_pair() {
     let commands = rib_task.await.unwrap();
     assert!(
         result.is_ok(),
-        "three 35 s remainder commands fit the two-minute forward budget: {result:?}; RIB commands: {commands:?}"
+        "the remainder must commit: {result:?}; RIB commands: {commands:?}"
     );
     assert_eq!(
         commands,
