@@ -415,12 +415,15 @@ impl PeerManager {
             {
                 self.metrics
                     .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
-                warn!(
-                    peer = %peer_ip,
-                    port = v6.port(),
-                    scope_id = v6.scope_id(),
-                    "inbound IPv6 link-local connection did not match a configured scoped neighbor; dynamic acceptance of link-local peers is not supported, dropping"
-                );
+                if let Some(suppressed) = self.link_local_unmatched_log.should_log() {
+                    warn!(
+                        peer = %peer_ip,
+                        port = v6.port(),
+                        scope_id = v6.scope_id(),
+                        suppressed,
+                        "inbound IPv6 link-local connection did not match a configured scoped neighbor; dynamic acceptance of link-local peers is not supported, dropping"
+                    );
+                }
                 return;
             }
             // ADR-0120: per-source accept-rate limit, after the
@@ -456,11 +459,14 @@ impl PeerManager {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
                     self.metrics
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
-                    warn!(
-                        peer = %peer_ip,
-                        limit = self.dynamic_neighbor_limit,
-                        "dynamic neighbor limit reached, dropping inbound connection"
-                    );
+                    if let Some(suppressed) = self.dynamic_limit_log.should_log() {
+                        warn!(
+                            peer = %peer_ip,
+                            limit = self.dynamic_neighbor_limit,
+                            suppressed,
+                            "dynamic neighbor limit reached, dropping inbound connection"
+                        );
+                    }
                     return;
                 }
 
@@ -770,13 +776,16 @@ impl PeerManager {
             // No dynamic range match either — drop with hint
             self.metrics
                 .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
-            warn!(
-                peer = %peer_ip,
-                hint = %format_args!(
-                    "to accept: rbgp neighbor {peer_ip} add --asn <REMOTE_ASN>"
-                ),
-                "inbound connection from unknown peer, dropping"
-            );
+            if let Some(suppressed) = self.unknown_peer_log.should_log() {
+                warn!(
+                    peer = %peer_ip,
+                    hint = %format_args!(
+                        "to accept: rbgp neighbor {peer_ip} add --asn <REMOTE_ASN>"
+                    ),
+                    suppressed,
+                    "inbound connection from unknown peer, dropping"
+                );
+            }
             return;
         }
 

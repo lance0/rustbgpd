@@ -2113,6 +2113,11 @@ family is not open; the peer retries).
 The metric HELP text lists the same six canonical `reason` values.
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
+The WARN lines for unknown-source, unmatched link-local, dynamic-limit and
+rate-limited drops, and the listener's ERROR line for a transient accept
+error, are each limited to one line per second; a line's `suppressed` field
+counts the events of its kind not logged since the previous one. The drop
+counter still counts every drop.
 The Grafana overview graphs every reason in "Inbound connection drops by
 reason". `BgpInboundNotificationBackoffDrops` (warning) fires when a
 `notification_backoff` drop was recorded in the last 15 minutes: a configured

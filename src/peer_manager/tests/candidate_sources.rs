@@ -139,7 +139,7 @@ async fn diff(
 
 /// [`diff`] from a caller below `operator_only`, expected to be refused.
 async fn diff_error(manager: PeerManager, candidate_toml: String) -> String {
-    match diff(manager, candidate_toml, false).await {
+    match Box::pin(diff(manager, candidate_toml, false)).await {
         Err(rustbgpd_api::peer_types::RuntimeConfigDiffError::InvalidCandidate(message)) => message,
         other => panic!("expected an invalid candidate, got {other:?}"),
     }

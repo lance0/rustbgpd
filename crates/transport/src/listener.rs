@@ -10,6 +10,7 @@ use crate::config::{
     TcpAoRotationPhase, TcpAoRotationStatus,
 };
 use crate::socket_opts::TcpAoInfoSnapshot;
+use rustbgpd_telemetry::LogThrottle;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -1121,6 +1122,7 @@ impl BgpListener {
     /// Run the accept loop until the channel is closed.
     pub async fn run(mut self) {
         let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
+        let mut transient_accept_log = LogThrottle::default();
         loop {
             tokio::select! {
                 command = self.rotation_rx.recv() => {
@@ -1210,7 +1212,7 @@ impl BgpListener {
                         AcceptErrorClass::Transient => {
                             // Per-connection failures (ECONNABORTED, EINTR,
                             // EPROTO, ...) — the next accept is unaffected.
-                            error!(error = %e, "BGP listener accept error");
+                            log_transient_accept_error(&mut transient_accept_log, &e);
                         }
                     },
                 }
@@ -2625,6 +2627,14 @@ impl TcpAoListenerKey {
     }
 }
 
+/// Log a transient accept error, throttled: a remote that aborts its
+/// handshakes repeats one at will.
+fn log_transient_accept_error(log: &mut LogThrottle, err: &std::io::Error) {
+    if let Some(suppressed) = log.should_log() {
+        error!(error = %err, suppressed, "BGP listener accept error");
+    }
+}
+
 /// Wait for an inbound connection on any bound family socket, returning the
 /// index of the socket that accepted alongside the accept result.
 ///
@@ -3096,6 +3106,20 @@ mod tests {
             accept_error_class(&std::io::Error::other("synthetic")),
             AcceptErrorClass::Transient
         );
+    }
+
+    /// Transient accept errors in one interval emit one line; the next line
+    /// carries the count of the rest. Red proof: logging every error leaves
+    /// the throttle untouched, so the next line reports none suppressed.
+    #[tokio::test(start_paused = true)]
+    async fn transient_accept_error_log_is_throttled() {
+        let mut log = LogThrottle::default();
+        let err = std::io::Error::from_raw_os_error(libc::ECONNABORTED);
+        for _ in 0..5 {
+            log_transient_accept_error(&mut log, &err);
+        }
+        tokio::time::advance(rustbgpd_telemetry::LOG_THROTTLE_INTERVAL).await;
+        assert_eq!(log.should_log(), Some(4));
     }
 
     #[test]

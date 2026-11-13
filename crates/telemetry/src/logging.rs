@@ -498,6 +498,37 @@ pub enum LoggingError {
     InvalidDirective(String),
 }
 
+/// Minimum spacing between the lines of one [`LogThrottle`], so the log
+/// stream cannot be flooded by the flood it reports.
+pub const LOG_THROTTLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// At most one log line per [`LOG_THROTTLE_INTERVAL`] for an event class
+/// that a remote can repeat at will; counts the events whose lines were
+/// suppressed. Uses tokio's clock, so paused-time tests drive it.
+#[derive(Debug, Default)]
+pub struct LogThrottle {
+    last_log: Option<tokio::time::Instant>,
+    suppressed_since_last_log: u64,
+}
+
+impl LogThrottle {
+    /// Whether an event may emit its line now. Returns the number of events
+    /// suppressed since the last emitted line, to log as `suppressed`.
+    pub fn should_log(&mut self) -> Option<u64> {
+        let now = tokio::time::Instant::now();
+        if self
+            .last_log
+            .is_none_or(|last| now.saturating_duration_since(last) >= LOG_THROTTLE_INTERVAL)
+        {
+            self.last_log = Some(now);
+            Some(std::mem::take(&mut self.suppressed_since_last_log))
+        } else {
+            self.suppressed_since_last_log += 1;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

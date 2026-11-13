@@ -11,13 +11,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 
 use lru::LruCache;
+use rustbgpd_telemetry::LogThrottle;
 use tokio::time::Instant;
 
 use crate::config::InboundAdmissionConfig;
-
-/// Minimum spacing between rate-limit warn lines, so the log stream
-/// cannot be flooded by the flood it reports.
-const LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Mask `addr` down to its configured aggregation prefix, producing the
 /// bucket key for that source.
@@ -34,32 +31,6 @@ fn aggregate(addr: IpAddr, v4_len: u8, v6_len: u8) -> IpAddr {
                 u128::MAX << (128 - u32::from(v6_len))
             };
             IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
-        }
-    }
-}
-
-/// At most one log line per [`LOG_INTERVAL`] for a drop class that a remote
-/// can repeat at will; counts the drops whose lines were suppressed.
-#[derive(Default)]
-pub(super) struct LogThrottle {
-    last_log: Option<Instant>,
-    suppressed_since_last_log: u64,
-}
-
-impl LogThrottle {
-    /// Whether a drop may emit its line now. Returns the number of drops
-    /// suppressed since the last emitted line.
-    pub(super) fn should_log(&mut self) -> Option<u64> {
-        let now = Instant::now();
-        if self
-            .last_log
-            .is_none_or(|last| now.saturating_duration_since(last) >= LOG_INTERVAL)
-        {
-            self.last_log = Some(now);
-            Some(std::mem::take(&mut self.suppressed_since_last_log))
-        } else {
-            self.suppressed_since_last_log += 1;
-            None
         }
     }
 }
@@ -128,9 +99,9 @@ impl InboundAdmission {
         }
     }
 
-    /// Whether a rate-limit drop may emit its warn line now. At most
-    /// one line per [`LOG_INTERVAL`]; returns the number of drops
-    /// suppressed since the last emitted line.
+    /// Whether a rate-limit drop may emit its warn line now. At most one
+    /// line per [`rustbgpd_telemetry::LOG_THROTTLE_INTERVAL`]; returns the
+    /// number of drops suppressed since the last emitted line.
     pub(super) fn should_log(&mut self) -> Option<u64> {
         self.log.should_log()
     }
@@ -239,7 +210,7 @@ mod tests {
         assert_eq!(admission.should_log(), Some(0));
         assert_eq!(admission.should_log(), None);
         assert_eq!(admission.should_log(), None);
-        tokio::time::advance(LOG_INTERVAL).await;
+        tokio::time::advance(rustbgpd_telemetry::LOG_THROTTLE_INTERVAL).await;
         assert_eq!(admission.should_log(), Some(2));
     }
 }
