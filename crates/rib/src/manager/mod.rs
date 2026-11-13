@@ -155,7 +155,7 @@ use crate::update::{
 };
 
 #[cfg(test)]
-use queries::{BMP_DUMP_CHUNK_SIZE, page_routes, send_mrt_snapshot};
+use queries::{BMP_DUMP_CHUNK_SIZE, page_routes};
 
 pub use conditional_advertisement::{
     ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
@@ -6012,7 +6012,9 @@ impl RibManager {
             RibUpdate::QueryConditionalAdvertisements { reply } => {
                 let _ = reply.send(self.conditional_advertisement_status());
             }
-            RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
+            RibUpdate::QueryMrtSnapshotChunk { cursor, reply } => {
+                self.handle_query_mrt_snapshot_chunk(cursor, reply);
+            }
             RibUpdate::QueryWarmMrtSnapshot {
                 views,
                 budget,
