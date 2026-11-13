@@ -2134,3 +2134,79 @@ async fn bfd_down_after_a_candidate_hold_outlives_the_generation() {
         actor.abort();
     }
 }
+
+/// A static peer held by a BFD Down whose replacement dials the returned
+/// listener, under a RIB that answers everything.
+async fn held_bfd_peer() -> (PeerManager, IpAddr, TcpListener) {
+    let Lab {
+        mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(1);
+    let peer = peers[0];
+    let (mut mgr, _states) = couple_bfd(mgr, peer);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    mgr.peers
+        .get_mut(&key(peer))
+        .unwrap()
+        .transport_config
+        .remote_addr = listener.local_addr().unwrap();
+    mgr.bfd_coupling.as_mut().unwrap().held_down.insert(peer);
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            answer(update);
+        }
+    });
+    (mgr, peer, listener)
+}
+
+/// Inside a generation, a `Start` retry pending for a held peer's session
+/// moves to the session that replaces it after a crash, and is delivered
+/// once the generation has ended.
+///
+/// LOAD-BEARING: a retry left keyed to the ended session is dropped, and the
+/// replacement stays held.
+#[tokio::test]
+async fn a_start_retry_moves_to_the_replacement_inside_a_generation() {
+    let (mut mgr, peer, listener) = held_bfd_peer().await;
+    mgr.schedule_bfd_retry(peer, true);
+    begin_generation(&mut mgr);
+    let crashed = mgr.peers[&key(peer)].session_id();
+    mgr.handle_session_notification(task_exited(&mgr, peer))
+        .await;
+    assert_ne!(mgr.peers[&key(peer)].session_id(), crashed);
+    mgr.abort_bfd_reload();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    mgr.retry_due_bfd_commands();
+    assert!(!mgr.bfd_withholding(&peer));
+    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the retry starts the replacement")
+        .unwrap();
+}
+
+/// Outside a generation, a held peer owed a `Start` (a release whose
+/// delivery was being retried, or a relaxed strict hold) is released when
+/// its session task ends: the replacement is started at once.
+///
+/// LOAD-BEARING: without the release the replacement stays Idle and held
+/// until a later BFD edge.
+#[tokio::test]
+async fn an_owed_start_goes_to_the_replacement_at_once() {
+    for relaxed in [false, true] {
+        let (mut mgr, peer, listener) = held_bfd_peer().await;
+        if relaxed {
+            mgr.mark_bfd_withheld(peer);
+        } else {
+            mgr.schedule_bfd_retry(peer, true);
+        }
+        mgr.handle_session_notification(task_exited(&mgr, peer))
+            .await;
+        assert!(!mgr.bfd_withholding(&peer), "relaxed={relaxed}");
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap_or_else(|_| panic!("relaxed={relaxed}: the replacement is started"))
+            .unwrap();
+    }
+}
