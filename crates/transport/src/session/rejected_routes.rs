@@ -47,6 +47,7 @@
 //! server bounds at ~256 MiB only if *every* peer keeps a full storm
 //! retained, and operators can lower the cap per deployment.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::time::SystemTime;
@@ -344,8 +345,8 @@ impl RejectedRouteStore {
         dead_code,
         reason = "the isolated store-allocation tool omits the production refresh caller"
     )]
-    pub(super) fn family_keys(&self, afi: Afi, safi: Safi) -> Vec<ImportDecisionKey> {
-        self.entries.as_ref().map_or_else(Vec::new, |entries| {
+    pub(super) fn family_keys(&self, afi: Afi, safi: Safi) -> HashSet<ImportDecisionKey> {
+        self.entries.as_ref().map_or_else(HashSet::new, |entries| {
             entries
                 .iter()
                 .map(|(key, _)| key)

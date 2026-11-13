@@ -92,11 +92,7 @@ impl PeerSession {
             _ => HashSet::new(),
         };
         let stale_retained = match family {
-            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => self
-                .rejected_routes
-                .family_keys(afi, safi)
-                .into_iter()
-                .collect(),
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => self.rejected_routes.family_keys(afi, safi),
             _ => HashSet::new(),
         };
         let stale = match family {
