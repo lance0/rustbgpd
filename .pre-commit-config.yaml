@@ -5,8 +5,14 @@
 # -- -D warnings; cargo test --workspace; cargo doc --workspace --lib
 # --bin rustbgpd --bin rbgp --no-deps --document-private-items).
 #
-# `cargo test --lib` + rustdoc are at pre-push (not pre-commit) so commits
-# stay fast; Rust hooks run only when their inputs change.
+# A commit runs only `cargo fmt`. Clippy, `cargo test --lib` and rustdoc run
+# at pre-push, so a round of several commits pays for them once; Rust hooks
+# run only when their inputs change.
+#
+# The pre-push hooks go through `scripts/hook-once.sh`, which skips a check
+# that already passed for the same clean tree and toolchain (a re-push, a
+# second worktree at the same commit). `HOOK_ONCE_DISABLE=1 git push` forces
+# them to run. `verbose: true` keeps its one-line run/skip verdict visible.
 #
 # Rustdoc warning denial comes from `.cargo/config.toml`
 # (build.rustdocflags), NOT an inline RUSTDOCFLAGS env: setting the env
@@ -38,26 +44,30 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: bash scripts/build-lock.sh cargo clippy --locked --workspace --all-targets -- -D warnings
-        language: system
-        files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
-        types: [file]
-        pass_filenames: false
-
-      - id: cargo-test
-        name: cargo test
-        entry: bash scripts/build-lock.sh cargo test --locked --workspace --lib
+        entry: bash scripts/hook-once.sh clippy -- bash scripts/build-lock.sh cargo clippy --locked --workspace --all-targets -- -D warnings
         language: system
         files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
         types: [file]
         pass_filenames: false
         stages: [pre-push]
+        verbose: true
+
+      - id: cargo-test
+        name: cargo test
+        entry: bash scripts/hook-once.sh test -- bash scripts/build-lock.sh cargo test --locked --workspace --lib
+        language: system
+        files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
+        types: [file]
+        pass_filenames: false
+        stages: [pre-push]
+        verbose: true
 
       - id: cargo-doc
         name: cargo doc
-        entry: bash scripts/build-lock.sh cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items
+        entry: bash scripts/hook-once.sh doc -- bash scripts/build-lock.sh cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items
         language: system
         files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$|^(\.cargo/config(\.toml)?|rust-toolchain(\.toml)?|proto/.*\.proto|examples/route-server/hygiene\.rpol)$'
         types: [file]
         pass_filenames: false
         stages: [pre-push]
+        verbose: true

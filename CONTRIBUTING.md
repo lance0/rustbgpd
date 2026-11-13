@@ -74,7 +74,7 @@ The recipes intentionally expose their direct commands:
   target directory. It is composed from the tiered recipes below and runs the
   same commands in the same order as before the split. It holds the repository
   build lock (`scripts/build-lock.sh`) for its whole run, so a second gate or a
-  compiling commit or push hook that shares the target directory waits for it
+  compiling push hook that shares the target directory waits for it
   instead of building alongside it.
 - `just check-fast` runs formatting and the cheap repository contracts in
   seconds without compiling anything. `just check-contracts` runs the slower
@@ -349,14 +349,22 @@ entry in a follow-up once the change is on `main`.
 
 ### Pre-commit hooks
 
-We ship a `.pre-commit-config.yaml` that runs `cargo fmt --all` and
-`cargo clippy --locked --workspace --all-targets -- -D warnings` on relevant
-commits, workspace library tests on relevant pushes, and rustdoc when Rust
-sources, manifests, lockfiles, protobuf schemas, embedded policy, or Cargo/toolchain
-configuration change. Prose-only pushes skip Rust builds; run `just links` and
-the relevant documentation contracts for those changes. The hooks are a local
-subset, not an exact CI mirror or a guarantee that a pull request is ready. `cargo test` is gated to pre-push (not pre-commit) so
-commits stay fast.
+We ship a `.pre-commit-config.yaml` that runs `cargo fmt --all` on commits
+that touch Rust files. On relevant pushes it runs
+`cargo clippy --locked --workspace --all-targets -- -D warnings` and the
+workspace library tests, plus rustdoc when Rust sources, manifests, lockfiles,
+protobuf schemas, embedded policy, or Cargo/toolchain configuration change.
+Clippy, tests, and rustdoc wait for the push so a series of commits pays for
+them once. Prose-only pushes skip Rust builds; run `just links` and the
+relevant documentation contracts for those changes. The hooks are a local
+subset, not an exact CI mirror or a guarantee that a pull request is ready.
+
+The push checks skip a tree they have already passed. `scripts/hook-once.sh`
+records each pass under the clone's Git directory, keyed by the check, its
+command, the committed tree, and the Rust toolchain, so a re-push or a second
+worktree at the same commit does not run them again; the hook prints one line
+saying so. A working tree with uncommitted or untracked files always runs the
+checks and records nothing. Run `HOOK_ONCE_DISABLE=1 git push` to force them.
 
 Set it up once:
 
@@ -380,8 +388,9 @@ Before installing, preserve any custom Git hooks you still need. Without
 the configured hooks, which can duplicate fmt and Clippy. `just hooks` removes
 those legacy hooks; it keeps the checks in `.pre-commit-config.yaml`.
 
-After install, hooks run automatically. To run them manually
-against staged files: `prek run` (or `pre-commit run`).
+After install, hooks run automatically. To run the commit hook manually
+against staged files: `prek run` (or `pre-commit run`). To run the push checks
+without pushing: `prek run --stage pre-push --all-files`.
 
 Run `just links` to check links between tracked Markdown files without network
 access. It requires lychee 0.24.2 and prints the pinned install command when the
