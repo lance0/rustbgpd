@@ -708,6 +708,32 @@ message PathsLimitState {
   optional uint32 effective_send_limit = 6;
 }
 
+// Administrative state of a neighbor: whether the daemon is holding it down,
+// and which owner did. A held-down neighbor settles to SessionState IDLE and
+// is not trying to connect; last_error is then the failure from before the
+// hold, except for SESSION_CRASH_LATCHED and MAX_PREFIX_LATCHED, where it is
+// the latch message. When several owners hold one neighbor, the value names
+// the first of: SESSION_CRASH_LATCHED, MAX_PREFIX_LATCHED, CONFIG_ADMIN_DOWN,
+// OPERATOR_DISABLED.
+enum NeighborAdminState {
+  // A daemon that does not report administrative state, or a retention-only
+  // row with no neighbor behind it.
+  NEIGHBOR_ADMIN_STATE_UNSPECIFIED = 0;
+  // Not held down: the session connects or accepts as configured.
+  NEIGHBOR_ADMIN_STATE_ENABLED = 1;
+  // Disabled at runtime by an operator (DisableNeighbor or rbgp neighbor
+  // disable). EnableNeighbor clears it.
+  NEIGHBOR_ADMIN_STATE_OPERATOR_DISABLED = 2;
+  // Held down by the neighbor's configured admin_down.
+  NEIGHBOR_ADMIN_STATE_CONFIG_ADMIN_DOWN = 3;
+  // Latched down after a max-prefix shutdown; EnableNeighbor, or the
+  // configured max_prefix_restart_seconds hold-down, clears it.
+  NEIGHBOR_ADMIN_STATE_MAX_PREFIX_LATCHED = 4;
+  // Latched down after its session task crashed repeatedly within the crash
+  // window. EnableNeighbor clears it; last_error carries the latch message.
+  NEIGHBOR_ADMIN_STATE_SESSION_CRASH_LATCHED = 5;
+}
+
 message NeighborState {
   NeighborConfig config = 1;
   SessionState state = 2;
@@ -916,6 +942,9 @@ message NeighborState {
   // its link-local address when it was admitted, and every collector sets
   // on_identity_conflict = "exclude". Kept for the life of the session.
   bool bmp_identity_excluded = 68;
+  // Administrative hold-down state and its owner. UNSPECIFIED from an older
+  // daemon and on a retention-only row.
+  NeighborAdminState admin_state = 69;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.

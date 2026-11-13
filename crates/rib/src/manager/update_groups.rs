@@ -4266,21 +4266,20 @@ impl RibManager {
         } else if self.orf_initial_eor_follows_table(peer) || self.eor_withheld(peer, family) {
             self.defer_orf_initial_eor(peer, family);
         }
-        // The regroup can build a destination table from the whole Loc-RIB;
-        // keep readiness served across it as other full-table paths do.
-        super::with_executor_handoff(|| {
-            self.with_replacement_readiness(|manager| {
-                let mut evpn_feed = if manager.update_groups.members.contains_key(&peer) {
-                    manager.recompute_update_group(peer)
-                } else {
-                    None
-                };
-                manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
-                manager.distribute_changes_with_evpn_feeds(
-                    evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
-                    true,
-                );
-            });
+        // The regroup can build a destination table from the whole Loc-RIB,
+        // so it takes the readiness lane (with the executor handoff). No
+        // policy transition is pending: ingest owner, as the slow-peer seam.
+        self.with_ingest_readiness(|manager| {
+            let mut evpn_feed = if manager.update_groups.members.contains_key(&peer) {
+                manager.recompute_update_group(peer)
+            } else {
+                None
+            };
+            manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
+            manager.distribute_changes_with_evpn_feeds(
+                evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
+                true,
+            );
         });
     }
 

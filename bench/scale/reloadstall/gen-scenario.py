@@ -110,6 +110,11 @@ authoritative batch's per-member path, the cohort shape of ungrouped,
 per-client-best and private-family peers. Stable peers keep `stable-out` and
 stay grouped. Absent or 0 emits the files unchanged.
 
+MRT extension: `GEN_MRT=1` adds an `[mrt]` section writing uncompressed dumps
+to `<out_dir>/mrt` with a one-day interval, so a run takes dumps only when it
+asks for one with `rbgp mrt-dump`. Works with every other shape. Absent or 0,
+the emitted config is unchanged.
+
 Converged-rejoin extension: `GEN_CONVERGED_REJOIN=1` explicitly enables IPv4
 GR helper retention with a 180-second disconnected window and 360-second
 post-reconnect EoR window, matching `--converged-rejoin`. This is a harness
@@ -161,6 +166,10 @@ if converged_rejoin not in ("0", "1"):
     sys.exit("GEN_CONVERGED_REJOIN must be 0 or 1")
 converged_rejoin = converged_rejoin == "1"
 rpki_cache = os.environ.get("GEN_RPKI_CACHE")
+mrt = os.environ.get("GEN_MRT", "0")
+if mrt not in ("0", "1"):
+    sys.exit("GEN_MRT must be 0 or 1")
+mrt = mrt == "1"
 if converged_rejoin and (dualstack or filter_count or ibgp_rr_asn is not None
                          or trip_max_prefixes is not None or mixed_export_only
                          or rpki_cache is not None):
@@ -371,6 +380,10 @@ config = [
     *(
         ["[rpki]", "[[rpki.cache_servers]]", f'address = "{rpki_cache}"', ""]
         if rpki_cache is not None else []
+    ),
+    *(
+        ["[mrt]", f'output_dir = "{rundir}/mrt"', "dump_interval = 86400", ""]
+        if mrt else []
     ),
 ]
 for i in range(n_peers):

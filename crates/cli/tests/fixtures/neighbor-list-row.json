@@ -4,6 +4,7 @@
   "remote_asn": 65002,
   "remote_asn_mode": "numeric",
   "state": "Established",
+  "admin_state": "enabled",
   "slow_peer": true,
   "uptime_seconds": 18446744073709551615,
   "prefixes_received": 104,

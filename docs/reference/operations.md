@@ -1382,21 +1382,71 @@ standby, upgrade, then swap.
 
 ### gRPC server dies unexpectedly
 
-The daemon treats an unexpected gRPC server exit as fatal and initiates a
-coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
-deliberate: losing the control plane means losing the ability to shut down
-cleanly later. See [ADR-0022](../adr/0022-grpc-server-supervision.md).
+The daemon restarts an unexpectedly ended gRPC server in place and keeps BGP
+running: a failure of the management plane says nothing about routing state.
+BGP sessions and routes are unaffected. See
+[ADR-0147](../adr/0147-management-servers-restart-in-place.md), which
+supersedes the earlier fail-stop of
+[ADR-0022](../adr/0022-grpc-server-supervision.md).
+
+Each exit logs `gRPC server exited unexpectedly; restarting it in place` and
+adds one to `bgp_management_server_crashes_total{server="grpc"}`. All
+configured listeners restart together and bind their configured TCP
+addresses and Unix socket paths again, after a delay that starts at 100 ms
+and doubles per restart to a 10 second cap; a run that stayed up for 60
+seconds starts over at 100 ms. A restart whose listeners cannot start (for
+example, the port was taken during the gap) counts as another crash and is
+retried. There is no restart limit: if every restart fails, the daemon keeps
+running BGP with the API down and logs each attempt. `gRPC server restarted`
+marks a restart whose listeners are all up.
+
+While the server is down, `/readyz` answers `503 not ready: gRPC server is
+restarting`, because the mutation path is unavailable; it returns to `200`
+when the restarted listeners are up. The core actors are asked first, so a
+PeerManager or RIB that stops answering in that state is still reported as
+its own failure. `/readyz` turns red once the run that ended has finished
+draining: about 2 s after its listeners stopped accepting, and up to 10 s
+more for a saturated TLS listener (see below). `/livez`, the systemd
+watchdog and `READY=1` are not affected. The shipped `BgpManagementServerCrashed` rule
+fires on any increase of the counter.
+
+The gRPC sockets are not held across a restart. During the gap the TCP ports
+are unbound and the Unix socket path is absent: the run that ended removes
+it and the restart creates it again. If another process binds a configured
+TCP port in that gap, each restart fails with the bind error in
+`startup_error` and is retried, at most 10 seconds apart, until the port is
+free; `/readyz` stays 503 meanwhile. The same holds if a second daemon
+instance starts listening on the Unix socket path: the restart refuses to
+replace a live socket and retries, and `rbgp` over that path reaches the
+other process until it is gone. A listener configured with port 0 binds a
+new ephemeral port on each restart, logged as `bound_addr`.
+
+What clients see:
+
+- New connections are refused during the gap. Clients reconnect to the same
+  configured addresses.
+- Connections that were open when the listener failed take no new requests;
+  new requests need a new connection. A request in flight on one runs to its
+  own answer. An open server-streaming RPC such as `WatchEvents` is such a
+  request: it keeps streaming after the restart, until its client
+  disconnects or its source ends.
+- A caller whose connection is lost gets a transport error. A runtime-config
+  mutation that had begun still runs to settlement (see
+  [the settlement watchdog](../how-to/settlement-watchdog.md)); read the
+  state back after reconnecting. No caller is told of a success that did not
+  settle.
 
 A gRPC listener whose socket becomes unusable (`listener socket unusable;
-stopping its accept loop`) gives its open connections the same one-second
-grace as coordinated shutdown, then exits. An open `WatchEvents` stream or an
-idle client connection cannot hold the listener, or the fail-stop, open.
-The other listeners then get one further second to drain before the gRPC
-server exits. So the fail-stop starts within about 2 s of the failure.
+stopping its accept loop`) gives its open connections a one-second grace to
+finish, then exits. The other listeners then get one further second before
+the gRPC server ends, so the restart starts within about 2 s of the failure.
 A TLS listener detects the failure only on its next accept, and it stops
 accepting while all 64 concurrent handshake slots are busy. If stalled
 clients hold every slot, detection waits for the first handshake to finish
 or hit its 10 s timeout, which adds up to 10 s.
+
+No restart begins after coordinated shutdown has started. A listener that
+cannot bind or start at startup still fails startup.
 
 ### RIB manager or peer manager exits unexpectedly
 
@@ -1465,8 +1515,84 @@ RIB manager failure instead.
 
 ### RPKI subsystem task exits unexpectedly
 
-The daemon treats an unexpected return or panic from the VRP manager, either
-validation-table forwarder, or any configured RTR client task as fatal. It logs
+A panic in one cache's RTR client is not fatal. The client logs
+`RTR client panicked; restarting its session with the held data retained`,
+leaves a panic report, and handles the panic as an ordinary loss of that RTR
+session: the cache's VRPs and ASPAs stay in use until the effective expire,
+and after `retry_interval` the client reconnects and resynchronizes with a
+Reset Query. BGP sessions and the other caches are not touched.
+`bgp_rpki_rtr_client_restarts_total{cache}` counts these restarts; a cache
+whose client keeps restarting shows `bgp_rpki_cache_connected` at `0` and
+loses its data at the expire like any unreachable cache.
+
+`rbgp doctor` reports any panic report as `crashes.recent` FAIL, "the daemon
+has crashed recently", so it also flags a recovered RTR client panic while the
+daemon kept running. Tell the two apart by the report's `location` and by the
+daemon: a recovered client panic has a non-zero
+`bgp_rpki_rtr_client_restarts_total{cache}`, the ERROR log above with that
+cache as `server`, and no `initiating coordinated shutdown` after it. The
+report is still worth attaching to a bug report.
+
+A panic in the VRP manager while it handles one message is not fatal either.
+The manager builds every update before it installs any of it, so after the
+panic each cache's VRPs and ASPAs, and the validation tables in use, are
+exactly what they were before the message. It logs
+`VRP manager panicked handling a message; continuing with its state as before it`
+with `what` and `server`, leaves a panic report, counts the panic in
+`bgp_rpki_task_restarts_total{task="vrp_manager"}`, and carries on. BGP
+sessions, the other caches and their RTR sessions are not touched. What
+follows depends on the message that was lost:
+
+- **A full table or a serial delta.** The cache's last applied data stays in
+  the tables, so import policy that matches on the validation state, best-path
+  selection and what is advertised see no change: existing routes keep their
+  states, and a route received now is validated against that same data.
+  Nothing becomes NotFound because of the panic. The cache is marked
+  `bgp_rpki_cache_resync_pending{cache}` `1`: the manager asks its client for a
+  full table, and the client sends a Reset Query on the same RTR session
+  after `retry_interval` (sooner if the cache sends a Serial Notify). Serial
+  deltas from that cache are dropped until the full table arrives, because
+  they apply to data the manager does not have. When the table is applied the
+  gauge returns to `0` and the RIB revalidates once, visiting only the routes
+  covered by the VRPs the two tables differ in; a table equal to the held one
+  changes nothing and triggers no revalidation.
+- **Held data still expires on time.** While a cache is resync pending the
+  manager itself drops the held data at the expire of the last End of Data it
+  applied, because the client's own timer was renewed by the update that was
+  lost. A manager that loses every table from one cache therefore asks again
+  once per `retry_interval`, and at that expire the cache's data leaves the
+  tables exactly as for an [unreachable cache](#rpki-cache-unreachable):
+  routes only it covered become NotFound.
+- **A flush or an expiry.** The removal is carried out again at once and the
+  remaining caches' tables are published. The cache is not marked resync
+  pending: its client has already dropped its serial, so its next query is a
+  Reset Query.
+- **A connectivity change or a `rbgp rpki caches` query.** Only that
+  notification or query is lost; the query's caller gets an error.
+
+The merged tables are the union of what each cache last delivered. A VRP that
+a healthy cache has withdrawn therefore stays in force while a resync-pending
+(or disconnected) cache's held data still has it, until that cache
+resynchronizes or its data expires.
+
+A panic in a validation-table forwarder is handled the same way: it logs
+`validation-table forwarder panicked; forwarding the latest table again in full`,
+counts in `bgp_rpki_task_restarts_total{task}` (`vrp_forwarder` or
+`aspa_forwarder`), waits out a restart backoff (100 ms, doubling to 10 s) and
+forwards the latest table to the RIB and the sessions again. Until then they
+keep the table they last received; the forwarder keeps accepting newer tables
+from the manager during the backoff, so the manager is not held up. Because the forwarder cannot know whether
+the interrupted table arrived, that one pass revalidates every route; states
+change only where the table really differs. The shipped `RpkiTaskRestarted`
+rule fires on any increase of the counter, and `RpkiCacheResyncPending` when a
+cache stays pending for 15 minutes. `rbgp doctor` flags these panic reports
+too, as described above.
+
+The daemon still treats as fatal: a panic of the VRP manager outside the
+handling of one message; a second panic while it repeats a lost flush or
+expiry, when the tables cannot be rebuilt without that cache and nothing could
+make its data leave on time; a VRP manager or forwarder task that returns; and
+an RTR client task that ends despite its restart. It logs
 `RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
 shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
@@ -1739,6 +1865,26 @@ inherited by dynamic peers follow the same rules. Session-generation
 replacement, explicit disable, neighbor removal, and dynamic-range replacement
 cancel an existing countdown rather than carrying it into new policy.
 
+An operator disable or a configured `admin_down` reads as `Idle (Admin)` in
+`rbgp neighbor` and its detail view, with `Admin State` naming the owner
+(`disabled by operator` or `disabled by config admin_down`). A neighbor whose
+session task crashed three times within ten minutes reads as `Idle (Crash)`,
+with `Admin State` `latched down after repeated session task crashes` and a
+`Last Error` that names the crash, its time and the enable command. The JSON
+`admin_state` is `operator_disabled`, `config_admin_down`,
+`session_crash_latched` or `max_prefix_latched`, and `enabled` otherwise;
+`state` stays `Idle`. When several owners hold one neighbor, the crash latch
+wins, then the max-prefix latch, then `admin_down`, then the operator (see
+[Administrative state](api.md#administrative-state)). Disabling a session
+does not replace its error, so for an operator or `admin_down` hold the detail
+view labels it `Error Before Disable`: it is the failure from before the hold,
+not why the neighbor is down. A plain `Idle` with no suffix is not held down
+administratively; the daemon starts it when nothing else withholds it (strict
+BFD, or an interface-only neighbor with no bound link-local address).
+`rbgp doctor` reports a crash latch, or a max-prefix latch with no armed
+restart, as a stuck peer that names the latch and the last error, rather than
+as administratively disabled.
+
 Before an explicit enable, inspect the latch:
 
 ```bash
@@ -1746,9 +1892,11 @@ rbgp neighbor <addr>
 rbgp --json neighbor <addr>
 ```
 
-Human output reports `Max-Prefix Action` (`shutdown` or `restart`), the
-configured `Max-Prefix Restart`, an active `Max-Prefix Hold-Down` countdown,
-and `Last Error`. The JSON equivalents are `max_prefix_action`,
+Human output shows a latched neighbor's state as `Idle (PfxCt)` and reports
+`Admin State` (`latched down after max-prefix shutdown`), `Max-Prefix Action`
+(`shutdown` or `restart`), the configured `Max-Prefix Restart`, an active
+`Max-Prefix Hold-Down` countdown, and `Last Error`. The JSON equivalents are
+`admin_state` (`max_prefix_latched`), `max_prefix_action`,
 `max_prefix_restart_seconds`, `max_prefix_restart_remaining_millis`, and
 `last_error`. A configured timer has an armed attempt only while the remaining
 field is present: after `Start` delivery failure consumes its one chance, the
@@ -1965,7 +2113,7 @@ The telemetry HTTP listener exposes these read-only paths:
 |------|---------|---------|
 | `/metrics` | `200` Prometheus text exposition | `500` if metrics encoding fails; `503` when the scrape's wait for the render exceeds 5 s (the render itself keeps running), or at once when 56 scrapes are already in flight (waiting, rendering or writing). Scrapes alone cannot fill the 64-connection budget, so `/livez` and `/readyz` stay reachable while a render is stuck |
 | `/livez` | `200 ok` once the listener accepts connections | No actor checks. While all 64 connections are in use, the listener closes connections that have not sent their request line within 250 ms of being accepted, oldest first, so idle or slow-sending clients cannot keep `/livez` and `/readyz` waiting for a connection |
-| `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
+| `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total and the gRPC server is not being restarted | `503 not ready: <reason>`; `gRPC server is restarting` between an unexpected gRPC server exit and its restart |
 | `/dp-readyz` (opt-in alpha) | `200 dataplane workers ready` after each configured FIB/EVPN worker has completed an initial attempt and continues making progress | `404` when disabled; `503` when not configured, starting, unavailable, closed, or stale |
 
 The listener runs on its own thread with a single-threaded runtime, separate
@@ -2059,7 +2207,7 @@ closed or reply dropped), `peer_manager_timeout`, `rib_unavailable` (RIB
 channel closed or reply dropped), `rib_timeout`, `rib_stalled` (an export-policy
 transition, selection-deferral release or source-peer teardown exceeded its
 30-second bound) and `daemon_unavailable` (a runtime-config settlement recovery
-fence or coordinated shutdown). The `503` body and the WARN log keep the exact error. Probes that
+fence, coordinated shutdown, or a gRPC server that is being restarted). The `503` body and the WARN log keep the exact error. Probes that
 succeed are not counted, including slow ones that only log a delayed-phase
 warning.
 
@@ -2132,7 +2280,7 @@ one beside it, so `group_left` joins never match two identities for one peer.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers an operator disable, a max-prefix shutdown latch and a session-crash latch, even though the configuration still says enabled. `bgp_max_prefix_latched` separates the max-prefix latch; no gauge separates the session-crash latch, which the neighbor's last error names |
+| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers an operator disable, a max-prefix shutdown latch and a session-crash latch, even though the configuration still says enabled. `bgp_max_prefix_latched` separates the max-prefix latch; no gauge separates the session-crash latch, which the neighbor's `admin_state` (`session_crash_latched`) and last error name |
 | `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable, or until the timed hold-down expires into a successful restart or, under strict BFD, into the BFD withhold; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
 | `bgp_session_task_crashes_total{peer,interface}` | Session tasks of this peer, or of its inbound collision candidates, that ended without a shutdown request (a panic or a run-loop error). Seeded at 0. The peer manager restarts the session (or retires a dynamic peer or candidate as if it went Idle) after the first and second crash within ten minutes, and latches the neighbor disabled on the third, counted across dynamic reconnects; `last_error` names the latest crash while latched or for ten minutes after it. A reconfigure keeps the latch; explicit enable or deleting the neighbor clears it. Reaped with the other exact peer-identity series |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
@@ -2313,7 +2461,7 @@ name it.
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it. `BgpPolicyTransitionFallback` fires when either fallback outcome increased in the last 15 minutes |
 | `bgp_readiness_probe_failures_total{reason}` | Failed `/readyz` probes, one per `503` response, by the closed `reason` set described under [HTTP probes](#http-probes): `deadline`, `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`, `rib_timeout`, `rib_stalled`, `daemon_unavailable`. All seven series are exported at 0 from startup |
-| `bgp_management_server_crashes_total{server}` | Unexpected exits and failed starts of a management server. The daemon restarts the server in place unless it is shutting down. `server` is `metrics`: the `/metrics`, `/readyz` and `/livez` HTTP server (see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)). Exported at 0 from startup. The server that reports the counter is the one that crashed, so an increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerCrashed` fires on any increase |
+| `bgp_management_server_crashes_total{server}` | Unexpected exits and failed starts of a management server. The daemon restarts the server in place unless it is shutting down. `server` is `metrics` (the `/metrics`, `/readyz` and `/livez` HTTP server, see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)) or `grpc` (the gRPC server with all its listeners, see [gRPC server dies unexpectedly](#grpc-server-dies-unexpectedly)). Both series are exported at 0 from startup. The metrics server reports its own crashes, so that increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerCrashed` fires on any increase |
 | `bgp_rib_stalled` | 1 while the daemon's latest sample of the RIB actor (every 5 seconds, 5-second deadline, independent of `/readyz` requests) got a stalled readiness answer: one export-policy transition, selection-deferral release or peer teardown has run 30 seconds or more. 0 after a ready answer and at startup. A sample that gets no answer leaves the value unchanged; silence is covered by `bgp_systemd_watchdog_pings_skipped_total`. The gauge is always exported but sampled only when the telemetry listener is configured and startup completed; without a sampler it stays 0. `BgpReadinessRibStalled` fires when it reads 1 on every evaluation for ten minutes |
 | `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
@@ -2321,7 +2469,7 @@ name it.
 | `bgp_rib_actor_work_duration_seconds{work_unit}` | Wall-clock duration of RIB actor work components. The closed `work_unit` set is `route_chunk` (construction and processing of one bounded route chunk, excluding its drained-batch tail), `distribute_flush` (one outbound pass across the peer set per distribution window: a route batch plus any unicast-only route messages that were already queued when it drained, up to 256 messages, 4,096 routes, 1,024 changed prefixes or 5 ms, so one observation can cover many UPDATE messages and the series count is windows, not messages; includes readiness servicing at peer boundaries), `exact_export_retire` (retiring exact-export rejections when that window settles), `attribute_gc` (deadline-triggered attribute-intern collection outside ingest chunks), and `flowspec_validation` (a receive-side feasibility slice, including completed selection/distribution). Validation slices cap candidate visits; dependency discovery, peer inventory, and distribution add work outside that visit count. Count-triggered collection remains included in its route chunk. Compare the `le="0.2"` bucket against the series count to count components above 200 ms. These are component timings for correlation with readiness waits, not uninterrupted stalls, a bound on probe latency, or coverage of all actor work |
 | `bgp_systemd_watchdog_pings_skipped_total` | Liveness samples that withheld the systemd `WATCHDOG=1` ping because PeerManager or the RIB gave no answer within the sample deadline (5 s under the shipped unit): a timeout, a closed channel or a dropped reply. A ping that the notify socket refused is counted too. A RIB "stalled" answer is not counted and keeps the ping. Zero without a systemd watchdog. Under the shipped `WatchdogSec=5min`, a count that keeps rising means PID 1 aborts the daemon about five minutes after the last delivered ping; a silent actor adds one every 6 seconds and logs a WARN naming it. The counter also moves during a stop, once the peer manager starts draining sessions; systemd no longer enforces the watchdog by then. The shipped `BgpSystemdWatchdogPingsSkipped` rule fires once skipping has continued for about two and a half minutes (at least 15 skips in two minutes, sustained for another minute); a single transient skip does not fire it |
 | `bgp_rib_actor_turn_duration_seconds{kind}` | Wall-clock duration of one RIB actor turn: the synchronous handling of one inbound RIB message from any lane (primary updates, general queries, operator summaries), labelled by message kind. The closed `kind` set is `routes`, `end_of_rib`, `peer_up`, `peer_down`, `peer_lifecycle`, `peer_state`, `outbound_policy`, `outbound_replay`, `route_refresh`, `injection`, `validation`, `dampening`, `query`. `peer_lifecycle` is neighbor deletion, release, rebind and graceful-restart entry; `peer_state` is per-session context such as policy, ADD-PATH, ORF and slow-peer state; `outbound_policy` is export-policy replacement and re-evaluation, outbound prefix limits and conditional advertisement; `outbound_replay` is a forced outbound replay or refresh; `injection` is API route, FlowSpec and EVPN injection and lease expiry; `validation` is RPKI and ASPA table updates; `query` covers every read, explain and subscription. A turn never yields, so it lies within one actor poll; readiness queries answered at checkpoints inside it are included in its time. Operator summaries answered from a synchronous replacement's frozen projection never reach the message dispatcher: their time counts toward whichever turn or work unit holds the replacement, and they are not observed as `query`. VPN, BGP-LS, labeled and RTC messages are processed and distributed inside their `routes` turn. Unicast, FlowSpec and EVPN messages are only admitted there; their chunk processing and distribution windows run later and appear as `route_chunk` and `distribute_flush` in `bgp_rib_actor_work_duration_seconds`. A clean policy transition's later polls appear in `bgp_rib_policy_transition_actor_poll_duration_seconds`. Attribute GC and FlowSpec validation slices are their own work units (`attribute_gc`, `flowspec_validation`). Other timer expiries (GR and LLGR stale sweeps, refresh windows, End-of-RIB holds, selection deferral, conditional advertisement), dirty-resync ticks, destination pre-staging and deferred initial table dumps are not message turns, and no histogram covers the whole unit; they show in `bgp_rib_actor_slice_seconds`. Use this histogram to find which message kind holds the actor. A turn of 200 ms or longer (the `/readyz` deadline, an exact bucket edge) also logs `slow RIB actor turn` at WARN with `kind`, `elapsed_ms`, and `peer`, `routes` (the batch size, or the departing peer's unicast routes) or `members` (cohort size) where they apply. The log is limited to one line per 10 seconds and its `suppressed` field counts the slow turns not logged; the histogram counts all of them. All series are exported at 0 from startup |
-| `bgp_rib_readiness_query_wait_seconds{seam}` | Wall-clock delay from admission to the dedicated RIB readiness lane until actor service. The closed `seam` set is `actor_loop` (ordinary drains, including in-pass ingest servicing), `policy_transition_fence` (synchronous replacement checkpoints), `selection_release` (synchronous selection-deferral release checkpoints), and `peer_teardown` (source-key collection and removal recomputation/distribution, including an injection lease expiry batch). Records service even after a caller times out, but queries canceled before admission or never served contribute no sample. Excludes channel admission wait, the prior peer-manager probe, and reply delivery; it is not full `/readyz` latency or a probe-timeout rate |
+| `bgp_rib_readiness_query_wait_seconds{seam}` | Wall-clock delay from admission to the dedicated RIB readiness lane until actor service. The closed `seam` set is `actor_loop` (ordinary drains, including in-pass ingest servicing and the registration, regroup and outbound-teardown units that run with no policy transition), `policy_transition_fence` (synchronous replacement checkpoints), `selection_release` (synchronous selection-deferral release checkpoints), and `peer_teardown` (source-key collection and removal recomputation/distribution, including an injection lease expiry batch). Records service even after a caller times out, but queries canceled before admission or never served contribute no sample. Excludes channel admission wait, the prior peer-manager probe, and reply delivery; it is not full `/readyz` latency or a probe-timeout rate |
 | `bgp_rib_actor_slice_seconds{stage}` | Wall-clock durations of RIB actor work. `stage="actor_poll"` is one whole poll of the actor task, including executor handoffs during which other tasks run; it is not uninterrupted worker occupancy. A long poll is not a query-service outage: readiness checkpoints answer queries synchronously inside a poll and the loop drains queries before yielding. The other closed stages split each poll at every 64th readiness checkpoint and at the poll end, and label each slice by the most recent checkpoint at or before its end, so work after the last checkpoint keeps that checkpoint's stage: `selection`, `retirement`, `update_group`, `flowspec`, `refresh`, and `other` (unnamed checkpoints). Checkpoints fire per item in long loops and the clock is read only at a split, so a gap between two checkpoints is never divided. A slice above 200 ms is wall-clock work labelled by its stage, not necessarily a single unchecked gap: it can span up to 64 checkpoints, at which pending queries were answered. Slices of a poll with no checkpoint appear only in `actor_poll`. Buckets run from 1 ms to 2 s, dense around 25, 50, 100, 200, and 500 ms |
 | `bgp_rib_actor_slice_max_microseconds{stage}` | Longest `bgp_rib_actor_slice_seconds` slice per stage, in microseconds, since the previous metrics render; `0` when none completed. Every `/metrics` scrape and `GetMetrics` call starts a new window, so with several scrapers each one sees the maximum since whichever render came last |
 | `bgp_runtime_scheduler_lateness_seconds` | Delay between the scheduled and actual wake of a 10 ms tokio interval probe. Tokio timers resolve to 1 ms, so samples above a few milliseconds mean every runtime worker was busy or blocked, which delays every ready task (sessions, HTTP probes, the RIB actor), not only the probe. Compare with `bgp_rib_actor_slice_seconds{stage="actor_poll"}` to tell RIB actor occupancy from worker saturation by other tasks. Same buckets as the RIB slice histogram |
@@ -3159,6 +3307,9 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
 | `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times that cache's RTR client panicked and restarted its session. `0` from startup for each configured cache. Each restart is an ordinary session loss: retained data stays in use until the effective expire and the client reconnects after `retry_interval` with a Reset Query |
+| `bgp_rpki_task_restarts_total{task}` | Panics the VRP manager (`vrp_manager`) or a validation-table forwarder (`vrp_forwarder`, `aspa_forwarder`) recovered from in place. All three series are `0` from startup. BGP sessions are not affected and the validation tables in use are kept; see [RPKI subsystem task exits unexpectedly](#rpki-subsystem-task-exits-unexpectedly). `RpkiTaskRestarted` fires on any increase |
+| `bgp_rpki_cache_resync_pending{cache}` | `1` while the VRP manager waits for a full table from that cache after losing one of its updates to a recovered panic, `0` otherwise and from startup. While `1`, until its expire, validation uses the cache's last applied VRPs and ASPAs, unrefreshed (`bgp_rpki_cache_end_of_data_age_seconds{cache}` is their age); after it the cache contributes nothing and the gauge stays `1` until the full table is applied. `RpkiCacheResyncPending` fires after 15 minutes |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data, computed at scrape time from a monotonic clock (the age `rbgp rpki caches` shows). Absent until the first End of Data and after a flush or expiry; advances through an ordinary disconnect. `bgp_rpki_cache_effective_expire_seconds` minus this value is the time left before the retained contribution expires |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Import re-evaluation work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed` (an inbound Route Refresh was sent), `skipped_not_established`, `skipped_state_unknown`, or `failed`. With `[rpki] local_revalidation`, `revalidated_locally` counts peers re-evaluated from retained input and `fallback_refresh` counts peers whose retained input was incomplete and that were refreshed instead. A state-query or re-evaluation-request timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
@@ -3294,10 +3445,18 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `termination signal received during coordinated shutdown; the owned runtime-config settlement is fenced and the daemon will fail-stop` | ERROR | A further SIGINT/SIGTERM arrived while a runtime-config owner was still settling; it is fenced as `operator_forced` and exit 70 follows after the grace |
 | `runtime config coordinator permit is still held outside settlement ownership` | ERROR | Shutdown stopped waiting for an unowned coordinator permit (`reason` is `deadline_expired` or `second_signal`) and continues without the warm checkpoint |
 | `SIGHUP reload task is still running with no settlement owner` | ERROR | Shutdown stopped waiting to join the reload task and continues |
-| `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `gRPC server exited unexpectedly; restarting it in place` | ERROR | A run of the gRPC server ended on its own, or a restart could not start its listeners (`startup_error`). Not fatal: BGP keeps running, `/readyz` is 503 until the restart is up, and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap). Counted in `bgp_management_server_crashes_total{server="grpc"}` |
+| `gRPC server restarted` | INFO | Every configured gRPC listener is up again after a restart; `/readyz` no longer reports the server down |
+| `gRPC server not restarted: the daemon is shutting down` | WARN | The server ended during coordinated shutdown, or shutdown began while its restart was waiting, and it stays down for the rest of the shutdown. The crash is still counted |
+| `gRPC supervisor exited unexpectedly; the gRPC API stays down until the daemon restarts` | ERROR | The task that restarts the gRPC server ended, which is a defect. Not fatal: BGP keeps running without the API and `/readyz` stays 503 |
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `RTR client panicked; restarting its session with the held data retained` | ERROR | One cache's RTR client panicked (`server`); it reconnects after `retry_interval` and the cache's data stays in use until it expires. Not fatal |
+| `VRP manager panicked handling a message; continuing with its state as before it` | ERROR | The VRP manager lost one message (`what`, `server`) to a panic; validation data is as before it, and a cache whose data update was lost resynchronizes with a Reset Query. Not fatal |
+| `validation-table forwarder panicked; forwarding the latest table again in full` | ERROR | A validation-table forwarder panicked; after `restart_in_ms` it forwards the latest table again and the RIB revalidates once. Not fatal |
+| `data held for a cache awaiting resynchronization reached its expiry` | WARN | A resync-pending cache (`server`) delivered no full table before its held data expired; that data now leaves the tables |
+| `serial delta dropped: cache is awaiting resynchronization` | WARN | A serial delta from a resync-pending cache (`server`) was discarded; its full table replaces the held data |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap), with `exit` naming the cause. Counted in `bgp_management_server_crashes_total{server="metrics"}` |
@@ -3309,7 +3468,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `injection lease expiry task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
-| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then fail-stops the daemon through gRPC server supervision; the metrics/readiness listener is closed and its address bound again |
+| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then ends the gRPC server, which the daemon restarts in place; the metrics/readiness listener is closed and its address bound again |
 | `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
 | `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
 | `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |
@@ -3741,7 +3900,10 @@ rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines
 Crash reports: a daemon panic writes a small TOML report (panic message,
 source location, thread, version — never environment variables or argv)
 to `<runtime_state_dir>/crash/panic-<ts>-<pid>-<n>.toml`, keeping the 10
-most recent. Each report is written to a temporary file and renamed into
+most recent. A panic at the same source location as the report the daemon
+wrote last writes no new report, so a recovered panic that repeats (an RTR
+client restarting on every retry) cannot push older reports out; it is still
+logged and counted every time. Each report is written to a temporary file and renamed into
 place, so a report is either complete or absent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
 ticket usually pinpoints the crash without a core dump.
 

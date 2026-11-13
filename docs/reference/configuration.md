@@ -3691,6 +3691,9 @@ Prometheus metrics exposed at the configured metrics endpoint:
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective expire interval per cache after the two-day maximum and `max_expire_interval` are applied |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Retained validated End-of-Data readiness per cache; includes empty tables and remains ready through reconnect until flush or expiry |
 | `bgp_rpki_cache_connected{cache}` | Whether an RTR session to the cache is established; `0` whenever it is down, including while an ordinary disconnect's retained contribution is still in use |
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times the cache's RTR client panicked and restarted its session; the restart is handled as an ordinary session loss |
+| `bgp_rpki_task_restarts_total{task}` | Panics the VRP manager (`vrp_manager`) or a validation-table forwarder (`vrp_forwarder`, `aspa_forwarder`) recovered from in place |
+| `bgp_rpki_cache_resync_pending{cache}` | `1` while the VRP manager waits for a full table from the cache after a recovered panic, `0` otherwise. Until its expire, validation uses the cache's last applied data; after it the cache contributes nothing |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data; present only while a contribution is retained, removed on flush or expiry |
 
 `NotFound` includes startup before validated data and the state after all
@@ -5033,7 +5036,7 @@ Each dump contains a complete `TABLE_DUMP_V2` snapshot:
 | `PEER_INDEX_TABLE` (subtype 1) | All known peers with ASN and BGP ID |
 | `RIB_IPV4_UNICAST` (subtype 2) | IPv4 routes from Adj-RIB-In per peer |
 | `RIB_IPV6_UNICAST` (subtype 4) | IPv6 routes from Adj-RIB-In per peer |
-| `RIB_GENERIC` (subtype 6) | L2VPN/EVPN routes (AFI 25 / SAFI 70) per RFC 6396 section 4.3.5 |
+| `RIB_GENERIC` (subtype 6) | L2VPN/EVPN routes (AFI 25 / SAFI 70) per RFC 6396 section 4.3.3 |
 | `RIB_IPV4_UNICAST_ADDPATH` (subtype 8) | IPv4 routes with path IDs (RFC 8050) |
 | `RIB_IPV6_UNICAST_ADDPATH` (subtype 10) | IPv6 routes with path IDs (RFC 8050) |
 
@@ -5052,6 +5055,58 @@ catch-up burst.
 
 When MRT is not configured, no timer or manager task is spawned — zero
 overhead.
+
+### What one dump shows
+
+A dump covers the post-policy Adj-RIB-In for IPv4 and IPv6 unicast (with the
+RFC 8050 Add-Path subtypes when a neighbor sends several paths) and
+L2VPN/EVPN. VPNv4/VPNv6, labeled unicast, FlowSpec, BGP-LS and RT-Constrain
+routes are not dumped.
+
+A dump is read from the live table in steps, with ordinary route processing
+between the steps, so it is not one instant of the whole table.
+
+Unicast is read about 4,096 routes per step, whatever the table size:
+
+- **Each unicast prefix is one instant.** All neighbors' paths for a prefix
+  are read in the same step, so every `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST`
+  record is the set of paths that existed together at one moment.
+- **Different prefixes are different instants.** Two records can be read
+  seconds apart on a large table. Do not conclude from one file that two
+  prefixes were, or were not, announced at the same time.
+
+EVPN (`RIB_GENERIC`) is read one block of one neighbor's table per step. A
+block is the neighbor's whole EVPN table while it holds up to 16,384 routes,
+and one sixteenth of it beyond that, so the EVPN step grows with the largest
+single neighbor's EVPN table: about 4,700 routes for a 75,000-route neighbor,
+about 62,500 for a 1,000,000-route neighbor. The same EVPN route learned from
+two neighbors is read at two different instants; the one-instant rule above
+is unicast only.
+
+For every family:
+
+- **A route that does not change during the dump appears exactly once.** A
+  route announced, replaced or withdrawn while the dump runs appears at most
+  once, in a form it really had (the old one or the new one), or not at all.
+- **The record timestamp is when the walk began.** Every route in the file
+  was read at or after it; the file name carries the time the file was
+  published.
+- **The peer table is complete.** The `PEER_INDEX_TABLE` is written first but
+  built last, from the neighbors seen in each step. A neighbor that goes down
+  mid-dump keeps its entry and the routes already read; one that comes up
+  mid-dump is listed and contributes what the walk had not yet passed. A
+  neighbor is listed once, with the address, ASN and BGP identifier it had
+  when its routes were first read: if it restarts with a new BGP identifier,
+  or an interface-only neighbor moves to a new link-local address, mid-dump,
+  routes read afterward are still filed under the first identity.
+
+A dump that takes longer than `dump_interval` is followed at once by the next
+one, so dumps run back to back; compare `mrt_last_dump_duration_milliseconds`
+with the interval to see it.
+
+A dump abandoned partway (a canceled `TriggerMrtDump`, or shutdown) publishes
+no file. The routes are still gathered in memory before the file is encoded
+and written, so the memory a dump needs is unchanged.
 
 See [ADR-0044](../adr/0044-mrt-dump-export.md) for design details.
 

@@ -146,3 +146,12 @@ canonical NLRI byte representation is total-orderable.
 - On-demand trigger returns the file path synchronously, blocking the
   gRPC handler until the dump completes. For very large RIBs this could
   be slow; a future enhancement could make it async with a status poll.
+
+## Update (2026-11-13)
+
+The single `QueryMrtSnapshot` turn described above was replaced by a chunked
+query that the MRT manager drives with a cursor: unicast is read about 4,096
+routes per RIB turn in prefix order, EVPN one hash shard of one neighbor's
+table per turn, and a cancellation now stops the walk at the next chunk. The
+text above is kept as the original decision; the current behavior is in
+[What one dump shows](../reference/configuration.md#what-one-dump-shows).

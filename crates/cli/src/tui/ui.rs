@@ -8,7 +8,7 @@ use crate::commands::neighbor::{
     negotiated_families_label, negotiation_status_label, next_hop_ownership_label,
     optional_seconds_label, rfc8212_policy_status_label,
 };
-use crate::output::{format_duration, format_state_with_stale, neighbor_source_label};
+use crate::output::{format_duration, neighbor_source_label, neighbor_state_label};
 use crate::tui::app::{
     App, EditorMode, ExplainState, PrefixEditor, RibPageState, SortColumn, View, neighbor_key,
 };
@@ -192,7 +192,7 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let cfg = n.config.as_ref();
         let identity = neighbor_key(n).unwrap_or_default();
         let asn = cfg.map(crate::output::remote_asn_label).unwrap_or_default();
-        let state_label = format_state_with_stale(n.state, n.stale);
+        let state_label = neighbor_state_label(n);
         let state_color = theme.state_color_with_stale(n.state, n.stale);
         let uptime = format_duration(n.uptime_seconds);
         let rx = format_number(n.prefixes_received);
@@ -228,7 +228,7 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let widths = [
         Constraint::Min(16),    // Neighbor
         Constraint::Length(7),  // AS
-        Constraint::Length(11), // State
+        Constraint::Length(12), // State: "Idle (Admin)"
         Constraint::Length(10), // Uptime
         Constraint::Length(8),  // Rx Pfx
         Constraint::Length(8),  // Tx Pfx
@@ -395,7 +395,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     let inner = block.inner(f.area());
     f.render_widget(block, f.area());
 
-    let state_label = format_state_with_stale(neighbor.state, neighbor.stale);
+    let state_label = neighbor_state_label(neighbor);
     let state_color = theme.state_color_with_stale(neighbor.state, neighbor.stale);
     let rate = app.peer_update_rate(address);
     let negotiation = negotiation_status_label(neighbor);
@@ -500,11 +500,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
             text,
         ),
         row("Source:", neighbor_source_label(neighbor), text),
-        row(
-            "State:",
-            state_label.to_string(),
-            Style::default().fg(state_color),
-        ),
+        row("State:", state_label, Style::default().fg(state_color)),
         row("Uptime:", format_duration(neighbor.uptime_seconds), text),
         row("Configured Hold Time:", configured_hold, text),
         row("Negotiation:", negotiation.to_string(), text),
@@ -1443,6 +1439,27 @@ mod tests {
         assert_eq!(event_time(253_402_300_799_999), "23:59:59Z");
         assert_eq!(event_time(253_402_300_800_000), "253402300800");
         assert_eq!(event_time(-1), "-1");
+    }
+
+    /// Load-bearing: the shared label and a State column wide enough for it.
+    /// Plain `format_state_with_stale` drops the suffix; an 11-cell column
+    /// cuts it to `Idle (Crash`.
+    #[test]
+    fn peer_table_shows_who_holds_a_neighbor_down() {
+        let rendered = rendered_snapshot(snapshot(
+            vec![NeighborState {
+                config: Some(NeighborConfig {
+                    address: "192.0.2.2".into(),
+                    remote_asn: 65002,
+                    ..Default::default()
+                }),
+                state: crate::proto::SessionState::Idle as i32,
+                admin_state: crate::proto::NeighborAdminState::SessionCrashLatched as i32,
+                ..Default::default()
+            }],
+            Freshness::Fresh,
+        ));
+        assert!(rendered.contains("Idle (Crash)"), "{rendered}");
     }
 
     fn snapshot(neighbors: Vec<NeighborState>, freshness: Freshness) -> DataSnapshot {
