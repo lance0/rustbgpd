@@ -501,6 +501,13 @@ fn paced_budget_expired() -> String {
     )
 }
 
+fn walk_budget_spent() -> String {
+    format!(
+        "the {:?} shared policy-walk budget expired before the RIB admitted the next export-policy command",
+        super::RIB_BATCH_REPLY_TIMEOUT
+    )
+}
+
 /// Admit one RIB command unless the shared deadline has passed: checked
 /// before waiting for channel capacity and again once capacity is reserved,
 /// so expiry never admits another command. An admitted command stays ahead of
@@ -511,14 +518,14 @@ pub(super) async fn admit_rib_command_before(
     update: RibUpdate,
 ) -> Result<(), String> {
     if tokio::time::Instant::now() >= deadline {
-        return Err(paced_budget_expired());
+        return Err(walk_budget_spent());
     }
     let permit = rib_tx
         .reserve()
         .await
         .map_err(|_| "RIB manager unavailable".to_string())?;
     if tokio::time::Instant::now() >= deadline {
-        return Err(paced_budget_expired());
+        return Err(walk_budget_spent());
     }
     permit.send(update);
     Ok(())
@@ -1393,6 +1400,7 @@ impl PeerManager {
                     targets,
                     &mut context,
                     require_clean_convergence,
+                    &mut phases.refresh_count,
                 )
                 .await;
             phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
@@ -1423,6 +1431,7 @@ impl PeerManager {
                     targets,
                     &mut context,
                     require_clean_convergence,
+                    &mut phases.refresh_count,
                 )
                 .await;
             phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
@@ -1468,6 +1477,7 @@ impl PeerManager {
                     targets,
                     &mut context,
                     require_clean_convergence,
+                    &mut phases.refresh_count,
                 )
                 .await;
             phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
@@ -1492,6 +1502,7 @@ impl PeerManager {
                 remainder,
                 &mut context,
                 require_clean_convergence,
+                &mut phases.refresh_count,
             )
             .await;
         phases.authoritative_remainder_apply_us = elapsed_us(authoritative_remainder_started);
@@ -1815,6 +1826,7 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
         context: &mut PolicySnapshotContext,
         require_clean_convergence: bool,
+        refresh_count: &mut usize,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         let pair_of = self.shared_export_pairs(&targets);
@@ -1900,7 +1912,6 @@ impl PeerManager {
         let mut pairs: Vec<usize> = planned.iter().map(|(pair, _, _)| *pair).collect();
         pairs.sort_unstable();
         pairs.dedup();
-        let mut refresh_count = 0;
         for pair in pairs {
             let members: Vec<&(usize, usize, PolicyRollbackPeerPlan)> = planned
                 .iter()
@@ -1958,7 +1969,7 @@ impl PeerManager {
                             &plan.peer_key,
                             context,
                             require_clean_convergence,
-                            &mut refresh_count,
+                            refresh_count,
                         )
                         .await
                 {
@@ -2738,13 +2749,18 @@ impl PeerManager {
         let rib_tx = self.rib_tx.clone();
         let batch = async {
             let (reply_tx, reply_rx) = oneshot::channel();
-            rib_tx
-                .send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            // An expired budget admits no further batch: the walk is about
+            // to roll back, and a batch queued now would only cost the RIB a
+            // turn to skip.
+            admit_rib_command_before(
+                &rib_tx,
+                deadline,
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
                     replacements: replacements.to_vec(),
                     reply: reply_tx,
-                })
-                .await
-                .map_err(|_| "RIB manager unavailable".to_string())?;
+                },
+            )
+            .await?;
             match reply_rx.await {
                 Err(_) => Err("RIB manager dropped authoritative batch reply".to_string()),
                 Ok(Err(error)) => Err(error.to_string()),

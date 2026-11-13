@@ -11,6 +11,8 @@ use crate::config::{
 use crate::peer_manager::generation::ReloadGenerationOutcome;
 use rustbgpd_policy::PolicyAction;
 
+type ExportInstallHook = Box<dyn FnOnce(Option<PolicyChain>) + Send>;
+
 /// Per-session counters for the fake sessions a generation drives.
 #[derive(Default)]
 struct GenerationSessionCounters {
@@ -26,6 +28,11 @@ struct GenerationSessionCounters {
     installed_import: Mutex<Option<PolicyChain>>,
     installed_export: Mutex<Option<PolicyChain>>,
     export_installs: AtomicU32,
+    /// Reject this many export-policy updates without installing them.
+    reject_export_updates: AtomicU32,
+    /// Runs once, with the chain of the first export-policy update this
+    /// session installs, before that update is acknowledged.
+    on_export_install: Mutex<Option<ExportInstallHook>>,
     runtime_config_updates: AtomicU32,
     runtime_knobs: Mutex<Vec<rustbgpd_transport::PeerRuntimeConfigUpdate>>,
     drop_runtime_reply: AtomicBool,
@@ -76,11 +83,22 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     answer_policy_update(&in_task.late_import_acks, reply);
                 }
                 PeerCommand::UpdateExportPolicy { policy, reply } => {
+                    if in_task.reject_export_updates.load(Ordering::SeqCst) > 0 {
+                        in_task.reject_export_updates.fetch_sub(1, Ordering::SeqCst);
+                        let _ =
+                            reply.send(Err(rustbgpd_transport::PeerCommandError::CommandFailed(
+                                "injected export-policy apply failure".to_string(),
+                            )));
+                        continue;
+                    }
                     if let Some(owners) = policy.as_deref().and_then(PolicyOwners::observe) {
                         in_task.export_owners.lock().unwrap().push(owners);
                     }
                     in_task.export_installs.fetch_add(1, Ordering::SeqCst);
                     *in_task.installed_export.lock().unwrap() = policy.as_deref().cloned();
+                    if let Some(hook) = in_task.on_export_install.lock().unwrap().take() {
+                        hook(policy.as_deref().cloned());
+                    }
                     answer_policy_update(&in_task.late_export_acks, reply);
                 }
                 PeerCommand::UpdateRuntimeConfig { config, reply } => {
@@ -766,6 +784,175 @@ async fn compensated_generation_batches_the_remainder_pair_in_both_directions() 
     }
     harness.shutdown().await;
     relay.await.unwrap();
+}
+
+/// One `PeerUp` for `peer` as its session registers it: on `export_policy`,
+/// sending IPv4 unicast.
+fn generation_peer_up(
+    peer: PeerId,
+    session_id: u64,
+    export_policy: Option<PolicyChain>,
+) -> (RibUpdate, mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate>) {
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    let update = RibUpdate::PeerUp {
+        supersedes: None,
+        peer,
+        session_id,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    };
+    (update, outbound_rx)
+}
+
+/// The export chain the RIB has installed for `peer`'s outbound registration.
+async fn rib_installed_export_chain(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+) -> Option<Arc<rustbgpd_policy::ir::CompiledChain>> {
+    let (reply, answer) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryInstalledExportChain { peer, reply })
+        .await
+        .unwrap();
+    answer
+        .await
+        .unwrap()
+        .expect("peer has an outbound registration")
+        .chain
+}
+
+/// A remainder pair member can complete its outbound registration inside the
+/// walk, after its session accepted the candidate chain and before its pair's
+/// RIB batch is sent (a flap and re-establish, or a deferred `PeerUp`
+/// registration released). That registration installs the chain the session
+/// holds, the candidate. When a later target then fails, the rollback must
+/// restore that member in the RIB as well as on its session, even though its
+/// batch was never sent: otherwise the RIB keeps exporting under the rejected
+/// chain while the reload reports full compensation.
+///
+/// The generation runs against a real RIB actor. The cohort takes the first
+/// pair; `127.1.0.3` and `127.1.0.4` are the remainder pair, `127.1.0.3`
+/// re-registers on its first export install, and `127.1.0.4` rejects its
+/// session leg.
+#[tokio::test]
+async fn rollback_restores_the_rib_chain_of_a_pair_member_that_registered_mid_walk() {
+    let fixture = generated_scenario_fixture("5", "4", &[("GEN_EXPORT_PAIRS", "2")]);
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(256);
+    let rib = tokio::spawn(
+        rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            harness.mgr.metrics.clone(),
+        )
+        .run(),
+    );
+    harness.mgr.rib_tx = rib_tx.clone();
+    harness.rib.abort();
+    let mut outbound = Vec::new();
+    let mut registered = BTreeMap::new();
+    for (peer_key, managed) in &harness.mgr.peers {
+        let peer = harness.mgr.rib_peer_of(peer_key);
+        let (peer_up, outbound_rx) =
+            generation_peer_up(peer, managed.session_id(), managed.export_policy.clone());
+        rib_tx.try_send(peer_up).unwrap();
+        outbound.push(outbound_rx);
+        registered.insert(
+            peer_key.address,
+            (peer, managed.session_id(), managed.export_policy.clone()),
+        );
+    }
+    let registering: IpAddr = "127.1.0.3".parse().unwrap();
+    let failing: IpAddr = "127.1.0.4".parse().unwrap();
+    let (peer, session_id, prior_chain) = registered[&registering].clone();
+    let prior_compiled = prior_chain.as_ref().map(PolicyChain::compiled_shared);
+    assert_eq!(
+        rib_installed_export_chain(&rib_tx, peer).await,
+        prior_compiled,
+        "the member starts on its prior chain"
+    );
+
+    // The member flaps and re-establishes as its session accepts the
+    // candidate chain: the new registration carries that chain and reaches
+    // the RIB before the acknowledgement reaches the walk.
+    let (flap_rx_tx, flap_rx) = std::sync::mpsc::channel();
+    let flap_tx = rib_tx.clone();
+    let installed_by_flap = Arc::new(Mutex::new(None));
+    let flap_chain = Arc::clone(&installed_by_flap);
+    *harness.counters[&registering]
+        .on_export_install
+        .lock()
+        .unwrap() = Some(Box::new(move |candidate| {
+        flap_tx
+            .try_send(RibUpdate::PeerDown { peer, session_id })
+            .unwrap();
+        let (peer_up, outbound_rx) = generation_peer_up(peer, session_id, candidate.clone());
+        flap_tx.try_send(peer_up).unwrap();
+        flap_rx_tx.send(outbound_rx).unwrap();
+        *flap_chain.lock().unwrap() = candidate;
+    }));
+    harness.counters[&failing]
+        .reject_export_updates
+        .store(1, Ordering::SeqCst);
+
+    std::fs::copy(
+        fixture.dir.path().join("gen-b.rpol"),
+        fixture.dir.path().join("member.rpol"),
+    )
+    .unwrap();
+    let candidate = fixture.load();
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(&outcome, ReloadGenerationOutcome::FullyCompensated(error)
+            if error.contains("injected export-policy apply failure")),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    outbound.push(
+        flap_rx
+            .try_recv()
+            .expect("the member re-registered during the walk"),
+    );
+    let candidate_chain = installed_by_flap.lock().unwrap().take();
+    assert_ne!(
+        candidate_chain, prior_chain,
+        "the mid-walk registration installed the candidate chain"
+    );
+    assert_eq!(
+        harness.mgr.peers[&key(registering)].export_policy,
+        prior_chain,
+        "the peer manager holds the prior chain again"
+    );
+    assert!(
+        rib_installed_export_chain(&rib_tx, peer).await == prior_compiled,
+        "the RIB must export to {registering} under its prior chain after the compensated \
+         failure, not the rejected candidate"
+    );
+    for (address, (peer, _, chain)) in &registered {
+        assert!(
+            rib_installed_export_chain(&rib_tx, *peer).await
+                == chain.as_ref().map(PolicyChain::compiled_shared),
+            "{address}: the RIB is back on the prior chain"
+        );
+    }
+    harness.shutdown().await;
+    drop(outbound);
+    rib.abort();
 }
 
 #[tokio::test]
