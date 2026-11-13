@@ -555,6 +555,16 @@ These are not guidelines — they are enforced invariants:
 - `evpn-linux` is the Linux kernel dataplane for EVPN VTEP mode — depends only on `evpn`, never on `rib` or `transport`
 - `cli` depends only on `wire` and `policy` (client-only proto stubs; dev tests also use `api`, `evpn`, `telemetry`, and `bmp`)
 
+### Bumping Dependencies
+
+`.cargo/config.toml` sets `registry.global-min-publish-age = "3 days"`, so
+`cargo update` and `cargo add` skip crate versions published in the last three
+days and report which versions they held back. Versions already in `Cargo.lock`
+and `--locked` builds are unaffected, and `cargo install` ignores the window.
+For an urgent security fix, override it for that one command:
+`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <version>`.
+Toolchains older than Rust 1.100 ignore the setting.
+
 ## Pull Request Process
 
 1. Fork the repository
