@@ -27,7 +27,8 @@ pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
 ///   work instead of racing the teardown.
 /// - **gRPC server down**: the gRPC server ended on its own and is being
 ///   restarted in place. `/readyz` reports 503 until the restarted server's
-///   listeners are up. It is not a [`DaemonNotReady`] reason: `GetHealth`
+///   listeners are up, unless a core actor fails the probe first. It is not
+///   a [`DaemonNotReady`] reason: `GetHealth`
 ///   cannot be asked while the server that answers it is down.
 #[derive(Clone, Debug, Default)]
 pub struct DaemonGate {
@@ -245,17 +246,20 @@ impl CoreReadinessProbe {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
         }
-        // The mutation path is down. `snapshot` does not ask: it serves
-        // `GetHealth`, which only a running gRPC server can answer.
-        if self.gate.as_ref().is_some_and(DaemonGate::grpc_server_down) {
-            return Err(CoreReadinessError::GrpcServerDown);
-        }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
         tokio::try_join!(
             biased;
             self.ping_peer_manager(deadline),
             self.query_rib(deadline)
         )?;
+        // The mutation path is down. Asked only after both actors answered:
+        // the server can stay down for as long as its restart keeps failing,
+        // and must not hide an actor that stopped answering meanwhile.
+        // `snapshot` does not ask at all: it serves `GetHealth`, which only
+        // a running gRPC server can answer.
+        if self.gate.as_ref().is_some_and(DaemonGate::grpc_server_down) {
+            return Err(CoreReadinessError::GrpcServerDown);
+        }
         Ok(())
     }
 
@@ -1298,38 +1302,62 @@ mod tests {
         );
     }
 
-    /// A gRPC server that is down fails readiness without asking the actors,
-    /// and clears again. It is not a `GetHealth` gate reason, so the health
-    /// snapshot still asks the actors, and a latched gate reason outranks it.
+    /// A gRPC server that is down fails readiness only once both actors
+    /// have answered, so it cannot hide an actor failure, and it clears
+    /// again. It is not a `GetHealth` gate reason, and a latched gate reason
+    /// outranks it.
     #[tokio::test]
-    async fn grpc_server_down_fails_readiness_until_cleared() {
-        let (peer_tx, peer_rx) = mpsc::channel(1);
-        let (rib_tx, _rib_rx) = mpsc::channel(1);
-        drop(peer_rx);
+    async fn grpc_server_down_fails_readiness_only_after_the_actors_answered() {
         let gate = DaemonGate::new();
-        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
-
         gate.set_grpc_server_down(true);
         assert!(gate.grpc_server_down());
         assert_eq!(gate.not_ready_reason(), None);
-        assert_eq!(probe.check().await, Err(CoreReadinessError::GrpcServerDown));
         assert_eq!(
             CoreReadinessError::GrpcServerDown.to_string(),
             "gRPC server is restarting"
-        );
-        assert_eq!(
-            probe.snapshot().await.unwrap_err(),
-            CoreReadinessError::PeerManagerUnavailable
         );
         assert!(core_actor_answered::<()>(&Err(
             CoreReadinessError::GrpcServerDown
         )));
 
-        gate.set_grpc_server_down(false);
+        // An actor that does not answer is the reported failure.
+        let (peer_tx, peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        drop(peer_rx);
+        let dead_actor = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
         assert_eq!(
-            probe.check().await,
+            dead_actor.check().await,
             Err(CoreReadinessError::PeerManagerUnavailable)
         );
+
+        // Both actors answer: the gRPC server is what holds readiness red.
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (rib_tx, mut rib_rx) = mpsc::channel(4);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
+        let actors = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(command) = peer_rx.recv() => match command {
+                        PeerManagerCommand::Ping { reply } => {
+                            let _ = reply.send(());
+                        }
+                        PeerManagerCommand::ActivePeers { reply } => {
+                            let _ = reply.send(0);
+                        }
+                        _ => {}
+                    },
+                    Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv() => {
+                        let _ = reply.send(0);
+                    }
+                    else => return,
+                }
+            }
+        });
+        assert_eq!(probe.check().await, Err(CoreReadinessError::GrpcServerDown));
+        assert!(probe.snapshot().await.is_ok(), "GetHealth does not ask");
+
+        gate.set_grpc_server_down(false);
+        assert_eq!(probe.check().await, Ok(()));
 
         gate.set_grpc_server_down(true);
         gate.begin_shutdown();
@@ -1339,6 +1367,7 @@ mod tests {
                 DaemonNotReady::ShuttingDown
             ))
         );
+        actors.abort();
     }
 
     /// Gate reasons are distinct `UPPER_SNAKE` codes; `/readyz` shows the

@@ -2136,9 +2136,9 @@ pub(crate) mod tests {
         assert!(response.ends_with("not ready: daemon is shutting down\n"));
     }
 
-    /// While the gRPC server is down between a crash and its restart,
-    /// `/readyz` is red with that cause and counts under the gate's reason;
-    /// it turns green again when the restart clears the gate.
+    /// While the gRPC server is down between a crash and its restart, and
+    /// both actors answer, `/readyz` is red with that cause and counts under
+    /// the gate's reason; it turns green again when the restart clears it.
     #[tokio::test]
     async fn readyz_is_red_while_the_grpc_server_is_down() {
         use rustbgpd_api::health_probe::DaemonGate;
@@ -2154,6 +2154,21 @@ pub(crate) mod tests {
         )
         .await;
 
+        // Both actors answer throughout: only the gRPC server is down.
+        let actors = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv() => {
+                        let _ = reply.send(());
+                    }
+                    Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv() => {
+                        let _ = reply.send(0);
+                    }
+                    else => return,
+                }
+            }
+        });
+
         gate.set_grpc_server_down(true);
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
@@ -2164,17 +2179,9 @@ pub(crate) mod tests {
         );
 
         gate.set_grpc_server_down(false);
-        let actors = tokio::spawn(async move {
-            if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
-                let _ = reply.send(());
-            }
-            if let Some(RibUpdate::QueryLocRibCount { reply, .. }) = rib_rx.recv().await {
-                let _ = reply.send(0);
-            }
-        });
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        actors.await.unwrap();
+        actors.abort();
     }
 
     #[tokio::test]
