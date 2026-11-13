@@ -487,6 +487,11 @@ pub(crate) struct PeerSession {
     /// awaits room so the close does not. The next Peer Up and the end of
     /// the session task wait for it; dropping the session aborts it.
     bmp_peer_down_handoff: Option<JoinHandle<()>>,
+    /// The collectors saw this session's last Peer Up and no Peer Down
+    /// after it: set once a Peer Up is in the BMP channel, cleared when a
+    /// Peer Down is queued or handed off. A session dropped while it is set
+    /// owes them a Peer Down (see [`Self::close_bmp_epoch`]).
+    bmp_peer_up_sent: bool,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
     /// `None` when RPKI not configured or in tests.
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -2558,6 +2563,7 @@ impl PeerSession {
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
             bmp_peer_down_handoff: None,
+            bmp_peer_up_sent: false,
             validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
@@ -2810,10 +2816,13 @@ impl PeerSession {
             return;
         }
         self.settle_bmp_peer_down().await;
+        let peer_up = matches!(event, BmpEvent::PeerUp { .. });
         if tx.send(event).await.is_err() {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, "channel_closed");
             debug!(peer = %self.peer_label, "BMP event channel closed");
+        } else if peer_up {
+            self.bmp_peer_up_sent = true;
         }
     }
 
@@ -2827,6 +2836,7 @@ impl PeerSession {
     /// cannot overtake it, and daemon shutdown delivers it before the BMP
     /// manager stops.
     fn hand_off_peer_down(&mut self, tx: mpsc::Sender<BmpEvent>, event: BmpEvent) {
+        self.bmp_peer_up_sent = false;
         let event = match tx.try_send(event) {
             Ok(()) => return,
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -2884,22 +2894,26 @@ impl PeerSession {
         }
     }
 
-    /// A session dropped inside an Established epoch whose BMP Peer Down it
-    /// never emitted (its task aborted or panicked before `SessionDown`)
-    /// queues one now: reason 2, local close without NOTIFICATION, behind
-    /// every event it already emitted. It never waits for room: delivered
+    /// A session dropped after a Peer Up the collectors saw, with no Peer
+    /// Down after it (its task aborted or panicked before `SessionDown`
+    /// queued one), queues one now behind every event it already emitted:
+    /// the teardown reason it latched, else reason 2, local close without
+    /// NOTIFICATION. It never waits for room: delivered
     /// later, it could follow a successor's Peer Up, so a full channel
     /// drops it, counted, as [`Self::abandon_bmp_peer_down`] does.
     fn close_bmp_epoch(&mut self) {
         let Some(tx) = self.bmp_tx.as_ref() else {
             return;
         };
-        if self.established_at.take().is_none() {
+        if !std::mem::take(&mut self.bmp_peer_up_sent) {
             return;
         }
         let event = BmpEvent::PeerDown {
             peer_info: self.build_bmp_peer_info(),
-            reason: PeerDownReason::LocalNoNotification(0),
+            reason: self
+                .last_down_reason
+                .take()
+                .unwrap_or(PeerDownReason::LocalNoNotification(0)),
         };
         match tx.try_send(event) {
             Ok(()) => {}
@@ -2952,9 +2966,11 @@ impl PeerSession {
         if tx.try_send(down).is_err() {
             return false;
         }
+        self.bmp_peer_up_sent = false;
         if tx.try_send(self.build_bmp_peer_up_event()).is_err() {
             return false;
         }
+        self.bmp_peer_up_sent = true;
         self.bmp_stream_diverged = false;
         self.metrics
             .set_bmp_stream_diverged(&self.peer_label, false);

@@ -1174,20 +1174,35 @@ async fn a_dropped_session_with_a_delivered_peer_down_abandons_nothing() {
     );
 }
 
-/// A session dropped inside its Established epoch, by an abort or by a
+/// A session dropped after a Peer Up the collectors saw, by an abort or by a
 /// panic that unwinds through it, emits the BMP Peer Down that
-/// `SessionDown` never did: reason 2, behind the Route Monitoring it
-/// already queued. A session that went down first emits no second one.
+/// `SessionDown` never did, behind the Route Monitoring it already queued:
+/// the teardown reason it latched, else reason 2 with FSM event code 0. A
+/// session that went down first, or whose Peer Up never reached the
+/// channel, emits none.
 /// Mutation-red: without the drop-time Peer Down the collector keeps the
-/// peer up; closing the epoch on every drop sends a second Peer Down.
+/// peer up; closing the epoch on every drop sends a second Peer Down; a
+/// fixed reason drops the latched automatic stop; keying on
+/// `established_at` sends a Peer Down for a peer the collectors never saw.
 #[tokio::test]
 async fn a_session_dropped_while_established_emits_bmp_peer_down() {
-    let established = || {
-        let (mut session, rib_rx, bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-        session.established_at = Some(tokio::time::Instant::now());
-        (session, rib_rx, bmp_rx)
-    };
+    async fn established() -> (
+        PeerSession,
+        mpsc::Receiver<RibUpdate>,
+        mpsc::Receiver<BmpEvent>,
+        TcpStream,
+    ) {
+        let (mut session, rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        let (client, server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        session
+            .execute_actions(vec![Action::SessionEstablished(Box::new(
+                negotiated_session(65002, false),
+            ))])
+            .await;
+        assert!(matches!(bmp_rx.try_recv(), Ok(BmpEvent::PeerUp { .. })));
+        (session, rib_rx, bmp_rx, server)
+    }
     let events = |bmp_rx: &mut mpsc::Receiver<BmpEvent>| {
         std::iter::from_fn(|| bmp_rx.try_recv().ok())
             .map(|event| match event {
@@ -1196,13 +1211,17 @@ async fn a_session_dropped_while_established_emits_bmp_peer_down() {
                     reason: PeerDownReason::LocalNoNotification(0),
                     ..
                 } => "PeerDown(local, no notification)",
+                BmpEvent::PeerDown {
+                    reason: PeerDownReason::LocalNoNotification(AUTOMATIC_STOP_FSM_EVENT),
+                    ..
+                } => "PeerDown(local, automatic stop)",
                 BmpEvent::PeerDown { .. } => "PeerDown(other)",
                 _ => "other",
             })
             .collect::<Vec<_>>()
     };
 
-    let (mut aborted, _rib_rx, mut bmp_rx) = established();
+    let (mut aborted, _rib_rx, mut bmp_rx, _server) = established().await;
     aborted.emit_bmp_event(BmpEvent::RouteMonitoring {
         peer_info: aborted.build_bmp_peer_info(),
         update_pdu: Bytes::from_static(&[0xde, 0xad]),
@@ -1213,7 +1232,7 @@ async fn a_session_dropped_while_established_emits_bmp_peer_down() {
         ["RouteMonitoring", "PeerDown(local, no notification)"]
     );
 
-    let (panicked, _rib_rx, mut bmp_rx) = established();
+    let (panicked, _rib_rx, mut bmp_rx, _server) = established().await;
     let task = tokio::spawn(async move {
         let _session = panicked;
         panic!("session task panicked");
@@ -1221,11 +1240,48 @@ async fn a_session_dropped_while_established_emits_bmp_peer_down() {
     assert!(task.await.unwrap_err().is_panic());
     assert_eq!(events(&mut bmp_rx), ["PeerDown(local, no notification)"]);
 
-    let (mut closed, _rib_rx, mut bmp_rx) = established();
+    // Latched as `fail_connection_locally` does before it awaits the
+    // connection's abort.
+    let (mut failing, _rib_rx, mut bmp_rx, _server) = established().await;
+    failing.last_down_reason = Some(PeerDownReason::LocalNoNotification(
+        AUTOMATIC_STOP_FSM_EVENT,
+    ));
+    drop(failing);
+    assert_eq!(events(&mut bmp_rx), ["PeerDown(local, automatic stop)"]);
+
+    let (mut closed, _rib_rx, mut bmp_rx, _server) = established().await;
     closed.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
     closed.execute_actions(vec![Action::SessionDown]).await;
     drop(closed);
     assert_eq!(events(&mut bmp_rx), ["PeerDown(other)"]);
+
+    // Aborted while its Peer Up waits for BMP room: the collectors never
+    // saw the peer come up.
+    let (mut unseen, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    unseen.test_install_stream(client);
+    let tx = unseen.bmp_tx.clone().unwrap();
+    for _ in 0..tx.max_capacity() {
+        unseen.emit_bmp_event(BmpEvent::RouteMonitoring {
+            peer_info: unseen.build_bmp_peer_info(),
+            update_pdu: Bytes::from_static(&[0xde, 0xad]),
+        });
+    }
+    tokio::select! {
+        biased;
+        _ = unseen.execute_actions(vec![Action::SessionEstablished(Box::new(
+            negotiated_session(65002, false),
+        ))]) => panic!("the Peer Up must wait for room"),
+        () = tokio::task::yield_now() => {}
+    }
+    assert!(unseen.established_at.is_some(), "the epoch had begun");
+    // Room again, so a Peer Down the drop owed would be delivered.
+    assert_eq!(
+        events(&mut bmp_rx),
+        vec!["RouteMonitoring"; tx.max_capacity()]
+    );
+    drop(unseen);
+    assert_eq!(events(&mut bmp_rx), Vec::<&str>::new());
 }
 
 /// LAN-200: a TCP disconnect abandons any pending BMP divergence repair.
