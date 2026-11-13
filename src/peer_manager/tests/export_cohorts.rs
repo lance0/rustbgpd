@@ -3063,6 +3063,9 @@ struct LargePairLayout {
     /// A unit of its own (a distinct export chain) follows pair members 49,
     /// 149 and 199 in caller order.
     units_between: bool,
+    /// Each rollback restore batch acknowledges its first member as
+    /// `Deferred`, for a paced restore command that restores it.
+    defer_first_restored: bool,
 }
 
 /// What [`run_large_remainder_pair`] observed.
@@ -3138,7 +3141,29 @@ async fn run_large_remainder_pair(layout: LargePairLayout) -> LargePairRun {
                         reply,
                     } => {
                         seen.push(("restore", replacement_addrs(&replacements)));
-                        let _ = reply.send(Ok(restored_receipts(&replacements)));
+                        let mut receipts = restored_receipts(&replacements);
+                        if layout.defer_first_restored {
+                            // Receipts are newest first: the batch's first
+                            // supplied member is the last receipt.
+                            let last = receipts.last_mut().unwrap();
+                            *last = rustbgpd_rib::PeerExportPolicyRestoreReceipt::Deferred {
+                                peer: last.peer(),
+                            };
+                        }
+                        let _ = reply.send(Ok(receipts));
+                    }
+                    RibUpdate::RestorePacedExportPolicies {
+                        replacements,
+                        reply,
+                        ..
+                    } => {
+                        seen.push(("paced", replacement_addrs(&replacements)));
+                        let _ = reply.send(Ok(rustbgpd_rib::PacedApplyOutcome {
+                            pending: Vec::new(),
+                            skipped: Vec::new(),
+                            applied: replacements.len(),
+                            cost: None,
+                        }));
                     }
                     _ => {}
                 }
@@ -3265,8 +3290,11 @@ async fn non_contiguous_pair_failure_leaves_the_units_between_its_members_untouc
         vec![
             ("batch", run.pair[..100].to_vec()),
             ("batch", run.pair[100..200].to_vec()),
-            ("restore", run.pair[..200].to_vec()),
-            ("restore", run.cohort.clone()),
+            ("restore", run.pair[100..200].to_vec()),
+            ("restore", run.pair[..100].to_vec()),
+            ("restore", run.cohort[151..].to_vec()),
+            ("restore", run.cohort[51..151].to_vec()),
+            ("restore", run.cohort[..51].to_vec()),
         ],
         "only the pair's two groups reached and the cohort are restored"
     );
@@ -3274,6 +3302,69 @@ async fn non_contiguous_pair_failure_leaves_the_units_between_its_members_untouc
     assert_eq!(
         run.between_installs, 0,
         "no unit listed between the pair's members was hot-applied"
+    );
+}
+
+/// A rollback restores a large pair's prior chain in batches of at most
+/// `PAIR_BATCH_MEMBERS`, newest members first, as the forward walk sent it:
+/// a pair refused at its third group returns its 250 reached members in
+/// three restore batches, not one. Each batch's deferred member is restored
+/// by a paced command before the next batch, every reached member is
+/// restored exactly once, and the rollback is exact.
+#[tokio::test]
+async fn large_pair_rollback_restores_in_bounded_batches() {
+    let run = run_large_remainder_pair(LargePairLayout {
+        fail_batch_from: Some(200),
+        defer_first_restored: true,
+        ..LargePairLayout::default()
+    })
+    .await;
+    assert!(
+        run.result.as_ref().is_err_and(|error| {
+            error.contains("batch refused")
+                && error.contains("already-applied peers restored")
+                && error.contains("committed cohort restored")
+        }),
+        "{:?}",
+        run.result
+    );
+    let (pair, cohort) = (&run.pair, &run.cohort);
+    assert_eq!(
+        run.commands,
+        vec![
+            ("batch", pair[..100].to_vec()),
+            ("batch", pair[100..200].to_vec()),
+            ("batch", pair[200..].to_vec()),
+            ("restore", pair[150..].to_vec()),
+            ("paced", vec![pair[150]]),
+            ("restore", pair[50..150].to_vec()),
+            ("paced", vec![pair[50]]),
+            ("restore", pair[..50].to_vec()),
+            ("paced", vec![pair[0]]),
+            ("restore", cohort[151..].to_vec()),
+            ("paced", vec![cohort[151]]),
+            ("restore", cohort[51..151].to_vec()),
+            ("paced", vec![cohort[51]]),
+            ("restore", cohort[..51].to_vec()),
+            ("paced", vec![cohort[0]]),
+        ],
+        "each prior chain goes back in batches of at most 100, each followed by its paced restores"
+    );
+    let mut restored: Vec<IpAddr> = run
+        .commands
+        .iter()
+        .filter(|(kind, _)| *kind == "restore")
+        .flat_map(|(_, members)| {
+            assert!(members.len() <= 100, "a restore batch of {}", members.len());
+            members.iter().copied()
+        })
+        .collect();
+    restored.sort_unstable();
+    let mut reached: Vec<IpAddr> = cohort.iter().chain(pair).copied().collect();
+    reached.sort_unstable();
+    assert_eq!(
+        restored, reached,
+        "every reached member is restored exactly once"
     );
 }
 
@@ -3332,10 +3423,14 @@ async fn large_remainder_pair_is_sent_in_bounded_batches_and_restored_whole() {
         vec![
             ("batch", pair[..100].to_vec()),
             ("batch", pair[100..200].to_vec()),
-            ("restore", pair[..200].to_vec()),
-            ("restore", cohort),
+            ("restore", pair[100..200].to_vec()),
+            ("restore", pair[..100].to_vec()),
+            ("restore", cohort[151..].to_vec()),
+            ("restore", cohort[51..151].to_vec()),
+            ("restore", cohort[..51].to_vec()),
         ],
-        "the refused second batch restores the 200 members of the two batches reached, then the cohort"
+        "the refused second batch restores the 200 members of the two batches reached, newest \
+         first and at most 100 per batch, then the cohort the same way"
     );
     // LOAD-BEARING: running every member's session legs ahead of the first
     // batch hot-applies these 50 sessions and then has to restore them.

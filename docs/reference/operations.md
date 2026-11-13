@@ -949,11 +949,14 @@ state is a fail-closed proof rather than a best-effort hint. The ordinary query
 is 100 ms. Only a typed timeout is retried, at most once, and all such retries
 share one absolute two-second window for the operation. A positive
 non-Established reply, a departed session task, or retry exhaustion rolls the
-policy change back. RIB compensation is registered as one reverse-order exact
-batch before rollback Route Refresh work is issued and may use the normal
-two-minute batch-reply bound. A local timeout does not cancel the queued repair:
-the late receiver remains daemon-owned and retry flags stay armed until a later
-operation proves convergence.
+policy change back. RIB compensation is registered before rollback Route
+Refresh work is issued and runs newest first: one batch per prior policy, at
+most 100 peers each, then a few peers per RIB command for the peers whose
+restore resyncs a whole table. The rollback has no total deadline: it is
+bounded by a two-minute stall timeout, measured from the last RIB command it
+completed. A local timeout does not cancel the repair: the late receiver
+remains daemon-owned and retry flags stay armed until a later operation
+proves convergence.
 
 On the sequential route, reload halts at the first step failure. A typed
 authoritative receipt records the exact successful peer effects, and the

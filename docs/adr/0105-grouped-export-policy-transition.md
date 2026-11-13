@@ -334,9 +334,12 @@ related series is the clean transition's
 
 Two limits remain. A restore batch still runs one shared cohort transition
 per source group in its one turn, so members returning from many source
-groups to one prior chain are restored in a single turn that grows with
-them (measured in checkpoints at 256 rows: 19,144 for 8 members from two
-groups, 53,416 for 32). And one member's restore is one RIB turn. A member that
+groups to one prior chain are restored in a turn that grows with them
+(measured in checkpoints at 256 rows: 19,144 for 8 members from two groups,
+53,416 for 32). The restore task caps that turn the way the forward walk
+caps a pair's batch: a prior chain goes back in batches of at most
+`PAIR_BATCH_MEMBERS` (100) members, newest first, each followed by the paced
+restores of its deferred members. And one member's restore is one RIB turn. A member that
 is alone in its update group rebuilds a group table and resyncs its own
 table in that turn; bounding it below one member needs a resumable
 replacement, which ADR-0111 examined and rejected.

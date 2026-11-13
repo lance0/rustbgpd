@@ -579,9 +579,10 @@ const RESTORE_PROGRESS_LOG_INTERVAL: std::time::Duration = std::time::Duration::
 /// abandons it: the task owns every send and every reply to the end.
 ///
 /// `replacements` are the captured priors in forward order; the restore runs
-/// newest first. Members returning to the same prior chain go back as one
-/// `RestorePeerExportPoliciesAuthoritatively` batch, which restores shared
-/// cohorts in its one turn and acknowledges each residual member as
+/// newest first. Members returning to the same prior chain go back in
+/// `RestorePeerExportPoliciesAuthoritatively` batches of at most
+/// `PAIR_BATCH_MEMBERS`, as the forward walk sends them; a batch restores
+/// shared cohorts in its turn and acknowledges each residual member as
 /// `Deferred`. Those are then restored by `RestorePacedExportPolicies`
 /// commands before the next batch. Every command is sent only after the
 /// previous reply, so other RIB work runs between them and no turn grows
@@ -644,7 +645,13 @@ async fn restore_export_policies_in_rib(
     // The paced walk's estimate and window carry across batches: each command
     // offers at most twice the members the previous one restored.
     let (mut cost, mut window) = (None, 1_usize);
-    for shape in &shapes {
+    // A prior chain larger than `PAIR_BATCH_MEMBERS` goes back in several
+    // batches, newest members first, so no one restore turn grows with the
+    // pair: the bound the forward walk keeps for the same reason.
+    for shape in shapes
+        .iter()
+        .flat_map(|shape| shape.chunks(PAIR_BATCH_MEMBERS))
+    {
         // The RIB executes a batch in reverse supplied order.
         let batch = shape
             .iter()
@@ -3128,8 +3135,10 @@ impl PeerManager {
         // Both waits below admit the operator-read lane on the transaction's
         // terms, reporting live state after session restoration was attempted.
         // Some restores may have failed; admission does not imply a common
-        // generation or an available RIB query lane. The rollback's own
-        // two-minute budget is unchanged.
+        // generation or an available RIB query lane. Serving reads does
+        // not change the rollback's bound: the enqueue below waits to the
+        // transaction's rollback deadline, and the restore that follows is
+        // bounded by the stall timeout, renewed by each completed command.
         match tokio::time::timeout_at(
             deadline,
             self.await_with_readiness(enqueued_rx, context.operator_reads),
