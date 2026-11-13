@@ -155,7 +155,7 @@ use crate::update::{
 };
 
 #[cfg(test)]
-use queries::{BMP_DUMP_CHUNK_SIZE, page_routes, send_mrt_snapshot};
+use queries::{BMP_DUMP_CHUNK_SIZE, page_routes};
 
 pub use conditional_advertisement::{
     ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
@@ -1720,6 +1720,46 @@ fn gate_row_checkpoint(readiness: &Option<Arc<ReplacementReadinessContext>>) {
     #[cfg(not(test))]
     replacement_readiness_checkpoint(readiness, false);
 }
+
+/// The readiness checkpoint of one item of a table-sized unit whose loop has
+/// no stage name. Test builds name it, so a work contract can count the items
+/// and the queries answered at them; every other build takes the plain
+/// checkpoint, which leaves the slice stage labels as they are.
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+#[inline]
+fn counted_checkpoint(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    stage: &'static str,
+    force: bool,
+) {
+    #[cfg(test)]
+    replacement_readiness_checkpoint_at(readiness, stage, force);
+    #[cfg(not(test))]
+    {
+        let _ = stage;
+        replacement_readiness_checkpoint(readiness, force);
+    }
+}
+
+/// [`counted_checkpoint`] stage: one Loc-RIB row collected for a new update
+/// group's table build.
+const GROUP_TABLE_BUILD_ROW: &str = "group_table_build_row";
+/// One Loc-RIB row collected for a new update group's table build.
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+#[inline]
+fn group_build_row_checkpoint(readiness: &Option<Arc<ReplacementReadinessContext>>) {
+    counted_checkpoint(readiness, GROUP_TABLE_BUILD_ROW, false);
+}
+
+/// [`counted_checkpoint`] stage: one stride of a departing member's EVPN
+/// recovery ledger release.
+const EVPN_RECOVERY_RETIRE: &str = "evpn_recovery_retire";
 
 /// Classify only the current helper callback, never a remembered stage or ordinal.
 #[expect(clippy::ref_option, reason = "cleanup borrows its existing owner")]
@@ -5981,7 +6021,9 @@ impl RibManager {
             RibUpdate::QueryConditionalAdvertisements { reply } => {
                 let _ = reply.send(self.conditional_advertisement_status());
             }
-            RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
+            RibUpdate::QueryMrtSnapshotChunk { cursor, reply } => {
+                self.handle_query_mrt_snapshot_chunk(cursor, reply);
+            }
             RibUpdate::QueryWarmMrtSnapshot {
                 views,
                 budget,

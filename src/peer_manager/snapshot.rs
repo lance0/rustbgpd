@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_api::peer_types::{
-    DynamicRangeTarget, PeerInfo, PeerKey, Rfc8212PolicyStatus, WarmCheckpointCapture,
-    WarmCheckpointSession,
+    AdminDownReason, DynamicRangeTarget, PeerInfo, PeerKey, Rfc8212PolicyStatus,
+    WarmCheckpointCapture, WarmCheckpointSession,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
@@ -208,6 +208,20 @@ pub(super) fn build_peer_info(
 pub(super) type RemoteAsnModes =
     std::collections::HashMap<(String, Option<String>), rustbgpd_api::peer_types::RemoteAsnMode>;
 
+/// The owner holding a disabled peer down. The latches, which the manager
+/// keeps outside this state, override it: a max-prefix latch in
+/// [`apply_max_prefix_latch`], then a session crash latch in
+/// [`apply_session_crash`].
+fn admin_down_reason(managed: &ManagedPeerState) -> Option<AdminDownReason> {
+    if managed.enabled {
+        None
+    } else if managed.admin_down.is_some() {
+        Some(AdminDownReason::ConfigAdminDown)
+    } else {
+        Some(AdminDownReason::Operator)
+    }
+}
+
 fn manager_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeerState,
@@ -228,6 +242,7 @@ fn manager_peer_info(
         peer_group: managed.peer_group.clone(),
         state: SessionState::Idle,
         enabled: managed.enabled,
+        admin_down_reason: admin_down_reason(managed),
         graceful_shutdown_advertise_intent: managed.advertise_graceful_shutdown,
         prefix_count: 0,
         rejected_routes_retained: None,
@@ -333,6 +348,11 @@ pub(super) fn unbound_interface_only_info(
         peer_group: resolved.peer_group.clone(),
         state: SessionState::Idle,
         enabled,
+        admin_down_reason: (!enabled).then_some(if resolved.admin_down.is_some() {
+            AdminDownReason::ConfigAdminDown
+        } else {
+            AdminDownReason::Operator
+        }),
         graceful_shutdown_advertise_intent: false,
         prefix_count: 0,
         rejected_routes_retained: None,
@@ -453,14 +473,22 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
 
 /// A session-task crash the manager handled, as `(error, latched)`, is the
 /// neighbor's `last_error` when nothing else reports one. A crash latch
-/// overrides any other error, a max-prefix latch's included: it alone
-/// names the recovery the neighbor waits for. Applied after the max-prefix
-/// overlay.
+/// overrides any other error and hold-down owner, a max-prefix latch's
+/// included: a max-prefix restart cannot lift it, so it alone names the
+/// recovery the neighbor waits for. Applied after the max-prefix overlay.
 pub(super) fn apply_session_crash(info: &mut PeerInfo, crash: Option<(&str, bool)>) {
     if let Some((crash, latched)) = crash
         && (latched || info.last_error.is_empty())
     {
         crash.clone_into(&mut info.last_error);
+        if latched && !info.enabled {
+            info.admin_down_reason = Some(AdminDownReason::SessionCrashLatched);
+            // A max-prefix restart cannot lift a crash latch, so no automatic
+            // restart is armed: the max-prefix latch reads as a shutdown.
+            if info.max_prefix_restart_remaining_millis.take().is_some() {
+                "shutdown".clone_into(&mut info.max_prefix_action);
+            }
+        }
     }
 }
 
@@ -472,6 +500,9 @@ pub(super) fn apply_max_prefix_latch(
     deadline: Option<tokio::time::Instant>,
 ) {
     error.clone_into(&mut info.last_error);
+    if !info.enabled {
+        info.admin_down_reason = Some(AdminDownReason::MaxPrefixLatched);
+    }
     info.max_prefix_action = if deadline.is_some() {
         "restart"
     } else {

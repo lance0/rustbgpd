@@ -322,6 +322,13 @@ pub struct JsonNeighbor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discovery_state: Option<&'static str>,
     pub state: String,
+    /// Administrative state: `enabled`, `operator_disabled`,
+    /// `config_admin_down`, `max_prefix_latched` or `session_crash_latched`.
+    /// While held down, `state` is `Idle` and `last_error` is the failure
+    /// from before the hold (the latch message for the two latches).
+    /// Omitted from a daemon that does not report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_state: Option<&'static str>,
     /// True when the daemon couldn't read fresh state from the peer
     /// session task — `state` is a placeholder Idle rather than an
     /// authoritative reading. Omitted from JSON when false to keep
@@ -409,6 +416,9 @@ pub struct JsonNeighborDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discovery_state: Option<&'static str>,
     pub state: String,
+    /// See [`JsonNeighbor::admin_state`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_state: Option<&'static str>,
     /// See [`JsonNeighbor::stale`].
     #[serde(skip_serializing_if = "is_false")]
     pub stale: bool,
@@ -932,6 +942,69 @@ pub(crate) fn discovery_state_label(n: &proto::NeighborState) -> Option<&'static
     }
 }
 
+/// Administrative state for JSON; `None` from a daemon that does not report it.
+pub(crate) fn admin_state_label(n: &proto::NeighborState) -> Option<&'static str> {
+    match proto::NeighborAdminState::try_from(n.admin_state) {
+        Ok(proto::NeighborAdminState::Enabled) => Some("enabled"),
+        Ok(proto::NeighborAdminState::OperatorDisabled) => Some("operator_disabled"),
+        Ok(proto::NeighborAdminState::ConfigAdminDown) => Some("config_admin_down"),
+        Ok(proto::NeighborAdminState::MaxPrefixLatched) => Some("max_prefix_latched"),
+        Ok(proto::NeighborAdminState::SessionCrashLatched) => Some("session_crash_latched"),
+        _ => None,
+    }
+}
+
+/// The detail view's description of an administrative hold-down; `None`
+/// while enabled or from an older daemon.
+pub(crate) fn admin_down_detail(n: &proto::NeighborState) -> Option<&'static str> {
+    match proto::NeighborAdminState::try_from(n.admin_state) {
+        Ok(proto::NeighborAdminState::OperatorDisabled) => Some("disabled by operator"),
+        Ok(proto::NeighborAdminState::ConfigAdminDown) => Some("disabled by config admin_down"),
+        Ok(proto::NeighborAdminState::MaxPrefixLatched) => {
+            Some("latched down after max-prefix shutdown")
+        }
+        Ok(proto::NeighborAdminState::SessionCrashLatched) => {
+            Some("latched down after repeated session task crashes")
+        }
+        _ => None,
+    }
+}
+
+/// The session state for human output, with `(Admin)`, `(PfxCt)` or
+/// `(Crash)` when the daemon holds the neighbor down, so it does not read as
+/// an Idle session the daemon will start. A stale row keeps its `Stale`.
+pub(crate) fn neighbor_state_label(n: &proto::NeighborState) -> String {
+    let state = format_state_with_stale(n.state, n.stale);
+    match admin_hold_suffix(n) {
+        Some(suffix) => format!("{state} ({suffix})"),
+        None => state.to_string(),
+    }
+}
+
+/// Colored variant of [`neighbor_state_label`].
+pub(crate) fn colored_neighbor_state(n: &proto::NeighborState) -> String {
+    let state = colored_state_with_stale(n.state, n.stale);
+    match admin_hold_suffix(n) {
+        Some(suffix) => format!("{state} ({suffix})"),
+        None => state,
+    }
+}
+
+fn admin_hold_suffix(n: &proto::NeighborState) -> Option<&'static str> {
+    if n.stale {
+        return None;
+    }
+    match proto::NeighborAdminState::try_from(n.admin_state) {
+        Ok(
+            proto::NeighborAdminState::OperatorDisabled
+            | proto::NeighborAdminState::ConfigAdminDown,
+        ) => Some("Admin"),
+        Ok(proto::NeighborAdminState::MaxPrefixLatched) => Some("PfxCt"),
+        Ok(proto::NeighborAdminState::SessionCrashLatched) => Some("Crash"),
+        _ => None,
+    }
+}
+
 /// The neighbor's identity for tables: the address (scoped as
 /// `fe80::1%eth0` for a link-local neighbor), or for an interface-only
 /// neighbor its interface and learned address, `swp1 (fe80::2)` or
@@ -1003,7 +1076,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
                 let state_pfx = if !n.stale && n.state == proto::SessionState::Established as i32 {
                     n.prefixes_received.to_string()
                 } else {
-                    colored_state_with_stale(n.state, n.stale)
+                    colored_neighbor_state(n)
                 };
                 (
                     n.messages_received.to_string(),
@@ -1019,8 +1092,8 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
             Row {
                 addr: neighbor_identity(n),
                 asn: cfg.map(remote_asn_label).unwrap_or_default(),
-                state_plain: format_state_with_stale(n.state, n.stale).to_string(),
-                state_colored: colored_state_with_stale(n.state, n.stale),
+                state_plain: neighbor_state_label(n),
+                state_colored: colored_neighbor_state(n),
                 uptime: format_duration(n.uptime_seconds),
                 rx: n.prefixes_received.to_string(),
                 // `~` marks a grouped member's desired count while its
@@ -1562,7 +1635,7 @@ fn write_json_document<W: Write + ?Sized, T: Serialize>(
             writer,
             &Document {
                 format: "rbgp-json",
-                format_version: "1.2",
+                format_version: "1.3",
                 data: value,
             },
         )
@@ -1663,7 +1736,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|contract| contract["id"] == "rbgp-json/1.2")
+            .find(|contract| contract["id"] == "rbgp-json/1.3")
             .unwrap();
         for payload in [
             serde_json::json!([]),
@@ -1679,11 +1752,11 @@ mod tests {
             let mut bytes = Vec::new();
             write_json_document(&mut bytes, &payload, true).unwrap();
             let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_json_shape(&document, contract, "rbgp-json/1.2");
+            assert_json_shape(&document, contract, "rbgp-json/1.3");
             assert_eq!(
                 document,
                 serde_json::json!({
-                    "format": "rbgp-json", "format_version": "1.2", "data": payload
+                    "format": "rbgp-json", "format_version": "1.3", "data": payload
                 })
             );
         }
@@ -2142,6 +2215,7 @@ mod tests {
             remote_asn_mode: "numeric",
             learned_peer_address: String::new(),
             discovery_state: None,
+            admin_state: None,
             state: "Established".to_string(),
             stale: true,
             slow_peer: true,

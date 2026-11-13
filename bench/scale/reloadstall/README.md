@@ -480,6 +480,13 @@ The daemon must already be running (load-gated `--release` start) with
 `<policy_live>`; `<policy_a>` / `<policy_b>` are the two generations copied over
 it on alternating reloads.
 
+Set `GEN_MRT=1` when generating any scenario to add an `[mrt]` section that
+writes uncompressed dumps to `<out_dir>/mrt` with a one-day interval. Take a
+dump against the loaded daemon with
+`rbgp --addr unix://<out_dir>/grpc.sock mrt-dump`, scraping
+`http://127.0.0.1:9179/metrics` immediately before and after it. With the knob
+absent, the generated files are unchanged.
+
 Set `GEN_RPKI_CACHE=127.0.0.1:3323` when generating a route-server scenario
 to add an RTR cache and a reject-invalid term to every member's shared import
 chain in both policy generations. A bracketed numeric IPv6 cache address such

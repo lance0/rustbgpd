@@ -2617,6 +2617,13 @@ fn merge_aspa_table_updates(
 /// number of them however many the caches send, instead of one per table.
 /// Skipping an intermediate table is sound: the merged delta covers every
 /// entry that changed since the last table the RIB applied.
+///
+/// A panic while forwarding does not end the forwarder. The receiver, the
+/// admission semaphore and the refresh queue outlive it; the update that was
+/// being forwarded may or may not have reached the RIB and the sessions, so
+/// after a [`rustbgpd_api::restart::RestartBackoff`] delay the latest table received is forwarded
+/// again as `full` builds it: a full re-evaluation, which reaches the right
+/// state whatever the RIB last applied. `on_restart` is told of each panic.
 async fn forward_validation_cache<U>(
     mut updates: mpsc::Receiver<U>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -2626,27 +2633,75 @@ async fn forward_validation_cache<U>(
         U,
         tokio::sync::OwnedSemaphorePermit,
     ) -> (RibUpdate, rustbgpd_transport::ValidationDelta),
+    full: impl Fn(&U) -> U,
+    on_restart: impl Fn(),
 ) {
+    use futures::FutureExt as _;
+
     let mut refresh = ValidationRefreshQueue::new(peer_mgr_tx);
     let admission = Arc::new(tokio::sync::Semaphore::new(1));
     let mut pending: Option<U> = None;
+    let mut latest: Option<U> = None;
     let mut open = true;
-    while open || pending.is_some() {
-        tokio::select! {
-            update = updates.recv(), if open => match update {
-                Some(update) => pending = Some(merge(pending.take(), update)),
-                None => open = false,
-            },
-            permit = Arc::clone(&admission).acquire_owned(), if pending.is_some() => {
-                let Some(update) = pending.take() else { continue };
-                let permit = permit.expect("the admission semaphore is never closed");
-                let (rib_update, delta) = split(update, permit);
-                let table_len = validation_table_len(&rib_update);
-                let _ = rib_tx.send(rib_update).await;
-                refresh.push(delta, table_len).await;
+    let mut backoff = rustbgpd_api::restart::RestartBackoff::default();
+    loop {
+        let started = tokio::time::Instant::now();
+        let forward = async {
+            while open || pending.is_some() {
+                tokio::select! {
+                    update = updates.recv(), if open => match update {
+                        Some(update) => {
+                            latest = Some(full(&update));
+                            pending = Some(merge(pending.take(), update));
+                        }
+                        None => open = false,
+                    },
+                    permit = Arc::clone(&admission).acquire_owned(), if pending.is_some() => {
+                        let Some(update) = pending.take() else { continue };
+                        let permit = permit.expect("the admission semaphore is never closed");
+                        let (rib_update, delta) = split(update, permit);
+                        let table_len = validation_table_len(&rib_update);
+                        let _ = rib_tx.send(rib_update).await;
+                        refresh.push(delta, table_len).await;
+                    }
+                    outcome = refresh.finished() => refresh.complete(outcome).await,
+                }
             }
-            outcome = refresh.finished() => refresh.complete(outcome).await,
+        };
+        // Unwind safety: the panicked future is not polled again. What it
+        // borrowed is rebuilt or self-correcting: `pending` is replaced
+        // below by the latest table in full, which supersedes anything it
+        // held; an admission permit dropped by the unwind is returned to the
+        // semaphore, and one already sent stays with the RIB; the refresh
+        // queue holds at most a reply receiver and a pending delta, and the
+        // full pass that follows covers any delta it lost.
+        if std::panic::AssertUnwindSafe(forward)
+            .catch_unwind()
+            .await
+            .is_ok()
+        {
+            return;
         }
+        on_restart();
+        let delay = backoff.next_delay(started.elapsed());
+        error!(
+            restart_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            "validation-table forwarder panicked; forwarding the latest table again in full"
+        );
+        // Keep taking tables during the backoff, so the manager is never
+        // held behind it; only the newest matters.
+        let backoff_over = tokio::time::sleep(delay);
+        tokio::pin!(backoff_over);
+        loop {
+            tokio::select! {
+                () = &mut backoff_over => break,
+                update = updates.recv(), if open => match update {
+                    Some(update) => latest = Some(full(&update)),
+                    None => open = false,
+                },
+            }
+        }
+        pending = latest.as_ref().map(&full);
     }
 }
 
@@ -3102,9 +3157,9 @@ loaded exits 2 there. A running daemon also exits
 1 when a component failure ends it (legacy BGP listen mode could bind
 neither family; explicit
 .B listen_addresses
-mode could not bind every configured endpoint; a configured metrics/readiness
-listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
-gRPC server, BGP listener task, BGP accept-forwarding task, or injection
+mode could not bind every configured endpoint; a configured gRPC or
+metrics/readiness listener failed to start; or the RIB manager, peer manager,
+RPKI subsystem, BGP listener task, BGP accept-forwarding task, or injection
 lease expiry task exited unexpectedly),
 so that a supervisor configured
 with
@@ -3232,10 +3287,10 @@ fn main() -> ExitCode {
                   For --diff: the diff carries actionable changes.\n     \
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
-                  endpoint failed to bind; configured metrics/readiness bind failure;\n     \
-                  or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
-                  gRPC server, BGP listener task, BGP accept-forwarding task,\n     \
-                  or injection lease expiry task exit)\n  \
+                  endpoint failed to bind; a configured gRPC or metrics/readiness\n     \
+                  listener failed to start; or unexpected RIB manager, peer manager,\n     \
+                  RPKI subsystem, BGP listener task, BGP accept-forwarding task, or\n     \
+                  injection lease expiry task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
                   --release-core-isolation exits 0 only when no owned link is left\n     \
@@ -3876,6 +3931,7 @@ struct PanicReport<'a> {
 /// bundles.
 fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
     let previous = std::panic::take_hook();
+    let last_location = Mutex::new(String::new());
     std::panic::set_hook(Box::new(move |info| {
         let message = info
             .payload()
@@ -3889,26 +3945,54 @@ fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
             .unwrap_or("unnamed")
             .to_string();
         // Best-effort: a failing report write must never mask the panic.
-        let _ = open_state_child_directory(&directory.file, std::ffi::OsStr::new("crash"), true)
-            .and_then(|crash| {
-                let metadata = crash.metadata()?;
-                if metadata.mode() & 0o022 != 0 {
-                    return Err(std::io::Error::other("unsafe crash directory mode"));
-                }
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default();
-                write_panic_report_in(
-                    &crash,
-                    &directory.display_path.join("crash"),
-                    now,
-                    &message,
-                    &location,
-                    &thread,
-                )
-            });
+        let _ = report_panic_once_per_location(&last_location, &location, || {
+            let crash =
+                open_state_child_directory(&directory.file, std::ffi::OsStr::new("crash"), true)?;
+            let metadata = crash.metadata()?;
+            if metadata.mode() & 0o022 != 0 {
+                return Err(std::io::Error::other("unsafe crash directory mode"));
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            write_panic_report_in(
+                &crash,
+                &directory.display_path.join("crash"),
+                now,
+                &message,
+                &location,
+                &thread,
+            )
+        });
         previous(info);
     }));
+}
+
+/// Run `write` unless `location` is where the last panic report this process
+/// wrote was raised. A recovered panic that repeats at one source location (an
+/// RTR client restarting on every retry) then writes one report instead of
+/// pruning every older report out of the directory. An unknown location never
+/// counts as a repeat.
+///
+/// `last` is updated only after `write` succeeds, so a failed write (a full
+/// disk) leaves the next panic at that location free to write its report. The
+/// lock is held across the write, which keeps concurrent panics ordered. A
+/// panic inside `write` cannot deadlock on it: a panic raised while the panic
+/// hook runs aborts the process instead of entering the hook again.
+fn report_panic_once_per_location(
+    last: &Mutex<String>,
+    location: &str,
+    write: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !location.is_empty() && *last == location {
+        return Ok(());
+    }
+    write()?;
+    location.clone_into(&mut last);
+    Ok(())
 }
 
 /// Write one panic report and prune the crash directory to the most
@@ -4125,8 +4209,12 @@ const TEST_LEASE_EXPIRY_PANIC_ENV: &str = "RUSTBGPD_TEST_LEASE_EXPIRY_PANIC";
 const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE";
 
 /// Test-only fault injection; never set this in production. The only accepted
-/// values are `rtr_client_panic` and `vrp_manager_panic`; all others are
-/// ignored without echoing them.
+/// values are `rtr_client_panic`, which panics the second connection attempt
+/// of the first cache's RTR client; `vrp_manager_panic`, which panics the
+/// manager's task outside what it recovers from; `vrp_manager_update_panic`,
+/// which panics the manager while it handles the second End of Data it
+/// accepts; and `vrp_forwarder_panic`, which panics the VRP forwarder on the
+/// second table it forwards. All others are ignored without echoing them.
 const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
 
 /// One aggregate budget to abort and account for every RPKI task after the
@@ -4176,12 +4264,16 @@ fn resolve_test_metrics_listener_unusable() -> Option<std::path::PathBuf> {
 fn resolve_test_rpki_task_exit() -> Option<TestRpkiTaskExit> {
     match std::env::var(TEST_RPKI_TASK_EXIT_ENV) {
         Err(std::env::VarError::NotPresent) => None,
-        Ok(value) if value == "rtr_client_panic" => Some(TestRpkiTaskExit::RtrClientPanic),
-        Ok(value) if value == "vrp_manager_panic" => Some(TestRpkiTaskExit::VrpManagerPanic),
+        Ok(value) if value == "rtr_client_panic" => Some(TestRpkiTaskExit::RtrClient),
+        Ok(value) if value == "vrp_manager_panic" => Some(TestRpkiTaskExit::VrpManager),
+        Ok(value) if value == "vrp_manager_update_panic" => {
+            Some(TestRpkiTaskExit::VrpManagerUpdate)
+        }
+        Ok(value) if value == "vrp_forwarder_panic" => Some(TestRpkiTaskExit::VrpForwarder),
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
             warn!(
-                "ignoring invalid {TEST_RPKI_TASK_EXIT_ENV}; expected rtr_client_panic or \
-                 vrp_manager_panic"
+                "ignoring invalid {TEST_RPKI_TASK_EXIT_ENV}; expected rtr_client_panic, \
+                 vrp_manager_panic, vrp_manager_update_panic or vrp_forwarder_panic"
             );
             None
         }
@@ -4190,8 +4282,10 @@ fn resolve_test_rpki_task_exit() -> Option<TestRpkiTaskExit> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestRpkiTaskExit {
-    RtrClientPanic,
-    VrpManagerPanic,
+    RtrClient,
+    VrpManager,
+    VrpManagerUpdate,
+    VrpForwarder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -4309,20 +4403,35 @@ fn observe_rpki_task_exit(
 /// metrics from the VRP manager. They are distinct signals: after an ordinary
 /// disconnect a cache stays ready, and its age keeps advancing, until the
 /// effective expire; a flush or expiry drops readiness and the age series.
+/// Also counts the panics the manager recovers from and marks each cache it
+/// then waits on for a full table. `inject_update_panic` is the test fault:
+/// the second accepted End of Data panics in its observer.
 fn observe_rpki_cache_metrics(
     manager: rustbgpd_rpki::VrpManager,
     metrics: &BgpMetrics,
     caches: &[std::net::SocketAddr],
+    inject_update_panic: bool,
 ) -> rustbgpd_rpki::VrpManager {
     for cache in caches {
         let label = cache.to_string();
         metrics.set_rpki_cache_end_of_data_ready(&label, false);
         metrics.set_rpki_cache_connected(&label, false);
+        metrics.seed_rpki_rtr_client_restarts(&label);
+        metrics.set_rpki_cache_resync_pending(&label, false);
     }
     let readiness = metrics.clone();
     let connectivity = metrics.clone();
     let end_of_data = metrics.clone();
+    let faults = metrics.clone();
+    let resync = metrics.clone();
+    let accepted = std::sync::atomic::AtomicUsize::new(0);
     manager
+        .with_fault_observer(move || {
+            faults.record_rpki_task_restart(rustbgpd_telemetry::metrics::RPKI_TASK_VRP_MANAGER);
+        })
+        .with_resync_observer(move |server, pending| {
+            resync.set_rpki_cache_resync_pending(&server.to_string(), pending);
+        })
         .with_readiness_observer(move |server, ready| {
             readiness.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
         })
@@ -4331,6 +4440,10 @@ fn observe_rpki_cache_metrics(
         })
         .with_end_of_data_observer(move |server, accepted_at| {
             end_of_data.set_rpki_cache_end_of_data_accepted_at(&server.to_string(), accepted_at);
+            if inject_update_panic && accepted_at.is_some() {
+                let seen = accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert!(seen != 1, "injected VRP manager update panic");
+            }
         })
 }
 
@@ -5613,12 +5726,13 @@ async fn run<T>(
                 .with_aspa_tx(aspa_table_tx),
             &metrics,
             &configured_cache_addrs,
+            test_rpki_task_exit == Some(TestRpkiTaskExit::VrpManagerUpdate),
         );
         let mut rpki_tasks = JoinSet::new();
         let mut rpki_task_registry = BTreeMap::new();
         let handle = rpki_tasks.spawn(async move {
             assert!(
-                test_rpki_task_exit != Some(TestRpkiTaskExit::VrpManagerPanic),
+                test_rpki_task_exit != Some(TestRpkiTaskExit::VrpManager),
                 "injected VRP manager task panic"
             );
             vrp_mgr.run().await;
@@ -5637,12 +5751,20 @@ async fn run<T>(
         // table re-evaluates everything (the RIB applies the same rule to its
         // own revalidation).
         let mut first_table = true;
+        let mut forwarded = 0_usize;
+        let inject_forwarder_panic = test_rpki_task_exit == Some(TestRpkiTaskExit::VrpForwarder);
+        let vrp_forwarder_metrics = metrics.clone();
         let handle = rpki_tasks.spawn(forward_validation_cache(
             rpki_table_rx,
             rpki_rib_tx,
             rpki_peer_mgr_tx,
             merge_vrp_table_updates,
             move |update: rustbgpd_rpki::RpkiTableUpdate, admission| {
+                forwarded += 1;
+                assert!(
+                    !(inject_forwarder_panic && forwarded == 2),
+                    "injected VRP forwarder panic"
+                );
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -5661,6 +5783,14 @@ async fn run<T>(
                     rustbgpd_transport::ValidationDelta::Rpki(session_delta),
                 )
             },
+            |update| rustbgpd_rpki::RpkiTableUpdate {
+                table: Arc::clone(&update.table),
+                delta: None,
+            },
+            move || {
+                vrp_forwarder_metrics
+                    .record_rpki_task_restart(rustbgpd_telemetry::metrics::RPKI_TASK_VRP_FORWARDER);
+            },
         ));
         register_rpki_task_kind(
             &mut rpki_task_registry,
@@ -5673,6 +5803,7 @@ async fn run<T>(
         let aspa_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_aspa = validation_watch_tx.clone();
         let mut first_table = true;
+        let aspa_forwarder_metrics = metrics.clone();
         let handle = rpki_tasks.spawn(forward_validation_cache(
             aspa_table_rx,
             aspa_rib_tx,
@@ -5696,6 +5827,15 @@ async fn run<T>(
                     },
                     rustbgpd_transport::ValidationDelta::Aspa(session_delta),
                 )
+            },
+            |update| rustbgpd_rpki::AspaTableUpdate {
+                table: Arc::clone(&update.table),
+                changed_customer_asns: None,
+            },
+            move || {
+                aspa_forwarder_metrics.record_rpki_task_restart(
+                    rustbgpd_telemetry::metrics::RPKI_TASK_ASPA_FORWARDER,
+                );
             },
         ));
         register_rpki_task_kind(
@@ -5732,12 +5872,17 @@ async fn run<T>(
                 max_expire_interval: server.max_expire_interval,
             };
             let expire_metrics = metrics.clone();
+            let restart_metrics = metrics.clone();
             let cache_label = addr.to_string();
+            let restart_label = cache_label.clone();
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
                 .with_record_limits(max_cache_records, Arc::clone(&record_budget))
                 .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
+                })
+                .with_restart_observer(move || {
+                    restart_metrics.record_rpki_rtr_client_restart(&restart_label);
                 });
             // Authenticated caches dial through the transport crate so TCP MD5
             // or TCP-AO is installed before the SYN leaves; the material was
@@ -5750,15 +5895,25 @@ async fn run<T>(
                 .tcp_ao
                 .as_ref()
                 .map(crate::config::transport_tcp_ao_keyring);
-            let client = if md5_password.is_some() || tcp_ao.is_some() {
+            let authenticated = md5_password.is_some() || tcp_ao.is_some();
+            let injected_dials = (test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClient)
+                && cache_ordinal == 0)
+                .then(|| std::sync::atomic::AtomicUsize::new(0));
+            let client = if authenticated || injected_dials.is_some() {
                 let auth_label = addr.to_string();
-                info!(
-                    server = %addr,
-                    md5 = md5_password.is_some(),
-                    tcp_ao = tcp_ao.is_some(),
-                    "RTR transport authentication configured"
-                );
+                if authenticated {
+                    info!(
+                        server = %addr,
+                        md5 = md5_password.is_some(),
+                        tcp_ao = tcp_ao.is_some(),
+                        "RTR transport authentication configured"
+                    );
+                }
                 client.with_dialer(move |remote| {
+                    if let Some(dials) = &injected_dials {
+                        let dial = dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        assert!(dial != 1, "injected RTR client task panic");
+                    }
                     let md5_password = md5_password.clone();
                     let tcp_ao = tcp_ao.clone();
                     let label = auth_label.clone();
@@ -5777,14 +5932,7 @@ async fn run<T>(
                 client
             };
             info!(server = %addr, "spawning RTR client for RPKI cache");
-            let handle = rpki_tasks.spawn(async move {
-                assert!(
-                    !(test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClientPanic)
-                        && cache_ordinal == 0),
-                    "injected RTR client task panic"
-                );
-                client.run().await;
-            });
+            let handle = rpki_tasks.spawn(client.run());
             register_rpki_task_kind(
                 &mut rpki_task_registry,
                 handle.id(),
@@ -6983,6 +7131,7 @@ async fn run<T>(
         stream_plan_runtime_state_directory: stream_plan_runtime_state_authority(
             runtime_state_directory.as_deref(),
         ),
+        stream_plan: rustbgpd_api::server::StreamPlanSlot::default(),
         config_mutation_gate: Some(config_mutation_gate.clone()),
         runtime_config_lock: runtime_config_lock.clone(),
         runtime_config_settlement: runtime_config_settlement.clone(),
@@ -6995,6 +7144,8 @@ async fn run<T>(
         bfd_events: Some(bfd_bgp_event_tx),
     };
     let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
+    let grpc_metrics = metrics.clone();
+    let grpc_gate = daemon_gate.clone();
     let mut grpc_handle = tokio::spawn(async move {
         match make_fib_route_snapshot(fib_status_rx).await {
             Ok(snapshot) => serve_config.fib_route_snapshot = snapshot,
@@ -7005,16 +7156,28 @@ async fn run<T>(
                 return;
             }
         }
-        rustbgpd_api::server::serve(
-            grpc_listeners,
-            grpc_rib_tx,
-            grpc_rib_query_tx,
-            grpc_peer_mgr_tx,
-            serve_config,
-            grpc_shutdown_rx,
-            rpc_shutdown_tx,
-            config_event_tx,
+        // Restarted in place when a run ends on its own: a management-plane
+        // failure must not end BGP. Every run gets clones of the same
+        // inputs, the Shutdown RPC sender among them, and binds the
+        // configured listeners again.
+        rustbgpd_api::restart::supervise_grpc_server(
+            |run| {
+                rustbgpd_api::server::serve(
+                    grpc_listeners.clone(),
+                    grpc_rib_tx.clone(),
+                    grpc_rib_query_tx.clone(),
+                    grpc_peer_mgr_tx.clone(),
+                    serve_config.clone(),
+                    run.stop,
+                    rpc_shutdown_tx.clone(),
+                    config_event_tx.clone(),
+                    run.started,
+                )
+            },
             grpc_startup_tx,
+            grpc_metrics,
+            grpc_gate,
+            grpc_shutdown_rx,
         )
         .await;
     });
@@ -7407,7 +7570,7 @@ async fn run<T>(
     }
 
     // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
-    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager).
+    // supervised-component exit (RIB, RPKI, BGP ingress, peer manager).
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -7471,7 +7634,8 @@ async fn run<T>(
                 break;
             }
             changed = rpc_shutdown_rx.changed(), if !rpc_shutdown_closed => {
-                // The gRPC server owns the sender; its own arm reports an exit.
+                // The gRPC supervisor owns the sender and hands each run a
+                // clone; its own arm reports an exit.
                 rpc_shutdown_closed = changed.is_err();
                 if rpc_shutdown_closed || !*rpc_shutdown_rx.borrow() {
                     continue;
@@ -7479,12 +7643,20 @@ async fn run<T>(
                 info!("shutdown initiated via gRPC");
                 break;
             }
-            result = &mut grpc_handle => {
-                error!(?result, "gRPC server exited unexpectedly");
-                info!("initiating shutdown due to gRPC server failure");
+            // The supervisor restarts the server in place. It returns on the
+            // stop sent at teardown, or once the gate reports shutdown; any
+            // other end is a defect in the supervisor itself. That is still
+            // a management-plane failure: BGP keeps running, with the API
+            // down and readiness red.
+            result = &mut grpc_handle, if !grpc_exited => {
                 grpc_exited = true;
-                component_failed = true;
-                break;
+                if result.is_err() || !daemon_gate.is_shutting_down() {
+                    daemon_gate.set_grpc_server_down(true);
+                    error!(
+                        ?result,
+                        "gRPC supervisor exited unexpectedly; the gRPC API stays down until the daemon restarts"
+                    );
+                }
             }
             result = &mut dampening_control_handle => {
                 dampening_control_exited = true;
@@ -9126,6 +9298,8 @@ mod tests {
                     delta,
                 )
             },
+            Clone::clone,
+            || {},
         ));
         let peer = |last| {
             PeerId::from_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
@@ -9204,15 +9378,38 @@ mod tests {
         mpsc::Receiver<RibUpdate>,
         mpsc::Receiver<PeerManagerCommand>,
     ) {
+        let (updates_tx, rib_rx, peer_mgr_rx, _restarts) =
+            spawn_vrp_forwarder_panicking_on(rib_capacity, None);
+        (updates_tx, rib_rx, peer_mgr_rx)
+    }
+
+    /// [`spawn_vrp_forwarder`] whose `panic_on`-th forwarded table panics,
+    /// with the count of panics the forwarder recovered from.
+    fn spawn_vrp_forwarder_panicking_on(
+        rib_capacity: usize,
+        panic_on: Option<usize>,
+    ) -> (
+        mpsc::Sender<rustbgpd_rpki::RpkiTableUpdate>,
+        mpsc::Receiver<RibUpdate>,
+        mpsc::Receiver<PeerManagerCommand>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         let (updates_tx, updates_rx) = mpsc::channel(1);
         let (rib_tx, rib_rx) = mpsc::channel(rib_capacity);
         let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(8);
+        let restarts = Arc::new(AtomicUsize::new(0));
+        let restart_count = Arc::clone(&restarts);
+        let mut forwarded = 0;
         tokio::spawn(forward_validation_cache(
             updates_rx,
             rib_tx,
             peer_mgr_tx,
             merge_vrp_table_updates,
-            |update: rustbgpd_rpki::RpkiTableUpdate, admission| {
+            move |update: rustbgpd_rpki::RpkiTableUpdate, admission| {
+                forwarded += 1;
+                assert!(Some(forwarded) != panic_on, "injected forwarder panic");
                 let session_delta = update
                     .delta
                     .as_deref()
@@ -9226,8 +9423,77 @@ mod tests {
                     rustbgpd_transport::ValidationDelta::Rpki(session_delta),
                 )
             },
+            |update| rustbgpd_rpki::RpkiTableUpdate {
+                table: Arc::clone(&update.table),
+                delta: None,
+            },
+            move || {
+                restart_count.fetch_add(1, Ordering::SeqCst);
+            },
         ));
-        (updates_tx, rib_rx, peer_mgr_rx)
+        (updates_tx, rib_rx, peer_mgr_rx, restarts)
+    }
+
+    /// A panic while a table is being forwarded does not end the forwarder
+    /// or lose the table: after the first restart backoff the latest table
+    /// is forwarded again as a full re-evaluation, because what the RIB last
+    /// applied is unknown, and later updates are forwarded as before.
+    #[tokio::test(start_paused = true)]
+    async fn forwarder_panic_forwards_the_latest_table_again_in_full_after_the_backoff() {
+        async fn next_table(
+            rib_rx: &mut mpsc::Receiver<RibUpdate>,
+        ) -> (
+            Arc<rustbgpd_rpki::VrpTable>,
+            Option<Vec<rustbgpd_rpki::VrpEntry>>,
+        ) {
+            let update = tokio::time::timeout(Duration::from_secs(60), rib_rx.recv())
+                .await
+                .expect("the forwarder forwards a table")
+                .expect("the forwarder is running");
+            // Dropping the update returns its admission permit.
+            match update {
+                RibUpdate::RpkiCacheUpdate { table, delta, .. } => (table, delta),
+                _ => panic!("expected a VRP table update"),
+            }
+        }
+        let delta = || Some(vec![vrp(24)]);
+
+        let (updates_tx, mut rib_rx, _peer_mgr_rx, restarts) =
+            spawn_vrp_forwarder_panicking_on(8, Some(2));
+        let first = vrp_table(65_001, 2);
+        let table = Arc::clone(&first);
+        updates_tx
+            .send(rustbgpd_rpki::RpkiTableUpdate { table, delta: None })
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&next_table(&mut rib_rx).await.0, &first));
+
+        let second = vrp_table(65_002, 2);
+        let update = rustbgpd_rpki::RpkiTableUpdate {
+            table: Arc::clone(&second),
+            delta: delta(),
+        };
+        updates_tx.send(update).await.unwrap();
+        let lost_at = tokio::time::Instant::now();
+        let (table, forwarded_delta) = next_table(&mut rib_rx).await;
+        assert_eq!(
+            lost_at.elapsed(),
+            rustbgpd_api::restart::RESTART_BACKOFF_INITIAL
+        );
+        assert!(Arc::ptr_eq(&table, &second));
+        assert_eq!(forwarded_delta, None, "forwarded again as a full table");
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let third = vrp_table(65_003, 2);
+        let update = rustbgpd_rpki::RpkiTableUpdate {
+            table: Arc::clone(&third),
+            delta: delta(),
+        };
+        updates_tx.send(update).await.unwrap();
+        let (table, forwarded_delta) = next_table(&mut rib_rx).await;
+        assert!(Arc::ptr_eq(&table, &third));
+        assert_eq!(forwarded_delta, delta());
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A RIB that stops reading does not make the forwarder queue one whole
@@ -9828,6 +10094,7 @@ mod tests {
             rustbgpd_rpki::VrpManager::new(update_rx, table_tx).with_cache_inventory(inventory),
             &metrics,
             &[addr],
+            false,
         );
         assert_eq!(
             rpki_cache_gauge(&metrics, "bgp_rpki_cache_connected", &cache),
@@ -11674,6 +11941,56 @@ mod tests {
         // The oldest seeded reports were removed first.
         assert!(!names.contains(&"panic-0000000000-000.toml".to_string()));
         assert!(!names.contains(&"panic-0000000001-000.toml".to_string()));
+    }
+
+    /// The panic hook's report decision: a panic repeating at the location
+    /// of the previous one writes no second report, a panic elsewhere does,
+    /// and so does a return to the first location afterwards.
+    #[test]
+    fn repeated_panic_location_writes_one_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let last = Mutex::new(String::new());
+        let reports = || std::fs::read_dir(dir.path()).unwrap().count();
+        let panic_at = |location: &str| {
+            report_panic_once_per_location(&last, location, || {
+                write_panic_report(dir.path(), "boom", location, "main")
+            })
+            .unwrap();
+        };
+        panic_at("src/a.rs:1:1");
+        panic_at("src/a.rs:1:1");
+        assert_eq!(reports(), 1);
+        panic_at("src/b.rs:2:2");
+        assert_eq!(reports(), 2);
+        panic_at("src/a.rs:1:1");
+        assert_eq!(reports(), 3);
+        // A panic with no location is never taken for a repeat.
+        panic_at("");
+        panic_at("");
+        assert_eq!(reports(), 5);
+    }
+
+    /// A report that could not be written is not remembered: the next panic
+    /// at that location writes its report once the directory is usable.
+    #[test]
+    fn failed_panic_report_does_not_suppress_the_next_one_at_that_location() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where the crash directory should be: the write fails.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        let crash = dir.path().join("crash");
+        let last = Mutex::new(String::new());
+        let panic_into = |crash_dir: &Path| {
+            report_panic_once_per_location(&last, "src/a.rs:1:1", || {
+                write_panic_report(crash_dir, "boom", "src/a.rs:1:1", "main")
+            })
+        };
+        assert!(panic_into(&blocked).is_err());
+        panic_into(&crash).unwrap();
+        assert_eq!(std::fs::read_dir(&crash).unwrap().count(), 1);
+        // Now that one was written, a repeat is skipped.
+        panic_into(&crash).unwrap();
+        assert_eq!(std::fs::read_dir(&crash).unwrap().count(), 1);
     }
 
     #[test]

@@ -2021,10 +2021,19 @@ impl RibManager {
 
     pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: PeerId) {
         if let Some(handle) = self.evpn_recovery_handle(peer) {
-            self.evpn_recovery
-                .retire_member_with_checkpoint(handle, &mut |force| {
-                    super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
-                });
+            // The release walks every slot the member's ledger holds, so it
+            // takes the readiness lane (with the executor handoff).
+            self.with_ingest_readiness(|manager| {
+                manager
+                    .evpn_recovery
+                    .retire_member_with_checkpoint(handle, &mut |force| {
+                        super::counted_checkpoint(
+                            &manager.replacement_readiness,
+                            super::EVPN_RECOVERY_RETIRE,
+                            force,
+                        );
+                    });
+            });
         }
         if let Some(owner) = self.evpn_recovery_owner(peer)
             && let Some(outbound) = self.outbound_peers.get(&peer)

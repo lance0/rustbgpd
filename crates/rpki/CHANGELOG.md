@@ -3,6 +3,38 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- `RtrClient::run` recovers from a panic while it connects or runs a session.
+  The panic is handled as a lost session: the held data and its expiry are
+  kept, the manager is told the cache disconnected, and after the retry
+  interval the client reconnects and resynchronizes with a Reset Query.
+  Previously the panic ended the client's task, and the data it had
+  delivered was never expired. The additive `RtrClient::with_restart_observer`
+  is called once per recovered panic.
+- `VrpManager::run` with a `CacheInventoryAttachment` recovers from a panic
+  while it handles one message. Every update is built before any of it is
+  installed, so the per-cache data and the distributed tables are as before
+  the message. A cache whose full table or serial delta was lost keeps its
+  previous data and is asked for a full table: its `RtrClient` sends a Reset
+  Query after the retry interval, the manager drops that cache's serial
+  deltas until the table arrives, and it drops the held data itself at the
+  expiry of the last End of Data it applied. A lost flush or expiry is
+  carried out again. The additive `VrpManager::with_fault_observer` is called
+  once per recovered panic and `VrpManager::with_resync_observer` when a
+  cache starts and stops waiting for its full table. Updates on the legacy
+  `VrpUpdate` channel are not covered.
+- A full table that replaces a cache's previous one, and the removal of a
+  cache's data, now carry a delta in `RpkiTableUpdate::delta` and
+  `AspaTableUpdate::changed_customer_asns`. The VRP delta is exactly the
+  entries that joined or left the merged table (an entry another cache still
+  holds is not in it); the ASPA set is the customers whose record changed in
+  that cache. Previously both were `None`, which asks consumers for a full
+  revalidation. A cache's first table is still `None`.
+- A panic in any `VrpManager` observer is counted as a fault and costs only
+  that notification; it no longer ends the manager or marks a cache for
+  resynchronization.
+
 ## 0.10.0 - 2026-11-08
 
 - Recheck the held data expiry while applying buffered RTR PDUs. An End of

@@ -163,6 +163,7 @@
   "strict_role": false,
   "max_prefix_restart_seconds": 119,
   "state": "Established",
+  "admin_state": "enabled",
   "authentication": "tcp_ao",
   "tcp_ao_health": "degraded",
   "distribution_mode": "add_path",

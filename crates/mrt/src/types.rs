@@ -2,7 +2,7 @@ use std::fs::File;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-pub use rustbgpd_rib::update::{MrtPeerEntry, MrtSnapshotData};
+pub use rustbgpd_rib::update::{MrtPeerEntry, MrtSnapshotChunk, MrtSnapshotData};
 
 /// Configuration for the MRT writer.
 #[derive(Debug, Clone)]

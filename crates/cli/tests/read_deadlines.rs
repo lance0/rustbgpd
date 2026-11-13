@@ -520,7 +520,7 @@ async fn versioned_json_wraps_existing_documents() {
         assert_eq!(
             document,
             serde_json::json!({
-                "format": "rbgp-json", "format_version": "1.2", "data": payload
+                "format": "rbgp-json", "format_version": "1.3", "data": payload
             }),
             "{args:?}"
         );

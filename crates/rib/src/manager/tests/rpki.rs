@@ -1421,6 +1421,86 @@ fn rpki_delta_max_len_gates_valid_but_not_coverage() {
     assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::Invalid);
 }
 
+/// A full table that replaces a held one, as after a cache resynchronizes,
+/// arrives with the entries the two tables differ in. The RIB then revisits
+/// only the routes those entries cover, where a table without a delta
+/// revisits every route, and both reach the same states.
+#[test]
+fn rpki_replacing_table_with_its_difference_revalidates_only_covered_routes() {
+    const ROUTES: u8 = 200;
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let net = |i: u8| Ipv4Addr::new(10, 0, i, 0);
+    let vrp = |i: u8, asn: u32| delta_vrp(net(i), 24, 24, asn);
+    let held: Vec<_> = (0..ROUTES).map(|i| vrp(i, 65001)).collect();
+    // One VRP gone (its route becomes NotFound) and one added beside an
+    // existing one (its route stays Valid).
+    let mut replacement = held.clone();
+    replacement.remove(7);
+    replacement.push(vrp(9, 65099));
+    let difference = vec![vrp(7, 65001), vrp(9, 65099)];
+
+    let work = |delta: Option<Vec<rustbgpd_rpki::VrpEntry>>| {
+        let mut manager = delta_manager();
+        insert_routes(
+            &mut manager,
+            peer,
+            (0..ROUTES)
+                .map(|i| make_route_with_as_path(Ipv4Prefix::new(net(i), 24), peer, vec![65001]))
+                .collect(),
+        );
+        manager.handle_rpki_cache_update(delta_table(&held), None);
+        let work = manager.handle_rpki_cache_update(delta_table(&replacement), delta);
+        (work, rpki_states(&manager))
+    };
+
+    let ((revalidated, changed), states) = work(Some(difference));
+    assert_eq!((revalidated, changed), (2, 1));
+    let ((full_revalidated, full_changed), full_states) = work(None);
+    assert_eq!((full_revalidated, full_changed), (u64::from(ROUTES), 1));
+    assert_eq!(states, full_states);
+    let not_found = states
+        .iter()
+        .filter(|(.., state)| *state == RpkiValidation::NotFound)
+        .count();
+    assert_eq!(not_found, 1);
+}
+
+/// Two caches serve nearly the same VRPs and one of them expires. The
+/// merged table loses only the VRP that cache alone held, and with that as
+/// the delta the RIB revisits one route. The expired cache's whole set as
+/// the delta would reach the same states by revisiting every route it
+/// covers, one covered-range lookup per entry.
+#[test]
+fn rpki_cache_expiry_beside_an_overlapping_cache_revalidates_only_the_difference() {
+    const ROUTES: u8 = 200;
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let net = |i: u8| Ipv4Addr::new(10, 0, i, 0);
+    let vrp = |i: u8| delta_vrp(net(i), 24, 24, 65001);
+    // The expiring cache held every VRP; the other one all but number 7.
+    let expiring: Vec<_> = (0..ROUTES).map(vrp).collect();
+    let remaining: Vec<_> = (0..ROUTES).filter(|i| *i != 7).map(vrp).collect();
+
+    let work = |delta: Vec<rustbgpd_rpki::VrpEntry>| {
+        let mut manager = delta_manager();
+        insert_routes(
+            &mut manager,
+            peer,
+            (0..ROUTES)
+                .map(|i| make_route_with_as_path(Ipv4Prefix::new(net(i), 24), peer, vec![65001]))
+                .collect(),
+        );
+        manager.handle_rpki_cache_update(delta_table(&expiring), None);
+        let work = manager.handle_rpki_cache_update(delta_table(&remaining), Some(delta));
+        (work, rpki_states(&manager))
+    };
+
+    let (difference_work, states) = work(vec![vrp(7)]);
+    assert_eq!(difference_work, (1, 1));
+    let (whole_set_work, whole_set_states) = work(expiring.clone());
+    assert_eq!(whole_set_work, (u64::from(ROUTES), 1));
+    assert_eq!(states, whole_set_states);
+}
+
 #[test]
 fn rpki_first_table_with_delta_forces_full_rescan() {
     let mut manager = delta_manager();

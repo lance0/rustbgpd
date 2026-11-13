@@ -565,7 +565,7 @@ impl<'a> SnapshotReader<'a> {
         Ok(())
     }
 
-    /// Parse a `RIB_GENERIC` record (RFC 6396 §4.3.5). Only L2VPN/EVPN
+    /// Parse a `RIB_GENERIC` record (RFC 6396 §4.3.3). Only L2VPN/EVPN
     /// is understood (the only AFI/SAFI the writer emits); any other
     /// AFI/SAFI has an NLRI of unknown framing, so the whole record is
     /// skipped and counted.

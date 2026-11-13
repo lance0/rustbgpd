@@ -75,6 +75,27 @@ class RpkiScenarioTests(unittest.TestCase):
                 ]
                 self.assertEqual(*imports)
 
+    def test_mrt_knob_adds_only_the_mrt_section(self):
+        with tempfile.TemporaryDirectory(prefix="mrt-gen-", dir="/tmp") as tmp:
+            plain, with_mrt = Path(tmp) / "plain", Path(tmp) / "mrt"
+            for out, env in ((plain, {"GEN_MRT": "0"}), (with_mrt, {"GEN_MRT": "1"})):
+                result = self.generate(out, cache=None, extra_env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("mrt", tomllib.loads((plain / "config.toml").read_text()))
+            config = tomllib.loads((with_mrt / "config.toml").read_text())
+            self.assertEqual(
+                config.pop("mrt"),
+                {"output_dir": f"{with_mrt.resolve()}/mrt", "dump_interval": 86400},
+            )
+            expected = (plain / "config.toml").read_text().replace(
+                str(plain.resolve()), str(with_mrt.resolve())
+            )
+            self.assertEqual(config, tomllib.loads(expected))
+            self.assertNotEqual(
+                self.generate(Path(tmp) / "bad", cache=None, extra_env={"GEN_MRT": "yes"}).returncode,
+                0,
+            )
+
     def test_invalid_addresses_fail_before_writing_files(self):
         bad = ("", "localhost:3323", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:65536",
                "127.0.0.1:-1", "127.0.0.1:abc", "127.0.0.999:3323", "::1:3323",

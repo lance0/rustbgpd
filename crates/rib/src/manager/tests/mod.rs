@@ -928,11 +928,18 @@ async fn query_explain_advertised_labeled_route(
 }
 
 async fn query_mrt_snapshot(tx: &mpsc::Sender<RibUpdate>) -> crate::update::MrtSnapshotData {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryMrtSnapshot { reply: reply_tx })
-        .await
-        .unwrap();
-    reply_rx.await.unwrap()
+    let mut snapshot = crate::update::MrtSnapshotAssembler::default();
+    let mut cursor = None;
+    loop {
+        let (reply, chunk) = oneshot::channel();
+        tx.send(RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
+            .await
+            .unwrap();
+        cursor = snapshot.push(chunk.await.unwrap());
+        if cursor.is_none() {
+            return snapshot.finish();
+        }
+    }
 }
 
 async fn query_warm_mrt_snapshot(

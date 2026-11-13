@@ -1225,6 +1225,9 @@ pub struct ServeConfig {
     /// Descriptor-pinned runtime-state authority used only for temporary
     /// streamed config-plan ingress. `None` keeps that RPC fail-closed.
     pub stream_plan_runtime_state_directory: Option<Arc<std::fs::File>>,
+    /// The streamed config-plan state every run of the server shares. Pass
+    /// `StreamPlanSlot::default()`.
+    pub stream_plan: StreamPlanSlot,
     /// Daemon hook used to reject persisted runtime-config mutations while a
     /// confirmed transaction is pending.
     pub config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -1507,6 +1510,27 @@ const fn uds_stream_plan_authenticated(bearer_enabled: bool, mode: u32) -> bool 
     bearer_enabled || uds_mode_is_owner_only(mode)
 }
 
+/// The streamed config-plan state of one daemon: its issued plan tokens and
+/// its one-at-a-time plan admission. Every clone shares one slot, prepared by
+/// the first [`serve`] run that needs it, so a gRPC server restarted in place
+/// keeps honoring tokens issued before the restart and never admits a second
+/// plan beside one still running on an older connection.
+#[derive(Clone, Default)]
+pub struct StreamPlanSlot(
+    Arc<std::sync::OnceLock<Option<Arc<crate::config_service::stream::StreamPlanState>>>>,
+);
+
+impl StreamPlanSlot {
+    fn get_or_prepare(
+        &self,
+        runtime_state_directory: Option<&Arc<std::fs::File>>,
+    ) -> Option<Arc<crate::config_service::stream::StreamPlanState>> {
+        self.0
+            .get_or_init(|| prepare_stream_plan_state(runtime_state_directory))
+            .clone()
+    }
+}
+
 fn prepare_stream_plan_state(
     runtime_state_directory: Option<&Arc<std::fs::File>>,
 ) -> Option<Arc<crate::config_service::stream::StreamPlanState>> {
@@ -1554,8 +1578,9 @@ pub async fn serve(
     let mut listener_tasks = JoinSet::new();
     let mut listener_startup = Vec::with_capacity(listeners.len());
     let dataplane_events = dataplane_event_broadcaster();
-    let stream_plan =
-        prepare_stream_plan_state(config.stream_plan_runtime_state_directory.as_ref());
+    let stream_plan = config
+        .stream_plan
+        .get_or_prepare(config.stream_plan_runtime_state_directory.as_ref());
 
     for listener in listeners {
         let (listener_startup_tx, listener_startup_rx) = oneshot::channel();
@@ -2905,7 +2930,7 @@ fn report_accept_end<S: Stream>(
 /// Tonic drains open connections with no deadline once its accept stream
 /// ends: `serve_internal` waits on `signal_tx.closed()` in tonic 0.14. An open
 /// watch stream, or an idle connection, would then hold a listener whose
-/// socket is unusable, and with it the gRPC fail-stop, until the client
+/// socket is unusable, and with it the gRPC server's restart, until the client
 /// disconnects. Give that drain the coordinated-shutdown grace, then drop the
 /// serve future. Returns `None` when the grace expired.
 ///
@@ -3663,7 +3688,7 @@ mod tests {
     #[test]
     fn streamed_config_production_wiring_is_singleton_and_authentication_is_explicit() {
         const PREPARE: &str =
-            "prepare_stream_plan_state(config.stream_plan_runtime_state_directory.as_ref())";
+            ".get_or_prepare(config.stream_plan_runtime_state_directory.as_ref())";
         assert_eq!(
             (
                 tcp_stream_plan_authenticated(false, false),
@@ -3679,9 +3704,21 @@ mod tests {
         let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
         let (_, listener_loop) = production.split_once("for listener in listeners").unwrap();
         assert_eq!(production.matches(PREPARE).count(), 1);
-        for absent in ["prepare_stream_plan_state(", "StreamPlanState::prepare("] {
+        for absent in [
+            "prepare_stream_plan_state(",
+            "StreamPlanState::prepare(",
+            "get_or_prepare(",
+        ] {
             assert!(!listener_loop.contains(absent));
         }
+        // One state per process, not per run of a restarted server.
+        assert_eq!(
+            production
+                .matches(".get_or_init(|| prepare_stream_plan_state(runtime_state_directory))")
+                .count(),
+            1
+        );
+        assert_eq!(production.matches("prepare_stream_plan_state(").count(), 2);
         assert_eq!(production.matches("StreamPlanState::prepare(").count(), 1);
         assert!(listener_loop.contains("let stream_plan = stream_plan.clone();"));
         assert!(
