@@ -1575,6 +1575,12 @@ separate from control-plane-only families advertising F=1.
 - BoRR/EoRR markers demarcate the refresh window.
 - Inbound BoRR marks existing routes as refresh-stale; EoRR sweeps
   unreplaced routes. 5-minute timeout on the refresh window.
+- The same boundary (EoRR, or the timeout once the RIB admits it) removes
+  retained IPv4/IPv6-unicast rejections the peer did not re-announce inside
+  the window from the rejected-route store, so `rbgp rib received PEER
+  --rejected` and BMP types 22 and 7/18/19 drop them with the accepted stale
+  routes. Until then they stay listed and counted, like the stale accepted
+  routes still in the Adj-RIB-In.
 - Outbound: Enhanced peers get BoRR → routes → EoRR; legacy peers get
   routes → EoR.
 - A GR restarter's initial flood remains unmarked until its first EoR,
@@ -2057,8 +2063,9 @@ carries inactive (absent), unlimited (zero), or finite.
   VRP table. Unavailable observations are omitted rather than reported as zero.
 - Pre-policy type 19 is accepted routes plus retained rejections other than
   RFC 7606 treat-as-withdraw. It requires authoritative reject retention, no
-  max-prefix `Block` withholding and no RFC 7313 enhanced route refresh of a
-  unicast family since the session reset, and no unicast Add-Path receive. Global type 18, and RFC 7854 type 7 with the same value
+  max-prefix `Block` withholding since the session reset, and no unicast
+  Add-Path receive. An RFC 7313 refresh sweeps unreplayed rejections with the
+  accepted routes, so the count stays exact across it. Global type 18, and RFC 7854 type 7 with the same value
   as §5 recommends, also require that no family other than IPv4/IPv6 unicast
   is negotiated, because denied routes of other families are not retained.
 - See the [BMP configuration contract](configuration.md#bmp) for

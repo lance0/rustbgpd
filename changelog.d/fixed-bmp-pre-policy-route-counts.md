@@ -7,9 +7,9 @@
   accepted IPv4/IPv6-unicast routes plus retained rejections other than
   treat-as-withdraw. The same value is sent as RFC 9972 type 18, with type 19
   per negotiated IPv4/IPv6-unicast family. These statistics are sent only
-  while rejected-route retention is enabled with no eviction, max-prefix
-  `Block` withholding or IPv4/IPv6-unicast enhanced route refresh since the
-  session reset and unicast Add-Path receive is off; types 7 and 18 also need
+  while rejected-route retention is enabled with no eviction or max-prefix
+  `Block` withholding since the session reset and unicast Add-Path receive is
+  off; types 7 and 18 also need
   a session with no other negotiated family.
   Otherwise they are omitted. See the
   [BMP statistics contract](../docs/reference/configuration.md#what-is-streamed).

@@ -18,9 +18,8 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   count only when it is exact: RFC 9972 type 19 per negotiated IPv4/IPv6
   unicast family, plus the RFC 7854 total (type 7) and its RFC 9972 twin
   (type 18) when no other family is negotiated. Exact means rejected-route
-  retention is enabled with no eviction, max-prefix `Block` withholding or
-  unicast enhanced route refresh since the session reset and no unicast
-  Add-Path receive; otherwise types
+  retention is enabled with no eviction or max-prefix `Block` withholding
+  since the session reset and no unicast Add-Path receive; otherwise types
   7/18/19 are omitted rather than approximated. When available, reports also
   carry the RFC 8671 post-policy Adj-RIB-Out total (type 15) and per-(AFI,
   SAFI) counts (type 17); types 15/17 are omitted when unavailable rather than
