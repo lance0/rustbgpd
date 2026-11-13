@@ -1812,8 +1812,29 @@ impl RibManager {
         self.peer_local_roles.remove(&peer);
         self.peer_export_encoders.remove(&peer);
         self.peer_unexportable.remove(&peer);
-        self.peer_otc_blocked.remove(&peer);
-        self.pending_otc_blocked.remove(&peer);
+        // RFC 9234 denies every OTC route toward a provider, peer or route
+        // server, so these hold an entry per blocked prefix: up to a full
+        // table learned from another provider. Their release takes the
+        // readiness lane (with the executor handoff).
+        let otc_blocked = self.peer_otc_blocked.remove(&peer);
+        let pending_otc_blocked = self.pending_otc_blocked.remove(&peer);
+        if otc_blocked.is_some() || pending_otc_blocked.is_some() {
+            self.with_ingest_readiness(|manager| {
+                let mut checkpoint = || {
+                    super::counted_checkpoint(
+                        &manager.replacement_readiness,
+                        super::OTC_BLOCKED_RELEASE,
+                        false,
+                    );
+                };
+                if let Some(mut blocked) = otc_blocked {
+                    crate::adj_rib_out::release_hash_map(&mut blocked, &mut checkpoint);
+                }
+                if let Some(mut pending) = pending_otc_blocked {
+                    crate::adj_rib_out::release_hash_map(&mut pending, &mut checkpoint);
+                }
+            });
+        }
         // The ORR vantage binding is per-registration: dropping the last
         // peer bound to a vantage must also drop the vantage's cached
         // SPF (and re-arm the empty-state early-out). Consuming the
