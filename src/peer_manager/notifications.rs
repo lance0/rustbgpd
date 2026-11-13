@@ -579,7 +579,7 @@ impl PeerManager {
             // one was handled is applied before the caller goes on.
             while let Ok(notification) = self.session_notify_rx.try_recv() {
                 self.drain_ready_session_lifecycle_notifications();
-                self.handle_session_notification(notification).await;
+                super::boxed(|| self.handle_session_notification(notification)).await;
             }
             return;
         }
@@ -612,7 +612,7 @@ impl PeerManager {
                 return;
             };
             if let Some(notification) = notification {
-                self.handle_session_notification(notification).await;
+                super::boxed(|| self.handle_session_notification(notification)).await;
             }
         }
     }
@@ -719,7 +719,7 @@ impl PeerManager {
         self.session_notification_depth += 1;
         if self.session_notification_depth > 1 {
             let mut retirements = Vec::new();
-            self.handle_one_session_notification(notification, &mut retirements)
+            super::boxed(|| self.handle_one_session_notification(notification, &mut retirements))
                 .await;
             self.finish_notification_round(retirements).await;
             self.session_notification_depth -= 1;
@@ -759,8 +759,10 @@ impl PeerManager {
                     .release_deferred_session_notification(index)
                     .expect("the captured notification remains queued");
                 self.drain_ready_session_lifecycle_notifications();
-                self.handle_one_session_notification(notification, &mut retirements)
-                    .await;
+                super::boxed(|| {
+                    self.handle_one_session_notification(notification, &mut retirements)
+                })
+                .await;
             }
             self.finish_notification_round(retirements).await;
             // A newly deferred ordinary retirement belongs to the next
@@ -777,8 +779,10 @@ impl PeerManager {
                     .release_deferred_session_notification(0)
                     .expect("the deferred collision remains queued");
                 let mut retirements = Vec::new();
-                self.handle_one_session_notification(notification, &mut retirements)
-                    .await;
+                super::boxed(|| {
+                    self.handle_one_session_notification(notification, &mut retirements)
+                })
+                .await;
                 self.finish_notification_round(retirements).await;
             }
             // Unrelated notices found by a nested drain form the next finite batch.
@@ -1172,8 +1176,10 @@ impl PeerManager {
                     .get(&peer_key)
                     .is_some_and(|m| m.pending_inbound.is_some())
                 {
-                    self.resolve_collision(peer_key.clone(), remote_router_id, peer_asn)
-                        .await;
+                    super::boxed(|| {
+                        self.resolve_collision(peer_key.clone(), remote_router_id, peer_asn)
+                    })
+                    .await;
                 }
                 // The session whose OPEN this is, if it is the primary now: a
                 // collision winner promoted just above takes the retention
@@ -1268,12 +1274,19 @@ impl PeerManager {
                             None => false,
                             // An exited primary has no reconnect wait to honour.
                             Some(rustbgpd_transport::StateQueryOutcome::SessionGone) => {
-                                self.promote_pending_inbound_unless_backoff(&peer_key, None)
-                                    .await
+                                super::boxed(|| {
+                                    self.promote_pending_inbound_unless_backoff(&peer_key, None)
+                                })
+                                .await
                             }
                             Some(rustbgpd_transport::StateQueryOutcome::State(state)) => {
-                                self.promote_pending_inbound_unless_backoff(&peer_key, Some(&state))
-                                    .await
+                                super::boxed(|| {
+                                    self.promote_pending_inbound_unless_backoff(
+                                        &peer_key,
+                                        Some(&state),
+                                    )
+                                })
+                                .await
                             }
                             // A live primary whose backoff streak is unknown:
                             // promoting could bypass its wait and reset the

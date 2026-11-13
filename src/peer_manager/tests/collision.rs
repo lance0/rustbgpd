@@ -2931,6 +2931,167 @@ fn run_loop_accepts_inbound_during_collision_burst_on_reduced_stack() {
         .unwrap();
 }
 
+/// A startup collision nests one handler chain per notice its peer has
+/// queued, because each promotion first drains that peer's notices: the
+/// primary's OPEN, its fall to Idle, the candidate's OPEN, and the exit of
+/// the primary's task, replaced at the innermost level. Run from the
+/// run loop's inbound-accept command, the deepest entry, the whole chain
+/// fits in half of a runtime worker's 2 MiB stack in an unoptimized build.
+///
+/// LOAD-BEARING: with the command arms, the notification round or the
+/// collision steps awaited in place (no `boxed`), their futures are slots of
+/// every enclosing poll frame and this test aborts with a stack overflow.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor fixture queues a peer's four nested notices behind an inbound accept"
+)]
+fn run_loop_resolves_nested_collision_notices_on_half_a_worker_stack() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(async {
+                    let (commands, command_rx) = mpsc::channel(4);
+                    let (rib_tx, _rib_rx) = mpsc::channel(1024);
+                    let metrics = BgpMetrics::new();
+                    let mut mgr = PeerManager::new(
+                        command_rx,
+                        65001,
+                        Ipv4Addr::new(10, 0, 0, 1),
+                        None,
+                        None,
+                        metrics.clone(),
+                        rib_tx,
+                        None,
+                    );
+                    // The replacement session dials a closed local port.
+                    let peer_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+                    let counters = Arc::new(FakePeerCounters::default());
+                    insert_test_managed_peer_with_asn(
+                        &mut mgr,
+                        peer_addr,
+                        65002,
+                        fake_peer_handle(peer_addr, SessionState::Idle, None, counters.clone()),
+                        false,
+                    );
+                    let managed = mgr.peers.get_mut(&key(peer_addr)).unwrap();
+                    managed.transport_config.remote_addr = SocketAddr::new(peer_addr, 9);
+                    let primary = mgr.peers[&key(peer_addr)].session_id();
+                    let candidate = 1001;
+                    mgr.next_session_id = candidate + 1;
+                    attach_test_pending_inbound(
+                        &mut mgr,
+                        peer_addr,
+                        fake_peer_handle(
+                            peer_addr,
+                            SessionState::OpenConfirm,
+                            Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            counters.clone(),
+                        ),
+                        candidate,
+                    );
+                    let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
+                    insert_test_managed_peer_with_asn(
+                        &mut mgr,
+                        localhost,
+                        65002,
+                        fake_peer_handle(
+                            localhost,
+                            SessionState::Active,
+                            None,
+                            Arc::new(FakePeerCounters::default()),
+                        ),
+                        false,
+                    );
+                    let notifications = mgr.session_notify_tx.clone();
+                    mgr.test_command_hook = Some(Arc::new(move |command| {
+                        if !matches!(command, PeerManagerCommand::AcceptInbound { .. }) {
+                            return;
+                        }
+                        // Queued after selection so AcceptInbound owns the
+                        // drain. Each notice is handled inside the promotion
+                        // the one before it started.
+                        let role = rustbgpd_transport::SessionRole::Primary;
+                        let open = |session_id| SessionNotification::OpenReceived {
+                            session_id,
+                            role,
+                            peer_addr,
+                            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                            peer_asn: 65002,
+                        };
+                        for notification in [
+                            open(primary),
+                            SessionNotification::BackToIdle {
+                                session_id: primary,
+                                role,
+                                peer_addr,
+                            },
+                            open(candidate),
+                            SessionNotification::TaskExited {
+                                session_id: primary,
+                                role,
+                                peer_addr,
+                                cause: "panicked".to_owned(),
+                            },
+                        ] {
+                            notifications.send(notification).unwrap();
+                        }
+                    }));
+                    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+                    let _remote = TcpStream::connect(listener.local_addr().unwrap())
+                        .await
+                        .unwrap();
+                    let (stream, accepted_from) = listener.accept().await.unwrap();
+                    // Spawned as the daemon spawns it.
+                    let actor = tokio::spawn(mgr.run());
+                    commands
+                        .send(PeerManagerCommand::AcceptInbound {
+                            stream,
+                            peer_addr: accepted_from,
+                            tcp_ao_info: None,
+                            tcp_ao_generation: None,
+                        })
+                        .await
+                        .unwrap();
+                    let (reply, response) = oneshot::channel();
+                    commands
+                        .send(PeerManagerCommand::Ping { reply })
+                        .await
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), response)
+                        .await
+                        .expect("inbound command settles")
+                        .unwrap();
+                    assert_eq!(
+                        counters.activate_max_prefix_metrics.load(Ordering::SeqCst),
+                        1,
+                        "the candidate is promoted"
+                    );
+                    let crashes: f64 = metrics
+                        .registry()
+                        .gather()
+                        .iter()
+                        .filter(|family| family.name() == "bgp_session_task_crashes_total")
+                        .flat_map(prometheus::proto::MetricFamily::get_metric)
+                        .map(|metric| metric.get_counter().get_value())
+                        .sum();
+                    assert!(
+                        (crashes - 1.0).abs() < f64::EPSILON,
+                        "the exited primary is replaced inside the nested drain: {crashes}"
+                    );
+                    commands.send(PeerManagerCommand::Shutdown).await.unwrap();
+                    actor.await.unwrap();
+                }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// Dequeueing a max-prefix warning frees its scope's slot in the session
 /// channel, so a nested drain that defers another peer's warnings can take
 /// the same scope's next warning before the first is handled. The deferred

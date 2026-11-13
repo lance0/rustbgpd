@@ -205,6 +205,17 @@ mod update_group_plan;
 use dynamic::{AcceptedDynamicRange, DeadLetteredPending, DynamicRange};
 use peer_table::{ManagedPeer, PeerTable};
 
+/// Build a future directly on the heap and pin it there.
+///
+/// `Box::pin(make_future())` in an unoptimized build first writes the whole
+/// future into a slot of the calling poll function's frame, and every such
+/// call keeps its own slot. A handler with many large arms then needs a
+/// frame of their sum on each poll, whichever arm runs. Built inside this
+/// call, the future's slot is in a frame that is gone before it is polled.
+pub(super) fn boxed<F: Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
 const DEFAULT_HOLD_TIME: u16 = rustbgpd_fsm::DEFAULT_HOLD_TIME;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 const BGP_PORT: u16 = 179;
@@ -1735,7 +1746,7 @@ impl PeerManager {
         }
         let started = tokio::time::Instant::now();
         // Boxed: the handlers are not part of every walk's state machine.
-        let events_served = Box::pin(self.serve_owned_walk_events_now()).await;
+        let events_served = boxed(|| self.serve_owned_walk_events_now()).await;
         if let Some(walk) = self.owned_walk.as_mut() {
             walk.gap_max = walk
                 .gap_max
@@ -2659,6 +2670,9 @@ impl PeerManager {
             hook(&cmd);
         }
         self.operator_read_seam = OperatorReadSeam::Unfenced;
+        // Every arm's future is a slot of this one poll frame in an
+        // unoptimized build, under whatever the arm that runs goes on to
+        // call. The large ones are built on the heap ([`boxed`]).
         match cmd {
             PeerManagerCommand::EnablePeerOwned { peer, reply } => {
                 let outcome = self.enable_peer_owned(peer).await;
@@ -2683,15 +2697,15 @@ impl PeerManager {
                 sync_config_snapshot,
                 reply,
             } => {
-                let result = self.add_peer(config, sync_config_snapshot).await;
+                let result = boxed(|| self.add_peer(config, sync_config_snapshot)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::AddConfiguredPeers { configs, reply } => {
-                let result = self.add_configured_peers(configs).await;
+                let result = boxed(|| self.add_configured_peers(configs)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
-                let result = self.runtime_create_peer(spec).await;
+                let result = boxed(|| self.runtime_create_peer(spec)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::DeletePeer {
@@ -2699,16 +2713,18 @@ impl PeerManager {
                 sync_config_snapshot,
                 reply,
             } => {
-                let result = self.delete_peer_runtime(peer, sync_config_snapshot).await;
+                let result = boxed(|| self.delete_peer_runtime(peer, sync_config_snapshot)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::OwnedNeighborMutation { mutation, reply } => {
                 // Static delete and both dynamic operations validate
                 // before effect; static add reports cleanup explicitly.
                 let outcome = match mutation {
-                    OwnedNeighborMutation::Add(spec) => self.owned_runtime_create_peer(spec).await,
+                    OwnedNeighborMutation::Add(spec) => {
+                        boxed(|| self.owned_runtime_create_peer(spec)).await
+                    }
                     OwnedNeighborMutation::Delete(peer) => {
-                        match self.delete_peer_runtime(peer, true).await {
+                        match boxed(|| self.delete_peer_runtime(peer, true)).await {
                             Ok(_) => OwnedNeighborMutationOutcome::Success,
                             Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
                                 OwnedNeighborMutationError::Peer(error),
@@ -2786,7 +2802,7 @@ impl PeerManager {
                         rpol,
                         dataset_bindings,
                     } => {
-                        self.sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings)
+                        boxed(|| self.sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings))
                             .await
                     }
                     OwnedCatalogMutation::DeletePeerGroup { name } => {
@@ -2960,7 +2976,7 @@ impl PeerManager {
                 let _ = reply.send(outcome);
             }
             PeerManagerCommand::ReconfigurePeer { config, reply } => {
-                let result = self.reconfigure_peer_runtime(config).await;
+                let result = boxed(|| self.reconfigure_peer_runtime(config)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ListPeers { reply } => {
@@ -3045,14 +3061,15 @@ impl PeerManager {
             PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
                 // API publication rollback restores policy chains before the
                 // staged config. Reads report each source's current values.
-                let result = self
-                    .apply_resolved_policy_snapshot_with_prestage_reads(
+                let result = boxed(|| {
+                    self.apply_resolved_policy_snapshot_with_prestage_reads(
                         targets,
                         false,
                         OperatorReadAdmission::Served,
                     )
-                    .await
-                    .map_err(policy::PolicySnapshotFailure::into_apply_error);
+                })
+                .await
+                .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPolicyImpactSnapshot {
@@ -3060,9 +3077,9 @@ impl PeerManager {
                 dynamic_ranges,
                 reply,
             } => {
-                let result = self
-                    .apply_policy_impact_snapshot(static_targets, dynamic_ranges)
-                    .await;
+                let result =
+                    boxed(|| self.apply_policy_impact_snapshot(static_targets, dynamic_ranges))
+                        .await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
@@ -3117,7 +3134,7 @@ impl PeerManager {
                 reason,
                 reply,
             } => {
-                let result = self.disable_peer(peer, reason).await;
+                let result = boxed(|| self.disable_peer(peer, reason)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ResetPeer {
@@ -3125,7 +3142,7 @@ impl PeerManager {
                 reason,
                 reply,
             } => {
-                let result = self.reset_peer(peer, reason).await;
+                let result = boxed(|| self.reset_peer(peer, reason)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ResetEvpnRecoverySession { request, reply } => {
@@ -3171,7 +3188,7 @@ impl PeerManager {
                 tcp_ao_info,
                 tcp_ao_generation,
             } => {
-                self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation)
+                boxed(|| self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation))
                     .await;
             }
             PeerManagerCommand::ApplyTcpAoRotation {
@@ -3240,7 +3257,7 @@ impl PeerManager {
             }
             PeerManagerCommand::HotUpdatePeer { config, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
-                let outcome = self.hot_update_peer_owned(config).await;
+                let outcome = boxed(|| self.hot_update_peer_owned(config)).await;
                 if matches!(&outcome, OwnedHotUpdatePeerOutcome::Success) {
                     self.reap_retired_policy_routes(&policy_routes_prior);
                 }
@@ -3268,7 +3285,7 @@ impl PeerManager {
                 failed,
                 reply,
             } => {
-                let result = self.refresh_dataset_dependents(&swapped, &failed).await;
+                let result = boxed(|| self.refresh_dataset_dependents(&swapped, &failed)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ListPolicies { reply } => {
@@ -3427,7 +3444,7 @@ impl PeerManager {
             }
             PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
-                let result = self.set_honor_graceful_shutdown(enabled).await;
+                let result = boxed(|| self.set_honor_graceful_shutdown(enabled)).await;
                 if result.is_ok() {
                     self.reap_retired_policy_routes(&policy_routes_prior);
                 }
@@ -3435,7 +3452,7 @@ impl PeerManager {
             }
             PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
-                let result = self.set_honor_blackhole(enabled).await;
+                let result = boxed(|| self.set_honor_blackhole(enabled)).await;
                 if result.is_ok() {
                     self.reap_retired_policy_routes(&policy_routes_prior);
                 }
@@ -3782,13 +3799,13 @@ impl PeerManager {
                         debug!("peer manager channel closed");
                         return;
                     };
-                    if Box::pin(self.dispatch_command(cmd)).await.is_break() {
+                    if boxed(|| self.dispatch_command(cmd)).await.is_break() {
                         return;
                     }
                 }
                 Some(loaded) = self.candidate_loads.join_next(), if !self.candidate_loads.is_empty() => {
                     match loaded {
-                        Ok(loaded) => self.finish_candidate_load(loaded).await,
+                        Ok(loaded) => boxed(|| self.finish_candidate_load(loaded)).await,
                         // A panicking load drops its reply; the caller sees
                         // the dropped-reply error.
                         Err(error) => warn!(%error, "config candidate load task failed"),
@@ -3801,13 +3818,13 @@ impl PeerManager {
                             let _ = reply.send(self.preflight_reload_generation(&candidate, route));
                         }
                         Some(InternalCommand::OpenDynamicBfdSockets { candidate, reply }) => {
-                            let _ = reply.send(self.open_dynamic_bfd_sockets(&candidate).await);
+                            let _ = reply.send(boxed(|| self.open_dynamic_bfd_sockets(&candidate)).await);
                         }
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
                             let outcome =
-                                Box::pin(self.apply_reload_generation(*candidate, actions, datasets)).await;
+                                boxed(|| self.apply_reload_generation(*candidate, actions, datasets)).await;
                             if matches!(outcome, ReloadGenerationOutcome::Applied(_)) {
                                 self.reap_retired_policy_routes(&policy_routes_prior);
                             }
@@ -3991,7 +4008,7 @@ impl PeerManager {
                 notification = self.session_notify_rx.recv() => {
                     if let Some(notification) = notification {
                         self.drain_ready_session_lifecycle_notifications();
-                        self.handle_session_notification(notification).await;
+                        boxed(|| self.handle_session_notification(notification)).await;
                     }
                 }
                 lifecycle = self.session_lifecycle_rx.recv() => {
@@ -4033,7 +4050,7 @@ impl PeerManager {
                     }
                 } => self.bfd_scope_retry_due(),
                 change = Self::receive_bfd_state_change(&mut self.bfd_coupling) => {
-                    self.handle_bfd_state_change(change).await;
+                    boxed(|| self.handle_bfd_state_change(change)).await;
                 }
                 changed = Self::receive_link_change(&mut self.link_check.changes) => {
                     if changed {

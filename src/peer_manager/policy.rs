@@ -5210,9 +5210,10 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
 
-        let applied = self
-            .refresh_policies_for_config(next_config, affected_peers)
-            .await?;
+        // Thirteen command arms await this future: keep the refresh state
+        // out of it, and so out of the command-dispatch poll frame.
+        let applied =
+            super::boxed(|| self.refresh_policies_for_config(next_config, affected_peers)).await?;
         self.publish_policy_config_event(&event, applied);
         Ok(())
     }
