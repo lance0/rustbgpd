@@ -1751,30 +1751,30 @@ impl RibManager {
                     0,
                 )
             });
-            super::with_executor_handoff(|| {
-                self.with_replacement_readiness(|manager| {
-                    #[cfg(test)]
-                    let observer = manager.replacement_readiness_test_hook.clone();
-                    #[cfg(test)]
-                    if let Some(observer) = &observer {
-                        observer("peer_adj_out_retirement_before");
-                    }
-                    rib.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
-                        super::replacement_readiness_cleanup_checkpoint(
-                            &manager.replacement_readiness,
-                            "peer_adj_out_retirement",
-                            progress,
-                        );
-                    }));
-                    drop(rib);
-                    #[cfg(feature = "bench-internals")]
-                    super::bench_support::retirement_end(2, retirement);
-                    #[cfg(test)]
-                    if let Some(observer) = &observer {
-                        observer("peer_adj_out_retirement_after");
-                    }
-                    manager.replacement_checkpoint(true);
-                });
+            // No policy transition is pending: ingest owner (with the
+            // executor handoff).
+            self.with_ingest_readiness(|manager| {
+                #[cfg(test)]
+                let observer = manager.replacement_readiness_test_hook.clone();
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_adj_out_retirement_before");
+                }
+                rib.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
+                    super::replacement_readiness_cleanup_checkpoint(
+                        &manager.replacement_readiness,
+                        "peer_adj_out_retirement",
+                        progress,
+                    );
+                }));
+                drop(rib);
+                #[cfg(feature = "bench-internals")]
+                super::bench_support::retirement_end(2, retirement);
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_adj_out_retirement_after");
+                }
+                manager.replacement_checkpoint(true);
             });
         }
         // The gauge reports the size of the table removed on the line
@@ -1882,32 +1882,30 @@ impl RibManager {
             let retirement = super::bench_support::retirement_begin(|| {
                 (baseline.unicast.len() + baseline.vpn.len(), 0)
             });
-            super::with_executor_handoff(|| {
-                self.with_replacement_readiness(|manager| {
-                    #[cfg(test)]
-                    let observer = manager.replacement_readiness_test_hook.clone();
-                    #[cfg(test)]
-                    if let Some(observer) = &observer {
-                        observer("peer_regroup_retirement_before");
-                    }
-                    baseline.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(
-                        |progress| {
-                            super::replacement_readiness_cleanup_checkpoint(
-                                &manager.replacement_readiness,
-                                "peer_regroup_retirement",
-                                progress,
-                            );
-                        },
-                    ));
-                    drop(baseline);
-                    #[cfg(feature = "bench-internals")]
-                    super::bench_support::retirement_end(3, retirement);
-                    #[cfg(test)]
-                    if let Some(observer) = &observer {
-                        observer("peer_regroup_retirement_after");
-                    }
-                    manager.replacement_checkpoint(true);
-                });
+            // No policy transition is pending: ingest owner (with the
+            // executor handoff).
+            self.with_ingest_readiness(|manager| {
+                #[cfg(test)]
+                let observer = manager.replacement_readiness_test_hook.clone();
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_regroup_retirement_before");
+                }
+                baseline.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
+                    super::replacement_readiness_cleanup_checkpoint(
+                        &manager.replacement_readiness,
+                        "peer_regroup_retirement",
+                        progress,
+                    );
+                }));
+                drop(baseline);
+                #[cfg(feature = "bench-internals")]
+                super::bench_support::retirement_end(3, retirement);
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_regroup_retirement_after");
+                }
+                manager.replacement_checkpoint(true);
             });
         }
         self.pending_extra_withdraws.remove(&peer);

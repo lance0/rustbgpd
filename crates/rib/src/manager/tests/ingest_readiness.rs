@@ -842,3 +842,41 @@ fn evpn_member_teardown_answers_readiness_while_releasing_its_recovery_ledger() 
         );
     }
 }
+
+fn assert_only_ingest_owners(case: &str, owners: &[ReadinessOwnerKind]) {
+    assert!(
+        !owners.is_empty()
+            && owners
+                .iter()
+                .all(|kind| *kind == ReadinessOwnerKind::Ingest),
+        "{case}: no policy transition is pending, so every owner is the ingest one: {owners:?}"
+    );
+}
+
+/// Retiring a departing session's Adj-RIB-Out and regrouping a peer for a
+/// family that became sendable involve no policy transition, so their
+/// readiness waits belong to the actor loop's seam, not the replacement
+/// fence's.
+#[test]
+fn outbound_teardown_and_family_unlock_take_the_ingest_owner() {
+    assert_only_ingest_owners("teardown", &evpn_member_teardown(64).owners);
+
+    let (mut manager, member, _gid, _output) = super::evpn_group_storage::fixture();
+    manager.replacement_readiness_receipts.clear();
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer: member,
+        session_id: 7,
+        family: (Afi::Ipv6, Safi::Unicast),
+        add_path_send_limit: None,
+    });
+    assert!(
+        manager.peer_sendable_families[&member].contains(&(Afi::Ipv6, Safi::Unicast)),
+        "the family was unlocked"
+    );
+    let owners: Vec<_> = manager
+        .replacement_readiness_receipts
+        .iter()
+        .map(|receipt| receipt.kind)
+        .collect();
+    assert_only_ingest_owners("family unlock", &owners);
+}
