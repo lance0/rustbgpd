@@ -516,6 +516,10 @@ def check_compose(errors: list[str], text: str) -> None:
         errors.append("docker compose: rustbgpd must not declare a restart policy")
 
 
+PACKAGE_SCRIPTS = ("preinstall", "postinstall", "preremove", "postremove")
+LIFECYCLE_CHECK = "scripts/check-package-lifecycle.sh"
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     inputs: list[str] = []
@@ -604,6 +608,19 @@ def check(root: Path) -> list[str]:
         require_patterns(errors, "tarball active assertions", assertion, tar_checks)
 
         nfpm = read("packaging/nfpm.yaml")
+        # The maintainer scripts and the lifecycle check that exercises them
+        # are workflow inputs, so a change to any of them reruns the check.
+        for kind in PACKAGE_SCRIPTS:
+            script = f"packaging/{kind}.sh"
+            if not re.search(rf"(?m)^  {kind}: {re.escape(script)}$", nfpm):
+                errors.append(f"nfpm maintainer scripts: {kind} must run {script}")
+            read(script)
+        read(LIFECYCLE_CHECK)
+        select_script(
+            workflow,
+            "native package lifecycle",
+            f'sudo {LIFECYCLE_CHECK} "$old" "$new"',
+        )
         destinations = set(re.findall(r"(?m)^\s+dst: (/usr/bin/\S+)\s*$", nfpm))
         expected_bins = {f"/usr/bin/{binary}" for binary in BINARIES}
         if destinations != expected_bins:

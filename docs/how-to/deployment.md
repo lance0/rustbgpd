@@ -352,6 +352,13 @@ for the daemon) supports the SIGHUP-reload workflow — `chown
 rustbgpd /etc/rustbgpd /etc/rustbgpd/config.toml` if you want runtime
 mutation.
 
+Removing the package (`apt-get remove`/`purge`, `dnf remove`) stops and
+disables `rustbgpd` and every `rustbgpd@` instance before the binaries are
+deleted, so the unit's `ExecStopPost` still releases any EVPN core-isolation
+links. The stop is graceful and withdraws the daemon's routes from its peers.
+`/var/lib/rustbgpd` and the `rustbgpd` user are kept; `purge` also deletes
+`/etc/rustbgpd/config.toml` on Debian and Ubuntu.
+
 ### Verifying release artifacts
 
 Each architecture has a `checksums-<arch>.txt` manifest covering its
@@ -1511,8 +1518,11 @@ reported separately by `negotiation_available`.
 
 This is the canonical procedure for the release `.deb` and `.rpm` packages.
 The package scripts create the service user and run `systemctl daemon-reload`;
-they deliberately do **not** stop, start, or restart rustbgpd. An operator must
-therefore own the graceful stop and the verification that follows it.
+on upgrade they deliberately do **not** stop, start, or restart rustbgpd. An
+operator must therefore own the graceful stop and the verification that follows
+it. An upgrade over a running daemon leaves the old binary running, and the
+package says a restart is required; `rbgp health` reports the version of the
+running daemon, not the file on disk.
 
 ### Upgrade
 
@@ -1636,14 +1646,17 @@ therefore own the graceful stop and the verification that follows it.
    ```sh
    sudo systemctl start rustbgpd
    sudo systemctl --no-pager --full status rustbgpd
-   /usr/bin/rustbgpd --version
+   dpkg-query -W -f='${Version}\n' rustbgpd # Debian / Ubuntu
+   rpm -q --qf '%{VERSION}\n' rustbgpd     # RHEL / Rocky / Alma
    sudo -u rustbgpd rbgp health
    sudo -u rustbgpd rbgp summary
    ```
 
-   Confirm the reported version is the package you selected and wait for every
-   expected session to return to `Established`; `systemd` active alone does not
-   prove routing convergence.
+   Confirm that the `Version:` line from `rbgp health`, which the running
+   daemon reports, matches the package you selected. `rustbgpd --version`
+   reads the binary on disk, which an unrestarted daemon no longer runs. Wait
+   for every expected session to return to `Established`; `systemd` active
+   alone does not prove routing convergence.
 
 ### Rollback
 
@@ -1839,7 +1852,7 @@ short version for first deployment:
 
 | Symptom | Where to look |
 |---|---|
-| Session won't establish | `rbgp neighbor <addr>` + `journalctl -u rustbgpd -p warning` |
+| Session won't establish | `rbgp neighbor <addr>` + `journalctl -u rustbgpd -p warning` (or, from JSON logs, `journalctl -u rustbgpd -o cat \| jq -c 'select(.level=="WARN" or .level=="ERROR")'`) |
 | Routes received but not installed | `rbgp rib`, then `rbgp rib received <peer> --rejected`; for the statement-level trace, `rbgp policy explain --neighbor <peer> --prefix <CIDR> --direction import` (opt-in: needs `[policy.explain] enabled = true`) |
 | Reload didn't change behavior | `rustbgpd --diff <file>` + cross-reference [reload matrix](../reference/reload-matrix.md) |
 | FIB programming failures | `bgp_fib_kernel_failures_total` Prometheus counter + `journalctl -u rustbgpd -g 'failed to apply general FIB route op'` |
@@ -1868,6 +1881,14 @@ Environment=RUST_LOG=info,[peer{peer_addr=10.0.0.1}]=debug
 ```
 
 Per-peer verbosity also comes from `[[neighbors]] log_level = "debug"`.
+
+When systemd connects the daemon's stdout to the journal (it sets
+`JOURNAL_STREAM` to stdout's device and inode), each line starts with its
+level's syslog priority, which journald strips and stores: `ERROR` as `err`
+(3), `WARN` as `warning` (4), `INFO` as `info` (6), and `DEBUG`/`TRACE` as
+`debug` (7). This detection is automatic; it needs no configuration and
+applies to both log formats. `journalctl -p` therefore filters by the
+daemon's level. Output to a terminal, a file or a pipe has no prefix.
 Restart required for the global setting; per-peer log_level is **live** —
 replaced on SIGHUP, so a level edit reaches running sessions without a
 restart (see the [reload matrix](../reference/reload-matrix.md)).

@@ -101,6 +101,7 @@ fn json_health(resp: &crate::proto::HealthResponse) -> JsonHealth {
         uptime_seconds: resp.uptime_seconds,
         active_peers: resp.active_peers,
         total_routes: resp.total_routes,
+        daemon_version: (!resp.daemon_version.is_empty()).then(|| resp.daemon_version.clone()),
     }
 }
 
@@ -140,6 +141,11 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
         )?;
         outln!("Established peers: {}", resp.active_peers)?;
         outln!("Routes:            {}", resp.total_routes)?;
+        // The running process, which can differ from the binary on disk
+        // after a package upgrade without a restart.
+        if !resp.daemon_version.is_empty() {
+            outln!("Version:           {}", resp.daemon_version)?;
+        }
     }
     Ok(())
 }
@@ -223,13 +229,13 @@ mod tests {
             uptime_seconds: u64::MAX,
             active_peers: 17,
             total_routes: 19,
-            // Version provenance belongs to doctor, not this readiness summary.
             daemon_version: "test-version".into(),
         };
         assert_eq!(
             serde_json::to_value(json_health(&state)).unwrap(),
             serde_json::json!({
-                "healthy": false, "uptime_seconds": u64::MAX, "active_peers": 17, "total_routes": 19
+                "healthy": false, "uptime_seconds": u64::MAX, "active_peers": 17, "total_routes": 19,
+                "daemon_version": "test-version"
             })
         );
     }

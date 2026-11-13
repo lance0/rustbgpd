@@ -33,6 +33,8 @@ INPUTS = (
     RELEASE,
     contract.INSTALLER,
     "packaging/nfpm.yaml",
+    *(f"packaging/{kind}.sh" for kind in contract.PACKAGE_SCRIPTS),
+    contract.LIFECYCLE_CHECK,
     "scripts/build-packages.sh",
     "docs/grafana/rustbgpd-overview.json",
     "docs/grafana/rustbgpd-evpn.json",
@@ -209,6 +211,24 @@ MUTATIONS = (
         "      - packaging/install.sh",
         "      - packaging/removed-install.sh",
         "release install workflow must trigger for packaging/install.sh",
+    ),
+    (
+        WORKFLOW,
+        "      - packaging/preremove.sh",
+        "      - packaging/removed-preremove.sh",
+        "release install workflow must trigger for packaging/preremove.sh",
+    ),
+    (
+        "packaging/nfpm.yaml",
+        "  preremove: packaging/preremove.sh\n",
+        "",
+        "nfpm maintainer scripts: preremove",
+    ),
+    (
+        WORKFLOW,
+        'sudo scripts/check-package-lifecycle.sh "$old" "$new"',
+        "true",
+        "native package lifecycle",
     ),
     (
         contract.SYSTEMD_UNIT,

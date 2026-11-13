@@ -225,7 +225,7 @@
     "exit_code_contract": {"source": "crates/cli/src/main.rs", "usage_error": 64, "command_exit_codes": {"config abort": [0, 1], "config apply": [0, 1, 3], "config confirm": [0, 1], "config diff": [0, 1, 2, 3], "config plan": [0, 1, 2, 3], "doctor": [0, 1, 2]}, "test_source": "crates/cli/tests/argument_errors.rs", "test": "usage_errors_never_exit_with_a_detailed_code", "test_linkage": "USAGE"},
     "versioned_json_contracts": [
       {
-        "id": "rbgp-json/1.1",
+        "id": "rbgp-json/1.2",
         "command_paths": ["config abort", "config apply", "config confirm", "config effective", "config plan", "config status", "dynamic-neighbor", "global", "gshut", "health", "neighbor", "neighbor-set", "peer-group", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown"],
         "source": "crates/cli/src/output.rs",
         "test": "versioned_json_document_preserves_payload_and_inventory_floor",
