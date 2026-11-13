@@ -4118,9 +4118,10 @@ const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 const TEST_LEASE_EXPIRY_PANIC_ENV: &str = "RUSTBGPD_TEST_LEASE_EXPIRY_PANIC";
 
 /// Test-only fault injection; never set this in production. The value is the
-/// path of a Unix socket: byte 1 reports that the fault is armed, and one
-/// received byte shuts down the bound metrics/readiness listening socket so
-/// its accept loop takes the unusable-socket exit.
+/// absolute path of a Unix socket: byte 1 reports that the fault is armed,
+/// and one received byte shuts down the bound metrics/readiness listening
+/// socket so its accept loop takes the unusable-socket exit. Any other value
+/// is ignored with a sanitized warning.
 const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE";
 
 /// Test-only fault injection; never set this in production. The only accepted
@@ -4155,6 +4156,19 @@ fn resolve_test_lease_expiry_panic() -> bool {
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
             warn!("ignoring invalid {TEST_LEASE_EXPIRY_PANIC_ENV}; expected 1");
             false
+        }
+    }
+}
+
+fn resolve_test_metrics_listener_unusable() -> Option<std::path::PathBuf> {
+    match std::env::var(TEST_METRICS_LISTENER_UNUSABLE_ENV) {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) if std::path::Path::new(&value).is_absolute() => Some(value.into()),
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!(
+                "ignoring invalid {TEST_METRICS_LISTENER_UNUSABLE_ENV}; expected an absolute socket path"
+            );
+            None
         }
     }
 }
@@ -7306,19 +7320,20 @@ async fn run<T>(
     // cannot delay `/livez` or `/metrics`; `/readyz` still asks the actors on
     // this runtime. Stopped after the coordinated teardown below.
     if let Some(metrics_listener) = &metrics_listener
-        && let Ok(path) = std::env::var(TEST_METRICS_LISTENER_UNUSABLE_ENV)
+        && let Some(path) = resolve_test_metrics_listener_unusable()
+        && let Ok(fault) = metrics_listener.try_clone()
     {
-        let fault = metrics_listener
-            .try_clone()
-            .expect("duplicate metrics listener for the test fault");
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let mut stream = tokio::net::UnixStream::connect(path)
-                .await
-                .expect("connect metrics-listener test fault");
-            stream.write_all(&[1]).await.expect("report armed fault");
-            stream.read_exact(&mut [0]).await.expect("await fault");
-            fault.shut_down_for_test();
+            let armed = async {
+                let mut stream = tokio::net::UnixStream::connect(path).await?;
+                stream.write_all(&[1]).await?;
+                stream.read_exact(&mut [0]).await
+            };
+            match armed.await {
+                Ok(_) => fault.shut_down_for_test(),
+                Err(error) => warn!(%error, "metrics-listener test fault not armed"),
+            }
         });
     }
     let (metrics_stop, metrics_stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -7514,16 +7529,19 @@ async fn run<T>(
                 component_failed = true;
                 break;
             }
-            // The supervisor restarts the server in place and returns only
-            // on the stop sent at teardown, so this is a defect in the
-            // supervisor itself. It is still a management-plane failure:
-            // BGP keeps running with the listener down.
+            // The supervisor restarts the server in place. It returns on the
+            // stop sent at teardown, or once the gate reports shutdown; any
+            // other end is a defect in the supervisor itself. That is still
+            // a management-plane failure: BGP keeps running with the
+            // listener down.
             result = &mut metrics_handle, if !metrics_supervisor_exited => {
                 metrics_supervisor_exited = true;
-                error!(
-                    ?result,
-                    "metrics/readiness supervisor exited unexpectedly; /metrics, /readyz and /livez stay down until the daemon restarts"
-                );
+                if result.is_err() || !daemon_gate.is_shutting_down() {
+                    error!(
+                        ?result,
+                        "metrics/readiness supervisor exited unexpectedly; /metrics, /readyz and /livez stay down until the daemon restarts"
+                    );
+                }
             }
             result = &mut bgp_listener_handle => {
                 error!(?result, "BGP listener task exited unexpectedly");

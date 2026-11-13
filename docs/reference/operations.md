@@ -1331,13 +1331,15 @@ part of the ordered teardown and exits 0.
 When `prometheus_addr` is configured, the HTTP server behind `/metrics`,
 `/readyz` and `/livez` is restarted in place if it ends on its own. A failure
 of this server says nothing about routing state, so the daemon never exits
-for it: BGP sessions, routes and the gRPC API are unaffected. Each exit logs
-`metrics/readiness server exited unexpectedly; restarting it in place` with
-the cause and the delay, and adds one to
-`bgp_management_server_restarts_total{server="metrics"}`.
+for it: BGP sessions, routes and the gRPC API are unaffected. Each unexpected
+exit or failed start adds one to
+`bgp_management_server_crashes_total{server="metrics"}` and, unless the
+daemon is shutting down, logs `metrics/readiness server exited unexpectedly;
+restarting it in place` with the cause and the delay.
 
-- After a panic, or a server thread that could not start, the next run serves
-  the same bound socket. The port stays bound throughout, and connections
+- After a panic, a server thread that could not start, or a listener that
+  could not join the server's runtime, the next run serves the same bound
+  socket. The port stays bound throughout, and connections
   made during the gap wait in the kernel backlog for the next run.
 - An accept loop that ended (`listener socket unusable; stopping its accept
   loop`) cannot recover on that socket, so the daemon closes it and binds the
@@ -1345,18 +1347,24 @@ the cause and the delay, and adds one to
   `metrics/readiness listener could not be bound again` and retries before
   each restart; requests are refused until a bind succeeds.
 
-The delay starts at 100 ms and doubles per restart to a 30 second cap; a run
+The delay starts at 100 ms and doubles per restart to a 10 second cap; a run
 that stayed up for 60 seconds starts over at 100 ms. There is no restart
 limit. If every restart fails, the daemon keeps running BGP with the listener
 down and logs each attempt.
 
 While the server is down nothing can report it: the signal is the failed
-scrape or probe. The counter shows the restart once the server is back, and
-the shipped `BgpManagementServerRestarted` rule fires on any increase.
+scrape or probe. The counter shows the crash once the server is back, and
+the shipped `BgpManagementServerCrashed` rule fires on any increase.
 `bgp_rib_stalled` keeps its last value until the restarted server's sampler
 runs. The systemd watchdog, `READY=1` and the gRPC `GetHealth` RPC do not
-depend on this server. An orchestrator that restarts the daemon on a failed
-`/livez` probe will still do so if the gap outlasts its failure threshold.
+depend on this server.
+
+The 10 second cap keeps one restart gap under the failure window of the
+[documented Kubernetes liveness probe](../how-to/deployment.md#kubernetes-probes)
+(three consecutive failures, 10 seconds apart). A server that can never
+restart still fails that probe, and Kubernetes then restarts the daemon.
+An operator who wants BGP to outlive that must point liveness at something
+other than this listener or raise `failureThreshold`.
 
 No restart begins after coordinated shutdown has started: a server that ends
 during teardown, or whose restart was still waiting when teardown began,
@@ -2223,7 +2231,7 @@ name it.
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it. `BgpPolicyTransitionFallback` fires when either fallback outcome increased in the last 15 minutes |
 | `bgp_readiness_probe_failures_total{reason}` | Failed `/readyz` probes, one per `503` response, by the closed `reason` set described under [HTTP probes](#http-probes): `deadline`, `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`, `rib_timeout`, `rib_stalled`, `daemon_unavailable`. All seven series are exported at 0 from startup |
-| `bgp_management_server_restarts_total{server}` | Unexpected exits and failed starts of a management server that the daemon then restarts in place. `server` is `metrics`: the `/metrics`, `/readyz` and `/livez` HTTP server (see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)). Exported at 0 from startup. The server that reports the counter is the one restarting, so an increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerRestarted` fires on any increase |
+| `bgp_management_server_crashes_total{server}` | Unexpected exits and failed starts of a management server. The daemon restarts the server in place unless it is shutting down. `server` is `metrics`: the `/metrics`, `/readyz` and `/livez` HTTP server (see [Metrics/readiness server exits unexpectedly](#metricsreadiness-server-exits-unexpectedly)). Exported at 0 from startup. The server that reports the counter is the one that crashed, so an increase is visible only after it is back; while it is down the signal is the failed scrape. `BgpManagementServerCrashed` fires on any increase |
 | `bgp_rib_stalled` | 1 while the daemon's latest sample of the RIB actor (every 5 seconds, 5-second deadline, independent of `/readyz` requests) got a stalled readiness answer: one export-policy transition, selection-deferral release or peer teardown has run 30 seconds or more. 0 after a ready answer and at startup. A sample that gets no answer leaves the value unchanged; silence is covered by `bgp_systemd_watchdog_pings_skipped_total`. The gauge is always exported but sampled only when the telemetry listener is configured and startup completed; without a sampler it stays 0. `BgpReadinessRibStalled` fires when it reads 1 on every evaluation for ten minutes |
 | `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
@@ -3210,9 +3218,9 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
-| `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 30 s cap), with `exit` naming the cause. Counted in `bgp_management_server_restarts_total{server="metrics"}` |
+| `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap), with `exit` naming the cause. Counted in `bgp_management_server_crashes_total{server="metrics"}` |
 | `metrics/readiness listener could not be bound again` | WARN | After an unusable listening socket was closed, binding `prometheus_addr` again failed with `error`. Retried before each restart |
-| `metrics/readiness server not restarted: the daemon is shutting down` | WARN | The server ended during coordinated shutdown, or shutdown began while its restart was waiting, and it stays down for the rest of the shutdown. Not counted as a restart |
+| `metrics/readiness server not restarted: the daemon is shutting down` | WARN | The server ended during coordinated shutdown, or shutdown began while its restart was waiting, and it stays down for the rest of the shutdown. The crash is still counted |
 | `metrics/readiness supervisor exited unexpectedly; /metrics, /readyz and /livez stay down until the daemon restarts` | ERROR | The task that restarts the server ended, which is a defect. Not fatal: BGP keeps running without the listener |
 | `metrics/readiness thread panicked` | WARN | The metrics/readiness thread panicked outside its serving task; logged when the thread is joined before its restart, after the panic report |
 | `End-of-RIB left to the resync tick: the release of its last hold did not send it` | WARN | The resync tick found an End-of-RIB toward `peer` for `families` that nothing held and that no refused send explains, and sent it. The hold that ended last should have sent the marker itself, so it was delayed by at most one tick. Logged once per marker, whether or not the peer's writer had room; a refused send is retried without another log line |

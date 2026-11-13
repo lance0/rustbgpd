@@ -2627,34 +2627,35 @@ tests:
                 See the daemon log and rbgp doctor
                 evpn.es.bond3.core_isolation.
 
-  # ── BgpManagementServerRestarted ───────────────────────────────
-  # One restart at 5m: fires while the increase is inside the 15m window,
+  # ── BgpManagementServerCrashed ───────────────────────────────
+  # One crash at 5m: fires while the increase is inside the 15m window,
   # and clears once the window has passed it.
   - interval: 1m
     input_series:
-      - series: 'bgp_management_server_restarts_total{instance="rs1:9179",server="metrics"}'
+      - series: 'bgp_management_server_crashes_total{instance="rs1:9179",server="metrics"}'
         values: "0x4 1x40"
     alert_rule_test:
       - eval_time: 4m
-        alertname: BgpManagementServerRestarted
+        alertname: BgpManagementServerCrashed
         exp_alerts: []
       - eval_time: 6m
-        alertname: BgpManagementServerRestarted
+        alertname: BgpManagementServerCrashed
         exp_alerts:
           - exp_labels:
               severity: warning
               instance: rs1:9179
               server: metrics
             exp_annotations:
-              summary: "metrics server restarted on rs1:9179"
+              summary: "metrics server crashed on rs1:9179"
               description: >-
-                bgp_management_server_restarts_total{server="metrics"}
+                bgp_management_server_crashes_total{server="metrics"}
                 on rs1:9179 increased in the last 15 minutes: the
-                server ended on its own and the daemon restarted it in place.
+                server ended on its own or could not start, and the daemon restarts
+                it in place.
                 BGP sessions and routes are not affected. The daemon ERROR log
-                names the cause; repeated restarts back off to 30 seconds.
+                names the cause; repeated restarts back off to 10 seconds.
       - eval_time: 25m
-        alertname: BgpManagementServerRestarted
+        alertname: BgpManagementServerCrashed
         exp_alerts: []
 
   # ── BgpReadinessRibStalled ─────────────────────────────────────

@@ -348,7 +348,7 @@ fn observe_administrative_shutdown(stream: &mut TcpStream) {
 }
 
 /// The port in the `addr` field of the first log line carrying `message`.
-fn wait_for_logged_port(daemon: &mut Daemon, message: &str) -> u16 {
+fn wait_for_logged_port_with_message(daemon: &mut Daemon, message: &str) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         let logs = daemon.logs();
@@ -1677,12 +1677,15 @@ fn metrics_server_exit_restarts_in_place_and_keeps_bgp_sessions_established() {
     fault.read_exact(&mut armed).expect("read armed byte");
     assert_eq!(armed, [1]);
 
-    let metrics_port = wait_for_logged_port(&mut daemon, "metrics server listening");
-    let mut peer = establish_bgp(wait_for_logged_port(&mut daemon, "BGP listener bound"));
+    let metrics_port = wait_for_logged_port_with_message(&mut daemon, "metrics server listening");
+    let mut peer = establish_bgp(wait_for_logged_port_with_message(
+        &mut daemon,
+        "BGP listener bound",
+    ));
     let established = "bgp_peer_session_established{interface=\"\",peer=\"127.0.0.1\"} 1\n";
     let before = wait_for_metric_row(&mut daemon, metrics_port, established);
     assert!(
-        before.contains("bgp_management_server_restarts_total{server=\"metrics\"} 0\n"),
+        before.contains("bgp_management_server_crashes_total{server=\"metrics\"} 0\n"),
         "the restart counter must be exported at 0\n{before}"
     );
     let readyz = http_get(metrics_port, "/readyz").expect("/readyz before the fault");
@@ -1694,7 +1697,7 @@ fn metrics_server_exit_restarts_in_place_and_keeps_bgp_sessions_established() {
     let after = wait_for_metric_row(
         &mut daemon,
         metrics_port,
-        "bgp_management_server_restarts_total{server=\"metrics\"} 1\n",
+        "bgp_management_server_crashes_total{server=\"metrics\"} 1\n",
     );
     assert!(
         after.contains(established),

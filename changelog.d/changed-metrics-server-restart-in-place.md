@@ -6,11 +6,14 @@
   BGP sessions and routes stay up. After a panic or a failed thread start the
   next run serves the same bound socket; after an unusable listening socket
   the daemon binds the configured address again. Restarts back off from
-  100 ms to a 30 second cap with no limit, and none begins once coordinated
+  100 ms to a 10 second cap with no limit, and none begins once coordinated
   shutdown has started. New counter
-  `bgp_management_server_restarts_total{server="metrics"}`, exported at 0,
-  counts them, and the alert pack gains `BgpManagementServerRestarted`. A
-  bind failure at startup still fails startup. See
+  `bgp_management_server_crashes_total{server="metrics"}`, exported at 0,
+  counts each unexpected exit or failed start, and the alert pack gains
+  `BgpManagementServerCrashed`. The 10 second cap keeps a restart gap under
+  the failure window of the documented Kubernetes liveness probe; a server
+  that never comes back still fails that probe. A bind failure at startup
+  still fails startup. See
   [Metrics/readiness server exits unexpectedly](../docs/reference/operations.md#metricsreadiness-server-exits-unexpectedly).
   **Operator-visible:** the daemon no longer exits 1 for this server, and
   `--help` and the man page no longer list it among the exit-1 causes. The

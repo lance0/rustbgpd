@@ -130,13 +130,16 @@ pub async fn serve_metrics(
     metrics: BgpMetrics,
     readiness_probe: CoreReadinessProbe,
     dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
-) {
+) -> Result<(), String> {
     let MetricsListener { addr, listener } = server;
     let listener = match TcpListener::from_std(listener) {
         Ok(listener) => listener,
         Err(error) => {
             error!(%addr, %error, "metrics listener could not join the server runtime");
-            return;
+            // Not the accept loop's verdict on the socket: the caller keeps it.
+            return Err(format!(
+                "metrics listener could not join the server runtime: {error}"
+            ));
         }
     };
     info!(%addr, "metrics server listening");
@@ -148,6 +151,7 @@ pub async fn serve_metrics(
         dataplane_probe,
     )
     .await;
+    Ok(())
 }
 
 /// Cadence of the `bgp_rib_stalled` sample.
@@ -194,7 +198,7 @@ pub(crate) enum MetricsServerExit {
     /// The handle was dropped: the stop the daemon requests at teardown.
     StopRequested,
     /// The server stopped on its own: `Ok` when its accept loop ended, `Err`
-    /// with the panic when it panicked.
+    /// when it panicked or its listener could not join the runtime.
     Exited(Result<(), String>),
     /// The thread or its runtime could not start (also logged).
     StartFailed(String),
@@ -256,7 +260,11 @@ impl MetricsServerThread {
                         biased;
                         _ = stop_rx => MetricsServerExit::StopRequested,
                         result = serve => {
-                            MetricsServerExit::Exited(result.map_err(|error| error.to_string()))
+                            MetricsServerExit::Exited(
+                                result
+                                    .map_err(|error| error.to_string())
+                                    .and_then(|served| served),
+                            )
                         }
                     }
                 });
@@ -302,7 +310,10 @@ impl Drop for MetricsServerThread {
 /// First delay before restarting the server; a single crash then costs a
 /// probe less than its usual timeout.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(100);
-const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// Longest delay. It stays under the shipped Kubernetes liveness probe's
+/// failure window (three failures, 10 seconds apart), so a restart gap alone
+/// does not get the daemon killed for a management-plane fault.
+const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(10);
 /// A run at least this long starts the next backoff from the initial delay.
 const RESTART_BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
 
@@ -325,7 +336,7 @@ impl RestartBackoff {
 /// sender drops, restarting it in place when it ends on its own. A
 /// management-plane failure is not evidence about routing state, so it never
 /// ends the daemon: the server restarts with capped backoff for as long as it
-/// takes, and each restart is logged and counted.
+/// takes, and each unexpected exit or failed start is logged and counted.
 ///
 /// The bound socket stays here and each run serves a duplicate, so a crashed
 /// run keeps the port and the kernel backlog holds new connections until the
@@ -333,9 +344,10 @@ impl RestartBackoff {
 /// itself unusable, so that socket is dropped and the address bound again at
 /// once, before the backoff, and again before each run while it is unbound.
 ///
-/// No restart begins once the daemon gate reports shutdown, whether the
-/// server ended during the shutdown or the shutdown began during a backoff;
-/// the caller's stop ends a backoff at once and joins a running server thread.
+/// No restart begins once the daemon gate reports shutdown: it is checked
+/// when a run ends and again last before each run starts, so the server is
+/// not started at all in a daemon that is already shutting down. The
+/// caller's stop ends a backoff at once and joins a running server thread.
 pub(crate) async fn supervise_metrics_server(
     listener: MetricsListener,
     metrics: BgpMetrics,
@@ -375,10 +387,16 @@ async fn supervise_with_runtime(
     let mut kept = Some(listener);
     let mut backoff = RestartBackoff(RESTART_BACKOFF_INITIAL);
     loop {
-        let started = Instant::now();
         if kept.is_none() {
             kept = rebind(addr).await;
         }
+        // Last before the run starts, so shutdown that began during a backoff
+        // or a bind cancels the restart.
+        if gate.is_shutting_down() {
+            warn!(%addr, "metrics/readiness server not restarted: the daemon is shutting down");
+            return;
+        }
+        let started = Instant::now();
         let run = match &kept {
             Some(listener) => listener.try_clone().map_err(|error| error.to_string()),
             None => Err("its address is not bound".to_string()),
@@ -411,6 +429,7 @@ async fn supervise_with_runtime(
                 "metrics/readiness listener unavailable: {error}"
             )),
         };
+        metrics.record_metrics_server_crash();
         if gate.is_shutting_down() {
             warn!(?exit, %addr, "metrics/readiness server not restarted: the daemon is shutting down");
             return;
@@ -420,7 +439,6 @@ async fn supervise_with_runtime(
             drop(kept.take());
             kept = rebind(addr).await;
         }
-        metrics.record_metrics_server_restart();
         let delay = backoff.next_delay(started.elapsed());
         error!(
             ?exit,
@@ -432,10 +450,6 @@ async fn supervise_with_runtime(
             biased;
             _ = &mut stop => return,
             () = tokio::time::sleep(delay) => {}
-        }
-        if gate.is_shutting_down() {
-            warn!(%addr, "metrics/readiness server not restarted: the daemon is shutting down");
-            return;
         }
     }
 }
@@ -784,7 +798,9 @@ pub(crate) mod tests {
         let addr = server.listener.local_addr().unwrap();
         assert_eq!(server.addr, addr);
         tokio::spawn(async move {
-            serve_metrics(server, metrics, readiness_probe, dataplane_probe).await;
+            serve_metrics(server, metrics, readiness_probe, dataplane_probe)
+                .await
+                .unwrap();
         });
 
         addr
@@ -864,7 +880,9 @@ pub(crate) mod tests {
                     .await
                     .unwrap();
                 addr_tx.send(server.addr).unwrap();
-                serve_metrics(server, metrics, unused_probe(), None).await;
+                serve_metrics(server, metrics, unused_probe(), None)
+                    .await
+                    .unwrap();
             });
         });
         (addr_rx.recv().unwrap(), entered_rx, release_tx)
@@ -945,7 +963,8 @@ pub(crate) mod tests {
                 Duration::from_millis(400)
             ]
         );
-        assert_eq!(delays[8], Duration::from_millis(25_600));
+        assert_eq!(delays[6], Duration::from_millis(6_400));
+        assert_eq!(delays[7], Duration::from_secs(10));
         assert_eq!(delays[9], RESTART_BACKOFF_CAP);
         let almost_stable = RESTART_BACKOFF_RESET_AFTER
             .checked_sub(Duration::from_millis(1))
@@ -961,11 +980,11 @@ pub(crate) mod tests {
         Err(std::io::Error::other("injected"))
     }
 
-    fn metrics_server_restarts(metrics: &BgpMetrics) -> u64 {
+    fn metrics_server_crashes(metrics: &BgpMetrics) -> u64 {
         let families = metrics.registry().gather();
         let family = families
             .iter()
-            .find(|family| family.name() == "bgp_management_server_restarts_total")
+            .find(|family| family.name() == "bgp_management_server_crashes_total")
             .unwrap();
         let [row] = family.get_metric() else {
             panic!("expected the one seeded server row");
@@ -1002,7 +1021,7 @@ pub(crate) mod tests {
             .unwrap();
         let addr = listener.addr;
         let metrics = BgpMetrics::new();
-        assert_eq!(metrics_server_restarts(&metrics), 0);
+        assert_eq!(metrics_server_crashes(&metrics), 0);
         let (stop, stop_rx) = oneshot::channel();
         let supervisor = tokio::spawn(supervise_with_runtime(
             fail_first,
@@ -1018,15 +1037,14 @@ pub(crate) mod tests {
             .await
             .expect("the restarted server must answer the queued request");
         assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
-        assert_eq!(metrics_server_restarts(&metrics), 1);
+        assert_eq!(metrics_server_crashes(&metrics), 1);
 
-        // The stop joins the running thread and closes the kept socket.
+        // The stop joins the running thread and ends the supervisor.
         drop(stop);
         tokio::time::timeout(SUPERVISOR_GUARD, supervisor)
             .await
             .expect("the stop must end the supervisor")
             .unwrap();
-        assert!(TcpStream::connect(addr).await.is_err());
     }
 
     /// An accept loop that ended reported its socket unusable: restarting on
@@ -1060,14 +1078,44 @@ pub(crate) mod tests {
         .await
         .expect("the server must listen on its address again");
         assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
-        assert_eq!(metrics_server_restarts(&metrics), 1);
+        assert_eq!(metrics_server_crashes(&metrics), 1);
     }
 
-    /// A server that ends after coordinated shutdown began stays down: the
-    /// supervisor returns on its own, without counting a restart or waiting
-    /// out a backoff, and releases the socket.
+    /// A server that ends after coordinated shutdown began stays down. The
+    /// crash is counted, but the supervisor returns at once: time is paused
+    /// and no backoff advances it.
+    #[tokio::test(start_paused = true)]
+    async fn server_exit_during_shutdown_is_not_restarted() {
+        let listener = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.addr;
+        let fault = listener.try_clone().unwrap();
+        let metrics = BgpMetrics::new();
+        let gate = DaemonGate::new();
+        let (_stop, stop_rx) = oneshot::channel();
+        let supervisor = tokio::spawn(supervise_metrics_server(
+            listener,
+            metrics.clone(),
+            unused_probe(),
+            None,
+            gate.clone(),
+            stop_rx,
+        ));
+        // The answer proves the first run is up before shutdown begins.
+        let livez = request(addr, "/livez").await;
+        assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
+        let before = tokio::time::Instant::now();
+        gate.begin_shutdown();
+        fault.shut_down_for_test();
+        supervisor.await.unwrap();
+        assert_eq!(before.elapsed(), Duration::ZERO);
+        assert_eq!(metrics_server_crashes(&metrics), 1);
+    }
+
+    /// A daemon that is already shutting down does not start the server.
     #[tokio::test]
-    async fn supervisor_does_not_restart_once_shutdown_has_begun() {
+    async fn supervisor_does_not_start_once_shutdown_has_begun() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static STARTS: AtomicUsize = AtomicUsize::new(0);
         fn counted_failed_start() -> std::io::Result<tokio::runtime::Runtime> {
@@ -1078,28 +1126,20 @@ pub(crate) mod tests {
         let listener = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let addr = listener.addr;
         let gate = DaemonGate::new();
         gate.begin_shutdown();
-        let metrics = BgpMetrics::new();
         let (_stop, stop_rx) = oneshot::channel();
-        tokio::time::timeout(
-            SUPERVISOR_GUARD,
-            supervise_with_runtime(
-                counted_failed_start,
-                listener,
-                metrics.clone(),
-                unused_probe(),
-                None,
-                gate,
-                stop_rx,
-            ),
+        supervise_with_runtime(
+            counted_failed_start,
+            listener,
+            BgpMetrics::new(),
+            unused_probe(),
+            None,
+            gate,
+            stop_rx,
         )
-        .await
-        .expect("the supervisor must end without a stop once shutdown began");
-        assert_eq!(STARTS.load(Ordering::SeqCst), 1);
-        assert_eq!(metrics_server_restarts(&metrics), 0);
-        assert!(TcpStream::connect(addr).await.is_err());
+        .await;
+        assert_eq!(STARTS.load(Ordering::SeqCst), 0);
     }
 
     /// Shutdown that begins during a backoff cancels the restart it was
@@ -1129,7 +1169,7 @@ pub(crate) mod tests {
             gate.clone(),
             stop_rx,
         ));
-        while metrics_server_restarts(&metrics) == 0 {
+        while metrics_server_crashes(&metrics) == 0 {
             tokio::task::yield_now().await;
         }
         gate.begin_shutdown();
@@ -1163,8 +1203,9 @@ pub(crate) mod tests {
             DaemonGate::new(),
             stop_rx,
         ));
-        // The count is recorded as the supervisor enters its first backoff.
-        while metrics_server_restarts(&metrics) == 0 {
+        // The crash is counted on the way into the first backoff, with no
+        // await between the two.
+        while metrics_server_crashes(&metrics) == 0 {
             tokio::task::yield_now().await;
         }
         drop(stop);

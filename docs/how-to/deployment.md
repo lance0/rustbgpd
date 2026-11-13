@@ -1136,6 +1136,15 @@ actor check (see [systemd](#systemd)). Alert on that case instead: a
 `bgp_readiness_probe_failures_total{reason=~"(peer_manager|rib)_(timeout|unavailable)"}`
 still rising after several minutes, means the actors are not answering.
 
+The daemon restarts the telemetry listener's HTTP server in place if that
+server crashes, instead of exiting (see
+[Metrics/readiness server exits unexpectedly](../reference/operations.md#metricsreadiness-server-exits-unexpectedly)).
+A restart gap is at most 10 seconds, under the three consecutive failures
+this probe needs, so a server that comes back does not get the pod killed.
+A server that can never restart still fails liveness, and Kubernetes then
+restarts a daemon whose BGP side was healthy. To let BGP outlive that, point
+liveness at something other than this listener or raise `failureThreshold`.
+
 Do not point liveness at `/readyz`, with any `failureThreshold`. `/readyz`
 fails for conditions that are not a dead daemon:
 
