@@ -2621,7 +2621,7 @@ fn merge_aspa_table_updates(
 /// A panic while forwarding does not end the forwarder. The receiver, the
 /// admission semaphore and the refresh queue outlive it; the update that was
 /// being forwarded may or may not have reached the RIB and the sessions, so
-/// after a [`RestartBackoff`] delay the latest table received is forwarded
+/// after a [`rustbgpd_api::restart::RestartBackoff`] delay the latest table received is forwarded
 /// again as `full` builds it: a full re-evaluation, which reaches the right
 /// state whatever the RIB last applied. `on_restart` is told of each panic.
 async fn forward_validation_cache<U>(
