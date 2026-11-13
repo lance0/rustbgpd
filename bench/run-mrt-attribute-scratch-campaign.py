@@ -27,11 +27,14 @@ def wait_idle(cpu, log, phase):
         if record["status"] == "pass": return
         if time.monotonic() >= deadline: raise RuntimeError(f"host preflight timed out for {phase}")
         time.sleep(1)
+def bench_executables(lines, name):
+    return sorted({m["executable"] for m in map(json.loads, lines) if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == name})
 def build(repo, tree, variant, mode, target, commands):
     command = next(row for row in commands if row.get("kind") == "build" and row["variant"] == variant and row["mode"] == mode)
     env = os.environ.copy(); env["CARGO_TARGET_DIR"] = str(target)
-    run(command["argv"], cwd=tree, env=env)
-    binaries = [p for p in (target/"release"/"deps").glob("snapshot_allocation-*") if p.is_file() and os.access(p,os.X_OK)]
+    # Cargo reports the executable path; its directory under the target dir is not stable across Cargo versions.
+    built = run(command["argv"]+["--message-format=json-render-diagnostics"], cwd=tree, env=env, stdout=subprocess.PIPE, text=True).stdout
+    binaries = bench_executables(built.splitlines(), "snapshot_allocation")
     if len(binaries) != 1: raise RuntimeError(f"expected one {variant} {mode} binary, found {len(binaries)}")
     destination = repo/"binaries"/f"{variant}-{mode}"; shutil.copy2(binaries[0],destination)
 def main():

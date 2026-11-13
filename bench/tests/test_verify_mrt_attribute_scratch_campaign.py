@@ -72,6 +72,19 @@ class CampaignContract(unittest.TestCase):
             stale=root/"stale"; stale.mkdir(); failed=lambda *args,**kwargs:types.SimpleNamespace(returncode=1)
             with self.assertRaises(RuntimeError): RUNNER.cleanup(REPO,stale,[stale/"tree"],failed)
             self.assertTrue(stale.exists())
+    def test_build_copies_the_executable_cargo_reports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory); (root/"binaries").mkdir(); bench=root/"target/release/build/rustbgpd-mrt/0123/out/snapshot_allocation-0123"
+            bench.parent.mkdir(parents=True); bench.write_bytes(b"bench")
+            def artifact(name,executable): return json.dumps({"reason":"compiler-artifact","target":{"name":name},"executable":executable})
+            lines=[artifact("rustbgpd_mrt",None),artifact("build-script-build",str(root/"build-script")),json.dumps({"reason":"build-finished","success":True}),artifact("snapshot_allocation",str(bench))]
+            calls=[]
+            def fake(argv,**kwargs): calls.append(argv); return types.SimpleNamespace(stdout="\n".join(lines)+"\n")
+            with unittest.mock.patch.object(RUNNER,"run",fake): RUNNER.build(root,root,"control","timing",root/"target",VERIFY.expected_commands())
+            self.assertEqual((root/"binaries/control-timing").read_bytes(),b"bench")
+            self.assertEqual(calls,[VERIFY.expected_commands()[0]["argv"]+["--message-format=json-render-diagnostics"]])
+            lines=lines[:-1]
+            with unittest.mock.patch.object(RUNNER,"run",fake),self.assertRaisesRegex(RuntimeError,"found 0"): RUNNER.build(root,root,"control","timing",root/"target",VERIFY.expected_commands())
     def test_runner_rejects_invalid_cpu_count_before_output_work(self):
         with tempfile.TemporaryDirectory() as directory:
             root=pathlib.Path(directory)
