@@ -66,6 +66,10 @@ move with it.
      (generation, sequential, or rejected route).
    - A restart-required global field that SIGHUP must not advance belongs in
      `pin_unreconciled_daemon_runtime_fields` in `src/config/mod.rs` (called from the SIGHUP path in `src/reload.rs`).
+   - A `[global]` field that is hot-applied or has its own report belongs in
+     the exemption list in `global_restart_required_changes`; every other
+     field is printed there by name and value, so summarize a secret-bearing
+     one instead of printing it.
    - A new restart-required top-level section has touchpoints the compiler
      does not enforce: a `ConfigDiff` flag set in `diff_config`, the
      `ConfigDiff::has_restart_required_changes` check, the restart-required
