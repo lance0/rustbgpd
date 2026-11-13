@@ -2077,7 +2077,7 @@ impl BgpMetrics {
         let rib_readiness_query_wait_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_readiness_query_wait_seconds",
-                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains and in-pass ingest servicing; `policy_transition_fence` is the synchronous replacement checkpoint; `selection_release` is the synchronous selection-deferral release checkpoint; `peer_teardown` collects source keys and recomputes/distributes their removal. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
+                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains, in-pass ingest servicing, and the registration, regroup and outbound-teardown units that run with no policy transition; `policy_transition_fence` is the synchronous replacement checkpoint; `selection_release` is the synchronous selection-deferral release checkpoint; `peer_teardown` collects source keys and recomputes/distributes their removal. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["seam"],
