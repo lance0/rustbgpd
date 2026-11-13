@@ -73,8 +73,9 @@ pub(crate) fn effective_prefix_str(prefix: &str) -> Option<(IpAddr, u8)> {
 /// A legal configuration with a consequence its operator should see.
 ///
 /// Not an error — `Config::load` accepts the config — but reported by
-/// `rustbgpd --check`, counted for `--check --strict`, and logged once at
-/// daemon startup. Each one states the condition (`headline`) and then the
+/// `rustbgpd --check`, counted for `--check --strict`, logged once at daemon
+/// startup, and logged again when a reload or API config change first
+/// introduces it. Each one states the condition (`headline`) and then the
 /// consequence and the action that clears it (`detail`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigAdvisory {

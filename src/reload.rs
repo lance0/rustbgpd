@@ -1685,6 +1685,10 @@ pub(crate) async fn run_config_bridge_accepted(
                             let _ = replacement.adopted.send(ReloadDispatch::AcknowledgementLost);
                             break;
                         }
+                        crate::log_config_advisories(
+                            new_snapshot.config_ref(),
+                            Some(current.config_ref()),
+                        );
                         current = new_snapshot;
                         accepted_tx.send_replace(Arc::clone(&current));
                         if sighup_ack_fault("bridge") {
@@ -1760,6 +1764,10 @@ pub(crate) async fn run_config_bridge_accepted(
                                     ConfigPersistCommitOutcome::PublishedDurable
                                         | ConfigPersistCommitOutcome::PublicationAmbiguous(_)
                                 ) {
+                                    crate::log_config_advisories(
+                                        candidate.config_ref(),
+                                        Some(current.config_ref()),
+                                    );
                                     current = candidate;
                                     accepted_tx.send_replace(Arc::clone(&current));
                                 }
@@ -5058,7 +5066,9 @@ log_format = "json"
             (concat!("write_tier", "_test_config("), 49),
             // +2: the two honor partial fan-out tests load their prior.
             (concat!("load_tier", "_test_config("), 39),
-            (concat!("load_tier", "_test_toml("), 9),
+            // +4: the two config-bridge advisory tests load their prior and
+            // candidate.
+            (concat!("load_tier", "_test_toml("), 13),
             (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),
         ];
@@ -14182,6 +14192,227 @@ peer_group = "secure"
 
         drop(replace_tx);
         drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    const ORR_ADVISORY: &str = "orr_vantage is configured but no neighbor negotiates";
+
+    /// Baseline plus an iBGP reflector client with an ORR vantage and no
+    /// `linkstate` neighbor, so it raises the ORR advisory the baseline does not.
+    fn orr_advisory_toml() -> String {
+        baseline_toml().replacen(
+            "hold_time = 90",
+            "hold_time = 90\n\n[[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65001\n\
+             route_reflector_client = true\norr_vantage = \"192.0.2.7\"",
+            1,
+        )
+    }
+
+    #[derive(Clone)]
+    struct AdvisoryLogSink(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for AdvisoryLogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AdvisoryLogSink {
+        /// Capture this thread's JSON log output with the advisory callsite
+        /// warmed: tracing caches callsite interest process-wide, so reach it
+        /// under this subscriber and rebuild before measuring.
+        fn install(warm: &Config) -> (Self, tracing::subscriber::DefaultGuard) {
+            let sink = Self(Arc::new(Mutex::new(Vec::new())));
+            let writer = sink.clone();
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .json()
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            );
+            crate::log_config_advisories(warm, None);
+            tracing::callsite::rebuild_interest_cache();
+            sink.0.lock().unwrap().clear();
+            (sink, guard)
+        }
+
+        /// ORR advisory records so far, each checked against the startup
+        /// event's shape: WARN, crate-root target, one-line message.
+        fn orr_advisories(&self) -> usize {
+            let output = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+            output
+                .lines()
+                .filter(|line| line.contains(ORR_ADVISORY))
+                .inspect(|line| {
+                    let json: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(json["level"], "WARN", "{line}");
+                    assert_eq!(json["target"], "rustbgpd", "{line}");
+                })
+                .count()
+        }
+    }
+
+    #[tokio::test]
+    async fn config_bridge_logs_new_advisories_once_per_adopted_reload() {
+        use tokio::time::{Duration, timeout};
+
+        let stale = load_tier_test_toml(baseline_toml(), "advisory-reload-stale");
+        let reloaded = load_tier_test_toml(&orr_advisory_toml(), "advisory-reload-new");
+        assert!(
+            stale
+                .advisories()
+                .iter()
+                .all(|a| !a.headline.contains("orr_vantage"))
+        );
+        let (sink, _guard) = AdvisoryLogSink::install(&reloaded);
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(1);
+        let (replace_tx, replace_rx) = mpsc::channel(1);
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(4);
+        let (accepted_tx, _accepted_rx) =
+            watch::channel(AcceptedConfigSnapshot::from_config_for_test(stale));
+        let bridge = tokio::spawn(run_config_bridge_accepted(
+            event_rx,
+            replace_rx,
+            mutation_tx,
+            accepted_tx,
+        ));
+
+        // Two SIGHUPs of the same file: the advisory is new only on the first.
+        for (before, after) in [(0, 1), (1, 1)] {
+            let (adopted, adopted_rx) = oneshot::channel();
+            replace_tx
+                .send(AcceptedBridgeReplacement {
+                    snapshot: AcceptedConfigSnapshot::from_config_for_test(reloaded.clone()),
+                    adopted,
+                })
+                .await
+                .unwrap();
+            let Some(ConfigMutation::AdoptReloadSnapshot { adopted: ack, .. }) =
+                mutation_rx.recv().await
+            else {
+                panic!("bridge must forward the reload as AdoptReloadSnapshot");
+            };
+            assert_eq!(sink.orr_advisories(), before, "logged before adoption");
+            ack.send(()).unwrap();
+            assert!(matches!(adopted_rx.await, Ok(ReloadDispatch::Replied(()))));
+            assert_eq!(sink.orr_advisories(), after);
+        }
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_logs_transaction_advisories_only_when_published() {
+        use tokio::time::{Duration, timeout};
+
+        let stale = load_tier_test_toml(baseline_toml(), "advisory-txn-stale");
+        let candidate_toml = orr_advisory_toml();
+        let (sink, _guard) =
+            AdvisoryLogSink::install(&load_tier_test_toml(&candidate_toml, "advisory-txn-warm"));
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(1);
+        let (replace_tx, replace_rx) = mpsc::channel(1);
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(4);
+        let (accepted_tx, _accepted_rx) =
+            watch::channel(AcceptedConfigSnapshot::from_config_for_test(stale));
+        let bridge = tokio::spawn(run_config_bridge_accepted(
+            event_rx,
+            replace_rx,
+            mutation_tx,
+            accepted_tx,
+        ));
+        let staged_event = |candidate_toml: String| {
+            let (staged, staged_rx) = oneshot::channel();
+            let (commit, commit_rx) = oneshot::channel();
+            let event = ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ConfigPersistAck::Staged {
+                    staged,
+                    commit: commit_rx,
+                }),
+            };
+            (event, staged_rx, commit)
+        };
+
+        // A candidate the bridge cannot derive is refused before persistence.
+        let (event, staged_rx, _commit) = staged_event("not = [valid".to_string());
+        event_tx.send(event).await.unwrap();
+        assert!(matches!(staged_rx.await, Ok(Err(_))));
+
+        // The runtime apply failed: its owner drops the commit channel.
+        let (event, staged_rx, commit) = staged_event(candidate_toml.clone());
+        event_tx.send(event).await.unwrap();
+        let Some(ConfigMutation::StageConfigAck(_, stage_reply)) = mutation_rx.recv().await else {
+            panic!("transaction must stage first");
+        };
+        stage_reply.send(Ok(())).unwrap();
+        assert!(matches!(staged_rx.await, Ok(Ok(()))));
+        drop(commit);
+        assert!(matches!(
+            mutation_rx.recv().await,
+            Some(ConfigMutation::DiscardStagedConfig)
+        ));
+
+        // Publication failed before the rename: the candidate is not adopted.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml: candidate_toml.clone(),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
+            })
+            .await
+            .unwrap();
+        let Some(ConfigMutation::ReplaceConfigAck(_, persist_ack)) = mutation_rx.recv().await
+        else {
+            panic!("immediate transaction must request one acknowledged write");
+        };
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::NotPublished("disk full".into()));
+        assert!(matches!(
+            ack_rx.await,
+            Ok(ConfigPersistCommitOutcome::NotPublished(_))
+        ));
+        assert_eq!(
+            sink.orr_advisories(),
+            0,
+            "no advisory for a refused candidate"
+        );
+
+        // The published commit logs the new advisory once.
+        let (event, staged_rx, commit) = staged_event(candidate_toml);
+        event_tx.send(event).await.unwrap();
+        let Some(ConfigMutation::StageConfigAck(_, stage_reply)) = mutation_rx.recv().await else {
+            panic!("transaction must stage first");
+        };
+        stage_reply.send(Ok(())).unwrap();
+        assert!(matches!(staged_rx.await, Ok(Ok(()))));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        commit.send(reply_tx).unwrap();
+        let Some(ConfigMutation::CommitStagedConfig(commit_ack)) = mutation_rx.recv().await else {
+            panic!("committed stage must be published");
+        };
+        assert_eq!(sink.orr_advisories(), 0, "logged before publication");
+        let _ = commit_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
+        assert!(matches!(
+            reply_rx.await,
+            Ok(ConfigPersistCommitOutcome::PublishedDurable)
+        ));
+        assert_eq!(sink.orr_advisories(), 1);
+
+        drop(event_tx);
+        drop(replace_tx);
         timeout(Duration::from_secs(1), bridge)
             .await
             .unwrap()

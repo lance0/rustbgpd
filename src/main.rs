@@ -2191,6 +2191,21 @@ fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
     warnings
 }
 
+/// Log each advisory `config` raises that `prior` did not, one WARN line each.
+///
+/// The single advisory log event: startup passes no prior, and the config
+/// bridge passes the snapshot it is replacing each time it adopts a reload or
+/// API commit, so an advisory is logged when it first appears rather than on
+/// every later mutation of a config that still raises it.
+pub(crate) fn log_config_advisories(config: &Config, prior: Option<&Config>) {
+    let prior = prior.map(Config::advisories).unwrap_or_default();
+    for advisory in config.advisories() {
+        if !prior.contains(&advisory) {
+            tracing::warn!("{}", advisory.one_line());
+        }
+    }
+}
+
 /// Print one `--check` warning as a framed stderr block.
 ///
 /// Framed and on stderr so the exit-0 summary line on stdout cannot be the
@@ -4949,9 +4964,7 @@ async fn run<T>(
     // The same set `--check` frames, logged here because this is the first
     // point on the daemon path with a subscriber installed — `Config::load`
     // runs before `init_logging`.
-    for advisory in config.advisories() {
-        tracing::warn!("{}", advisory.one_line());
-    }
+    log_config_advisories(&config, None);
     // The eBGP policy posture, in the log. `--check` frames this before
     // deployment, but a runtime config mutation rewrites the file
     // canonically and takes any banner the operator wrote with it — the log
