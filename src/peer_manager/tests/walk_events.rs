@@ -830,6 +830,10 @@ async fn events_between_cohort_setup_members_keep_every_member() {
 /// LOAD-BEARING: with no seam in the restore wait the dead session is
 /// replaced only after the walk.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds the crashing session, the scripted RIB and the re-established session"
+)]
 async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain() {
     let crashing = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -858,14 +862,17 @@ async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain()
         false,
     );
     assert_eq!(mgr.peers[&key(crashing)].session_id(), crashing_session);
-    // Its own prior chain, so its restore is a command of its own, after
-    // the other two members'.
+    // Three prior chains, so the restore is three commands, newest first:
+    // the crashing peer's is the last.
     let prior = Some(distinct_deny_policy_chain(7));
+    mgr.peers.get_mut(&key(peers[0])).unwrap().export_policy = Some(distinct_deny_policy_chain(8));
     {
         let managed = mgr.peers.get_mut(&key(crashing)).unwrap();
         managed.export_policy.clone_from(&prior);
         managed.transport_config.remote_addr = listener.local_addr().unwrap();
     }
+    let (readiness, readiness_rx) = mpsc::channel(1);
+    mgr = mgr.with_readiness_queries(readiness_rx);
     let (registered_tx, mut registered) = mpsc::unbounded_channel();
     let rib = tokio::spawn(async move {
         let (mut forward, mut restores) = (0, 0);
@@ -883,9 +890,35 @@ async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain()
                 update @ RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. } => {
                     restores += 1;
                     if let Some(crash) = crash.take() {
-                        // The restore task is running; the walk waits on it.
+                        // The first command is queued, so the walk's next
+                        // poll runs straight into its restore wait, past
+                        // every seam of the rollback's session steps. Only
+                        // that wait answers a readiness probe sent now.
+                        let (reply, in_restore_wait) = oneshot::channel();
+                        readiness
+                            .send(PeerManagerReadinessQuery::Ping { reply })
+                            .await
+                            .unwrap();
+                        in_restore_wait.await.unwrap();
                         crash.send(()).unwrap();
                         set(&exited).await;
+                        answer(update);
+                        // That command's completion is the seam. Hold the
+                        // next one until the walk has replaced the dead
+                        // session (its `PeerDown`), or has clearly not.
+                        let mut held = Vec::new();
+                        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                            loop {
+                                match rib_rx.recv().await {
+                                    Some(RibUpdate::PeerDown { .. }) | None => return,
+                                    Some(update) => held.push(update),
+                                }
+                            }
+                        })
+                        .await;
+                        restores += held.len();
+                        held.into_iter().for_each(answer);
+                        continue;
                     }
                     answer(update);
                 }
@@ -933,5 +966,5 @@ async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain()
     assert_eq!(export_policy, prior, "it runs the restored chain");
     mgr.delete_peer(key(crashing), false).await.unwrap();
     drop(mgr);
-    assert_eq!(rib.await.unwrap(), 2, "one restore command per prior chain");
+    assert_eq!(rib.await.unwrap(), 3, "one restore command per prior chain");
 }
