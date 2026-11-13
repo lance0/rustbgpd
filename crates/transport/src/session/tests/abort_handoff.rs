@@ -362,6 +362,46 @@ async fn abort_of_an_idle_established_session_closes_its_epoch() {
     assert_eq!(rib.loc_rib_count().await, 0);
 }
 
+/// A session task that panics inside its run loop unwinds through the
+/// session's drop without running `SessionDown`. The drop still closes the
+/// open epoch, as for an abort, and with a `PeerDown`: the panic is a local
+/// failure with no NOTIFICATION exchanged and no session left to resume
+/// from, so the routes are withdrawn rather than retained under the peer's
+/// graceful restart.
+/// Mutation-red: skipping the RIB hand-off while unwinding leaves the route
+/// installed and no session end delivered.
+#[tokio::test(start_paused = true)]
+async fn panicked_session_task_withdraws_its_routes() {
+    let mut rib = GatedRib::spawn();
+    let (mut s1, s1_commands, _s1_peer) = established(&rib, 1).await;
+    let peer = s1.rib_peer();
+    negotiate_restart(&mut s1);
+    receive(&mut s1, first());
+    s1.process_read_buffer().await;
+    rib.release().await;
+    assert_eq!(rib.loc_rib_count().await, 1);
+
+    let (fail, failure) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _commands = s1_commands;
+        let mut session = s1;
+        tokio::select! {
+            biased;
+            _ = session.run() => unreachable!("the run loop outlives the test"),
+            _ = failure => panic!("session task panicked"),
+        }
+    });
+    // The run loop parks on its peer before the panic is injected.
+    tokio::task::yield_now().await;
+    fail.send(()).unwrap();
+    assert!(task.await.unwrap_err().is_panic());
+    rib.release().await;
+
+    assert_eq!(rib.ends, [("PeerDown", 1)]);
+    assert_eq!(rib.loc_rib_count().await, 0);
+    assert_eq!(rib.retained_stale(peer).await, 0);
+}
+
 /// A graceful-restart end held at the abort is delivered as it was queued:
 /// the routes are retained as the session's capabilities say, and no
 /// `PeerDown` follows it to purge them.

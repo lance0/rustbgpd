@@ -487,6 +487,11 @@ pub(crate) struct PeerSession {
     /// awaits room so the close does not. The next Peer Up and the end of
     /// the session task wait for it; dropping the session aborts it.
     bmp_peer_down_handoff: Option<JoinHandle<()>>,
+    /// The collectors saw this session's last Peer Up and no Peer Down
+    /// after it: set once a Peer Up is in the BMP channel, cleared when a
+    /// Peer Down is queued or handed off. A session dropped while it is set
+    /// owes them a Peer Down (see [`Self::close_bmp_epoch`]).
+    bmp_peer_up_sent: bool,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
     /// `None` when RPKI not configured or in tests.
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -1136,19 +1141,28 @@ struct AcceptedTransport {
 /// A dropped session must not free a whole outbound inventory in that one
 /// turn, whether its task returned from `run()` or was cancelled at an await
 /// point (`abort_for_transport_safety`, a `shutdown_timeout` expiry): the remainder
-/// goes to the paced release task. A cancelled session must also still end
-/// in the RIB: the RIB-bound messages it held, and the end of an Established
-/// epoch it never closed, are delivered by their own task (see
-/// [`PeerSession::hand_off_rib_backlog`]). Both are skipped without a
-/// runtime, where `tokio::spawn` would panic and nothing could run them,
-/// and while unwinding. A runtime that is shutting down cancels the spawned
-/// tasks at once instead of panicking, which drops the inventory in that
-/// turn and the held messages with the RIB actor they were bound for.
+/// goes to the paced release task. A cancelled or panicked session must also
+/// still end in the RIB and at the BMP collectors: the RIB-bound messages it
+/// held, and the end of an Established epoch it never closed, are delivered
+/// by their own task (see [`PeerSession::hand_off_rib_backlog`]), and the
+/// epoch's BMP Peer Down is queued here (see
+/// [`PeerSession::close_bmp_epoch`]). The paced release is skipped while
+/// unwinding, so freeing an inventory the panic may have left mid-step
+/// cannot panic again; the session ends are not, since a panicked session
+/// would otherwise stay live in the RIB with nothing left to retire it.
+/// Spawning hand-offs is skipped without a runtime, where `tokio::spawn`
+/// would panic and nothing could run them. A runtime that is shutting down
+/// cancels the spawned tasks at once instead of panicking, which drops the
+/// inventory in that turn and the held messages with the RIB actor they
+/// were bound for.
 impl Drop for PeerSession {
     fn drop(&mut self) {
         self.abandon_bmp_peer_down();
-        if !std::thread::panicking() && tokio::runtime::Handle::try_current().is_ok() {
-            self.hand_off_retirement();
+        self.close_bmp_epoch();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            if !std::thread::panicking() {
+                self.hand_off_retirement();
+            }
             self.hand_off_rib_backlog();
         }
     }
@@ -2549,6 +2563,7 @@ impl PeerSession {
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
             bmp_peer_down_handoff: None,
+            bmp_peer_up_sent: false,
             validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
@@ -2801,10 +2816,13 @@ impl PeerSession {
             return;
         }
         self.settle_bmp_peer_down().await;
+        let peer_up = matches!(event, BmpEvent::PeerUp { .. });
         if tx.send(event).await.is_err() {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, "channel_closed");
             debug!(peer = %self.peer_label, "BMP event channel closed");
+        } else if peer_up {
+            self.bmp_peer_up_sent = true;
         }
     }
 
@@ -2818,6 +2836,7 @@ impl PeerSession {
     /// cannot overtake it, and daemon shutdown delivers it before the BMP
     /// manager stops.
     fn hand_off_peer_down(&mut self, tx: mpsc::Sender<BmpEvent>, event: BmpEvent) {
+        self.bmp_peer_up_sent = false;
         let event = match tx.try_send(event) {
             Ok(()) => return,
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -2875,6 +2894,44 @@ impl PeerSession {
         }
     }
 
+    /// A session dropped after a Peer Up the collectors saw, with no Peer
+    /// Down after it (its task aborted or panicked before `SessionDown`
+    /// queued one), queues one now behind every event it already emitted:
+    /// the teardown reason it latched, else reason 2, local close without
+    /// NOTIFICATION. It never waits for room: delivered
+    /// later, it could follow a successor's Peer Up, so a full channel
+    /// drops it, counted, as [`Self::abandon_bmp_peer_down`] does.
+    fn close_bmp_epoch(&mut self) {
+        let Some(tx) = self.bmp_tx.as_ref() else {
+            return;
+        };
+        if !std::mem::take(&mut self.bmp_peer_up_sent) {
+            return;
+        }
+        let event = BmpEvent::PeerDown {
+            peer_info: self.build_bmp_peer_info(),
+            reason: self
+                .last_down_reason
+                .take()
+                .unwrap_or(PeerDownReason::LocalNoNotification(0)),
+        };
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_label, "channel_closed");
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_label, "channel_full");
+                warn!(
+                    peer = %self.peer_label,
+                    "BMP Peer Down dropped: the session ended inside its epoch while the BMP event channel was full"
+                );
+            }
+        }
+    }
+
     /// Latch the divergence flag after a dropped `RouteMonitoring` and
     /// arm the bounded-latency repair timer.
     fn mark_bmp_stream_diverged(&mut self) {
@@ -2909,9 +2966,11 @@ impl PeerSession {
         if tx.try_send(down).is_err() {
             return false;
         }
+        self.bmp_peer_up_sent = false;
         if tx.try_send(self.build_bmp_peer_up_event()).is_err() {
             return false;
         }
+        self.bmp_peer_up_sent = true;
         self.bmp_stream_diverged = false;
         self.metrics
             .set_bmp_stream_diverged(&self.peer_label, false);
