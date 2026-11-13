@@ -758,22 +758,28 @@ impl RibManager {
             })
             .map(|(name, _)| Arc::clone(name))
             .collect();
-        let now = Instant::now();
-        let mut transitions = Vec::new();
-        for name in &names {
-            let held = self
-                .conditional_advertisements
-                .definitions
-                .get(name)
-                .is_some_and(|state| state.held);
-            if held || changed.contains(name) {
-                self.evaluate_definition_now(name, now, &mut transitions);
-            } else {
-                self.reobserve_definition(name, now, &mut transitions);
-            }
+        if names.is_empty() {
+            return Vec::new();
         }
-        self.mark_conditional_advertisement_peers_dirty(&transitions);
-        transitions
+        // Each rescan walks the Adj-RIB-Ins under its ranges.
+        self.with_ingest_readiness(|manager| {
+            let now = Instant::now();
+            let mut transitions = Vec::new();
+            for name in &names {
+                let held = manager
+                    .conditional_advertisements
+                    .definitions
+                    .get(name)
+                    .is_some_and(|state| state.held);
+                if held || changed.contains(name) {
+                    manager.evaluate_definition_now(name, now, &mut transitions);
+                } else {
+                    manager.reobserve_definition(name, now, &mut transitions);
+                }
+            }
+            manager.mark_conditional_advertisement_peers_dirty(&transitions);
+            transitions
+        })
     }
 
     /// Evaluate `name` the way a non-startup install evaluates a new or
@@ -808,29 +814,42 @@ impl RibManager {
         &mut self,
         source: PeerId,
     ) -> Vec<Arc<str>> {
-        let Some(rib) = self.ribs.get(&source) else {
+        if !self.ribs.contains_key(&source)
+            || !self
+                .conditional_advertisements
+                .definitions
+                .values()
+                .any(|state| state.definition.condition_policy.is_some())
+        {
             return Vec::new();
-        };
-        let names: Vec<_> = self
-            .conditional_advertisements
-            .definitions
-            .iter()
-            .filter(|(_, state)| {
-                state.definition.condition_policy.is_some()
-                    && state.definition.condition_prefixes.iter().any(|entry| {
-                        rib.prefixes_within(&entry.prefix)
-                            .any(|prefix| entry.matches(prefix))
-                    })
-            })
-            .map(|(name, _)| Arc::clone(name))
-            .collect();
-        let now = Instant::now();
-        let mut transitions = Vec::new();
-        for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
         }
-        self.mark_conditional_advertisement_peers_dirty(&transitions);
-        transitions
+        // The source's range walks and each rescan visit Adj-RIB-In rows.
+        self.with_ingest_readiness(|manager| {
+            let Some(rib) = manager.ribs.get(&source) else {
+                return Vec::new();
+            };
+            let names: Vec<_> = manager
+                .conditional_advertisements
+                .definitions
+                .iter()
+                .filter(|(_, state)| {
+                    state.definition.condition_policy.is_some()
+                        && state.definition.condition_prefixes.iter().any(|entry| {
+                            rib.prefixes_within(&entry.prefix)
+                                .inspect(|_| manager.condition_scan_checkpoint())
+                                .any(|prefix| entry.matches(prefix))
+                        })
+                })
+                .map(|(name, _)| Arc::clone(name))
+                .collect();
+            let now = Instant::now();
+            let mut transitions = Vec::new();
+            for name in &names {
+                manager.reobserve_definition(name, now, &mut transitions);
+            }
+            manager.mark_conditional_advertisement_peers_dirty(&transitions);
+            transitions
+        })
     }
 
     /// Earliest armed settle deadline.
@@ -1059,12 +1078,14 @@ impl RibManager {
             for rib in self.ribs.values() {
                 prefixes.extend(
                     rib.prefixes_within(&entry.prefix)
+                        .inspect(|_| self.condition_scan_checkpoint())
                         .filter(|prefix| entry.matches(*prefix)),
                 );
             }
         }
         let mut matches = ConditionMatches::new(definition.condition_prefixes.len());
         for prefix in prefixes {
+            self.condition_scan_checkpoint();
             matches.record(
                 definition,
                 prefix,
@@ -1072,6 +1093,16 @@ impl RibManager {
             );
         }
         matches
+    }
+
+    /// A rescan walks every Adj-RIB-In under each range's base, so its
+    /// callers take the readiness lane and each visited prefix serves it.
+    fn condition_scan_checkpoint(&self) {
+        super::counted_checkpoint(
+            &self.replacement_readiness,
+            super::CONDITION_SCAN_ROW,
+            false,
+        );
     }
 
     /// One condition prefix's observation from its own candidates.
