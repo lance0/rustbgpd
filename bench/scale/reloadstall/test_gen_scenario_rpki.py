@@ -273,6 +273,48 @@ class ExportPairsScenarioTests(unittest.TestCase):
             self.assertEqual(gen_b.count(drop), 3)
             self.assertNotIn("drop-filtered", (out / "gen-a.rpol").read_text())
 
+    def test_peer_context_gates_every_changed_chain_in_both_generations(self):
+        with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
+            outputs = []
+            out = Path(tmp) / "plain"
+            for knob in [None, "0"]:
+                extra = {} if knob is None else {"GEN_EXPORT_PEER_CONTEXT": knob}
+                result = self.generate(out, 7, "3", extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs.append({path.name: path.read_bytes() for path in out.iterdir()})
+            self.assertEqual(outputs[0], outputs[1])
+            out = Path(tmp) / "gated"
+            result = self.generate(out, 7, "3", {"GEN_EXPORT_PEER_CONTEXT": "1",
+                                                 "GEN_FILTER_COUNT": "1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("export_peer_context(changed chains ungrouped)", result.stdout)
+            gate = "    term peer-gate { if peer.asn == 64496 { reject } }\n"
+            drop = "    term drop-filtered { if route.prefix in filtered { reject } }\n"
+            for generation in ["gen-a.rpol", "gen-b.rpol"]:
+                policy = (out / generation).read_text()
+                filtering = drop if generation == "gen-b.rpol" else ""
+                for chain in ["member-out", "member-out-1", "member-out-2"]:
+                    self.assertIn(f"policy {chain} {{\n{gate}{filtering}    term tag", policy)
+                self.assertEqual(policy.count(gate), 3)
+                self.assertIn("policy stable-out {\n    term tag", policy)
+            # No stub uses the gated ASN.
+            neighbors = tomllib.loads((out / "config.toml").read_text())["neighbors"]
+            self.assertNotIn(64496, [neighbor["remote_asn"] for neighbor in neighbors])
+
+    def test_peer_context_rejects_invalid_and_non_mixed_shapes(self):
+        with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
+            for index, (changed, extra) in enumerate([
+                (None, {"GEN_EXPORT_PEER_CONTEXT": "1"}),
+                (7, {"GEN_EXPORT_PEER_CONTEXT": "yes"}),
+                (7, {"GEN_EXPORT_PEER_CONTEXT": "1", "GEN_IBGP_RR_ASN": "65000"}),
+            ]):
+                with self.subTest(changed=changed, extra=extra):
+                    out = Path(tmp) / str(index)
+                    result = self.generate(out, changed, None, extra)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("GEN_EXPORT_PEER_CONTEXT", result.stderr)
+                    self.assertFalse(out.exists())
+
     def test_pairs_reject_invalid_and_non_mixed_shapes(self):
         with tempfile.TemporaryDirectory(prefix="pairs-gen-", dir="/tmp") as tmp:
             for index, (changed, pairs) in enumerate([(None, "2"), (7, "0"), (7, "8")]):

@@ -3825,13 +3825,14 @@ pub enum RibUpdate {
     /// Contract: replacements naming peers no longer registered for
     /// outbound updates are skipped (a reconnect installs the desired
     /// policy — the same posture as the serial per-peer loop this
-    /// replaces). Residual members whose session sends EVPN are not
-    /// applied: their installed chain is left as it was and the reply
-    /// names them in caller order, for the caller to apply through
+    /// replaces). Residual members (every member outside a shared cohort)
+    /// whose session sends any family are not applied: their installed
+    /// chain is left as it was and the reply names them in caller order,
+    /// for the caller to apply through
     /// [`RibUpdate::ApplyPacedExportPolicies`], a few per command within a
-    /// turn budget, so that other RIB work runs between those commands. Everything else commits in the
-    /// one synchronous call: there is no partial-state failure mode after
-    /// the first mutation. Per-member wire delivery is best-effort — a
+    /// turn budget, so that other RIB work runs between those commands.
+    /// Shared cohorts commit in the one synchronous call: there is no
+    /// partial-state failure mode after the first mutation. Per-member wire delivery is best-effort — a
     /// member whose emission cannot be prepared (closed channel, encoder
     /// churn, exact-export rejection) is marked dirty and healed by the
     /// ordinary resync from the already-committed state.

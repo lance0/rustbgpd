@@ -2338,8 +2338,9 @@ impl PeerManager {
     /// registered in the RIB are skipped inside the batch (a reconnect
     /// installs the desired policy), matching the prior per-peer loop.
     ///
-    /// Members carrying EVPN outbound state come back unapplied: each one's
-    /// move resyncs its whole EVPN table, so they are applied here through
+    /// Members outside a shared cohort come back unapplied, whatever family
+    /// their sessions send: each one's move resyncs its whole table in every
+    /// such family, so they are applied here through
     /// paced RIB commands. Each command applies the members that fit the
     /// RIB's turn budget and returns the rest, so other RIB work runs between
     /// commands instead of waiting behind one turn that grows with members ×

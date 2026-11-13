@@ -507,6 +507,534 @@ fn evpn_cohort_reload_longest_command_is_flat_in_moved_members() {
     }
 }
 
+/// Members an authoritative cohort batch cannot move on its shared unicast
+/// transition, so each one's move resyncs its whole table.
+#[derive(Clone, Copy, Debug)]
+enum ResidualArm {
+    /// `VPNv4`-only members.
+    Vpn,
+    /// Labeled-unicast-only members.
+    Labeled,
+    /// `FlowSpec`-only members.
+    FlowSpec,
+    /// BGP-LS-only members.
+    BgpLs,
+    /// `VPNv4` members with per-client best: ungrouped (ADR-0126 D8).
+    PerClientBestVpn,
+    /// IPv4 unicast members whose chain reads peer context: never grouped.
+    Ungrouped,
+    /// IPv4 unicast members of one group moving to two destinations.
+    MixedDestinations,
+}
+
+impl ResidualArm {
+    const ALL: [Self; 7] = [
+        Self::Vpn,
+        Self::Labeled,
+        Self::FlowSpec,
+        Self::BgpLs,
+        Self::PerClientBestVpn,
+        Self::Ungrouped,
+        Self::MixedDestinations,
+    ];
+
+    fn families(self) -> Vec<(Afi, Safi)> {
+        match self {
+            Self::Vpn | Self::PerClientBestVpn => vec![(Afi::Ipv4, Safi::MplsVpn)],
+            Self::Labeled => vec![(Afi::Ipv4, Safi::LabeledUnicast)],
+            Self::FlowSpec => vec![(Afi::Ipv4, Safi::FlowSpec)],
+            Self::BgpLs => vec![(Afi::BgpLs, Safi::BgpLs)],
+            Self::Ungrouped | Self::MixedDestinations => vec![(Afi::Ipv4, Safi::Unicast)],
+        }
+    }
+
+    fn grouped(self) -> bool {
+        !matches!(self, Self::PerClientBestVpn | Self::Ungrouped)
+    }
+
+    /// The community member `index` is tagged with under generation `tag`:
+    /// mixed-destination members alternate between two chains.
+    fn tag(self, tag: u32, index: usize) -> u32 {
+        match self {
+            Self::MixedDestinations => tag + u32::try_from(index % 2).unwrap(),
+            _ => tag,
+        }
+    }
+
+    /// The export chain that adds `tag`; an ungrouped member's chain also
+    /// carries a peer-ASN term that matches none of them.
+    fn chain(self, tag: u32) -> rustbgpd_policy::PolicyChain {
+        let chain = super::update_groups::community_chain(tag);
+        if !matches!(self, Self::Ungrouped) {
+            return chain;
+        }
+        let tagging = chain.policies[0].policy.entries[0].clone();
+        let mut gate = tagging.clone();
+        gate.action = rustbgpd_policy::PolicyAction::Deny;
+        gate.modifications = rustbgpd_policy::RouteModifications::default();
+        gate.match_neighbor_set = Some(rustbgpd_policy::NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![65_099],
+            peer_groups: vec![],
+        });
+        rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+            entries: vec![gate, tagging],
+            default_action: rustbgpd_policy::PolicyAction::Deny,
+        }])
+    }
+
+    /// [`RESIDUAL_ROWS`] routes of the arm's family from [`external`].
+    fn seed(self, manager: &mut RibManager) {
+        let source = external();
+        let IpAddr::V4(address) = source.addr() else {
+            unreachable!("test peers are IPv4")
+        };
+        let octets = (0..RESIDUAL_ROWS).map(|index| u8::try_from(index).unwrap());
+        let update = match self {
+            Self::Vpn | Self::PerClientBestVpn => RibUpdate::VpnRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: octets
+                    .map(|octet| make_vpn_rib_route(address, octet, 100, 100))
+                    .collect(),
+                withdrawn: vec![],
+            },
+            Self::Labeled => RibUpdate::LabeledRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: octets
+                    .map(|octet| make_labeled_rib_route(address, octet, 100, 100))
+                    .collect(),
+                withdrawn: vec![],
+            },
+            Self::BgpLs => RibUpdate::BgpLsRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: octets
+                    .map(|octet| make_bgpls_route(address, octet, 100))
+                    .collect(),
+                withdrawn: vec![],
+            },
+            Self::FlowSpec => {
+                let mut update = test_routes_received(source, vec![]);
+                if let RibUpdate::RoutesReceived {
+                    flowspec_announced, ..
+                } = &mut update
+                {
+                    *flowspec_announced = octets
+                        .map(|octet| {
+                            let mut route = crate::test_support::make_flowspec_route(address);
+                            route.rule.components =
+                                vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                                    rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                                        Ipv4Addr::new(10, 9, octet, 0),
+                                        24,
+                                    )),
+                                )];
+                            route
+                        })
+                        .collect();
+                }
+                update
+            }
+            Self::Ungrouped | Self::MixedDestinations => routes_from(source, 0, 1, RESIDUAL_ROWS),
+        };
+        manager.handle_update(update);
+        drain_route_chunks(manager);
+    }
+}
+
+/// Rows of the arm's family announced to every member, fixed across sizes.
+const RESIDUAL_ROWS: usize = 256;
+
+/// The keys of `update`'s announcements, in any family, that carry `tag`.
+fn tagged_keys(update: &OutboundRouteUpdate, tag: u32) -> Vec<String> {
+    let tagged = |communities: &[u32]| communities.contains(&tag);
+    let mut keys = Vec::new();
+    keys.extend(
+        update
+            .announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.prefix)),
+    );
+    keys.extend(
+        update
+            .vpn_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.key())),
+    );
+    keys.extend(
+        update
+            .labeled_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.nlri.prefix)),
+    );
+    keys.extend(
+        update
+            .flowspec_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.key())),
+    );
+    keys.extend(
+        update
+            .bgpls_announce
+            .iter()
+            .filter(|route| tagged(route.communities()))
+            .map(|route| format!("{:?}", route.key())),
+    );
+    keys
+}
+
+/// Per member, the distinct keys announced with the tag `tag_of` gives it.
+fn tagged_per_member(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    tag_of: impl Fn(usize) -> u32,
+) -> Vec<usize> {
+    receivers
+        .iter_mut()
+        .enumerate()
+        .map(|(index, receiver)| {
+            let mut keys = HashSet::new();
+            while let Ok(update) = receiver.try_recv() {
+                keys.extend(tagged_keys(&update, tag_of(index)));
+            }
+            keys.len()
+        })
+        .collect()
+}
+
+/// An export-policy reload moves `size` residual members of `arm` onto a new
+/// chain, the peer manager's way: the authoritative batch, then paced
+/// commands for every member it hands back. Each command applies the members
+/// its budget admits (two here), so the longest single command must not grow
+/// with the moved members; one turn carrying the whole cohort grows members
+/// × rows.
+fn residual_cohort_reload(size: usize, arm: ResidualArm) -> Work {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let mut receivers: Vec<_> = (0..size)
+        .map(|index| {
+            let peer = member(index);
+            let (outbound_tx, receiver) = mpsc::channel(4096);
+            let mut up = test_peer_up(peer, 1, outbound_tx);
+            if let RibUpdate::PeerUp {
+                export_policy,
+                peer_asn,
+                sendable_families,
+                per_client_best,
+                ..
+            } = &mut up
+            {
+                *export_policy = Some(arm.chain(OLD));
+                *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                *sendable_families = arm.families();
+                *per_client_best = matches!(arm, ResidualArm::PerClientBestVpn);
+            }
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    let group = manager.grouped_member_of(member(0));
+    assert_eq!(group.is_some(), arm.grouped(), "{arm:?}: setup");
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; size],
+        "{arm:?} size {size}: initial tables"
+    );
+    let chains: HashMap<PeerId, rustbgpd_policy::PolicyChain> = (0..size)
+        .map(|index| (member(index), arm.chain(arm.tag(NEW, index))))
+        .collect();
+    let replacements = |peers: &[PeerId]| {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(chains[peer].clone()),
+            })
+            .collect::<Vec<_>>()
+    };
+    let all: Vec<PeerId> = (0..size).map(member).collect();
+    let mut pending = Vec::new();
+    let mut longest = checkpoints_in(|| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(&all),
+            reply,
+        });
+        pending = response.try_recv().unwrap().unwrap();
+    })[ALL];
+    while !pending.is_empty() {
+        let mut outcome = None;
+        let command = checkpoints_in(|| {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+                replacements: replacements(&pending),
+                cost: Some(TWO_PER_COMMAND),
+                reply,
+            });
+            outcome = Some(response.try_recv().unwrap().unwrap());
+        });
+        longest = longest.max(command[ALL]);
+        pending = outcome.unwrap().pending;
+    }
+    // The walk's own commands deliver every row; no repair is left owed.
+    assert!(
+        manager.dirty_peers.is_empty(),
+        "{arm:?} size {size}: members left dirty after the walk"
+    );
+    // Pin the wire: every member ends with every row under its new chain.
+    assert_eq!(
+        tagged_per_member(&mut receivers, |index| arm.tag(NEW, index)),
+        vec![RESIDUAL_ROWS; size],
+        "{arm:?} size {size}: re-exported tables"
+    );
+    Work::from([("longest command checkpoints", longest)])
+}
+
+#[test]
+fn residual_cohort_reload_longest_command_is_flat_in_moved_members() {
+    let unit = "longest command checkpoints";
+    // Every arm first, so a failure names each arm's growth.
+    let counts: Vec<(ResidualArm, usize, usize)> = ResidualArm::ALL
+        .into_iter()
+        .map(|arm| {
+            (
+                arm,
+                residual_cohort_reload(SMALL, arm)[unit],
+                residual_cohort_reload(LARGE, arm)[unit],
+            )
+        })
+        .collect();
+    for &(arm, small, large) in &counts {
+        assert!(small > 0, "{arm:?}: no work counted");
+        assert!(
+            large < small * 2,
+            "{arm:?}: the longest single RIB command grew {small} -> {large} from {SMALL} to \
+             {LARGE} moved members at {RESIDUAL_ROWS} rows; one turn carries more than one \
+             member's move\nall arms (small, large): {counts:?}",
+        );
+    }
+}
+
+/// Update-group tables no member belongs to.
+fn memberless_groups(manager: &RibManager) -> usize {
+    manager
+        .group_ribs
+        .values()
+        .filter(|group| group.members.is_empty())
+        .count()
+}
+
+/// How the paced walk over a refused cohort ends.
+#[derive(Clone, Copy, Debug)]
+enum WalkEnd {
+    /// The walk fails before its first command; the peer manager restores.
+    Restored,
+    /// Every mover is applied and joins the destination.
+    Completed,
+    /// Every mover leaves the RIB first, so each paced command skips it.
+    EveryMoverLeft,
+}
+
+/// Count the `retirement` checkpoints the replacement readiness owner
+/// observes, and whether a readiness query queued at the first one is
+/// answered by a later one. Returns (visits, answered during retirement).
+fn observe_retirement_readiness(
+    manager: &mut RibManager,
+) -> (
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let visits = Arc::new(AtomicUsize::new(0));
+    let answered = Arc::new(AtomicBool::new(false));
+    let pending = std::sync::Mutex::new(None);
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let (visits, answered) = (Arc::clone(&visits), Arc::clone(&answered));
+        move |observed| {
+            if observed != "retirement" {
+                return;
+            }
+            let mut pending = pending.lock().unwrap();
+            if visits.fetch_add(1, Ordering::Relaxed) == 0 {
+                *pending = Some(super::update_groups::queue_replacement_readiness(
+                    &readiness_tx,
+                ));
+            } else if pending
+                .as_mut()
+                .is_some_and(|response: &mut oneshot::Receiver<_>| response.try_recv().is_ok())
+            {
+                answered.store(true, Ordering::Relaxed);
+            }
+        }
+    }));
+    (visits, answered)
+}
+
+/// A shared cohort the forward batch refuses after building its destination
+/// (an action-only next-hop change refuses the shared inventory) hands its
+/// members to the paced walk, which adopts the destination through its first
+/// mover. However the walk ends, no memberless destination outlives it:
+/// a restore retires it, and so does the paced command that skips the last
+/// mover when every mover left the RIB. That retirement, [`RESIDUAL_ROWS`]
+/// staged rows, runs under the replacement readiness owner and answers a
+/// readiness query part-way through.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture follows each way the walk can end through the destination's retirement"
+)]
+fn refused_cohort_destination_never_outlives_the_walk_memberless() {
+    use std::sync::atomic::Ordering;
+    const OLD: u32 = 0xFC00_0001;
+    const SIZE: usize = 4;
+    let arm = ResidualArm::MixedDestinations;
+    let old = super::update_groups::community_chain(OLD);
+    let mut next = old.clone();
+    next.policies[0].policy.entries[0]
+        .modifications
+        .set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    let all: Vec<PeerId> = (0..SIZE).map(member).collect();
+    let replacements = |chain: &rustbgpd_policy::PolicyChain, peers: &[PeerId]| {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(chain.clone()),
+            })
+            .collect::<Vec<_>>()
+    };
+    for end in [
+        WalkEnd::Restored,
+        WalkEnd::Completed,
+        WalkEnd::EveryMoverLeft,
+    ] {
+        let (_tx, mut manager) = manager();
+        manager.paced_elapsed_for_test = Some(Duration::ZERO);
+        let _receivers: Vec<_> = (0..SIZE)
+            .map(|index| {
+                let (outbound_tx, receiver) = mpsc::channel(4096);
+                let mut up = test_peer_up(member(index), 1, outbound_tx);
+                if let RibUpdate::PeerUp {
+                    export_policy,
+                    peer_asn,
+                    sendable_families,
+                    ..
+                } = &mut up
+                {
+                    *export_policy = Some(old.clone());
+                    *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                    *sendable_families = arm.families();
+                }
+                manager.handle_update(up);
+                receiver
+            })
+            .collect();
+        arm.seed(&mut manager);
+        let source = manager.grouped_member_of(all[0]).unwrap();
+        assert_eq!(memberless_groups(&manager), 0, "setup");
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(&next, &all),
+            reply,
+        });
+        let mut pending = response.try_recv().unwrap().unwrap();
+        assert_eq!(pending, all, "the refused cohort is handed back whole");
+        let receipt = manager.authoritative_transition_receipts.last().unwrap();
+        assert_eq!(
+            (receipt.destination_builds, receipt.shared_members),
+            (1, 0),
+            "the cohort built its destination and was refused"
+        );
+        assert_eq!(memberless_groups(&manager), 1, "the built destination");
+        let (destination, staged) = manager
+            .group_ribs
+            .iter()
+            .find(|(_, group)| group.members.is_empty())
+            .map(|(gid, group)| (*gid, group.table.len()))
+            .unwrap();
+        assert!(staged >= RESIDUAL_ROWS, "{end:?}: staged {staged} rows");
+        if matches!(end, WalkEnd::EveryMoverLeft) {
+            for &peer in &all {
+                manager.handle_update(RibUpdate::PeerDown {
+                    peer,
+                    session_id: 1,
+                });
+            }
+            drain_route_chunks(&mut manager);
+        }
+        let (visits, answered) = observe_retirement_readiness(&mut manager);
+        match end {
+            WalkEnd::Restored => {
+                let (reply, mut response) = oneshot::channel();
+                manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements: replacements(&old, &all),
+                    reply,
+                });
+                response.try_recv().unwrap().unwrap();
+                assert!(
+                    all.iter()
+                        .all(|peer| manager.grouped_member_of(*peer) == Some(source)),
+                    "every member is back in its source group"
+                );
+            }
+            WalkEnd::Completed | WalkEnd::EveryMoverLeft => {
+                while !pending.is_empty() {
+                    let (reply, mut response) = oneshot::channel();
+                    manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+                        replacements: replacements(&next, &pending),
+                        cost: Some(TWO_PER_COMMAND),
+                        reply,
+                    });
+                    let outcome = response.try_recv().unwrap().unwrap();
+                    if matches!(end, WalkEnd::EveryMoverLeft) {
+                        assert_eq!(outcome.applied, 0, "every mover is skipped");
+                    }
+                    pending = outcome.pending;
+                }
+            }
+        }
+        manager.replacement_readiness_test_hook = None;
+        if matches!(end, WalkEnd::Completed) {
+            assert!(
+                all.iter()
+                    .all(|peer| manager.grouped_member_of(*peer) == Some(destination)),
+                "every mover joined the destination"
+            );
+        } else {
+            assert!(
+                !manager.group_ribs.contains_key(&destination),
+                "{end:?}: the unadopted destination survived the walk's last command"
+            );
+            assert!(
+                visits.load(Ordering::Relaxed) >= 2 && answered.load(Ordering::Relaxed),
+                "{end:?}: retiring {staged} staged rows answered no readiness query \
+                 ({} retirement checkpoints observed under a readiness owner)",
+                visits.load(Ordering::Relaxed)
+            );
+        }
+        assert_eq!(memberless_groups(&manager), 0, "{end:?}");
+        // Later churn finds no orphan to stage into.
+        manager.handle_update(routes_from(external(), 0, 9, 4));
+        drain_route_chunks(&mut manager);
+        assert_eq!(memberless_groups(&manager), 0, "{end:?}: after churn");
+        assert_eq!(
+            manager.group_ribs.contains_key(&destination),
+            matches!(end, WalkEnd::Completed),
+            "{end:?}: after churn"
+        );
+    }
+}
+
 #[test]
 fn inbound_update_distribution_work_is_linear() {
     assert_linear(

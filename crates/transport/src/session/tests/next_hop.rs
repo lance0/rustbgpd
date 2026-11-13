@@ -4457,7 +4457,30 @@ async fn action_only_replacement_frames(
             })
             .await
             .unwrap();
-        response.await.unwrap().unwrap();
+        // The peer manager's walk: the batch hands residual members back,
+        // and paced commands apply them until none remain.
+        let (mut pending, mut cost) = (response.await.unwrap().unwrap(), None);
+        while !pending.is_empty() {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            let sent: Vec<PeerExportPolicyReplacement> = replacements()
+                .into_iter()
+                .filter(|replacement: &PeerExportPolicyReplacement| {
+                    pending.contains(&replacement.peer)
+                })
+                .collect();
+            session
+                .rib_tx
+                .send(RibUpdate::ApplyPacedExportPolicies {
+                    replacements: sent,
+                    cost,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let outcome = response.await.unwrap().unwrap();
+            assert!(outcome.applied >= 1, "every paced command makes progress");
+            (pending, cost) = (outcome.pending, outcome.cost);
+        }
     }
     let mut replacements_seen = 0;
     while let Ok(update) = receivers[0].try_recv() {

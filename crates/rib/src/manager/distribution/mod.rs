@@ -817,8 +817,9 @@ pub(in crate::manager) fn paced_admits_next(
 enum ResidualMode {
     /// Apply every residual member (rollback and direct callers).
     All,
-    /// Hand back every residual EVPN sender unapplied (the forward batch).
-    DeferEvpn,
+    /// Hand back every residual member whose session sends any family
+    /// unapplied (the forward batch).
+    DeferSenders,
     /// Apply residual members in caller order while the turn budget allows
     /// (one command of the paced walk); hand back the rest.
     Paced {
@@ -6056,7 +6057,7 @@ impl RibManager {
             });
             return;
         }
-        let _ = reply.send(self.apply_export_policy_replacements_deferring_evpn(replacements));
+        let _ = reply.send(self.apply_export_policy_replacements_deferring_residual(replacements));
     }
 
     pub(super) fn handle_restore_peer_export_policies_authoritatively(
@@ -6134,6 +6135,9 @@ impl RibManager {
                 })
                 .collect::<Vec<_>>();
             manager.apply_export_policy_replacements_synchronously(execution)?;
+            // A walk that failed before a refused cohort's first mover joined
+            // leaves that cohort's destination memberless.
+            manager.discard_refused_cohort_destinations();
             Ok(receipts)
         })
     }
@@ -6174,19 +6178,62 @@ impl RibManager {
 
     /// The forward authoritative batch: as
     /// [`Self::apply_export_policy_replacements_synchronously`], except that
-    /// residual members whose session sends EVPN are left unapplied, with
-    /// their installed chain untouched, and returned in caller order. Each
-    /// such move resyncs the member's whole EVPN table, so the caller applies
-    /// them through [`Self::apply_paced_export_policies`], a few per RIB
-    /// command within [`PACED_TURN_BUDGET`], and other work runs between those
-    /// commands instead of waiting behind one actor turn growing with moved
-    /// members × rows. Rollback batches stay whole.
-    pub(in crate::manager) fn apply_export_policy_replacements_deferring_evpn(
+    /// residual members whose session sends any family are left unapplied,
+    /// with their installed chain untouched, and returned in caller order.
+    /// Shared cohorts still commit here. A residual move resyncs the member's
+    /// whole table in every family it sends (EVPN, VPN, labeled unicast,
+    /// `FlowSpec`, BGP-LS, or the unicast of an ungrouped, per-client-best or
+    /// mixed-destination member), so the caller applies them through
+    /// [`Self::apply_paced_export_policies`], a few per RIB command within
+    /// [`PACED_TURN_BUDGET`], and other work runs between those commands
+    /// instead of waiting behind one actor turn growing with moved members ×
+    /// rows. Rollback batches stay whole.
+    pub(in crate::manager) fn apply_export_policy_replacements_deferring_residual(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerId>, RibCommandError> {
-        self.apply_export_policy_replacements(replacements, ResidualMode::DeferEvpn)
+        self.apply_export_policy_replacements(replacements, ResidualMode::DeferSenders)
             .map(|outcome| outcome.deferred)
+    }
+
+    /// Discard every recorded refused-cohort destination that no member
+    /// joined, unless a destination prestage now owns that group. Callers
+    /// run inside a replacement readiness scope, so retiring a large table
+    /// keeps answering readiness and summary queries.
+    fn discard_refused_cohort_destinations(&mut self) {
+        for (gid, _) in std::mem::take(&mut self.refused_cohort_destinations) {
+            self.discard_refused_cohort_destination(gid);
+        }
+    }
+
+    fn discard_refused_cohort_destination(&mut self, gid: usize) {
+        let prestaged = self.prepared_destination == Some(gid)
+            || self
+                .pending_destination_prestage
+                .as_ref()
+                .is_some_and(|prestage| prestage.destination == gid);
+        if !prestaged {
+            let _ = self.discard_uncommitted_policy_transition_group(gid);
+        }
+    }
+
+    /// After a paced command: a refused destination whose movers have all
+    /// been applied or skipped has seen its whole walk. Retire it now if no
+    /// member joined (every mover left the RIB, or moved elsewhere), rather
+    /// than staging route updates into it until the next batch or restore.
+    fn settle_refused_cohort_destinations(&mut self, applied: &[PeerId], skipped: &[PeerId]) {
+        let mut settled = Vec::new();
+        self.refused_cohort_destinations
+            .retain_mut(|(gid, movers)| {
+                movers.retain(|peer| !applied.contains(peer) && !skipped.contains(peer));
+                if movers.is_empty() {
+                    settled.push(*gid);
+                }
+                !movers.is_empty()
+            });
+        for gid in settled {
+            self.discard_refused_cohort_destination(gid);
+        }
     }
 
     /// One command of the paced walk: the batch body for the members that fit
@@ -6420,6 +6467,11 @@ impl RibManager {
             prestage.retire_with(&mut || checkpoint());
             self.replacement_checkpoint(true);
         }
+        // A new forward batch starts a new walk: an earlier walk's refused
+        // destination that no member joined is retired here, in this scope.
+        if matches!(mode, ResidualMode::DeferSenders) {
+            self.discard_refused_cohort_destinations();
+        }
 
         let phase = std::time::Instant::now();
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
@@ -6604,6 +6656,16 @@ impl RibManager {
                 n_shared_members += members.len();
                 n_destination_groups += 1;
             } else {
+                // A refusal after the destination build leaves the group for
+                // the movers; deferred, they join it only in a later command.
+                let memberless = self
+                    .group_ribs
+                    .get(&destination)
+                    .is_some_and(|group| group.members.is_empty());
+                if memberless && matches!(mode, ResidualMode::DeferSenders) {
+                    self.refused_cohort_destinations
+                        .push((destination, members.clone()));
+                }
                 residual.extend(members);
             }
         }
@@ -6623,7 +6685,7 @@ impl RibManager {
         // Per-member fallback: the ordinary regroup lifecycle (baseline
         // snapshot + dirty), drained by the one pass below — the exact
         // body of the single-peer seam, minus its per-call pass. A member
-        // handed back (an EVPN sender in the forward batch, or one past the
+        // handed back (any sender in the forward batch, or one past the
         // paced budget) is instead restored to its installed chain.
         let mut deferred: HashSet<PeerId> = HashSet::new();
         let (mut applied, mut recompute_max, mut over_budget) =
@@ -6639,7 +6701,7 @@ impl RibManager {
             checkpoint();
             let hand_back = match mode {
                 ResidualMode::All => false,
-                ResidualMode::DeferEvpn => self.carries_evpn_outbound_state(peer),
+                ResidualMode::DeferSenders => self.sends_any_family(peer),
                 ResidualMode::Paced { started, .. } => {
                     #[cfg(test)]
                     let elapsed = self
@@ -6715,6 +6777,9 @@ impl RibManager {
                 Some(applied_peers.iter().map(|&peer| (peer, None)).collect());
         }
         self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
+        if matches!(mode, ResidualMode::Paced { .. }) {
+            self.settle_refused_cohort_destinations(&applied_peers, &skipped);
+        }
         let member_costs = self.paced_member_costs.take();
         receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         let pass_max = member_costs.and_then(|costs| costs.into_values().flatten().max());
@@ -6781,15 +6846,14 @@ impl RibManager {
         })
     }
 
-    /// Whether moving `peer` can resync EVPN outbound state: the session
-    /// sends EVPN. Its old chain may have denied every row (no private rows,
-    /// no admitted keys) while the new one permits the whole table, so the
-    /// family, not current rows, decides. EVPN group ownership requires the
-    /// family too.
-    fn carries_evpn_outbound_state(&self, peer: PeerId) -> bool {
+    /// Whether moving `peer` can resync outbound state: its session sends
+    /// some family. Its old chain may have denied every row (no rows held)
+    /// while the new one permits the whole table, so the negotiated families,
+    /// not current rows, decide.
+    fn sends_any_family(&self, peer: PeerId) -> bool {
         self.peer_sendable_families
             .get(&peer)
-            .is_some_and(|families| families.contains(&(Afi::L2Vpn, Safi::Evpn)))
+            .is_some_and(|families| !families.is_empty())
     }
 
     /// Commit one qualifying cohort through the shared batched
