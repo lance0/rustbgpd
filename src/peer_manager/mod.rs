@@ -1717,9 +1717,13 @@ impl PeerManager {
     async fn serve_owned_walk_events_now(&mut self) -> u64 {
         let mut served = self.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
         let links_changed = self.link_check.changes.as_mut().map(|changes| {
-            changes
-                .has_changed()
-                .inspect(|_| drop(changes.borrow_and_update()))
+            // Only a change this seam handles is marked seen: one sent after
+            // an unchanged reading stays pending for the next seam.
+            changes.has_changed().inspect(|changed| {
+                if *changed {
+                    drop(changes.borrow_and_update());
+                }
+            })
         });
         match links_changed {
             Some(Ok(true)) => {
