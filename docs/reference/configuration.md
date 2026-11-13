@@ -3691,6 +3691,7 @@ Prometheus metrics exposed at the configured metrics endpoint:
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective expire interval per cache after the two-day maximum and `max_expire_interval` are applied |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Retained validated End-of-Data readiness per cache; includes empty tables and remains ready through reconnect until flush or expiry |
 | `bgp_rpki_cache_connected{cache}` | Whether an RTR session to the cache is established; `0` whenever it is down, including while an ordinary disconnect's retained contribution is still in use |
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times the cache's RTR client panicked and restarted its session; the restart is handled as an ordinary session loss |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data; present only while a contribution is retained, removed on flush or expiry |
 
 `NotFound` includes startup before validated data and the state after all

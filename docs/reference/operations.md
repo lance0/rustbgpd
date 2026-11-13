@@ -1424,8 +1424,27 @@ RIB manager failure instead.
 
 ### RPKI subsystem task exits unexpectedly
 
-The daemon treats an unexpected return or panic from the VRP manager, either
-validation-table forwarder, or any configured RTR client task as fatal. It logs
+A panic in one cache's RTR client is not fatal. The client logs
+`RTR client panicked; restarting its session with the held data retained`,
+leaves a panic report, and handles the panic as an ordinary loss of that RTR
+session: the cache's VRPs and ASPAs stay in use until the effective expire,
+and after `retry_interval` the client reconnects and resynchronizes with a
+Reset Query. BGP sessions and the other caches are not touched.
+`bgp_rpki_rtr_client_restarts_total{cache}` counts these restarts; a cache
+whose client keeps restarting shows `bgp_rpki_cache_connected` at `0` and
+loses its data at the expire like any unreachable cache.
+
+`rbgp doctor` reports any panic report as `crashes.recent` FAIL, "the daemon
+has crashed recently", so it also flags a recovered RTR client panic while the
+daemon kept running. Tell the two apart by the report's `location` and by the
+daemon: a recovered client panic has a non-zero
+`bgp_rpki_rtr_client_restarts_total{cache}`, the ERROR log above with that
+cache as `server`, and no `initiating coordinated shutdown` after it. The
+report is still worth attaching to a bug report.
+
+The daemon treats an unexpected return or panic from the VRP manager or either
+validation-table forwarder as fatal, and likewise an RTR client task that ends
+despite the restart. It logs
 `RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
 shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
@@ -2091,8 +2110,9 @@ one beside it, so `group_left` joins never match two identities for one peer.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers both an operator disable and a max-prefix shutdown latch, even though the configuration still says enabled; `bgp_max_prefix_latched` separates the two |
+| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers an operator disable, a max-prefix shutdown latch and a session-crash latch, even though the configuration still says enabled. `bgp_max_prefix_latched` separates the max-prefix latch; no gauge separates the session-crash latch, which the neighbor's last error names |
 | `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable, or until the timed hold-down expires into a successful restart or, under strict BFD, into the BFD withhold; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
+| `bgp_session_task_crashes_total{peer,interface}` | Session tasks of this peer, or of its inbound collision candidates, that ended without a shutdown request (a panic or a run-loop error). Seeded at 0. The peer manager restarts the session (or retires a dynamic peer or candidate as if it went Idle) after the first and second crash within ten minutes, and latches the neighbor disabled on the third, counted across dynamic reconnects; `last_error` names the latest crash while latched or for ten minutes after it. A reconfigure keeps the latch; explicit enable or deleting the neighbor clears it. Reaped with the other exact peer-identity series |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
 | `bgp_peer_session_state{peer,interface,state}` | Exact active-primary one-hot FSM state; `state` is `idle`, `connect`, `active`, `open_sent`, `open_confirm`, or `established` |
 | `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` | Configured identity of each exact peer, always `1`. Join it onto any per-peer family with `* on (instance, peer, interface) group_left(remote_asn, description, peer_group) bgp_peer_info` so dashboards and alerts name the member instead of the bare address. `remote_asn` is the configured ASN, or the ASN learned from OPEN for an accept-any dynamic range (`0` until then); `description` falls back to the neighbor address when none is configured, and dynamic peers without a range description carry `dynamic:<peer_group>`; `peer_group` is empty for ungrouped neighbors. `description` and `peer_group` are scrubbed — control characters dropped, surrounding whitespace trimmed, and bounded to 128 characters |
@@ -3117,6 +3137,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
 | `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times that cache's RTR client panicked and restarted its session. `0` from startup for each configured cache. Each restart is an ordinary session loss: retained data stays in use until the effective expire and the client reconnects after `retry_interval` with a Reset Query |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data, computed at scrape time from a monotonic clock (the age `rbgp rpki caches` shows). Absent until the first End of Data and after a flush or expiry; advances through an ordinary disconnect. `bgp_rpki_cache_effective_expire_seconds` minus this value is the time left before the retained contribution expires |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Import re-evaluation work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed` (an inbound Route Refresh was sent), `skipped_not_established`, `skipped_state_unknown`, or `failed`. With `[rpki] local_revalidation`, `revalidated_locally` counts peers re-evaluated from retained input and `fallback_refresh` counts peers whose retained input was incomplete and that were refreshed instead. A state-query or re-evaluation-request timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
@@ -3259,6 +3280,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `RTR client panicked; restarting its session with the held data retained` | ERROR | One cache's RTR client panicked (`server`); it reconnects after `retry_interval` and the cache's data stays in use until it expires. Not fatal |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap), with `exit` naming the cause. Counted in `bgp_management_server_crashes_total{server="metrics"}` |
@@ -3702,7 +3724,10 @@ rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines
 Crash reports: a daemon panic writes a small TOML report (panic message,
 source location, thread, version — never environment variables or argv)
 to `<runtime_state_dir>/crash/panic-<ts>-<pid>-<n>.toml`, keeping the 10
-most recent. Each report is written to a temporary file and renamed into
+most recent. A panic at the same source location as the report the daemon
+wrote last writes no new report, so a recovered panic that repeats (an RTR
+client restarting on every retry) cannot push older reports out; it is still
+logged and counted every time. Each report is written to a temporary file and renamed into
 place, so a report is either complete or absent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
 ticket usually pinpoints the crash without a core dump.
 

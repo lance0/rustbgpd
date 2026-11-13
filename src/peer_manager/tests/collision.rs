@@ -268,7 +268,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
         }
         other @ (SessionNotification::BackToIdle { .. }
         | SessionNotification::MaxPrefixExceeded { .. }
-        | SessionNotification::MaxPrefixWarning { .. }) => {
+        | SessionNotification::MaxPrefixWarning { .. }
+        | SessionNotification::TaskExited { .. }) => {
             panic!("expected OpenReceived from candidate, got {other:?}");
         }
     }
