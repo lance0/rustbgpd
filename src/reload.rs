@@ -309,6 +309,53 @@ impl std::fmt::Display for ReloadStepError {
 pub(crate) struct SighupReloadPlan {
     pub(crate) baseline_runtime: Config,
     pub(crate) desired: Arc<AcceptedConfigSnapshot>,
+    /// Honor-knob steps an earlier SIGHUP left known-partial.
+    pub(crate) honor_redrive: HonorRedrive,
+}
+
+const HONOR_GRACEFUL_SHUTDOWN_BUCKET: &str = "honor_graceful_shutdown.apply";
+const HONOR_BLACKHOLE_BUCKET: &str = "honor_blackhole.apply";
+
+/// Honor-knob steps that left EBGP peers behind. A sequential SIGHUP re-sends
+/// each owed step with the unchanged knob value, and the peer manager
+/// retargets only the peers still behind its snapshot. The SIGHUP lane carries
+/// it from one settled reload into the next, including a coalesced follow-up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HonorRedrive {
+    pub(crate) graceful_shutdown: bool,
+    pub(crate) blackhole: bool,
+}
+
+impl HonorRedrive {
+    /// The re-drive still owed after an acknowledged reload. Only a run of
+    /// the step settles it: a step that ran is owed exactly when it named
+    /// failures. A step that never ran keeps its prior debt, whether an
+    /// earlier step stopped the reload or the reload took the generation
+    /// route. A generation can settle `complete` while it skips a dynamic
+    /// peer whose chains do not resolve, so its receipt does not prove the
+    /// honor tail reached every peer; the next re-drive leaves settled peers
+    /// untouched. A rejected or fenced reload has no runtime effect; keep the
+    /// prior value.
+    pub(crate) fn after(self, completion: &SighupCompletion, trace: &SighupReloadTrace) -> Self {
+        let failures: &[ReloadStepFailure] = match completion {
+            SighupCompletion::Complete => &[],
+            SighupCompletion::KnownPartial { failures } => failures,
+        };
+        let owed = |bucket: &'static str, prior: bool| {
+            if failures.iter().any(|failure| failure.bucket == bucket) {
+                return true;
+            }
+            let ran = trace.applied.contains(&SighupEffect {
+                bucket,
+                target: "[global]".to_string(),
+            });
+            prior && !ran
+        };
+        Self {
+            graceful_shutdown: owed(HONOR_GRACEFUL_SHUTDOWN_BUCKET, self.graceful_shutdown),
+            blackhole: owed(HONOR_BLACKHOLE_BUCKET, self.blackhole),
+        }
+    }
 }
 
 /// One reload's typed effect ledger. The owner retains only a bounded projection
@@ -2038,6 +2085,7 @@ async fn reload_config_recorded(
         SighupReloadPlan {
             baseline_runtime: current.clone(),
             desired,
+            honor_redrive: HonorRedrive::default(),
         },
         live_grpc_tcp,
         live_grpc_uds,
@@ -2405,6 +2453,20 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
     }
+    // An honor step an earlier SIGHUP left known-partial runs again with the
+    // unchanged knob value. Only the sequential route reaches the step; a
+    // generation re-resolves every live peer on its own, and the re-drive is
+    // not a knob change, so it does not enter route classification.
+    let honor_graceful_shutdown_step =
+        honor_graceful_shutdown_changed || plan.honor_redrive.graceful_shutdown;
+    let honor_blackhole_step = honor_blackhole_changed || plan.honor_redrive.blackhole;
+    if plan.honor_redrive != HonorRedrive::default() {
+        info!(
+            graceful_shutdown = plan.honor_redrive.graceful_shutdown,
+            blackhole = plan.honor_redrive.blackhole,
+            "reload: retrying the EBGP peers an earlier SIGHUP's honor-knob step left behind"
+        );
+    }
     let dynamic_neighbor_limit_changed =
         new_config.global.dynamic_neighbor_limit != current.global.dynamic_neighbor_limit;
     if dynamic_neighbor_limit_changed {
@@ -2702,11 +2764,11 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
                 for peer in &diff.removed {
                     trace.plan("neighbors.reconcile", peer.to_string());
                 }
-                if honor_graceful_shutdown_changed {
-                    trace.plan("honor_graceful_shutdown.apply", "[global]");
+                if honor_graceful_shutdown_step {
+                    trace.plan(HONOR_GRACEFUL_SHUTDOWN_BUCKET, "[global]");
                 }
-                if honor_blackhole_changed {
-                    trace.plan("honor_blackhole.apply", "[global]");
+                if honor_blackhole_step {
+                    trace.plan(HONOR_BLACKHOLE_BUCKET, "[global]");
                 }
                 if fib_tables_changed && fib_cmd_tx.is_some() {
                     trace.plan("fib_tables.apply", "[[fib_tables]]");
@@ -3094,8 +3156,8 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     if !policy_diff.has_changes()
         && peer_groups_unchanged
         && neighbors_unchanged
-        && !honor_graceful_shutdown_changed
-        && !honor_blackhole_changed
+        && !honor_graceful_shutdown_step
+        && !honor_blackhole_step
         && !dynamic_neighbors_changed
         && !fib_tables_changed
         && !dataset_commit_pending
@@ -4067,7 +4129,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     //    policy/peer-group/global-chain edits and neighbor reconcile
     //    so the peer manager recomputes effective chains from the
     //    same live snapshot the rest of this reload has just shaped.
-    if honor_graceful_shutdown_changed {
+    if honor_graceful_shutdown_step {
         let enabled = new_config.global.honor_graceful_shutdown;
         let dispatch = dispatch_actor_mutation_step(peer_mgr_tx, &progress, |reply| {
             PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }
@@ -4077,19 +4139,23 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             &mut progress,
             working_config,
             &desired_snapshot,
-            "honor_graceful_shutdown.apply",
+            HONOR_GRACEFUL_SHUTDOWN_BUCKET,
             dispatch,
         ) {
             Ok(config) => config,
             Err(outcome) => return *outcome,
         };
         working_config.global.honor_graceful_shutdown = enabled;
-        info!(
-            enabled,
-            "reload: [global] honor_graceful_shutdown hot-applied"
-        );
+        if honor_graceful_shutdown_changed {
+            info!(
+                enabled,
+                "reload: [global] honor_graceful_shutdown hot-applied"
+            );
+        } else {
+            info!("reload: [global] honor_graceful_shutdown re-drove the EBGP peers left behind");
+        }
     }
-    if honor_blackhole_changed {
+    if honor_blackhole_step {
         let enabled = new_config.global.honor_blackhole;
         let dispatch = dispatch_actor_mutation_step(peer_mgr_tx, &progress, |reply| {
             PeerManagerCommand::SetHonorBlackhole { enabled, reply }
@@ -4099,14 +4165,18 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             &mut progress,
             working_config,
             &desired_snapshot,
-            "honor_blackhole.apply",
+            HONOR_BLACKHOLE_BUCKET,
             dispatch,
         ) {
             Ok(config) => config,
             Err(outcome) => return *outcome,
         };
         working_config.global.honor_blackhole = enabled;
-        info!(enabled, "reload: [global] honor_blackhole hot-applied");
+        if honor_blackhole_changed {
+            info!(enabled, "reload: [global] honor_blackhole hot-applied");
+        } else {
+            info!("reload: [global] honor_blackhole re-drove the EBGP peers left behind");
+        }
     }
 
     // 6b. [[fib_tables]] hot-apply. Unlike the honor knobs above, FIB programs
@@ -4796,7 +4866,7 @@ fn settle_honor_step(
                 bucket,
                 error = %partial,
                 "reload: [global] honor knob installed, but some EBGP peers kept their prior \
-                 chains; the next generation-route reload retargets them"
+                 chains; the next SIGHUP retargets them"
             );
             progress.record_applied(bucket, "[global]");
             for (peer, reason) in partial.failed {
@@ -7407,6 +7477,184 @@ hold_time = 90
         std::fs::remove_file(path).unwrap();
     }
 
+    /// After a known-partial honor step, the next SIGHUP with an unchanged
+    /// file re-sends that step's command; the SIGHUP lane carries the debt as
+    /// `HonorRedrive` from one settled reload into the next. A re-drive that
+    /// fails again stays known-partial and owed; one the peers acknowledge
+    /// settles complete and clears the debt, and then an unchanged SIGHUP
+    /// sends nothing.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one test walks the toggle, failed re-drive, healing re-drive and quiet reload in order"
+    )]
+    async fn honor_partial_is_redriven_by_the_next_unchanged_sighup() {
+        for graceful in [true, false] {
+            let bucket = if graceful {
+                HONOR_GRACEFUL_SHUTDOWN_BUCKET
+            } else {
+                HONOR_BLACKHOLE_BUCKET
+            };
+            let mut runtime = load_config_from_toml("honor-redrive", baseline_toml());
+            let mut desired = runtime.clone();
+            if graceful {
+                desired.global.honor_graceful_shutdown = true;
+            } else {
+                desired.global.honor_blackhole = true;
+            }
+            let mut redrive = HonorRedrive::default();
+            // Per round, whether the step leaves the peer behind; `None`
+            // expects no command. The knob toggle and the first re-drive
+            // leave it behind, the second re-drive heals it.
+            for (round, left_behind) in [Some(true), Some(true), Some(false), None]
+                .into_iter()
+                .enumerate()
+            {
+                let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+                let actor = tokio::spawn(async move {
+                    let command = peer_mgr_rx.recv().await;
+                    let Some(left_behind) = left_behind else {
+                        assert!(
+                            command.is_none(),
+                            "round {round}: nothing owed, nothing sent"
+                        );
+                        return;
+                    };
+                    let reply = match (graceful, command) {
+                        (
+                            true,
+                            Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }),
+                        )
+                        | (false, Some(PeerManagerCommand::SetHonorBlackhole { enabled, reply })) =>
+                        {
+                            assert!(enabled, "a re-drive keeps the knob value");
+                            reply
+                        }
+                        _ => panic!("round {round}: expected the {bucket} command"),
+                    };
+                    let result = if left_behind {
+                        Err(HonorKnobPartial {
+                            targeted: 1,
+                            failed: vec![(
+                                rustbgpd_api::peer_types::PeerKey::new(
+                                    "10.0.0.2".parse().unwrap(),
+                                    None,
+                                ),
+                                "hot-apply: session timed out".to_string(),
+                            )],
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    reply.send(result).unwrap();
+                });
+                let trace: SighupReloadTraceHandle =
+                    Arc::new(Mutex::new(SighupReloadTrace::default()));
+                let outcome = reload_config_with_tcp_ao_recorded(
+                    SighupReloadPlan {
+                        baseline_runtime: runtime.clone(),
+                        desired: AcceptedConfigSnapshot::from_config_for_test(desired.clone()),
+                        honor_redrive: redrive,
+                    },
+                    runtime.global.telemetry.grpc_tcp.as_ref(),
+                    runtime.global.telemetry.grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(Arc::clone(&trace)),
+                )
+                .await;
+                // An unsent command closes the channel and fails the actor.
+                drop(peer_mgr_tx);
+                actor.await.unwrap();
+                let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+                    panic!("{bucket} round {round}: expected authority: {outcome:?}");
+                };
+                let trace = trace.lock().unwrap().clone();
+                redrive = redrive.after(&authority.completion, &trace);
+                let owed = HonorRedrive {
+                    graceful_shutdown: graceful,
+                    blackhole: !graceful,
+                };
+                if left_behind == Some(true) {
+                    let SighupCompletion::KnownPartial { failures } = &authority.completion else {
+                        panic!("{bucket} round {round}: a left-behind peer keeps it partial");
+                    };
+                    assert_eq!(
+                        failures
+                            .iter()
+                            .map(|failure| (failure.bucket, failure.target.as_str()))
+                            .collect::<Vec<_>>(),
+                        vec![(bucket, "10.0.0.2")],
+                    );
+                    assert_eq!(redrive, owed, "{bucket} round {round}");
+                } else {
+                    assert!(
+                        matches!(authority.completion, SighupCompletion::Complete),
+                        "{bucket} round {round}: {:?}",
+                        authority.completion
+                    );
+                    assert_eq!(
+                        trace.applied.contains(&SighupEffect {
+                            bucket,
+                            target: "[global]".to_string(),
+                        }),
+                        left_behind.is_some(),
+                        "{bucket} round {round}"
+                    );
+                    assert_eq!(redrive, HonorRedrive::default(), "{bucket} round {round}");
+                }
+                runtime = authority.runtime;
+            }
+        }
+    }
+
+    /// Only a run of the honor step settles its debt. A reload stopped before
+    /// the step keeps it, and so does a generation, complete or partial for
+    /// an unrelated reason: a generation can skip an unresolvable dynamic
+    /// peer and still settle complete. A step that ran clean clears it.
+    #[test]
+    fn honor_redrive_follows_only_steps_that_ran() {
+        let owed = HonorRedrive {
+            graceful_shutdown: true,
+            blackhole: true,
+        };
+        let partial = |bucket: &'static str| SighupCompletion::KnownPartial {
+            failures: vec![ReloadStepFailure {
+                bucket,
+                target: "10.0.0.2".to_string(),
+                error: ReloadStepError::Rejected("down".to_string()),
+            }],
+        };
+        let mut generation = SighupReloadTrace::default();
+        generation.applied("generation.apply", "[config]");
+        for (completion, trace) in [
+            (partial("neighbors.reconcile"), SighupReloadTrace::default()),
+            (SighupCompletion::Complete, generation.clone()),
+            (partial("listener_auth.withdraw"), generation),
+        ] {
+            assert_eq!(owed.after(&completion, &trace), owed, "{completion:?}");
+        }
+        let mut ran = SighupReloadTrace::default();
+        ran.applied(HONOR_BLACKHOLE_BUCKET, "[global]");
+        let blackhole_settled = HonorRedrive {
+            graceful_shutdown: true,
+            blackhole: false,
+        };
+        assert_eq!(
+            owed.after(&partial("neighbors.reconcile"), &ran),
+            blackhole_settled
+        );
+        assert_eq!(
+            owed.after(&SighupCompletion::Complete, &ran),
+            blackhole_settled
+        );
+    }
+
     async fn assert_honor_reply_loss_fences(graceful: bool, bucket: &'static str) {
         let current = load_config_from_toml("honor-reply-loss", baseline_toml());
         let mut desired = current.clone();
@@ -7427,6 +7675,7 @@ hold_time = 90
             SighupReloadPlan {
                 baseline_runtime: current,
                 desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                honor_redrive: HonorRedrive::default(),
             },
             None,
             None,
@@ -8293,6 +8542,7 @@ hold_time = 90
             SighupReloadPlan {
                 baseline_runtime: current.clone(),
                 desired,
+                honor_redrive: HonorRedrive::default(),
             },
             live_grpc_tcp,
             live_grpc_uds,
@@ -8460,6 +8710,7 @@ hold_time = 90
                 SighupReloadPlan {
                     baseline_runtime: current,
                     desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                    honor_redrive: HonorRedrive::default(),
                 },
                 None,
                 None,
@@ -8541,6 +8792,7 @@ hold_time = 90
                         SighupReloadPlan {
                             baseline_runtime: current,
                             desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                            honor_redrive: HonorRedrive::default(),
                         },
                         None,
                         None,
@@ -8738,6 +8990,7 @@ hold_time = 90
             SighupReloadPlan {
                 baseline_runtime: initial,
                 desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                honor_redrive: HonorRedrive::default(),
             },
             None,
             None,
@@ -9204,6 +9457,7 @@ import_policy_chain = ["origin-guard"]
                 SighupReloadPlan {
                     baseline_runtime: initial.clone(),
                     desired,
+                    honor_redrive: HonorRedrive::default(),
                 },
                 initial.global.telemetry.grpc_tcp.as_ref(),
                 initial.global.telemetry.grpc_uds.as_ref(),
@@ -10021,6 +10275,7 @@ import_policy_chain = ["origin-guard"]
                 SighupReloadPlan {
                     baseline_runtime: initial.clone(),
                     desired,
+                    honor_redrive: HonorRedrive::default(),
                 },
                 initial.global.telemetry.grpc_tcp.as_ref(),
                 initial.global.telemetry.grpc_uds.as_ref(),
@@ -10151,6 +10406,7 @@ import_policy_chain = ["origin-guard"]
             SighupReloadPlan {
                 baseline_runtime: initial.clone(),
                 desired,
+                honor_redrive: HonorRedrive::default(),
             },
             initial.global.telemetry.grpc_tcp.as_ref(),
             initial.global.telemetry.grpc_uds.as_ref(),
@@ -10240,6 +10496,7 @@ import_policy_chain = ["origin-guard"]
                     SighupReloadPlan {
                         baseline_runtime: current,
                         desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                        honor_redrive: HonorRedrive::default(),
                     },
                     None,
                     None,
@@ -11590,6 +11847,7 @@ tcp_ao = [
             SighupReloadPlan {
                 baseline_runtime: current.clone(),
                 desired,
+                honor_redrive: HonorRedrive::default(),
             },
             current.global.telemetry.grpc_tcp.as_ref(),
             current.global.telemetry.grpc_uds.as_ref(),

@@ -2853,6 +2853,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
     let plan = SighupReloadPlan {
         baseline_runtime: current.clone(),
         desired: candidate,
+        honor_redrive: crate::reload::HonorRedrive::default(),
     };
     let live_uds = current.global.telemetry.grpc_uds.clone();
     let operation_pm = pm_tx.clone();
@@ -3452,6 +3453,7 @@ async fn reload_with_listener(
         SighupReloadPlan {
             baseline_runtime: current,
             desired,
+            honor_redrive: crate::reload::HonorRedrive::default(),
         },
         None,
         live_uds.as_ref(),
@@ -7026,6 +7028,248 @@ async fn dataset_swap_refreshes_a_peer_whose_import_chain_is_unknown() {
             > refreshes,
         "the swap refreshes the peer"
     );
+    harness.shutdown().await;
+}
+
+/// The SIGHUP re-drive sends the honor command again with the knob
+/// unchanged. Only the peer still behind the snapshot is retargeted; the peer
+/// the first fan-out reached gets no session command or state query. A
+/// re-drive that fails again names the peer again, and once nothing is behind
+/// a re-drive touches no peer and leaves the snapshot alone.
+#[tokio::test]
+async fn honor_redrive_retargets_only_the_peer_left_behind() {
+    let prior = export_knob_group_config(2);
+    let mut harness = GenerationHarness::new(&prior);
+    let stale: IpAddr = "10.0.1.1".parse().unwrap();
+    let applied: IpAddr = "10.0.1.2".parse().unwrap();
+    let stale_chain = harness.mgr.peers[&key(stale)].import_policy.clone();
+    harness.counters[&stale]
+        .drop_import_replies
+        .store(2, Ordering::SeqCst);
+    let failed_peers = |partial: &rustbgpd_api::peer_types::HonorKnobPartial| {
+        partial
+            .failed
+            .iter()
+            .map(|(peer, _)| peer.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let partial = harness
+        .mgr
+        .set_honor_blackhole(true)
+        .await
+        .expect_err("the dropped import reply leaves one peer behind");
+    assert_eq!(failed_peers(&partial), vec![key(stale)]);
+    let honored = harness.mgr.peers[&key(applied)].import_policy.clone();
+    assert_ne!(honored, stale_chain);
+    let applied_queries = harness.counters[&applied]
+        .state_queries
+        .load(Ordering::SeqCst);
+
+    let again = harness
+        .mgr
+        .set_honor_blackhole(true)
+        .await
+        .expect_err("a re-drive that fails again names the peer again");
+    assert_eq!(failed_peers(&again), vec![key(stale)]);
+    assert_eq!(harness.mgr.peers[&key(stale)].import_policy, stale_chain);
+
+    harness
+        .mgr
+        .set_honor_blackhole(true)
+        .await
+        .expect("the re-drive heals the peer once its session answers");
+    assert_eq!(harness.mgr.peers[&key(stale)].import_policy, honored);
+    assert_eq!(
+        harness.counters[&applied]
+            .import_installs
+            .load(Ordering::SeqCst),
+        1,
+        "the peer the first fan-out reached is not reinstalled"
+    );
+    assert_eq!(
+        harness.counters[&applied]
+            .state_queries
+            .load(Ordering::SeqCst),
+        applied_queries,
+        "a settled peer gets no session round trip"
+    );
+
+    let snapshot = harness.mgr.current_config.clone();
+    let stale_installs = harness.counters[&stale]
+        .import_installs
+        .load(Ordering::SeqCst);
+    harness.mgr.set_honor_blackhole(true).await.unwrap();
+    assert_eq!(
+        harness.counters[&stale]
+            .import_installs
+            .load(Ordering::SeqCst),
+        stale_installs
+    );
+    assert_eq!(harness.mgr.current_config, snapshot);
+    harness.shutdown().await;
+}
+
+/// A peer left behind and then deleted, or whose config changed so a
+/// generation already retargeted it, leaves nothing for the re-drive: it
+/// succeeds and touches no peer.
+#[tokio::test]
+async fn honor_redrive_after_the_peer_is_deleted_or_reconfigured_is_clean() {
+    for deleted in [true, false] {
+        let prior = export_knob_group_config(2);
+        let mut harness = GenerationHarness::new(&prior);
+        let stale: IpAddr = "10.0.1.1".parse().unwrap();
+        let applied: IpAddr = "10.0.1.2".parse().unwrap();
+        harness.counters[&stale]
+            .drop_import_replies
+            .store(1, Ordering::SeqCst);
+        harness
+            .mgr
+            .set_honor_graceful_shutdown(true)
+            .await
+            .expect_err("the dropped import reply leaves one peer behind");
+
+        let mut candidate = remove_private_as_candidate(&harness.mgr.current_config);
+        if deleted {
+            candidate
+                .neighbors
+                .retain(|neighbor| neighbor.address != stale.to_string());
+        }
+        let outcome = harness.apply(&candidate).await;
+        let ReloadGenerationOutcome::Applied(_) = outcome else {
+            panic!("deleted={deleted}: {outcome:?}");
+        };
+        assert_eq!(harness.mgr.peers.contains_key(&key(stale)), !deleted);
+        let installs: Vec<u32> = [stale, applied]
+            .iter()
+            .map(|peer| {
+                harness.counters[peer]
+                    .import_installs
+                    .load(Ordering::SeqCst)
+            })
+            .collect();
+
+        harness
+            .mgr
+            .set_honor_graceful_shutdown(true)
+            .await
+            .unwrap_or_else(|partial| panic!("deleted={deleted}: {partial}"));
+        assert_eq!(
+            [stale, applied]
+                .iter()
+                .map(|peer| harness.counters[peer]
+                    .import_installs
+                    .load(Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            installs,
+            "deleted={deleted}"
+        );
+        harness.shutdown().await;
+    }
+}
+
+/// A peer that took the honored chain but still owes its Route Refresh is
+/// retargeted by the re-drive through the pending refresh alone: no chain is
+/// reinstalled, and the owed refresh is delivered.
+#[tokio::test]
+async fn honor_redrive_delivers_an_owed_route_refresh() {
+    let prior = export_knob_group_config(2);
+    let mut harness = GenerationHarness::new(&prior);
+    let owed: IpAddr = "10.0.1.1".parse().unwrap();
+    harness.counters[&owed]
+        .drop_state_after
+        .store(1, Ordering::SeqCst);
+    let partial = harness
+        .mgr
+        .set_honor_graceful_shutdown(true)
+        .await
+        .expect_err("a lost state query leaves the refresh owed");
+    assert_eq!(partial.failed.len(), 1);
+    assert_eq!(partial.failed[0].1, "route refresh owed");
+    assert!(harness.mgr.peers[&key(owed)].pending_refresh);
+    let installs = harness.counters[&owed]
+        .import_installs
+        .load(Ordering::SeqCst);
+    let refreshes = harness.counters[&owed]
+        .route_refreshes
+        .load(Ordering::SeqCst);
+
+    harness.counters[&owed]
+        .drop_state_after
+        .store(0, Ordering::SeqCst);
+    harness
+        .mgr
+        .set_honor_graceful_shutdown(true)
+        .await
+        .expect("the re-drive delivers the owed refresh");
+    assert!(!harness.mgr.peers[&key(owed)].pending_refresh);
+    assert_eq!(
+        harness.counters[&owed]
+            .import_installs
+            .load(Ordering::SeqCst),
+        installs,
+        "the installed chain already matches"
+    );
+    assert_eq!(
+        harness.counters[&owed]
+            .route_refreshes
+            .load(Ordering::SeqCst),
+        refreshes + 1
+    );
+    harness.shutdown().await;
+}
+
+/// A generation keeps a member's installed RPOL chains when only unused
+/// source sets moved. An owed re-drive normalizes the same way, so it leaves
+/// those members untouched instead of reinstalling and refreshing them.
+#[tokio::test]
+async fn honor_redrive_keeps_chains_the_generation_retained() {
+    let fixture = generated_filter_fixture();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    std::fs::copy(
+        fixture.dir.path().join("gen-b.rpol"),
+        fixture.dir.path().join("member.rpol"),
+    )
+    .unwrap();
+    let candidate = fixture.load();
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::Applied(_) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let stable: IpAddr = "127.1.0.4".parse().unwrap();
+    let managed = &harness.mgr.peers[&key(stable)];
+    assert_ne!(managed.remote_asn, harness.mgr.local_asn, "an EBGP member");
+    let resolved = candidate
+        .resolve_neighbor(&candidate.neighbors[3])
+        .unwrap()
+        .export_policy;
+    assert_ne!(
+        managed.export_policy, resolved,
+        "the generation retained a structurally different chain"
+    );
+    let counts = |harness: &GenerationHarness| -> Vec<(u32, u32, u32)> {
+        harness
+            .counters
+            .values()
+            .map(|counters| {
+                (
+                    counters.import_installs.load(Ordering::SeqCst),
+                    counters.export_installs.load(Ordering::SeqCst),
+                    counters.route_refreshes.load(Ordering::SeqCst),
+                )
+            })
+            .collect()
+    };
+    let before = counts(&harness);
+
+    let enabled = harness.mgr.current_config.global.honor_blackhole;
+    harness
+        .mgr
+        .set_honor_blackhole(enabled)
+        .await
+        .expect("nothing is behind");
+    assert_eq!(counts(&harness), before);
     harness.shutdown().await;
 }
 

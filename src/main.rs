@@ -7366,6 +7366,9 @@ async fn run<T>(
     // Wall-clock and CLOCK_MONOTONIC start of the active reload.
     let mut active_sighup_started: Option<(SystemTime, u64)> = None;
     let mut active_sighup_trace: Option<SighupReloadTraceHandle> = None;
+    // Honor-knob steps the last acknowledged reload left known-partial; the
+    // next reload, plain or coalesced follow-up, re-drives them.
+    let mut honor_redrive = reload::HonorRedrive::default();
     // Set only by the peer-manager supervision arm, which consumes the
     // JoinHandle; the coordinated teardown below must not join it twice.
     let mut peer_mgr_exited = false;
@@ -7527,20 +7530,25 @@ async fn run<T>(
             } => {
                 reload_in_flight = None;
                 metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
+                let settled_trace = active_sighup_trace
+                    .take()
+                    .map(|trace| trace.lock().expect("SIGHUP trace poisoned").clone());
                 if let (Some((started, started_monotonic)), Some(trace)) =
-                    (active_sighup_started.take(), active_sighup_trace.take())
+                    (active_sighup_started.take(), &settled_trace)
                 {
-                    let trace = trace.lock().expect("SIGHUP trace poisoned").clone();
                     publish_last_sighup(
                         &last_sighup_reload,
                         rustbgpd_api::proto::SighupReloadRecord {
                             started_monotonic_micros: started_monotonic,
-                            ..last_sighup_record(started, &outcome, &trace)
+                            ..last_sighup_record(started, &outcome, trace)
                         },
                     );
                 }
                 match outcome {
                     Ok(Ok(authority)) => {
+                        if let Some(trace) = &settled_trace {
+                            honor_redrive = honor_redrive.after(&authority.completion, trace);
+                        }
                         match &authority.completion {
                             reload::SighupCompletion::Complete => {}
                             reload::SighupCompletion::KnownPartial { failures } => warn!(
@@ -7699,6 +7707,7 @@ async fn run<T>(
                         SighupReloadPlan {
                             baseline_runtime: snapshot,
                             desired,
+                            honor_redrive,
                         },
                         live_tcp.as_ref(),
                         live_uds.as_ref(),
@@ -10372,6 +10381,34 @@ mod tests {
         assert_eq!(
             sighup_reload_metric_outcome(&task_failed),
             SighupReloadMetricOutcome::TaskFailed
+        );
+    }
+
+    /// The SIGHUP lane settles the honor re-drive debt from each acknowledged
+    /// outcome and hands it to the next reload plan, plain or coalesced.
+    /// Dropping either line silently disables the re-drive.
+    #[test]
+    fn sighup_lane_carries_the_honor_redrive_debt() {
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        assert!(
+            production
+                .contains("honor_redrive = honor_redrive.after(&authority.completion, trace);"),
+            "the settlement arm must update the debt from the acknowledged outcome"
+        );
+        let plans: Vec<&str> = production
+            .match_indices("SighupReloadPlan {")
+            .map(|(at, _)| {
+                &production[at..production[at..]
+                    .find('}')
+                    .map_or(production.len(), |end| at + end)]
+            })
+            .collect();
+        assert_eq!(plans.len(), 1, "one SIGHUP plan construction");
+        assert!(
+            plans[0].contains("honor_redrive,"),
+            "the reload plan must carry the debt: {}",
+            plans[0]
         );
     }
 

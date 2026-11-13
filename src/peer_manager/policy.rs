@@ -4988,9 +4988,9 @@ impl PeerManager {
         &mut self,
         enabled: bool,
     ) -> Result<(), HonorKnobPartial> {
-        if self.current_config.global.honor_graceful_shutdown == enabled {
-            return Ok(());
-        }
+        // An unchanged value is a re-drive: retarget only the peers still
+        // behind the snapshot, and leave the snapshot itself alone.
+        let redrive = self.current_config.global.honor_graceful_shutdown == enabled;
 
         // Best-effort fan-out: precompute every EBGP peer's resolved chains
         // against the *new* snapshot, advance the snapshot unconditionally,
@@ -5000,9 +5000,10 @@ impl PeerManager {
         // `?`-shortcircuit shape produced and is hard to debug
         // operationally. A failed peer keeps its installed chains (they
         // advance only on session acknowledgement); the reply names it so
-        // the reload receipt is known-partial. Nothing retries it on its
-        // own: the next generation-route reload re-resolves every live
-        // peer and retargets those whose installed chains differ.
+        // the reload receipt is known-partial. The SIGHUP lane carries that
+        // receipt into the next sequential SIGHUP, which re-sends this
+        // command with the unchanged value (the re-drive below); a
+        // generation-route reload re-resolves every live peer itself.
         //
         // Resolution failures are also non-fatal at the per-peer scope:
         // if a single neighbor's effective chain can't be resolved
@@ -5036,7 +5037,7 @@ impl PeerManager {
             let chains = next_config
                 .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
                 .map(|resolved| (resolved.import, resolved.export));
-            let (import_policy, export_policy) = match chains {
+            let (mut import_policy, mut export_policy) = match chains {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -5048,6 +5049,21 @@ impl PeerManager {
                     continue;
                 }
             };
+            if redrive {
+                // Normalize as the generation does, so a chain it retained is
+                // settled here too instead of being reinstalled.
+                super::generation::retain_installed_policy(
+                    managed.import_policy.as_ref(),
+                    &mut import_policy,
+                );
+                super::generation::retain_installed_policy(
+                    managed.export_policy.as_ref(),
+                    &mut export_policy,
+                );
+                if managed.policy_settled(import_policy.as_ref(), export_policy.as_ref()) {
+                    continue;
+                }
+            }
             if let Err(e) = self
                 .update_runtime_policies_for_peer_key(
                     peer_key.clone(),
@@ -5067,7 +5083,7 @@ impl PeerManager {
                     peer = %address,
                     error = %e,
                     "honor_graceful_shutdown: failed to hot-apply on peer — desired snapshot \
-                     advances anyway; the next generation-route reload retargets it"
+                     advances anyway; the next SIGHUP retargets it"
                 );
                 failures.push((peer_key, format!("hot-apply: {e}")));
             } else if self.honor_refresh_owed(&peer_key) {
@@ -5084,8 +5100,10 @@ impl PeerManager {
         // alternative (shortcircuit on first failure with no rollback)
         // leaves successfully-updated peers running ahead of the
         // snapshot, which is the worse drift.
-        self.replace_current_config(next_config);
-        self.reconcile_stale_dynamic_max_prefix_restarts();
+        if !redrive {
+            self.replace_current_config(next_config);
+            self.reconcile_stale_dynamic_max_prefix_restarts();
+        }
 
         if failures.is_empty() {
             info!(
@@ -5105,9 +5123,9 @@ impl PeerManager {
         &mut self,
         enabled: bool,
     ) -> Result<(), HonorKnobPartial> {
-        if self.current_config.global.honor_blackhole == enabled {
-            return Ok(());
-        }
+        // An unchanged value is a re-drive: retarget only the peers still
+        // behind the snapshot, and leave the snapshot itself alone.
+        let redrive = self.current_config.global.honor_blackhole == enabled;
 
         let mut next_config = self.current_config.clone();
         next_config.global.honor_blackhole = enabled;
@@ -5137,7 +5155,7 @@ impl PeerManager {
             let chains = next_config
                 .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
                 .map(|resolved| (resolved.import, resolved.export));
-            let (import_policy, export_policy) = match chains {
+            let (mut import_policy, mut export_policy) = match chains {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -5149,6 +5167,21 @@ impl PeerManager {
                     continue;
                 }
             };
+            if redrive {
+                // Normalize as the generation does, so a chain it retained is
+                // settled here too instead of being reinstalled.
+                super::generation::retain_installed_policy(
+                    managed.import_policy.as_ref(),
+                    &mut import_policy,
+                );
+                super::generation::retain_installed_policy(
+                    managed.export_policy.as_ref(),
+                    &mut export_policy,
+                );
+                if managed.policy_settled(import_policy.as_ref(), export_policy.as_ref()) {
+                    continue;
+                }
+            }
             if let Err(e) = self
                 .update_runtime_policies_for_peer_key(
                     peer_key.clone(),
@@ -5168,7 +5201,7 @@ impl PeerManager {
                     peer = %address,
                     error = %e,
                     "honor_blackhole: failed to hot-apply on peer — desired snapshot \
-                     advances anyway; the next generation-route reload retargets it"
+                     advances anyway; the next SIGHUP retargets it"
                 );
                 failures.push((peer_key, format!("hot-apply: {e}")));
             } else if self.honor_refresh_owed(&peer_key) {
@@ -5180,8 +5213,10 @@ impl PeerManager {
             }
         }
 
-        self.replace_current_config(next_config);
-        self.reconcile_stale_dynamic_max_prefix_restarts();
+        if !redrive {
+            self.replace_current_config(next_config);
+            self.reconcile_stale_dynamic_max_prefix_restarts();
+        }
 
         if failures.is_empty() {
             info!(
