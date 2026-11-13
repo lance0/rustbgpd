@@ -419,18 +419,21 @@ async fn catch_panic<F: Future>(future: F) -> Option<F::Output> {
         // Unwind safety: the panicked future is never polled again, and its
         // locals (the stream, the staged transaction and its record charge)
         // were dropped by the unwind. What outlives it is the `RtrClient`
-        // the future borrowed, used only by `restart_after_panic`. Its
-        // fields may hold values from an End of Data whose update was not
-        // delivered:
-        // - `epoch`: cleared by the restart, so the next query is a Reset
-        //   Query.
-        // - `held_records` and `held_charge`: an over-count at worst; the
-        //   full table that answers the Reset Query replaces both.
-        // - `refresh_interval`, `retry_interval`, `expire_interval`: the
-        //   cache's own advertised timers, each already bounded; the retry
-        //   sleep is capped at the expiry instant whatever their relation.
-        // - `last_end_of_data_at` and `data_expires_at`: see
-        //   `restart_after_panic`.
+        // the future borrowed, used only by `restart_after_panic`.
+        // `commit_end_of_data` changes its End of Data state immediately
+        // before the update is sent, so:
+        // - `held_records`, `last_end_of_data_at`, `data_expires_at` and
+        //   `epoch` describe data the manager was sent. The restart clears
+        //   `epoch` regardless, so the next query is a Reset Query.
+        // - `refresh_interval`, `retry_interval`, `expire_interval` (and the
+        //   expire observer's gauge) can be from an undelivered End of Data
+        //   only if the expire observer itself panicked. They are the
+        //   cache's own advertised timers, each already bounded, and the
+        //   retry sleep is capped at the expiry instant whatever their
+        //   relation.
+        // - `held_charge` (legacy channel only) can then hold the
+        //   undelivered transaction's charge: a miscount that the full
+        //   table answering the Reset Query replaces.
         // - `negotiated_version`, `negotiation_complete`, `v2_reprobe_at`:
         //   connection state that every new connection attempt re-derives.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx)))
@@ -720,18 +723,14 @@ impl RtrClient {
     /// Recover from a panic in a connection attempt or session, whose
     /// stream the unwind already closed. The held data and its expiry
     /// instant are kept, exactly as for a dropped connection. The epoch is
-    /// not: the panic may have struck after the epoch advanced but before
-    /// its update reached the manager, so only a full table is known to
-    /// match what the manager holds.
+    /// not: a full table is the one response known to match what the
+    /// manager holds, whatever the panic interrupted.
     ///
-    /// End of Data sets the expiry instant before it sends the update, so
-    /// data that reached the manager always has a deadline. The cost is one
-    /// window: a panic after the instant is set and before the send leaves
-    /// the previous data held under the new End of Data's deadline, up to
-    /// one expire interval past its own. The other order would be worse: a
-    /// panic after the send would leave delivered data with the older
-    /// deadline, or with none after a first End of Data, and data with no
-    /// deadline is never flushed.
+    /// The expiry instant always belongs to data the manager was sent.
+    /// [`Self::commit_end_of_data`] sets it immediately before the update is
+    /// sent, with nothing that can panic in between, so a panic cannot leave
+    /// an undelivered End of Data's deadline on the previous data, and
+    /// delivered data never lacks a deadline.
     async fn restart_after_panic(&mut self) {
         error!(
             server = %self.config.server_addr,
@@ -1173,6 +1172,34 @@ impl RtrClient {
             self.retry_interval = floor;
         }
         self.observe_expire();
+    }
+
+    /// Record a complete, validated End of Data: its timers, the held record
+    /// count, the data's expiry instant and the epoch, advanced as one unit.
+    ///
+    /// The caller sends the update as its very next step. Nothing between
+    /// the expiry assignment here and that send can panic, so a panic never
+    /// leaves undelivered data's deadline on the previously delivered data;
+    /// and the assignment still comes first, so delivered data always has a
+    /// deadline. The expire observer, the only foreign code, runs before any
+    /// of the state below changes.
+    fn commit_end_of_data(
+        &mut self,
+        (refresh, retry, expire): (u32, u32, u32),
+        held_records: usize,
+        session_id: u16,
+        serial: u32,
+    ) {
+        self.apply_eod_timers(refresh, retry, expire);
+        self.held_records = held_records;
+        let now = TokioInstant::now();
+        self.last_end_of_data_at = Some(now);
+        self.data_expires_at = Some(now + self.expire_interval);
+        self.epoch = Some(CacheEpoch {
+            version: self.negotiated_version,
+            session_id,
+            serial,
+        });
     }
 
     /// Clamp one End of Data timer to its §6 maximum, warning with both
@@ -1675,7 +1702,7 @@ impl RtrClient {
                             // A full table replaces the held count, a delta
                             // adds to it. The charge leaves the transaction
                             // with the update below.
-                            self.held_records = if is_reset {
+                            let held_records = if is_reset {
                                 reservation.announced()
                             } else {
                                 self.held_records + reservation.announced()
@@ -1693,18 +1720,6 @@ impl RtrClient {
                                 drop(std::mem::take(&mut aspa_withdrawn));
                                 charge.release_withdrawn();
                             }
-                            self.apply_eod_timers(refresh, retry, expire);
-                            let now = TokioInstant::now();
-                            self.last_end_of_data_at = Some(now);
-                            self.data_expires_at = Some(now + self.expire_interval);
-                            // The transaction is complete and validated:
-                            // advance the epoch as one unit.
-                            self.epoch = Some(CacheEpoch {
-                                version: self.negotiated_version,
-                                session_id,
-                                serial,
-                            });
-
                             let aspa_count = aspa_announced.len() + aspa_withdrawn.len();
                             let update = if is_reset {
                                 info!(
@@ -1744,7 +1759,7 @@ impl RtrClient {
                                 );
                             }
 
-                            if let Some(handle) = &self.enhanced_tx {
+                            if self.enhanced_tx.is_some() {
                                 let update = match update {
                                     VrpUpdate::FullTable {
                                         server,
@@ -1782,7 +1797,13 @@ impl RtrClient {
                                         unreachable!("End of Data never emits ServerDown")
                                     }
                                 };
-                                let _ = handle.0.send(update).await;
+                                self.commit_end_of_data(
+                                    (refresh, retry, expire),
+                                    held_records,
+                                    session_id,
+                                    serial,
+                                );
+                                self.send_enhanced(update).await;
                             } else {
                                 // The legacy channel cannot carry the
                                 // charge, so the client keeps it, and its
@@ -1792,6 +1813,12 @@ impl RtrClient {
                                     Some(held) if !is_reset => held.absorb(charge),
                                     held => *held = Some(charge),
                                 }
+                                self.commit_end_of_data(
+                                    (refresh, retry, expire),
+                                    held_records,
+                                    session_id,
+                                    serial,
+                                );
                                 let _ = self.vrp_tx.send(update).await;
                             }
                             return Ok(());
