@@ -1761,6 +1761,10 @@ fn group_build_row_checkpoint(readiness: &Option<Arc<ReplacementReadinessContext
 /// recovery ledger release.
 const EVPN_RECOVERY_RETIRE: &str = "evpn_recovery_retire";
 
+/// [`counted_checkpoint`] stage: one prefix a conditional-advertisement
+/// condition rescan visits, in a range walk or in the per-prefix observation.
+const CONDITION_SCAN_ROW: &str = "condition_scan_row";
+
 /// Classify only the current helper callback, never a remembered stage or ordinal.
 #[expect(clippy::ref_option, reason = "cleanup borrows its existing owner")]
 fn replacement_readiness_cleanup_checkpoint(
