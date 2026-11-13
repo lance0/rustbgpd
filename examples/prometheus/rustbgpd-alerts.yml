@@ -665,6 +665,23 @@ groups:
             bgp_rib_readiness_query_wait_seconds for the seam; restart only if
             the work is not finishing.
 
+      - alert: BgpManagementServerRestarted
+        # The daemon restarts its metrics/readiness HTTP server in place
+        # instead of exiting. The counter is served by the server that
+        # restarted, so it rises only once that server is back; while it is
+        # down the signal is the failed scrape (`up == 0`).
+        expr: increase(bgp_management_server_restarts_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.server }} server restarted on {{ $labels.instance }}"
+          description: >-
+            bgp_management_server_restarts_total{server="{{ $labels.server }}"}
+            on {{ $labels.instance }} increased in the last 15 minutes: the
+            server ended on its own and the daemon restarted it in place.
+            BGP sessions and routes are not affected. The daemon ERROR log
+            names the cause; repeated restarts back off to 30 seconds.
+
       - alert: BgpSystemdWatchdogPingsSkipped
         # Each increment is a liveness sample in which PeerManager or the RIB
         # gave no answer, or a ping the notify socket refused. A silent actor

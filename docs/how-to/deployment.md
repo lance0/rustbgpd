@@ -631,10 +631,12 @@ Notes on the sandbox:
   `prometheus_addr` health listener cannot bind, or any configured gRPC
   listener cannot bind. An unexpected gRPC server,
   RIB manager, peer manager, RPKI subsystem task, BGP listener task, inbound
-  accept-forwarding task, metrics/readiness server, or injection lease expiry
+  accept-forwarding task, or injection lease expiry
   task exit instead runs the
   coordinated peer teardown before exit 1. These components are not respawned in place; the supervisor is the
-  recovery path.
+  recovery path. The metrics/readiness server is the exception: the daemon
+  restarts it in place and keeps BGP running (see
+  [Metrics/readiness server exits unexpectedly](../reference/operations.md#metricsreadiness-server-exits-unexpectedly)).
   Exit 70 is also a failure: it is the runtime-config settlement watchdog's
   fail-stop recovery request and must remain restartable. `RestartSec=5`
   retries a transient failure, while `StartLimitBurst=5` and
