@@ -543,13 +543,14 @@ SIGHUP again (or run `rbgp reload`). After a `known_partial` honor step, each
 later sequential-route SIGHUP, including the follow-up reload for a SIGHUP
 coalesced during another reload, runs that step again with the unchanged knob
 value. The re-drive retargets only the EBGP peers whose installed chains
-differ from the running config or that still owe a Route Refresh or export
-apply; every other peer gets no session command. The step is then receipted
-applied once those peers acknowledge, or `known_partial` again, naming each
-peer still behind. A peer deleted in the meantime is no longer retried. A
-reload rejected before any effect, or one that stops before its honor step,
-leaves the retry owed for the next SIGHUP; a `complete` receipt clears it.
-The retry is held in daemon memory, and a restart reapplies every peer anyway.
+differ from the running config or are unknown, or that still owe a Route
+Refresh or export apply; every other peer gets no session command. The step
+is then receipted applied once those peers acknowledge, or `known_partial`
+again, naming each peer still behind. A peer deleted in the meantime is no
+longer retried. Only a run of the step settles the retry: a reload rejected
+before any effect, one that stops before its honor step, and one that takes
+the generation route all leave it owed for the next sequential SIGHUP. The
+retry is held in daemon memory, and a restart reapplies every peer anyway.
 
 These also retarget a left-behind peer:
 

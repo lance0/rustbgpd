@@ -327,15 +327,19 @@ pub(crate) struct HonorRedrive {
 }
 
 impl HonorRedrive {
-    /// The re-drive still owed after an acknowledged reload. A complete
-    /// receipt converged every peer: its honor step ran clean, or a
-    /// generation re-resolved every live peer. In a known-partial receipt, a
-    /// step that ran is owed exactly when it named failures, and a step that
-    /// never ran (an earlier step stopped the reload) keeps its prior debt.
-    /// A rejected or fenced reload has no runtime effect; keep the prior value.
+    /// The re-drive still owed after an acknowledged reload. Only a run of
+    /// the step settles it: a step that ran is owed exactly when it named
+    /// failures. A step that never ran keeps its prior debt, whether an
+    /// earlier step stopped the reload or the reload took the generation
+    /// route. A generation can settle `complete` while it skips a dynamic
+    /// peer whose chains do not resolve, so its receipt does not prove the
+    /// honor tail reached every peer; the next re-drive leaves settled peers
+    /// untouched. A rejected or fenced reload has no runtime effect; keep the
+    /// prior value.
     pub(crate) fn after(self, completion: &SighupCompletion, trace: &SighupReloadTrace) -> Self {
-        let SighupCompletion::KnownPartial { failures } = completion else {
-            return Self::default();
+        let failures: &[ReloadStepFailure] = match completion {
+            SighupCompletion::Complete => &[],
+            SighupCompletion::KnownPartial { failures } => failures,
         };
         let owed = |bucket: &'static str, prior: bool| {
             if failures.iter().any(|failure| failure.bucket == bucket) {
@@ -4142,10 +4146,14 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             Err(outcome) => return *outcome,
         };
         working_config.global.honor_graceful_shutdown = enabled;
-        info!(
-            enabled,
-            "reload: [global] honor_graceful_shutdown hot-applied"
-        );
+        if honor_graceful_shutdown_changed {
+            info!(
+                enabled,
+                "reload: [global] honor_graceful_shutdown hot-applied"
+            );
+        } else {
+            info!("reload: [global] honor_graceful_shutdown re-drove the EBGP peers left behind");
+        }
     }
     if honor_blackhole_step {
         let enabled = new_config.global.honor_blackhole;
@@ -4164,7 +4172,11 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             Err(outcome) => return *outcome,
         };
         working_config.global.honor_blackhole = enabled;
-        info!(enabled, "reload: [global] honor_blackhole hot-applied");
+        if honor_blackhole_changed {
+            info!(enabled, "reload: [global] honor_blackhole hot-applied");
+        } else {
+            info!("reload: [global] honor_blackhole re-drove the EBGP peers left behind");
+        }
     }
 
     // 6b. [[fib_tables]] hot-apply. Unlike the honor knobs above, FIB programs
@@ -7601,34 +7613,45 @@ hold_time = 90
         }
     }
 
-    /// A known-partial reload stopped before its honor step keeps the debt;
-    /// one whose step ran clean clears it; a complete one clears everything.
+    /// Only a run of the honor step settles its debt. A reload stopped before
+    /// the step keeps it, and so does a generation, complete or partial for
+    /// an unrelated reason: a generation can skip an unresolvable dynamic
+    /// peer and still settle complete. A step that ran clean clears it.
     #[test]
     fn honor_redrive_follows_only_steps_that_ran() {
         let owed = HonorRedrive {
             graceful_shutdown: true,
             blackhole: true,
         };
-        let stopped_early = SighupCompletion::KnownPartial {
+        let partial = |bucket: &'static str| SighupCompletion::KnownPartial {
             failures: vec![ReloadStepFailure {
-                bucket: "neighbors.reconcile",
+                bucket,
                 target: "10.0.0.2".to_string(),
                 error: ReloadStepError::Rejected("down".to_string()),
             }],
         };
-        let mut trace = SighupReloadTrace::default();
-        assert_eq!(owed.after(&stopped_early, &trace), owed);
-        trace.applied(HONOR_BLACKHOLE_BUCKET, "[global]");
+        let mut generation = SighupReloadTrace::default();
+        generation.applied("generation.apply", "[config]");
+        for (completion, trace) in [
+            (partial("neighbors.reconcile"), SighupReloadTrace::default()),
+            (SighupCompletion::Complete, generation.clone()),
+            (partial("listener_auth.withdraw"), generation),
+        ] {
+            assert_eq!(owed.after(&completion, &trace), owed, "{completion:?}");
+        }
+        let mut ran = SighupReloadTrace::default();
+        ran.applied(HONOR_BLACKHOLE_BUCKET, "[global]");
+        let blackhole_settled = HonorRedrive {
+            graceful_shutdown: true,
+            blackhole: false,
+        };
         assert_eq!(
-            owed.after(&stopped_early, &trace),
-            HonorRedrive {
-                graceful_shutdown: true,
-                blackhole: false,
-            }
+            owed.after(&partial("neighbors.reconcile"), &ran),
+            blackhole_settled
         );
         assert_eq!(
-            owed.after(&SighupCompletion::Complete, &SighupReloadTrace::default()),
-            HonorRedrive::default()
+            owed.after(&SighupCompletion::Complete, &ran),
+            blackhole_settled
         );
     }
 

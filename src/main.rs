@@ -10310,6 +10310,34 @@ mod tests {
         );
     }
 
+    /// The SIGHUP lane settles the honor re-drive debt from each acknowledged
+    /// outcome and hands it to the next reload plan, plain or coalesced.
+    /// Dropping either line silently disables the re-drive.
+    #[test]
+    fn sighup_lane_carries_the_honor_redrive_debt() {
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        assert!(
+            production
+                .contains("honor_redrive = honor_redrive.after(&authority.completion, trace);"),
+            "the settlement arm must update the debt from the acknowledged outcome"
+        );
+        let plans: Vec<&str> = production
+            .match_indices("SighupReloadPlan {")
+            .map(|(at, _)| {
+                &production[at..production[at..]
+                    .find('}')
+                    .map_or(production.len(), |end| at + end)]
+            })
+            .collect();
+        assert_eq!(plans.len(), 1, "one SIGHUP plan construction");
+        assert!(
+            plans[0].contains("honor_redrive,"),
+            "the reload plan must carry the debt: {}",
+            plans[0]
+        );
+    }
+
     #[test]
     fn sighup_coalesced_records_one_bounded_row() {
         let metrics = BgpMetrics::new();

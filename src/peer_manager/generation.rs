@@ -114,7 +114,8 @@ impl AppliedEffects {
     }
 }
 
-/// Ignore unused RPOL source tables only at generation resolution. Keep the
+/// Ignore unused RPOL source tables only at generation resolution (and in the
+/// honor-knob re-drive, which must agree with it on settled peers). Keep the
 /// installed evaluation handle and counters; the candidate config still owns
 /// its complete source/catalog. Compiling mixed/TOML chains can discard source
 /// distinctions. Local/loop guards and collapsed set aliases also keep their
@@ -123,7 +124,10 @@ impl AppliedEffects {
     clippy::too_many_lines,
     reason = "one exhaustive comparison over every action and guard kind; splitting it would hide a missed variant"
 )]
-fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Option<PolicyChain>) {
+pub(super) fn retain_installed_policy(
+    installed: Option<&PolicyChain>,
+    candidate: &mut Option<PolicyChain>,
+) {
     let (Some(installed), Some(next)) = (installed, candidate.as_ref()) else {
         return;
     };

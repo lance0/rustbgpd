@@ -5037,7 +5037,7 @@ impl PeerManager {
             let chains = next_config
                 .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
                 .map(|resolved| (resolved.import, resolved.export));
-            let (import_policy, export_policy) = match chains {
+            let (mut import_policy, mut export_policy) = match chains {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -5049,8 +5049,20 @@ impl PeerManager {
                     continue;
                 }
             };
-            if redrive && managed.policy_settled(import_policy.as_ref(), export_policy.as_ref()) {
-                continue;
+            if redrive {
+                // Normalize as the generation does, so a chain it retained is
+                // settled here too instead of being reinstalled.
+                super::generation::retain_installed_policy(
+                    managed.import_policy.as_ref(),
+                    &mut import_policy,
+                );
+                super::generation::retain_installed_policy(
+                    managed.export_policy.as_ref(),
+                    &mut export_policy,
+                );
+                if managed.policy_settled(import_policy.as_ref(), export_policy.as_ref()) {
+                    continue;
+                }
             }
             if let Err(e) = self
                 .update_runtime_policies_for_peer_key(
@@ -5143,7 +5155,7 @@ impl PeerManager {
             let chains = next_config
                 .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
                 .map(|resolved| (resolved.import, resolved.export));
-            let (import_policy, export_policy) = match chains {
+            let (mut import_policy, mut export_policy) = match chains {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -5155,8 +5167,20 @@ impl PeerManager {
                     continue;
                 }
             };
-            if redrive && managed.policy_settled(import_policy.as_ref(), export_policy.as_ref()) {
-                continue;
+            if redrive {
+                // Normalize as the generation does, so a chain it retained is
+                // settled here too instead of being reinstalled.
+                super::generation::retain_installed_policy(
+                    managed.import_policy.as_ref(),
+                    &mut import_policy,
+                );
+                super::generation::retain_installed_policy(
+                    managed.export_policy.as_ref(),
+                    &mut export_policy,
+                );
+                if managed.policy_settled(import_policy.as_ref(), export_policy.as_ref()) {
+                    continue;
+                }
             }
             if let Err(e) = self
                 .update_runtime_policies_for_peer_key(

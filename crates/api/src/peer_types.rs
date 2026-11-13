@@ -404,8 +404,9 @@ pub enum OwnedDampeningControlOutcome {
     Ambiguous(PeerLifecycleError),
 }
 
-/// A best-effort honor-knob fan-out that installed the new knob value in the
-/// peer manager's snapshot but left some EBGP peers on their prior chains.
+/// A best-effort honor-knob fan-out, a knob change or a re-drive, that left
+/// some EBGP peers behind. The knob value is installed in the peer manager's
+/// snapshot either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HonorKnobPartial {
     /// EBGP peers the fan-out targeted.
@@ -418,7 +419,7 @@ impl std::fmt::Display for HonorKnobPartial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} of {} EBGP peers failing (snapshot advanced anyway)",
+            "{} of {} EBGP peers failing (the knob value is installed)",
             self.failed.len(),
             self.targeted
         )?;
