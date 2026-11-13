@@ -69,6 +69,7 @@ check-fast:
     cargo fmt --all -- --check
     rustfmt --check --edition 2024 crates/*/fuzz/fuzz_targets/*.rs
     python3 -m unittest -v scripts/test_build_lock.py
+    python3 -m unittest -v scripts/test_hook_once.py
     python3 -m unittest -v scripts/test_run_ci_steps.py
     python3 -m unittest -v scripts/test_check_ci_scale_split_contract.py
     python3 scripts/check_ci_scale_split_contract.py
