@@ -4857,6 +4857,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .unsupported_sections
             .push("[global].honor_blackhole".to_string());
     }
+    if diff.dynamic_neighbor_limit_changed {
+        class
+            .unsupported_sections
+            .push("[global].dynamic_neighbor_limit (apply via SIGHUP reload)".to_string());
+    }
     if diff.evpn_runtime_change_class.is_reload_applied() {
         class
             .unsupported_sections
