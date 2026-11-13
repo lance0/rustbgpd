@@ -933,14 +933,14 @@ pub(crate) mod tests {
 
     fn metrics_server_crashes(metrics: &BgpMetrics) -> u64 {
         let families = metrics.registry().gather();
-        let family = families
+        let row = families
             .iter()
             .find(|family| family.name() == "bgp_management_server_crashes_total")
+            .unwrap()
+            .get_metric()
+            .iter()
+            .find(|row| row.get_label()[0].value() == "metrics")
             .unwrap();
-        let [row] = family.get_metric() else {
-            panic!("expected the one seeded server row");
-        };
-        assert_eq!(row.get_label()[0].value(), "metrics");
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
