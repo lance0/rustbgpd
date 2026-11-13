@@ -28,7 +28,7 @@ bug — file an issue.
 |---|---|
 | **live** | Change applies in place on SIGHUP or a supported runtime CRUD RPC without requiring a replacement session task. Enforcement of the new setting can still stop BGP, such as a lowered prefix limit exceeded by the current route count. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()`. |
 | **reload-applied** | Change hot-applies to a running subsystem reconciler or derived matcher on SIGHUP / supported runtime CRUD, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem or snapshot consumer **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler) and `[[dynamic_neighbors]]` matcher rebuilds. Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
-| **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload and visible in `rustbgpd --diff` until restart. |
+| **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload. Until restart, `rbgp config diff /etc/rustbgpd/config.toml` still lists it, because the running snapshot keeps the pinned value. `rustbgpd --diff` compares two files, so it shows the change only before the new file is installed. |
 | **coordinator-gated** | EVPN runtime tables: supported shapes hot-apply through the ADR-0063 coordinator, and the runtime snapshot advances only after the daemon actors accept the change; unsupported shapes pin back to the committed model (see the EVPN section below). |
 
 These classes describe accepted changes. A candidate that fails parse-time
@@ -791,7 +791,15 @@ rbgp reload
 # …or signal without waiting, then read the receipt
 systemctl reload rustbgpd   # or: kill -HUP $(pidof rustbgpd)
 rbgp config last-reload
+
+# After the reload: compare the installed file against the running config.
+# Restart-required edits stay listed here until the next restart.
+rbgp config diff /etc/rustbgpd/config.toml
 ```
+
+The two diff commands use different exit codes. `rustbgpd --diff` exits 0
+for no actionable changes, 1 for actionable changes and 2 for a load error.
+`rbgp config diff` exits 0 for no changes, 2 for changes and 1 for an error.
 
 A SIGHUP that arrives while a reload is running is coalesced into one
 follow-up reload that re-reads the file after the running reload settles; see
