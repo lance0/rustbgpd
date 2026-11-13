@@ -1679,6 +1679,20 @@ impl PeerManager {
         }
     }
 
+    /// Whether the walk that owns the actor holds the end of `peer`'s
+    /// session task: the peer has no session and is retired when the walk
+    /// ends.
+    pub(super) fn owned_walk_holds_task_exit(&self, peer: &PeerKey) -> bool {
+        let Some(session) = self.peers.get(peer).map(ManagedPeer::session_id) else {
+            return false;
+        };
+        self.owned_walk.as_ref().is_some_and(|walk| {
+            walk.held.iter().any(|held| {
+                matches!(held, SessionNotification::TaskExited { session_id, .. } if *session_id == session)
+            })
+        })
+    }
+
     /// Serve the events a long policy walk would otherwise hold until it
     /// ends, at a seam between two of its units: BFD state changes and due
     /// BFD command retries, link changes and link-check retries, session

@@ -507,6 +507,138 @@ async fn dynamic_idle_mid_walk_is_held_until_the_walk_has_rolled_back() {
     }
 }
 
+/// E-4, a real task exit: a dynamic peer's session task ends mid-walk and
+/// its retirement is held, so the peer stays in the table with no session.
+/// The walk treats it as a known-down peer: it carries the chains and owes
+/// no session step. A later failure restores every peer exactly; a walk
+/// that reaches the peer after its task ended commits. Neither waits out a
+/// session deadline, and the peer is retired once the walk has ended.
+///
+/// LOAD-BEARING: a session step sent to the ended task fails, so the
+/// forward walk rolls back and the rollback, which cannot reassert the
+/// prior chain either, is ambiguous.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds the crashing session, the scripted RIB and both outcomes"
+)]
+async fn dynamic_task_exit_mid_walk_owes_no_session_step() {
+    for fail_later in [true, false] {
+        let Lab {
+            mut mgr,
+            mut rib_rx,
+            peers,
+            ..
+        } = lab(2);
+        let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+        let dynamic_session = 50;
+        let (crash, crashed) = oneshot::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+        let exit = SessionTaskExitNotice::new(
+            Some(mgr.session_notify_tx.clone()),
+            SessionIdentity::primary(dynamic_session),
+            dynamic,
+        );
+        insert_test_dynamic_managed_peer(
+            &mut mgr,
+            dynamic,
+            dynamic_session,
+            walk_session(
+                dynamic,
+                Arc::default(),
+                Some((exit, crashed, Arc::clone(&exited))),
+            ),
+            true,
+            IpAddr::V4(Ipv4Addr::new(10, 42, 9, 0)),
+            24,
+            "dynamic",
+        );
+        // Rollback: the dynamic peer's unit commits, its task ends during
+        // the second unit and the third is refused. Forward: its task ends
+        // during the first unit, before the walk reaches it.
+        let (order, crash_at, refuse_at) = if fail_later {
+            ([dynamic, peers[0], peers[1]], 2, 3)
+        } else {
+            ([peers[0], dynamic, peers[1]], 1, 0)
+        };
+        let rib = tokio::spawn(async move {
+            let mut commands = 0;
+            let mut crash = Some(crash);
+            while let Some(update) = rib_rx.recv().await {
+                if !is_walk_command(&update) {
+                    answer(update);
+                    continue;
+                }
+                commands += 1;
+                if commands == crash_at {
+                    // The exit notice is queued before the unit's reply.
+                    crash.take().unwrap().send(()).unwrap();
+                    set(&exited).await;
+                }
+                match update {
+                    RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
+                        if commands == refuse_at =>
+                    {
+                        let _ = reply.send(Err(RibCommandError::internal("refused")));
+                    }
+                    update => answer(update),
+                }
+            }
+        });
+        let targets = distinct_targets(&order);
+        let candidate = targets
+            .iter()
+            .find(|target| target.address == dynamic)
+            .unwrap()
+            .export_policy
+            .clone();
+        let started = tokio::time::Instant::now();
+        let result = mgr
+            .apply_resolved_policy_snapshot_classified(targets, true)
+            .await;
+        assert!(
+            started.elapsed() < PEER_POLICY_UPDATE_TIMEOUT,
+            "fail_later={fail_later}: the walk waited {:?} on the ended session",
+            started.elapsed()
+        );
+        let expected = if fail_later {
+            let failure = result.expect_err("the third batch is refused");
+            assert_eq!(
+                failure.kind,
+                PolicySnapshotFailureKind::FullyCompensated,
+                "{} ({})",
+                failure.message(),
+                failure.code.as_str()
+            );
+            None
+        } else {
+            assert!(
+                result.is_ok(),
+                "{:?}",
+                result.err().map(|failure| failure.message().to_owned())
+            );
+            candidate
+        };
+        assert_eq!(
+            mgr.peers[&key(dynamic)].export_policy,
+            expected,
+            "fail_later={fail_later}: the walk does not retire a peer it captured"
+        );
+
+        let held = mgr
+            .session_notify_rx
+            .try_recv()
+            .expect("the held notification is back on the channel");
+        mgr.handle_session_notification(held).await;
+        assert!(
+            !mgr.peers.contains_key(&key(dynamic)),
+            "fail_later={fail_later}: retired after the walk"
+        );
+        drop(mgr);
+        rib.await.unwrap();
+    }
+}
+
 /// E-5, flood: a seam serves at most the per-kind budget of session
 /// notifications, the rest stay queued, and the walk commits.
 ///

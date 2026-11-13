@@ -4529,6 +4529,23 @@ impl PeerManager {
         // that flapped in between. Rollback applies are exempt: restoring a prior
         // chain is best-effort by contract and must never be blocked by the state
         // that made the forward apply fail.
+        // The walk holds the end of this peer's session task: no session is
+        // left to install a chain or to refresh, and the peer is retired
+        // when the walk ends, its RIB state going with its `PeerDown`. It
+        // carries the chains as a known-down peer does and owes nothing.
+        if self.owned_walk_holds_task_exit(&peer_key)
+            && let Some(managed) = self.peers.get_mut(&peer_key)
+        {
+            managed.import_policy = import_policy;
+            managed.export_policy = export_policy;
+            managed.import_install_unknown = false;
+            managed.export_install_unknown = false;
+            managed.pending_refresh = false;
+            managed.pending_export_apply = false;
+            managed.policy_known_down = true;
+            return Ok(());
+        }
+
         let rfc8212_fatal_transition = matches!(refresh_failure, RefreshFailureHandling::Fatal)
             && self.rfc8212_import_presence_transition(&peer_key, import_policy.as_ref());
         // True only for the Established case: that peer's `AdjRibIn` holds
