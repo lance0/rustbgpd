@@ -429,7 +429,11 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   300s, reset on ManualStart. Unlike RFC 4271 §8.2.2, a ConnectRetryTimer
   expiry in Connect (a dial that got no answer) increments the
   ConnectRetryCounter, so a peer that silently drops SYNs backs off like one
-  that refuses them. A refused dial first gets two 1s retries.
+  that refuses them. A dial whose connect attempt times out first (the
+  connect timeout or the kernel's SYN retries) raises no
+  TcpConnection_Fails; the session waits in Connect for the timer, so the
+  curve stays monotonic up to the cap. A refused dial, an RST or an
+  unreachable route is TcpConnection_Fails and first gets two 1s retries.
 - Jitter (RFC 4271 §10): the ConnectRetryTimer and the transport's Idle
   reconnect wait are multiplied by a factor drawn uniformly from 0.75 to 1.0
   each time they are set, the RFC's suggested default. The range is fixed.
@@ -440,7 +444,10 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   (sent or received, including an OPEN exchange that ends in one), or by the
   peer dropping TCP without a NOTIFICATION in OpenConfirm or Established,
   doubles the Idle reconnect wait from `connect_retry_secs`, capped at 300s and
-  never below the configured interval. The streak clears after the session
+  never below the configured interval. Only the NOTIFICATION teardowns in
+  the streak hold the neighbor's inbound connections (from the second), so
+  a TCP drop never refuses an inbound-only or restarting peer. The streak
+  clears after the session
   stays Established for five minutes, on an explicit operator enable while
   the session is in Idle, or on an administrative reset. Local closes without
   a NOTIFICATION (an operator drain, fast external failover) keep the

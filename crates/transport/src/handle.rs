@@ -1309,9 +1309,8 @@ pub struct PeerSessionState {
     /// Seconds until the next automatic reconnect attempt while the session
     /// waits in Idle after an unplanned teardown (0 when none is pending).
     pub reconnect_in_secs: u64,
-    /// Consecutive NOTIFICATION teardowns and peer-side TCP losses in the
-    /// current reconnect-backoff streak. Each one doubles the deferred
-    /// reconnect wait.
+    /// Consecutive NOTIFICATION teardowns in the current reconnect-backoff
+    /// streak. Each one doubles the deferred reconnect wait.
     pub notification_idle_failures: u32,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,

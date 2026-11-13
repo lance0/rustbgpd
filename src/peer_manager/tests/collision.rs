@@ -3703,15 +3703,9 @@ async fn replacement_names_the_last_session_the_rib_registered() {
         ),
         false,
     );
-    let (_first, _first_tx) = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
+    let (first, _first_tx) = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
     let registered = mgr.peers[&key(peer_addr)].session_id();
-    // An operator reset ends the first session, so with one later peer drop
-    // the reconnect streak stays below the inbound hold.
-    mgr.peers[&key(peer_addr)]
-        .handle()
-        .administrative_reset_timeout(None, Duration::from_secs(5))
-        .await
-        .unwrap();
+    drop(first);
     handle_until_primary_idle(&mut mgr).await;
 
     // Replacement 2 reaches OpenConfirm, then its connection closes: it
@@ -4420,15 +4414,9 @@ async fn pending_collision_candidate_does_not_register_before_promotion() {
 async fn unregistered_promoted_candidate_preserves_the_replacement_chain() {
     let (mut mgr, _rib_tx, mut rib_rx) = replacement_residual_manager(SessionState::Active);
     let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let (_first, _tx) = establish_inbound(&mut mgr, &mut rib_rx, peer.address).await;
+    let (first, _tx) = establish_inbound(&mut mgr, &mut rib_rx, peer.address).await;
     let registered = mgr.peers[&peer].session_id();
-    // An operator reset ends the first session, so with one later peer drop
-    // the reconnect streak stays below the inbound hold.
-    mgr.peers[&peer]
-        .handle()
-        .administrative_reset_timeout(None, Duration::from_secs(5))
-        .await
-        .unwrap();
+    drop(first);
     let idle = residual_notification(&mut mgr, registered, true).await;
     mgr.handle_session_notification(idle).await;
 
