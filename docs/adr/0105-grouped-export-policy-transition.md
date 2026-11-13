@@ -221,6 +221,37 @@ paced command that applies or skips its last mover, by the rollback restore,
 or by the next forward batch, whichever comes first. The first limit above (rollback is one turn over the whole list) remains, and
 so does the remainder's one-member-per-command walk under its own budget.
 
+**Amended:** 2026-11-13 — the authoritative remainder batches each export
+pair that two or more of its peers share. PeerManager still selects one
+cohort for the clean transition. In the remainder it now groups the peers
+that pass the cohort's local eligibility check by `(installed, target)`
+export pair, in first-occurrence order. A peer whose pair is its own, a peer
+with retry intent, an RFC 8212 presence transition (ADR-0112: its Route
+Refresh follows its RIB step immediately) and every peer of a snapshot that
+names a peer twice keep the per-peer path in section 4 unchanged. For a
+shared pair, the caller-order walk runs only the session legs of each member
+(both hot-applies, the state probe, the bail rules) and defers the RIB step
+of every member it observed Established. After the walk, each pair is sent
+as one `ReplacePeerExportPoliciesAuthoritatively` batch followed by its paced
+walk, the entry point the cohort handoff uses, so the RIB shares the
+destination build and the old-to-new delta across the pair. One RIB turn
+therefore carries the shared cohorts of one export pair, which is more than
+one cohort when the pair's members sit in several source groups, or the
+members the paced budget admits. Every RIB command of the remainder,
+per-peer or batched, shares the transaction's one forward budget, anchored at
+its first RIB command. Once every pair has committed, the deferred Route
+Refreshes run in walk order through the step the cohort uses: the session is
+probed again, a positively known-down peer owes no refresh, and a failed
+refresh is fatal. Between its session leg and its batch a member's session
+holds the new chain while the RIB holds the old one, the window cohort
+members already have. Any failure (a session leg, a batch or paced command,
+budget expiry, a deferred refresh) restores every captured prior, remainder
+then cohort. A member whose batch was never sent still holds its prior chain
+in the RIB, so its rollback restores the session and bookkeeping only; a
+member of a batch that was sent, whatever its reply, is in the restore batch.
+The limit that remains: peers with pairwise distinct export changes
+still cost one full-table RIB command each under the two-minute budget.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

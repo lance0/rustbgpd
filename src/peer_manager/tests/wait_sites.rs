@@ -429,7 +429,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ExportRestored,
     },
     WaitSite {
-        site: "policy.rs::try_apply_export_only_policy_cohort",
+        site: "policy.rs::dispatch_deferred_refresh",
         awaits: "PeerCommand::QueryState before the deferred Route Refresh (non-clean reload)",
         drive: Drive::ForwardCohort {
             import_delta: true,

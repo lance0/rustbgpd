@@ -432,17 +432,21 @@ impl GenerationHarness {
 /// Use the same emitted A/B policy files as the mixed dual-stack filtering
 /// measurement, with three changed members and one stable member.
 fn generated_filter_fixture() -> RsFixture {
+    generated_scenario_fixture("4", "3", &[("GEN_FILTER_COUNT", "1")])
+}
+
+fn generated_scenario_fixture(peers: &str, changed: &str, env: &[(&str, &str)]) -> RsFixture {
     let dir = tempfile::tempdir().unwrap();
     let output = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/bench/scale/reloadstall/gen-scenario.py"
         ))
-        .arg("4")
+        .arg(peers)
         .arg(dir.path())
-        .args(["1790", "3"])
+        .args(["1790", changed])
         .env("GEN_DUALSTACK", "1")
-        .env("GEN_FILTER_COUNT", "1")
+        .envs(env.iter().copied())
         .env_remove("GEN_IBGP_RR_ASN")
         .env_remove("GEN_TRIP_MAX_PREFIXES")
         .env_remove("GEN_TRIP_RESTART_SECONDS")
@@ -707,6 +711,61 @@ async fn generated_filter_noop_hot_update_and_late_rollback_preserve_installed_p
         harness.shutdown().await;
         relay.await.unwrap();
     }
+}
+
+/// Generation compensation re-applies the prior chains as a forward
+/// snapshot, so it pays the same remainder walk. With the changed peers on
+/// two export pairs, the pair the cohort did not take costs one RIB command
+/// in each direction, not one per member, and the generation still ends
+/// `FullyCompensated`.
+#[tokio::test]
+async fn compensated_generation_batches_the_remainder_pair_in_both_directions() {
+    let fixture = generated_scenario_fixture("5", "4", &[("GEN_EXPORT_PAIRS", "2")]);
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (rib_commands, relay) = record_generation_policy_commands(&mut harness);
+    let remainder: Vec<IpAddr> = ["127.1.0.3", "127.1.0.4"]
+        .map(|peer| peer.parse().unwrap())
+        .to_vec();
+    std::fs::copy(
+        fixture.dir.path().join("gen-b.rpol"),
+        fixture.dir.path().join("member.rpol"),
+    )
+    .unwrap();
+    let mut candidate = fixture.load();
+    // A session replacement that fails after the policy step forces the
+    // compensating replay of every prior chain.
+    candidate.neighbors[4].hold_time = Some(60);
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("127.1.0.5".parse().unwrap()), 0);
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    let replaces: Vec<Vec<IpAddr>> = rib_commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(kind, _)| *kind == "replace")
+        .map(|(_, peers)| peers.clone())
+        .collect();
+    assert_eq!(
+        replaces
+            .iter()
+            .filter(|peers| peers.iter().any(|peer| remainder.contains(peer)))
+            .collect::<Vec<_>>(),
+        vec![&remainder, &remainder],
+        "the remainder pair takes one RIB command forward and one in compensation: {replaces:?}"
+    );
+    for changed in ["127.1.0.1", "127.1.0.2", "127.1.0.3", "127.1.0.4"] {
+        assert_eq!(harness.export_installs(changed), 2);
+    }
+    harness.shutdown().await;
+    relay.await.unwrap();
 }
 
 #[tokio::test]

@@ -210,6 +210,11 @@ struct CapturedResolvedPolicy {
     /// an apply are the carried `PeerUp` intent, not
     /// convergence debt, and it owes no Route Refresh to this transaction.
     known_down: bool,
+    /// The forward walk deferred this peer's RIB step and failed before
+    /// sending it, so the RIB provably still holds the prior export chain and
+    /// the rollback has no RIB step to restore. A step that was sent, even
+    /// one whose reply was lost, leaves this false.
+    rib_step_never_sent: bool,
 }
 
 /// Why a forward policy apply failed, plus the one fact the rollback cannot
@@ -425,6 +430,10 @@ struct PolicySnapshotContext {
     operator_reads: OperatorReadAdmission,
 }
 
+/// One peer's policy apply, stopped after its session legs and before its RIB
+/// step. A rollback plans every peer this way; the forward remainder walk
+/// plans the Established peers that share an export pair, so that their RIB
+/// steps run as one batch.
 struct PolicyRollbackPeerPlan {
     peer_key: PeerKey,
     export_restore: Option<(Option<PolicyChain>, bool)>,
@@ -1525,9 +1534,141 @@ impl PeerManager {
             .then_some((&managed.export_policy, &target.export_policy))
     }
 
-    /// Apply targets one at a time in their supplied order. This is the
-    /// authoritative transaction used for an unpartitioned snapshot and for a
-    /// partition's stable remainder. It never recursively selects a cohort.
+    /// For each target, the index of the `(installed, target)` export pair it
+    /// shares with at least one other target, numbered by first occurrence;
+    /// `None` for a target whose pair is its own, or that is not locally
+    /// eligible for a batched RIB step (see
+    /// [`Self::local_export_only_policy_pair`]). A snapshot naming a peer
+    /// twice shares nothing: its replacements are order-dependent.
+    fn shared_export_pairs(&self, targets: &[ResolvedPeerPolicy]) -> Vec<Option<usize>> {
+        let mut seen = BTreeSet::new();
+        if targets
+            .iter()
+            .any(|target| !seen.insert(PeerKey::new(target.address, target.interface.clone())))
+        {
+            return vec![None; targets.len()];
+        }
+        // (representative target, members)
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        let pair_of: Vec<Option<usize>> = targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let pair = self.local_export_only_policy_pair(target)?;
+                let known = pairs.iter().position(|(representative, _)| {
+                    self.local_export_only_policy_pair(&targets[*representative]) == Some(pair)
+                });
+                let known = known.unwrap_or_else(|| {
+                    pairs.push((index, 0));
+                    pairs.len() - 1
+                });
+                pairs[known].1 += 1;
+                Some(known)
+            })
+            .collect();
+        pair_of
+            .into_iter()
+            .map(|pair| pair.filter(|&pair| pairs[pair].1 >= 2))
+            .collect()
+    }
+
+    /// Unwind a failed authoritative walk: restore every captured prior and
+    /// classify the failure by whether that restore was exact.
+    async fn fail_authoritative_walk(
+        &mut self,
+        applied: Vec<CapturedResolvedPolicy>,
+        context: &mut PolicySnapshotContext,
+        require_clean_convergence: bool,
+        address: IpAddr,
+        apply_error: &PolicyApplyFailure,
+    ) -> PolicySnapshotFailure {
+        match self
+            .restore_resolved_policies(applied, context, require_clean_convergence)
+            .await
+        {
+            Ok(()) => PolicySnapshotFailure::compensated_code(
+                apply_error.code,
+                format!(
+                    "failed to apply resolved policy to {address}: {apply_error}; \
+                     already-applied peers restored"
+                ),
+            ),
+            Err(restore_error) => PolicySnapshotFailure::ambiguous_code(
+                restore_error.code,
+                format!(
+                    "failed to apply resolved policy to {address}: {apply_error}; \
+                     restoring already-applied peers also failed: {restore_error}"
+                ),
+            ),
+        }
+    }
+
+    /// The deferred RIB steps of the authoritative walk: one batch per shared
+    /// export pair, in first-occurrence order, under the transaction's forward
+    /// budget. On failure, returns the pair that failed, one of its members'
+    /// addresses and the failure.
+    async fn apply_planned_export_pairs(
+        &mut self,
+        planned: &[(usize, usize, PolicyRollbackPeerPlan)],
+        context: &mut PolicySnapshotContext,
+    ) -> Result<(), (usize, IpAddr, PolicyApplyFailure)> {
+        let mut pairs: Vec<usize> = planned.iter().map(|(pair, _, _)| *pair).collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        for pair in pairs {
+            let members = || planned.iter().filter(move |(member, _, _)| *member == pair);
+            let peer_keys: Vec<PeerKey> = members()
+                .map(|(_, _, plan)| plan.peer_key.clone())
+                .collect();
+            let replacements: Vec<PeerExportPolicyReplacement> = members()
+                .map(|(_, _, plan)| PeerExportPolicyReplacement {
+                    peer: self.rib_peer_of(&plan.peer_key),
+                    export_policy: plan
+                        .export_restore
+                        .as_ref()
+                        .and_then(|(export_policy, _)| export_policy.clone()),
+                })
+                .collect();
+            let deadline = context.forward.deadline();
+            self.apply_export_policy_replacements_authoritatively(
+                &peer_keys,
+                &replacements,
+                deadline,
+                context,
+            )
+            .await
+            .map_err(|message| {
+                (
+                    pair,
+                    peer_keys[0].address,
+                    PolicyApplyFailure {
+                        code: RuntimeConfigPolicyFailureCode::RibApplyRejected,
+                        message,
+                        refresh_delivery_began: false,
+                    },
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Apply targets in their supplied order. This is the authoritative
+    /// transaction used for an unpartitioned snapshot and for a partition's
+    /// stable remainder. It never recursively selects a cohort.
+    ///
+    /// A target whose export pair is its own is applied whole, one peer at a
+    /// time: session legs, its `ReplacePeerExportPolicy` RIB step, its Route
+    /// Refresh. Established targets that share an export pair run only their
+    /// session legs in that walk. Their RIB steps then go, one pair at a
+    /// time, through the batch entry point the cohort handoff uses, so the
+    /// RIB shares the destination build and the old-to-new delta across the
+    /// pair instead of resyncing a full table per member; their Route
+    /// Refreshes follow once every pair has committed. Every RIB command of
+    /// the walk shares the transaction's forward budget.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the walk keeps prior capture, the session legs, the deferred RIB steps and their refreshes in one rollback owner"
+    )]
     async fn apply_resolved_policy_snapshot_authoritatively(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
@@ -1535,9 +1676,12 @@ impl PeerManager {
         require_clean_convergence: bool,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
+        let pair_of = self.shared_export_pairs(&targets);
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
-        for target in targets {
+        // Deferred RIB steps: (export pair, index into `applied`, plan).
+        let mut planned: Vec<(usize, usize, PolicyRollbackPeerPlan)> = Vec::new();
+        for (target, pair) in targets.into_iter().zip(pair_of) {
             let peer_key = PeerKey::new(target.address, target.interface.clone());
             let prior = {
                 let Some(managed) = self.peers.get(&peer_key) else {
@@ -1555,17 +1699,19 @@ impl PeerManager {
                     pending_export_apply: managed.pending_export_apply,
                     adj_rib_in_may_have_moved: false,
                     known_down: managed.policy_known_down,
+                    rib_step_never_sent: false,
                 }
             };
             applied.push(prior);
             let applied_idx = applied.len() - 1;
+            let mut plan = None;
             if let Err(apply_error) = self
                 .update_runtime_policies_for_peer_key(
                     peer_key.clone(),
                     target.import_policy.clone(),
                     target.export_policy.clone(),
                     RefreshFailureHandling::Fatal,
-                    None,
+                    pair.map(|_| &mut plan),
                     require_clean_convergence.then_some(&mut context.clean_state_window),
                     Some(&mut context.forward),
                     context.operator_reads,
@@ -1577,30 +1723,25 @@ impl PeerManager {
                 // peer's rollback owes a refresh back even though its forward
                 // apply did not complete.
                 applied[applied_idx].adj_rib_in_may_have_moved = apply_error.refresh_delivery_began;
-                let restored = std::mem::take(&mut applied);
-                return match self
-                    .restore_resolved_policies(restored, context, require_clean_convergence)
-                    .await
-                {
-                    Ok(()) => Err(PolicySnapshotFailure::compensated_code(
-                        apply_error.code,
-                        format!(
-                            "failed to apply resolved policy to {}: {apply_error}; \
-                             already-applied peers restored",
-                            target.address
-                        ),
-                    )),
-                    Err(restore_error) => Err(PolicySnapshotFailure::ambiguous_code(
-                        restore_error.code,
-                        format!(
-                            "failed to apply resolved policy to {}: {apply_error}; \
-                             restoring already-applied peers also failed: {restore_error}",
-                            target.address
-                        ),
-                    )),
-                };
+                for (_, planned_idx, _) in &planned {
+                    applied[*planned_idx].rib_step_never_sent = true;
+                }
+                return Err(self
+                    .fail_authoritative_walk(
+                        applied,
+                        context,
+                        require_clean_convergence,
+                        target.address,
+                        &apply_error,
+                    )
+                    .await);
             }
-            applied[applied_idx].adj_rib_in_may_have_moved = true;
+            // A planned peer has fired no refresh yet: its flag is set once
+            // its deferred refresh step has run.
+            applied[applied_idx].adj_rib_in_may_have_moved = plan.is_none();
+            if let (Some(pair), Some(plan)) = (pair, plan) {
+                planned.push((pair, applied_idx, plan));
+            }
             // The apply classified the peer from its state query outcome; its verdict is
             // authoritative for the convergence-debt scan and adds no extra
             // session round trip.
@@ -1609,6 +1750,58 @@ impl PeerManager {
                 .get(&peer_key)
                 .is_some_and(|managed| managed.policy_known_down);
             self.drain_operator_queries(context.operator_reads).await;
+        }
+
+        if let Err((failed_pair, address, apply_error)) =
+            self.apply_planned_export_pairs(&planned, context).await
+        {
+            // Pairs after the failed one were never sent. The failed pair
+            // may or may not have moved, so its members are restored.
+            for (pair, planned_idx, _) in &planned {
+                applied[*planned_idx].rib_step_never_sent = *pair > failed_pair;
+            }
+            return Err(self
+                .fail_authoritative_walk(
+                    applied,
+                    context,
+                    require_clean_convergence,
+                    address,
+                    &apply_error,
+                )
+                .await);
+        }
+
+        // The planned peers' Route Refreshes, deferred past their RIB steps
+        // exactly as the cohort defers its members' (same correctness
+        // argument: the session has run the new import chain since its
+        // hot-apply, and the refresh converges `AdjRibIn` once the peer
+        // re-sends).
+        let mut refresh_count = 0;
+        for (_, applied_idx, plan) in &planned {
+            if plan.refresh_failure.is_some()
+                && let Err(apply_error) = self
+                    .dispatch_deferred_refresh(
+                        &plan.peer_key,
+                        context,
+                        require_clean_convergence,
+                        &mut refresh_count,
+                    )
+                    .await
+            {
+                applied[*applied_idx].adj_rib_in_may_have_moved =
+                    apply_error.refresh_delivery_began;
+                let address = plan.peer_key.address;
+                return Err(self
+                    .fail_authoritative_walk(
+                        applied,
+                        context,
+                        require_clean_convergence,
+                        address,
+                        &apply_error,
+                    )
+                    .await);
+            }
+            applied[*applied_idx].adj_rib_in_may_have_moved = true;
         }
         Ok(applied)
     }
@@ -1813,6 +2006,7 @@ impl PeerManager {
                     // compensation does not treat a positively down member as
                     // convergence debt.
                     known_down: managed.policy_known_down,
+                    rib_step_never_sent: false,
                 }
             };
             // LAN-462: hot-apply a changed import chain through the same
@@ -2108,9 +2302,13 @@ impl PeerManager {
                 if prestaged {
                     self.discard_prepared_export_destination(targets[0]).await;
                 }
+                // The cohort's own budget: the remainder walk anchors the
+                // forward budget at its first command, so it is not charged
+                // for this one.
                 self.apply_export_policy_replacements_authoritatively(
                     &peer_keys,
                     &replacements,
+                    tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT,
                     context,
                 )
                 .await
@@ -2155,135 +2353,135 @@ impl PeerManager {
         // unchanged get no refresh at all, exactly as today.
         let deferred_refresh_started = Instant::now();
         for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
-            if !import_deltas[index] {
-                captured[index].adj_rib_in_may_have_moved = true;
-                continue;
-            }
-            let commands = self
-                .peers
-                .get(peer_key)
-                .expect("cohort peer existed before deferred refresh")
-                .handle()
-                .commands_sender();
-            let state = if require_clean_convergence {
-                self.query_clean_session_state(
-                    commands,
-                    &mut context.clean_state_window,
-                    context.operator_reads,
-                )
-                .await
-            } else {
-                self.await_with_readiness(
-                    rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                        commands,
-                        PEER_QUERY_TIMEOUT,
-                    ),
-                    context.operator_reads,
-                )
-                .await
-            };
-            self.drain_readiness_queries().await;
-            if matches!(
-                state,
-                StateQueryOutcome::State(ref state)
-                    if state.fsm_state == SessionState::Established
-            ) {
-                phase_timings.refresh_count += 1;
-                if let Err(failure) = self
-                    .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
+            if import_deltas[index]
+                && let Err(failure) = self
+                    .dispatch_deferred_refresh(
+                        peer_key,
+                        context,
+                        require_clean_convergence,
+                        &mut phase_timings.refresh_count,
+                    )
                     .await
-                {
-                    let error = failure.error;
-                    // Mirror the authoritative path's fatal refresh handling:
-                    // arm `pending_refresh` for the retry pipeline, then unwind
-                    // the snapshot. This member's own refresh failed at the
-                    // refresh step, so — exactly as on the authoritative path —
-                    // an earlier family may already have been requested under
-                    // the candidate chain and its rollback owes a refresh back.
-                    // Later members keep the flag false: their sessions have
-                    // been running the new import chain since the setup
-                    // hot-apply, but no refresh was ever fired for them, so the
-                    // restore's ordinary `import_changed` reassert plus the
-                    // prior pending-flag restore is exact.
-                    if let Some(managed) = self.peers.get_mut(peer_key) {
-                        managed.pending_refresh = true;
-                    }
-                    captured[index].adj_rib_in_may_have_moved = failure.delivery_began;
-                    let rollback = self
-                        .restore_resolved_policies(captured, context, require_clean_convergence)
-                        .await;
-                    return Some(Err(match rollback {
-                        Ok(()) => PolicySnapshotFailure::compensated_code(
-                            RuntimeConfigPolicyFailureCode::RouteRefreshRejected,
-                            format!(
-                                "failed to apply resolved policy to {}: route refresh: {error}; already-applied peers restored",
-                                target.address
-                            ),
-                        ),
-                        Err(restore_error) => PolicySnapshotFailure::ambiguous_code(
-                            restore_error.code,
-                            format!(
-                                "failed to apply resolved policy to {}: route refresh: {error}; restoring already-applied peers also failed: {restore_error}",
-                                target.address
-                            ),
-                        ),
-                    }));
-                }
-            } else if require_clean_convergence {
-                // A positively known-down member's refresh owes nothing to this
-                // transaction: AdjRibIn is empty until PeerUp installs the
-                // accepted session chain. Its pending
-                // flag is carried intent, not debt. Ambiguous observations
-                // (SessionGone / TimedOut) keep failing closed: they cannot
-                // prove the session kept the edit.
-                if matches!(
-                    state,
-                    StateQueryOutcome::State(ref state)
-                        if state.fsm_state != SessionState::Established
-                ) {
-                    captured[index].adj_rib_in_may_have_moved = true;
-                    continue;
-                }
-                let code = match state {
-                    StateQueryOutcome::SessionGone => {
-                        RuntimeConfigPolicyFailureCode::StateSessionGone
-                    }
-                    StateQueryOutcome::TimedOut => {
-                        RuntimeConfigPolicyFailureCode::StateRetryExhausted
-                    }
-                    StateQueryOutcome::State(_) => {
-                        RuntimeConfigPolicyFailureCode::StateNonEstablished
-                    }
-                };
-                if let Some(managed) = self.peers.get_mut(peer_key) {
-                    managed.pending_refresh = true;
-                }
+            {
+                // This member's own refresh failed at the refresh step, so an
+                // earlier family may already have been requested under the
+                // candidate chain and its rollback owes a refresh back. Later
+                // members keep the flag false: their sessions have been
+                // running the new import chain since the setup hot-apply, but
+                // no refresh was ever fired for them, so the restore's
+                // ordinary `import_changed` reassert plus the prior
+                // pending-flag restore is exact.
+                captured[index].adj_rib_in_may_have_moved = failure.refresh_delivery_began;
                 let rollback = self
                     .restore_resolved_policies(captured, context, require_clean_convergence)
                     .await;
                 return Some(Err(match rollback {
                     Ok(()) => PolicySnapshotFailure::compensated_code(
-                        code,
+                        failure.code,
                         format!(
-                            "failed to apply resolved policy to {}: Route Refresh target state was not provably Established; already-applied peers restored",
+                            "failed to apply resolved policy to {}: {failure}; already-applied peers restored",
                             target.address
                         ),
                     ),
                     Err(restore_error) => PolicySnapshotFailure::ambiguous_code(
                         restore_error.code,
                         format!(
-                            "failed to apply resolved policy to {}: Route Refresh target state was not provably Established; restoring already-applied peers also failed: {restore_error}",
+                            "failed to apply resolved policy to {}: {failure}; restoring already-applied peers also failed: {restore_error}",
                             target.address
                         ),
                     ),
                 }));
-            } else if let Some(managed) = self.peers.get_mut(peer_key) {
-                managed.pending_refresh = true;
             }
             captured[index].adj_rib_in_may_have_moved = true;
         }
         phase_timings.deferred_refresh_dispatch_us = elapsed_us(deferred_refresh_started);
         Some(Ok(captured))
+    }
+
+    /// Fire one peer's Route Refresh after the RIB step it was deferred past
+    /// has committed. The session is probed again first, since the RIB step
+    /// may have taken a long time.
+    ///
+    /// A failed refresh arms `pending_refresh` and is fatal, exactly as on
+    /// the per-peer path. A positively known-down peer owes nothing: its
+    /// `AdjRibIn` is empty until `PeerUp` installs the accepted session
+    /// chain. Under `require_clean_convergence` an ambiguous observation
+    /// (`SessionGone` / `TimedOut`) fails closed, as it cannot prove the
+    /// session kept the edit; otherwise a peer that is not Established arms
+    /// `pending_refresh` for the retry pipeline.
+    async fn dispatch_deferred_refresh(
+        &mut self,
+        peer_key: &PeerKey,
+        context: &mut PolicySnapshotContext,
+        require_clean_convergence: bool,
+        refresh_count: &mut usize,
+    ) -> Result<(), PolicyApplyFailure> {
+        let Some(commands) = self
+            .peers
+            .get(peer_key)
+            .map(|managed| managed.handle().commands_sender())
+        else {
+            return Ok(());
+        };
+        let state = if require_clean_convergence {
+            self.query_clean_session_state(
+                commands,
+                &mut context.clean_state_window,
+                context.operator_reads,
+            )
+            .await
+        } else {
+            self.await_with_readiness(
+                rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ),
+                context.operator_reads,
+            )
+            .await
+        };
+        self.drain_readiness_queries().await;
+        let arm_pending_refresh = |manager: &mut Self| {
+            if let Some(managed) = manager.peers.get_mut(peer_key) {
+                managed.pending_refresh = true;
+            }
+        };
+        match state {
+            StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
+                *refresh_count += 1;
+                let Err(failure) = self
+                    .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
+                    .await
+                else {
+                    return Ok(());
+                };
+                arm_pending_refresh(self);
+                Err(PolicyApplyFailure {
+                    code: RuntimeConfigPolicyFailureCode::RouteRefreshRejected,
+                    message: format!("route refresh: {}", failure.error),
+                    refresh_delivery_began: failure.delivery_began,
+                })
+            }
+            StateQueryOutcome::State(_) if require_clean_convergence => Ok(()),
+            StateQueryOutcome::SessionGone | StateQueryOutcome::TimedOut
+                if require_clean_convergence =>
+            {
+                arm_pending_refresh(self);
+                Err(PolicyApplyFailure {
+                    code: if matches!(state, StateQueryOutcome::SessionGone) {
+                        RuntimeConfigPolicyFailureCode::StateSessionGone
+                    } else {
+                        RuntimeConfigPolicyFailureCode::StateRetryExhausted
+                    },
+                    message: "Route Refresh target state was not provably Established".to_string(),
+                    refresh_delivery_began: false,
+                })
+            }
+            _ => {
+                arm_pending_refresh(self);
+                Ok(())
+            }
+        }
     }
 
     /// Fire-and-forget cleanup of a prepared clean-transition destination
@@ -2344,11 +2542,12 @@ impl PeerManager {
     /// paced RIB commands. Each command applies the members that fit the
     /// RIB's turn budget and returns the rest, so other RIB work runs between
     /// commands instead of waiting behind one turn that grows with members ×
-    /// rows. The batch and every command of that walk share one
-    /// `RIB_BATCH_REPLY_TIMEOUT` budget of their own, anchored when the batch
-    /// is sent and never renewed per command; the authoritative remainder
-    /// keeps the transaction's forward budget, anchored at its own first
-    /// command. Any failure, including that budget expiring mid-walk, returns
+    /// rows. The batch and every command of that walk share the caller's
+    /// `deadline`, never renewed per command: a cohort handoff passes one
+    /// `RIB_BATCH_REPLY_TIMEOUT` budget of its own, anchored when the batch
+    /// is sent, and the authoritative remainder passes the transaction's
+    /// forward budget, anchored at its own first command. Any failure,
+    /// including that budget expiring mid-walk, returns
     /// `Err` and the caller restores every captured prior; a peer that left
     /// the RIB comes back skipped, as its reconnect installs the session's
     /// accepted chain.
@@ -2358,12 +2557,10 @@ impl PeerManager {
         &mut self,
         peer_keys: &[PeerKey],
         replacements: &[PeerExportPolicyReplacement],
+        deadline: tokio::time::Instant,
         context: &mut PolicySnapshotContext,
     ) -> Result<(), String> {
         self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
-        // The cohort's own budget: the remainder walk anchors the forward
-        // budget at its first command, so it is not charged for this one.
-        let deadline = tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT;
         let rib_tx = self.rib_tx.clone();
         let batch = async {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -2874,6 +3071,7 @@ impl PeerManager {
                 }
                 continue;
             }
+            let rib_step_never_sent = prior.rib_step_never_sent;
             let refresh_failure = if prior.adj_rib_in_may_have_moved {
                 RefreshFailureHandling::BestEffortRearm
             } else {
@@ -2904,6 +3102,9 @@ impl PeerManager {
                 }
                 Ok(()) => {
                     if let Some(mut plan) = plan {
+                        if rib_step_never_sent {
+                            plan.export_restore = None;
+                        }
                         if !prior.adj_rib_in_may_have_moved {
                             plan.restore_prior_pending =
                                 Some((prior.pending_refresh, prior.pending_export_apply));
@@ -4267,11 +4468,27 @@ impl PeerManager {
         }
 
         let is_rollback = !matches!(refresh_failure, RefreshFailureHandling::Fatal);
-        if let Some(rollback_plan) = rollback_plan {
-            debug_assert!(
-                is_rollback,
-                "rollback planning requires best-effort handling"
-            );
+        if !is_rollback {
+            // A forward walk defers only the RIB step of an Established peer,
+            // and with it the Route Refresh that must follow that step. An
+            // RFC 8212 presence transition keeps both inline (ADR-0112: its
+            // refresh follows its RIB step immediately); every other peer
+            // has no RIB step to defer and finishes below as before.
+            if let Some(rollback_plan) = rollback_plan
+                && needs_export_apply
+                && is_established
+                && !rfc8212_fatal_transition
+            {
+                *rollback_plan = Some(PolicyRollbackPeerPlan {
+                    peer_key,
+                    export_restore: Some((export_policy, true)),
+                    refresh_failure: needs_refresh.then_some(refresh_failure),
+                    is_established,
+                    restore_prior_pending: None,
+                });
+                return Ok(());
+            }
+        } else if let Some(rollback_plan) = rollback_plan {
             if let Some(managed) = self.peers.get_mut(&peer_key) {
                 if needs_refresh {
                     managed.pending_refresh = true;
