@@ -416,6 +416,23 @@ pub struct RtrClient {
 async fn catch_panic<F: Future>(future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|cx| {
+        // Unwind safety: the panicked future is never polled again, and its
+        // locals (the stream, the staged transaction and its record charge)
+        // were dropped by the unwind. What outlives it is the `RtrClient`
+        // the future borrowed, used only by `restart_after_panic`. Its
+        // fields may hold values from an End of Data whose update was not
+        // delivered:
+        // - `epoch`: cleared by the restart, so the next query is a Reset
+        //   Query.
+        // - `held_records` and `held_charge`: an over-count at worst; the
+        //   full table that answers the Reset Query replaces both.
+        // - `refresh_interval`, `retry_interval`, `expire_interval`: the
+        //   cache's own advertised timers, each already bounded; the retry
+        //   sleep is capped at the expiry instant whatever their relation.
+        // - `last_end_of_data_at` and `data_expires_at`: see
+        //   `restart_after_panic`.
+        // - `negotiated_version`, `negotiation_complete`, `v2_reprobe_at`:
+        //   connection state that every new connection attempt re-derives.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx)))
             .map_or(Poll::Ready(None), |poll| poll.map(Some))
     })
@@ -705,8 +722,16 @@ impl RtrClient {
     /// instant are kept, exactly as for a dropped connection. The epoch is
     /// not: the panic may have struck after the epoch advanced but before
     /// its update reached the manager, so only a full table is known to
-    /// match what the manager holds. End of Data sets the expiry instant
-    /// before it sends the update, so delivered data always has one.
+    /// match what the manager holds.
+    ///
+    /// End of Data sets the expiry instant before it sends the update, so
+    /// data that reached the manager always has a deadline. The cost is one
+    /// window: a panic after the instant is set and before the send leaves
+    /// the previous data held under the new End of Data's deadline, up to
+    /// one expire interval past its own. The other order would be worse: a
+    /// panic after the send would leave delivered data with the older
+    /// deadline, or with none after a first End of Data, and data with no
+    /// deadline is never flushed.
     async fn restart_after_panic(&mut self) {
         error!(
             server = %self.config.server_addr,
@@ -6240,7 +6265,19 @@ mod tests {
         // The next table the manager publishes is the resynchronized one:
         // the retained data was neither flushed nor changed in between.
         write_pdus(&mut stream2, &host_prefixes_and_end_of_data(101, &[3, 4])).await;
-        assert_eq!(table_rx.recv().await.unwrap().table.len(), 2);
+        let table = table_rx.recv().await.unwrap().table;
+        let state = |last| {
+            let host = rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, last), 32);
+            table.validate(&rustbgpd_wire::Prefix::V4(host), 65001)
+        };
+        assert_eq!(table.len(), 2);
+        for last in [3, 4] {
+            assert_eq!(state(last), rustbgpd_wire::RpkiValidation::Valid);
+        }
+        // Neither the replaced entry nor the undelivered delta is present.
+        for last in [1, 2] {
+            assert_eq!(state(last), rustbgpd_wire::RpkiValidation::NotFound);
+        }
         assert_eq!(*transitions.lock().unwrap(), [true, false, true]);
 
         client_handle.abort();

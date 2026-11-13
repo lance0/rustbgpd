@@ -12,4 +12,7 @@
   **Operator-visible:** the new `bgp_rpki_rtr_client_restarts_total{cache}`
   counter starts at `0` for each configured cache and counts these restarts;
   each one logs `RTR client panicked; restarting its session with the held
-  data retained` at ERROR and leaves a panic report.
+  data retained` at ERROR and leaves a panic report. A panic at the same
+  source location as the last report the daemon wrote no longer writes another
+  report, so a repeating recovered panic cannot prune older reports;
+  `rbgp doctor` reports any panic report as a recent crash.

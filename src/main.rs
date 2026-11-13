@@ -3876,6 +3876,7 @@ struct PanicReport<'a> {
 /// bundles.
 fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
     let previous = std::panic::take_hook();
+    let last_location = Mutex::new(String::new());
     std::panic::set_hook(Box::new(move |info| {
         let message = info
             .payload()
@@ -3888,6 +3889,10 @@ fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
             .name()
             .unwrap_or("unnamed")
             .to_string();
+        if repeats_last_panic_location(&last_location, &location) {
+            previous(info);
+            return;
+        }
         // Best-effort: a failing report write must never mask the panic.
         let _ = open_state_child_directory(&directory.file, std::ffi::OsStr::new("crash"), true)
             .and_then(|crash| {
@@ -3909,6 +3914,22 @@ fn install_panic_hook(directory: Arc<PinnedRuntimeStateDirectory>) {
             });
         previous(info);
     }));
+}
+
+/// Whether `location` is where this process's previous reported panic was
+/// raised, recording it for the next call. A recovered panic that repeats at
+/// one source location (an RTR client restarting on every retry) then writes
+/// one report instead of pruning every older report out of the directory. An
+/// unknown location never counts as a repeat.
+fn repeats_last_panic_location(last: &Mutex<String>, location: &str) -> bool {
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !location.is_empty() && *last == location {
+        return true;
+    }
+    location.clone_into(&mut last);
+    false
 }
 
 /// Write one panic report and prune the crash directory to the most
@@ -4125,8 +4146,8 @@ const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER
 
 /// Test-only fault injection; never set this in production. The only accepted
 /// values are `rtr_client_panic`, which panics the second connection attempt
-/// of the first cache's RTR client (opened without transport authentication),
-/// and `vrp_manager_panic`; all others are ignored without echoing them.
+/// of the first cache's RTR client, and `vrp_manager_panic`; all others are
+/// ignored without echoing them.
 const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
 
 /// One aggregate budget to abort and account for every RPKI task after the
@@ -5755,15 +5776,25 @@ async fn run<T>(
                 .tcp_ao
                 .as_ref()
                 .map(crate::config::transport_tcp_ao_keyring);
-            let client = if md5_password.is_some() || tcp_ao.is_some() {
+            let authenticated = md5_password.is_some() || tcp_ao.is_some();
+            let injected_dials = (test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClientPanic)
+                && cache_ordinal == 0)
+                .then(|| std::sync::atomic::AtomicUsize::new(0));
+            let client = if authenticated || injected_dials.is_some() {
                 let auth_label = addr.to_string();
-                info!(
-                    server = %addr,
-                    md5 = md5_password.is_some(),
-                    tcp_ao = tcp_ao.is_some(),
-                    "RTR transport authentication configured"
-                );
+                if authenticated {
+                    info!(
+                        server = %addr,
+                        md5 = md5_password.is_some(),
+                        tcp_ao = tcp_ao.is_some(),
+                        "RTR transport authentication configured"
+                    );
+                }
                 client.with_dialer(move |remote| {
+                    if let Some(dials) = &injected_dials {
+                        let dial = dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        assert!(dial != 1, "injected RTR client task panic");
+                    }
                     let md5_password = md5_password.clone();
                     let tcp_ao = tcp_ao.clone();
                     let label = auth_label.clone();
@@ -5782,20 +5813,6 @@ async fn run<T>(
                 client
             };
             info!(server = %addr, "spawning RTR client for RPKI cache");
-            let client = if test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClientPanic)
-                && cache_ordinal == 0
-            {
-                let dials = std::sync::atomic::AtomicUsize::new(0);
-                client.with_dialer(move |remote| {
-                    let dial = dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    async move {
-                        assert!(dial != 1, "injected RTR client task panic");
-                        tokio::net::TcpStream::connect(remote).await
-                    }
-                })
-            } else {
-                client
-            };
             let handle = rpki_tasks.spawn(client.run());
             register_rpki_task_kind(
                 &mut rpki_task_registry,
@@ -11661,6 +11678,32 @@ mod tests {
         // The oldest seeded reports were removed first.
         assert!(!names.contains(&"panic-0000000000-000.toml".to_string()));
         assert!(!names.contains(&"panic-0000000001-000.toml".to_string()));
+    }
+
+    /// The panic hook's report decision: a panic repeating at the location
+    /// of the previous one writes no second report, a panic elsewhere does,
+    /// and so does a return to the first location afterwards.
+    #[test]
+    fn repeated_panic_location_writes_one_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let last = Mutex::new(String::new());
+        let reports = || std::fs::read_dir(dir.path()).unwrap().count();
+        let panic_at = |location: &str| {
+            if !repeats_last_panic_location(&last, location) {
+                write_panic_report(dir.path(), "boom", location, "main").unwrap();
+            }
+        };
+        panic_at("src/a.rs:1:1");
+        panic_at("src/a.rs:1:1");
+        assert_eq!(reports(), 1);
+        panic_at("src/b.rs:2:2");
+        assert_eq!(reports(), 2);
+        panic_at("src/a.rs:1:1");
+        assert_eq!(reports(), 3);
+        // A panic with no location is never taken for a repeat.
+        panic_at("");
+        panic_at("");
+        assert_eq!(reports(), 5);
     }
 
     #[test]
