@@ -6,6 +6,8 @@
 //! [`supervise_grpc_server`] is the gRPC restart loop.
 
 use std::future::Future;
+#[cfg(test)]
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -61,8 +63,9 @@ pub struct ServerRun {
 /// restarting it in place when a run ends on its own.
 ///
 /// `run_server` starts one run (in the daemon, [`crate::server::serve`] with
-/// cloned inputs); a run that returns before it was asked to stop is an
-/// unexpected exit. The first run's startup result goes to `first_startup`,
+/// cloned inputs). Each run is its own task, so a run that panics ends like
+/// one that returns: before it was asked to stop, either is an unexpected
+/// exit. The first run's startup result goes to `first_startup`,
 /// and a first run that cannot start is not retried: a listener that cannot
 /// bind at startup still fails startup. Every later exit or failed start is
 /// logged, counted and retried with capped backoff for as long as it takes.
@@ -89,7 +92,7 @@ pub async fn supervise_grpc_server<F, Fut>(
     mut stop: oneshot::Receiver<()>,
 ) where
     F: FnMut(ServerRun) -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     let mut first_startup = Some(first_startup);
     let mut backoff = RestartBackoff::default();
@@ -103,44 +106,51 @@ pub async fn supervise_grpc_server<F, Fut>(
         let started_at = Instant::now();
         let (run_stop, run_stop_rx) = oneshot::channel();
         let (started, mut started_rx) = oneshot::channel();
-        let run = run_server(ServerRun {
+        // Awaited on every path out of this loop iteration, so no run
+        // outlives the supervisor.
+        let mut run = tokio::spawn(run_server(ServerRun {
             stop: run_stop_rx,
             started,
-        });
-        tokio::pin!(run);
+        }));
         let mut startup_seen = false;
         let mut startup_error = None;
-        loop {
+        let panic = loop {
             tokio::select! {
                 biased;
                 _ = &mut stop => {
                     let _ = run_stop.send(());
-                    run.await;
+                    if let Err(error) = run.await {
+                        error!(%error, "gRPC server panicked while stopping");
+                    }
                     return;
                 }
+                // Before the startup arm: a run can report and end between
+                // two polls, and its report is then read below.
+                ended = &mut run => break ended.err().map(|error| error.to_string()),
                 startup = &mut started_rx, if !startup_seen => {
                     startup_seen = true;
-                    let startup = startup.unwrap_or_else(|_| {
-                        Err("gRPC server exited before reporting listener startup".to_string())
-                    });
-                    if let Some(first_startup) = first_startup.take() {
-                        let failed = startup.is_err();
-                        let _ = first_startup.send(startup);
-                        if failed {
-                            run.await;
+                    match report_startup(startup.ok(), &mut first_startup) {
+                        Startup::FirstFailed => {
+                            let _ = run.await;
                             return;
                         }
-                    } else {
-                        match startup {
-                            Ok(()) => {
-                                gate.set_grpc_server_down(false);
-                                info!("gRPC server restarted");
-                            }
-                            Err(error) => startup_error = Some(error),
+                        Startup::First => {}
+                        Startup::Restarted => {
+                            gate.set_grpc_server_down(false);
+                            info!("gRPC server restarted");
                         }
+                        Startup::RestartFailed(error) => startup_error = Some(error),
                     }
                 }
-                () = &mut run => break,
+            }
+        };
+        if !startup_seen {
+            // The run is over, so its startup result is either already sent
+            // or never will be. A started run that ended is still down.
+            match report_startup(started_rx.try_recv().ok(), &mut first_startup) {
+                Startup::FirstFailed => return,
+                Startup::First | Startup::Restarted => {}
+                Startup::RestartFailed(error) => startup_error = Some(error),
             }
         }
         metrics.record_grpc_server_crash();
@@ -152,6 +162,7 @@ pub async fn supervise_grpc_server<F, Fut>(
         let delay = backoff.next_delay(started_at.elapsed());
         error!(
             ?startup_error,
+            ?panic,
             restart_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             "gRPC server exited unexpectedly; restarting it in place"
         );
@@ -160,6 +171,42 @@ pub async fn supervise_grpc_server<F, Fut>(
             _ = &mut stop => return,
             () = tokio::time::sleep(delay) => {}
         }
+    }
+}
+
+/// What one run's startup report means to the supervisor.
+enum Startup {
+    /// The first run started; the daemon's startup was told.
+    First,
+    /// The first run could not start; the daemon's startup was told and the
+    /// run is not retried.
+    FirstFailed,
+    /// A restarted run has every listener up.
+    Restarted,
+    /// A restarted run could not start its listeners.
+    RestartFailed(String),
+}
+
+/// Classify a run's startup report (`None` when the run ended without
+/// sending one) and pass the first run's on to the daemon's startup.
+fn report_startup(
+    startup: Option<Result<(), String>>,
+    first_startup: &mut Option<oneshot::Sender<Result<(), String>>>,
+) -> Startup {
+    let startup = startup
+        .unwrap_or_else(|| Err("gRPC server exited before reporting listener startup".to_string()));
+    match (first_startup.take(), startup) {
+        (Some(first_startup), startup) => {
+            let failed = startup.is_err();
+            let _ = first_startup.send(startup);
+            if failed {
+                Startup::FirstFailed
+            } else {
+                Startup::First
+            }
+        }
+        (None, Ok(())) => Startup::Restarted,
+        (None, Err(error)) => Startup::RestartFailed(error),
     }
 }
 
@@ -196,11 +243,14 @@ mod tests {
     }
 
     /// One run of the fake server, as the test sees it: the supervisor's
-    /// ends, and the sender whose drop (or send) ends the run.
+    /// ends, and the sender that ends the run. Dropping it returns from the
+    /// run; sending `Panic` panics it.
     struct FakeRun {
         run: ServerRun,
-        end: oneshot::Sender<()>,
+        end: oneshot::Sender<Panic>,
     }
+
+    struct Panic;
 
     struct Harness {
         runs: mpsc::UnboundedReceiver<FakeRun>,
@@ -223,7 +273,7 @@ mod tests {
                 let (end, ended) = oneshot::channel();
                 let _ = runs_tx.send(FakeRun { run, end });
                 async move {
-                    let _ = ended.await;
+                    assert!(ended.await.is_err(), "injected gRPC server panic");
                 }
             },
             first_startup_tx,
@@ -312,6 +362,38 @@ mod tests {
         assert!(!h.gate.grpc_server_down());
     }
 
+    /// A first run that reports a failed start and returns before the
+    /// supervisor polls again is still reported, with its own error, and not
+    /// retried: the daemon's startup is waiting on that report.
+    #[tokio::test(start_paused = true)]
+    async fn a_first_run_that_reports_and_returns_at_once_is_reported_and_not_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = runs.clone();
+        let (first_startup_tx, first_startup) = oneshot::channel();
+        let (_stop, stop_rx) = oneshot::channel();
+        let metrics = BgpMetrics::new();
+        let supervisor = tokio::spawn(supervise_grpc_server(
+            move |run| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let _ = run.started.send(Err("bind failed".to_string()));
+                }
+            },
+            first_startup_tx,
+            metrics.clone(),
+            DaemonGate::new(),
+            stop_rx,
+        ));
+        let reported = tokio::time::timeout(GUARD, first_startup)
+            .await
+            .expect("the daemon's startup must be told");
+        assert_eq!(reported, Ok(Err("bind failed".to_string())));
+        ended(supervisor).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(grpc_crashes(&metrics), 0);
+    }
+
     /// The whole restart: readiness goes red when the run ends, stays red
     /// through the backoff, and clears only when the next run reports its
     /// listeners started.
@@ -343,6 +425,25 @@ mod tests {
         assert_eq!(stop_received(second.run.stop).await, Ok(()));
         drop(second.end);
         ended(h.supervisor).await;
+    }
+
+    /// A run that panics is an unexpected exit like any other: it does not
+    /// take the supervisor with it, and the server is restarted.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_panics_is_counted_and_restarted() {
+        let mut h = harness();
+        let first = h.runs.recv().await.unwrap();
+        first.run.started.send(Ok(())).unwrap();
+        assert!(first.end.send(Panic).is_ok());
+        in_backoff_after(&h.metrics, 1).await;
+        assert!(h.gate.grpc_server_down());
+
+        let second = h.runs.recv().await.expect("the panicked run is restarted");
+        second.run.started.send(Ok(())).unwrap();
+        yield_until(|| !h.gate.grpc_server_down()).await;
+        assert_eq!(grpc_crashes(&h.metrics), 1);
+        assert!(!h.supervisor.is_finished());
+        h.supervisor.abort();
     }
 
     /// A restart whose listeners cannot start is one more crash: readiness
