@@ -12165,7 +12165,24 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
                 });
             });
         } else {
+            manager.replacement_readiness_receipts.clear();
             operation(&mut manager);
+            // Outbound-only teardown involves no policy transition, so each
+            // detached retirement takes the ingest owner.
+            if departing == peer {
+                let owners: Vec<_> = manager
+                    .replacement_readiness_receipts
+                    .iter()
+                    .map(|receipt| receipt.kind)
+                    .collect();
+                assert!(
+                    !owners.is_empty()
+                        && owners
+                            .iter()
+                            .all(|kind| *kind == super::super::ReadinessOwnerKind::Ingest),
+                    "{owners:?}"
+                );
+            }
         }
         manager
     });

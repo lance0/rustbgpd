@@ -830,7 +830,7 @@ fn evpn_member_teardown_answers_readiness_while_releasing_its_recovery_ledger() 
     let small = evpn_member_teardown(4096);
     let large = evpn_member_teardown(32768);
     assert!(
-        small.visited >= 256 / 64 && large.visited >= small.visited + (1024 - 256) / 64,
+        small.visited >= 4096 / 64 && large.visited >= 32768 / 64,
         "the release checkpoints every 64 slots: {small:?} {large:?}"
     );
     for turn in [&small, &large] {
