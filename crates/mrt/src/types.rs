@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,9 @@ pub struct MrtWriterConfig {
     /// Keep at most this many of this writer's dumps; `None` keeps all.
     pub max_files: Option<NonZeroU32>,
     /// Vets the directories above `output_dir` before each dump; an error
-    /// fails the dump. The daemon supplies its runtime-state ancestor rule.
-    pub ancestor_check: Option<fn(&Path) -> std::io::Result<()>>,
+    /// fails the dump. It receives the configured path and the directory
+    /// descriptor the dump will be published and pruned through, which is
+    /// what the check must cover. The daemon supplies its runtime-state
+    /// ancestor rule.
+    pub ancestor_check: Option<fn(&Path, &File) -> std::io::Result<()>>,
 }

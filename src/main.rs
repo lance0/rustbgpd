@@ -463,6 +463,7 @@ impl PinnedRuntimeStateDirectory {
         verify_runtime_state_ancestors(
             "runtime-state directory",
             path,
+            &file,
             geteuid().as_raw(),
             nix::unistd::getegid().as_raw(),
         )?;
@@ -539,40 +540,25 @@ fn open_state_child_directory(
 /// user could rewrite. Runtime writers use the retained descriptor; this
 /// check also keeps durable recovery paths beneath trusted ancestors.
 /// Every directory traversed is checked, sshd `StrictModes` style: those
-/// along the path as written and along its canonical form. Each must be owned
-/// by root or the daemon user, and must not be world-writable, or writable by
-/// a group other than the daemon's, unless it has the sticky bit (as `/tmp`
-/// does). The daemon's own group is trusted as it is for credential files, so
-/// a `umask 002` user-private group stays usable.
+/// along the path as written, and those physically above `pinned`, the
+/// descriptor already opened for it. Walking `..` from the descriptor rather
+/// than resolving the path again keeps the proof on the directory actually
+/// used, even if a symlink in the path is swapped after the open. Each must
+/// be owned by root or the daemon user, and must not be world-writable, or
+/// writable by a group other than the daemon's, unless it has the sticky bit
+/// (as `/tmp` does). The daemon's own group is trusted as it is for
+/// credential files, so a `umask 002` user-private group stays usable.
 fn verify_runtime_state_ancestors(
     role: &str,
     path: &Path,
+    pinned: &File,
     daemon_user: u32,
     daemon_group: u32,
 ) -> Result<(), String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| format!("failed to resolve the current directory: {error}"))?
-            .join(path)
-    };
-    let canonical = std::fs::canonicalize(&absolute)
-        .map_err(|error| format!("failed to resolve {role} {}: {error}", path.display()))?;
-    // `ancestors()` of the directory itself start with the directory; skip
-    // it, as `prepare` already holds it to the stricter owner-only rule.
-    for ancestor in absolute
-        .ancestors()
-        .skip(1)
-        .chain(canonical.ancestors().skip(1))
-    {
-        let metadata = std::fs::metadata(ancestor).map_err(|error| {
-            format!(
-                "failed to inspect {} above {role} {}: {error}",
-                ancestor.display(),
-                path.display()
-            )
-        })?;
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+
+    let check = |metadata: &std::fs::Metadata, ancestor: &dyn std::fmt::Display| {
         let mode = metadata.mode();
         let foreign_owner = metadata.uid() != 0 && metadata.uid() != daemon_user;
         let shared_writable = (mode & 0o002 != 0
@@ -580,26 +566,77 @@ fn verify_runtime_state_ancestors(
             && mode & 0o1000 == 0;
         if foreign_owner || shared_writable {
             return Err(format!(
-                "{role} {} is reachable through {} (uid={}, mode={:o}), which a \
+                "{role} {} is reachable through {ancestor} (uid={}, mode={:o}), which a \
                  user other than root or the daemon user could replace; it must be owned by root \
                  or the daemon user and not writable by others unless sticky",
                 path.display(),
-                ancestor.display(),
                 metadata.uid(),
                 mode & 0o7777
             ));
         }
+        Ok(())
+    };
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("failed to resolve the current directory: {error}"))?
+            .join(path)
+    };
+    // `ancestors()` of the directory itself start with the directory; skip
+    // it, as the caller already holds it to the stricter owner-only rule.
+    for ancestor in absolute.ancestors().skip(1) {
+        let metadata = std::fs::metadata(ancestor).map_err(|error| {
+            format!(
+                "failed to inspect {} above {role} {}: {error}",
+                ancestor.display(),
+                path.display()
+            )
+        })?;
+        check(&metadata, &ancestor.display())?;
+    }
+    let inspect_error = |error: std::io::Error| {
+        format!(
+            "failed to inspect the directories above {role} {}: {error}",
+            path.display()
+        )
+    };
+    let mut current = pinned.try_clone().map_err(inspect_error)?;
+    let mut current_metadata = current.metadata().map_err(inspect_error)?;
+    for level in 1_u32.. {
+        // O_PATH needs only search permission, as the path walk above does.
+        let parent = openat(
+            &current,
+            "..",
+            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|errno| inspect_error(errno.into()))?;
+        let metadata = parent.metadata().map_err(inspect_error)?;
+        // Only the root is its own parent.
+        if (metadata.dev(), metadata.ino()) == (current_metadata.dev(), current_metadata.ino()) {
+            break;
+        }
+        check(
+            &metadata,
+            &format_args!("the directory {level} level(s) above the opened directory"),
+        )?;
+        current = parent;
+        current_metadata = metadata;
     }
     Ok(())
 }
 
 /// Hold the MRT output directory's ancestors to the runtime-state rule, so
 /// no user other than root or the daemon user can swap the directory that
-/// retention deletes from.
-fn verify_mrt_output_dir_ancestors(path: &Path) -> std::io::Result<()> {
+/// retention deletes from. `pinned` is the descriptor the dump is published
+/// and pruned through.
+fn verify_mrt_output_dir_ancestors(path: &Path, pinned: &File) -> std::io::Result<()> {
     verify_runtime_state_ancestors(
         "MRT output_dir",
         path,
+        pinned,
         nix::unistd::geteuid().as_raw(),
         nix::unistd::getegid().as_raw(),
     )
@@ -12358,6 +12395,54 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).unwrap();
         rustbgpd_mrt::writer::write_dump(&config, b"accepted").unwrap();
         assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 1);
+    }
+
+    /// Load-bearing: the ancestor proof covers the directory the dump is
+    /// written into, not whatever the path names by the time of the check.
+    /// Here `link` resolves into a world-writable directory when the output
+    /// directory is opened, and is repointed at a private one before the
+    /// check runs; a pathname check would approve the private chain while
+    /// the dump landed under the writable one.
+    #[test]
+    fn mrt_ancestor_proof_covers_the_opened_directory_after_a_symlink_swap() {
+        /// Swap `<base>/link` to `<base>/safe` after the open, then run the
+        /// daemon's check.
+        fn swap_then_check(path: &Path, pinned: &File) -> std::io::Result<()> {
+            let link = path.parent().unwrap();
+            std::fs::remove_file(link)?;
+            std::os::unix::fs::symlink(link.with_file_name("safe"), link)?;
+            verify_mrt_output_dir_ancestors(path, pinned)
+        }
+        let base = tempfile::tempdir().unwrap();
+        let private = |path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let shared = base.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        private(&shared.join("mrt"));
+        private(&base.path().join("safe"));
+        private(&base.path().join("safe/mrt"));
+        std::os::unix::fs::symlink(&shared, base.path().join("link")).unwrap();
+        let config = rustbgpd_mrt::MrtWriterConfig {
+            output_dir: base.path().join("link/mrt"),
+            dump_interval: 3600,
+            compress: false,
+            file_prefix: "rib".to_string(),
+            max_files: std::num::NonZeroU32::new(1),
+            ancestor_check: Some(swap_then_check),
+        };
+        let error = rustbgpd_mrt::writer::write_dump(&config, b"refused").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("reachable through"), "{error}");
+        assert_eq!(std::fs::read_dir(shared.join("mrt")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(base.path().join("safe/mrt"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     /// Load-bearing: a trailing `/` or `/.` must not let a symlinked
