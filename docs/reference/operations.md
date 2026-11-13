@@ -1019,8 +1019,8 @@ changes at any moment, so fast external failover does not wait for it.
 Between two units of the walk it also serves the events of existing
 sessions. A unit is one peer's session step, one RIB batch or paced command,
 or, during a rollback, one restore command: at a full table, on the order of
-a second for a peer with its own export policy. Served there, at most eight
-of each kind per unit:
+a second for a peer with its own export policy. Served at each boundary
+(a unit has at least two), at most eight of each kind per boundary:
 
 - A BFD state change that takes a session down, and a `BfdDown` that is
   being retried because the session's mailbox was full. The BGP session is
@@ -1033,6 +1033,14 @@ of each kind per unit:
   the restored one during a rollback); the third crash in ten minutes
   latches the neighbor. A max-prefix breach stops the session and latches
   the neighbor. An OPEN collision is resolved.
+
+The bound is on what a boundary takes from each queue, not on what a served
+event's handler drains: session up and down events are taken whole, and a
+round of notifications that retires, replaces or promotes a session handles
+every session notification queued at that moment, as does a BFD Down that
+ends an inbound collision candidate. When a session is replaced inside a reload, operator
+reads of that peer's import counters show the old session's values until
+the reload ends.
 
 These still wait until the walk or rollback has ended:
 
@@ -1057,7 +1065,8 @@ link-state changes, readiness and admitted reads do not.
 The `reload generation phase timing` line reports this service:
 `owned_wait_service_gap_max_us` is the longest interval in which no session
 event could be served (one unit, or the shared transition),
-`events_served` counts the events served between units and
+`events_served` counts the events handled at the boundaries, including
+every notification such a round drained, and
 `event_service_us` is the time spent serving them. That time is not counted
 against the two-minute stall timeout, and serving an event never renews it.
 

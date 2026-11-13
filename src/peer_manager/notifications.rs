@@ -1138,6 +1138,7 @@ impl PeerManager {
         notification: SessionNotification,
         retirements: &mut Vec<NotificationRetirement>,
     ) {
+        self.count_owned_walk_event();
         match notification {
             SessionNotification::OpenReceived {
                 session_id,
@@ -1630,6 +1631,7 @@ impl PeerManager {
 
     pub(super) fn drain_ready_session_lifecycle_notifications(&mut self) {
         while let Ok(notification) = self.session_lifecycle_rx.try_recv() {
+            self.count_owned_walk_event();
             self.handle_session_lifecycle_notification(&notification);
         }
     }

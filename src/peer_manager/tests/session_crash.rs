@@ -93,7 +93,7 @@ fn crash_count(mgr: &PeerManager) -> Option<f64> {
 }
 
 /// A test peer at `PEER` whose restarted sessions dial a closed port.
-fn manager_with_peer() -> PeerManager {
+pub(super) fn manager_with_peer() -> PeerManager {
     let mut mgr = test_peer_manager();
     insert_test_managed_peer(&mut mgr, PEER, closed_peer_handle(), false);
     mgr.peers

@@ -427,9 +427,15 @@ has completed a RIB command when the owner is next polled.
 Served there: BFD state changes and due BFD command retries, link changes
 and link-check retries, session lifecycle events, one round of session
 notifications, and NOTIFICATION events, in the run loop's order (lifecycle
-events before a notification, queued BFD changes before a BFD retry). BFD
-changes, session notifications and NOTIFICATION events are bounded at eight
-per seam, so a flood costs a unit a fixed amount of work. Serving is not
+events before a notification, queued BFD changes before a BFD retry). What
+a seam takes from the BFD, session notification and NOTIFICATION event
+queues is bounded at eight of each per seam; a unit has at least two seams.
+The bound is on what the seam takes, not on what a served handler drains:
+lifecycle events are drained whole, as in the run loop, and a notification
+round that retires, replaces or promotes a session handles every session
+notification queued at that moment, as does a served BFD Down that retires
+a pending inbound session. A flood therefore costs a seam a fixed amount of
+work only while no event in it ends a session. Serving is not
 progress: the stall budget is never renewed at a seam, and the time spent
 serving is taken out of it. Nothing is served inside a unit, which holds a
 session handle across its awaits, except link changes, which only ask

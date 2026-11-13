@@ -309,8 +309,13 @@ fn bounded_fan_out<F: Future>(
 /// progress while still keeping the unchanged 200 ms end-to-end deadline.
 const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 /// How many events of one kind (BFD state changes, session notifications,
-/// notification events) a policy walk serves at one of its seams. A flood
-/// costs the walk at most this many handlers per kind and unit.
+/// notification events) a policy walk takes from its queue at one seam. A
+/// unit has at least two seams, so this is a bound per seam, not per unit.
+/// It does not bound what a served handler drains on its own: session
+/// lifecycle events are drained whole, and a notification round that
+/// retires, replaces or promotes a session, or a BFD Down that retires a
+/// pending inbound session, handles every session notification queued at
+/// that moment. `events_served` counts each of those as handled.
 const OWNED_WALK_EVENT_BUDGET: usize = 8;
 
 /// A resolved policy snapshot's walk owns the actor: what it has served at
@@ -324,6 +329,9 @@ pub(super) struct OwnedWalkEvents {
     served_at: tokio::time::Instant,
     /// Longest interval between two such instants.
     gap_max: Duration,
+    /// Events handled while the walk owned the actor, however they were
+    /// reached: a session notification or lifecycle event is counted by
+    /// its handler, so one a served handler drains on its own counts too.
     events_served: u64,
     service: Duration,
 }
@@ -1693,13 +1701,23 @@ impl PeerManager {
         })
     }
 
+    /// Count one session notification or lifecycle event handled while a
+    /// policy walk owns the actor.
+    pub(super) fn count_owned_walk_event(&mut self) {
+        if let Some(walk) = self.owned_walk.as_mut() {
+            walk.events_served += 1;
+        }
+    }
+
     /// Serve the events a long policy walk would otherwise hold until it
     /// ends, at a seam between two of its units: BFD state changes and due
     /// BFD command retries, link changes and link-check retries, session
     /// lifecycle events, one round of session notifications, and
-    /// notification events, in that order. Each kind but the lifecycle
-    /// events, which are drained whole before the notifications as the run
-    /// loop drains them, is bounded by [`OWNED_WALK_EVENT_BUDGET`].
+    /// notification events, in that order. What the seam takes from each
+    /// queue but the lifecycle events, which are drained whole before the
+    /// notifications as the run loop drains them, is bounded by
+    /// [`OWNED_WALK_EVENT_BUDGET`]; a served handler that retires, replaces
+    /// or promotes a session still handles every queued notification.
     ///
     /// Everything else stays behind the walk: the command channel (config and
     /// peer mutations, inbound connections, `Shutdown`), internal commands,
@@ -1754,14 +1772,14 @@ impl PeerManager {
         {
             self.retry_link_checks();
         }
-        served += u64::try_from(self.session_lifecycle_rx.len()).unwrap_or(u64::MAX);
+        // Lifecycle events and session notifications count themselves
+        // (`count_owned_walk_event`), wherever a handler drains them.
         self.drain_ready_session_lifecycle_notifications();
         if let Ok(notification) = self.session_notify_rx.try_recv() {
             let more = self
                 .session_notify_rx
                 .ready_count()
                 .min(OWNED_WALK_EVENT_BUDGET - 1);
-            served += 1 + u64::try_from(more).unwrap_or(u64::MAX);
             self.handle_session_notification_round(notification, more)
                 .await;
         }

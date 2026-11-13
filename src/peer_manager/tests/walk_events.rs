@@ -690,6 +690,178 @@ async fn a_notification_flood_costs_one_seam_its_budget() {
     rib.await.unwrap();
 }
 
+/// E-5, the documented exception to the budget: a seam whose round retires
+/// a session handles every notification queued at that moment, and counts
+/// each one. A pending inbound candidate's Idle ahead of a flood leaves
+/// nothing queued after one seam.
+///
+/// LOAD-BEARING: `events_served` counted from the budget reports eight.
+#[tokio::test(start_paused = true)]
+async fn a_retiring_round_at_a_seam_handles_the_whole_queue() {
+    const FLOOD: usize = 50;
+    let Lab { mut mgr, peers, .. } = lab(2);
+    let candidate = 60;
+    attach_test_pending_inbound(
+        &mut mgr,
+        peers[1],
+        walk_session(peers[1], Arc::default(), None),
+        candidate,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::BackToIdle {
+            session_id: candidate,
+            role: SessionRole::InboundCandidate,
+            peer_addr: peers[1],
+        })
+        .unwrap();
+    let session_id = mgr.peers[&key(peers[0])].session_id();
+    for _ in 0..FLOOD {
+        mgr.session_notify_tx
+            .send(SessionNotification::BackToIdle {
+                session_id,
+                role: SessionRole::Primary,
+                peer_addr: peers[0],
+            })
+            .unwrap();
+    }
+    let service = serve_one_seam(&mut mgr).await;
+    assert_eq!(
+        mgr.session_notify_rx.ready_count(),
+        0,
+        "nothing left queued"
+    );
+    assert!(mgr.peers[&key(peers[1])].pending_inbound.is_none());
+    assert_eq!(
+        service.events_served,
+        u64::try_from(FLOOD + 1).unwrap(),
+        "every handled notification is counted"
+    );
+}
+
+/// One seam of a walk that owns the actor, and what it served.
+async fn serve_one_seam(mgr: &mut PeerManager) -> OwnedWalkService {
+    assert!(mgr.begin_owned_walk());
+    mgr.serve_owned_walk_events().await;
+    mgr.end_owned_walk()
+}
+
+/// A static neighbor's max-prefix breach is served at a seam: the session
+/// is stopped and the neighbor latched.
+///
+/// LOAD-BEARING: a seam that serves no session notification leaves the
+/// breached session running until the walk ends.
+#[tokio::test]
+async fn max_prefix_breach_is_latched_at_a_seam() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, primary.clone()),
+        false,
+    );
+    let session_id = mgr.peers[&key(addr)].session_id();
+    mgr.session_notify_tx
+        .send(SessionNotification::MaxPrefixExceeded {
+            session_id,
+            role: SessionRole::Primary,
+            peer_addr: addr,
+            count: 501,
+            bound: 500,
+            family: None,
+            received: false,
+            path_limit: false,
+        })
+        .unwrap();
+    serve_one_seam(&mut mgr).await;
+    assert!(!mgr.peers[&key(addr)].enabled);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    wait_counter(&primary.stop, 1).await;
+}
+
+/// A static neighbor's crash that reaches the latch is served at a seam:
+/// the neighbor is latched disabled instead of restarted.
+///
+/// LOAD-BEARING: a seam that serves no session notification leaves the
+/// crash unhandled until the walk ends.
+#[tokio::test(start_paused = true)]
+async fn crash_latch_is_applied_at_a_seam() {
+    use super::session_crash::{
+        SESSION_CRASH_LATCH, crash_primary, install_crashing_primary, manager_with_peer,
+    };
+    let peer = key(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut mgr = manager_with_peer();
+    for _ in 1..SESSION_CRASH_LATCH {
+        let trigger = install_crashing_primary(&mut mgr, &peer);
+        crash_primary(&mut mgr, trigger).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+    }
+    install_crashing_primary(&mut mgr, &peer).send(()).unwrap();
+    for _ in 0..100 {
+        if mgr.session_notify_rx.ready_count() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(mgr.session_notify_rx.ready_count(), 1, "the exit notice");
+    serve_one_seam(&mut mgr).await;
+    assert!(mgr.session_crash_latched(&peer));
+    assert!(!mgr.peers[&peer].enabled);
+}
+
+/// An OPEN collision is resolved at a seam: the local side wins and the
+/// inbound candidate is dropped.
+///
+/// LOAD-BEARING: a seam that serves no session notification leaves the
+/// candidate pending until the walk ends.
+#[tokio::test]
+async fn open_collision_is_resolved_at_a_seam() {
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 10),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let router_id = Some(Ipv4Addr::new(10, 0, 0, 2));
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        addr,
+        65002,
+        fake_peer_handle(addr, SessionState::OpenConfirm, router_id, Arc::default()),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::OpenConfirm, router_id, pending.clone()),
+        2,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::OpenReceived {
+            session_id: 2,
+            role: SessionRole::InboundCandidate,
+            peer_addr: addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            peer_asn: 65002,
+        })
+        .unwrap();
+    serve_one_seam(&mut mgr).await;
+    wait_counter(&pending.collision_dump, 1).await;
+    assert!(
+        mgr.peers[&key(addr)].pending_inbound.is_none(),
+        "the local side keeps its session"
+    );
+}
+
 /// E-5, stall: events that keep arriving while a unit never completes do
 /// not keep the walk alive. It rolls back one stall timeout after its last
 /// completed RIB command, plus only the time the seam after that command
@@ -702,6 +874,17 @@ async fn a_notification_flood_costs_one_seam_its_budget() {
 ///
 /// LOAD-BEARING: charging the service time to the stall budget ends the
 /// walk that much early.
+///
+/// This test pins that service time is excluded, not that serving never
+/// renews the stall timer, and no forward walk can tell the two apart.
+/// Every seam of the per-peer, batch and paced walks directly follows a
+/// completed unit's `progressed()`, with no time between them but the
+/// service the seam excludes, so a renewal at the seam lands where that one
+/// did. A cohort's seams precede the remainder walk, whose first session
+/// step renews the timer before its first RIB command. A renewal at a seam
+/// is visible only in a later rollback partition (the cohort's restore
+/// after the remainder's) whose session restores take time; no test drives
+/// that shape.
 #[tokio::test(start_paused = true)]
 async fn events_do_not_renew_a_stalled_walk() {
     let first_command = Duration::from_secs(80);
