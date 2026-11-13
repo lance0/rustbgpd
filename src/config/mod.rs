@@ -2708,7 +2708,18 @@ fn json_config_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
 fn render_json_config_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "(unset)".to_string(),
-        serde_json::Value::String(s) => s.clone(),
+        // Escape control characters so a value cannot split an output or
+        // log line.
+        serde_json::Value::String(s) => s
+            .chars()
+            .flat_map(|c| {
+                let escaped = c.is_control().then(|| c.escape_default());
+                escaped
+                    .into_iter()
+                    .flatten()
+                    .chain((!c.is_control()).then_some(c))
+            })
+            .collect(),
         other => other.to_string(),
     }
 }
@@ -4859,10 +4870,13 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
 
     if diff.global_changed {
         class.restart_required_sections.push("[global]".to_string());
+        // Names only: the list holds section tokens that clients join and
+        // split. Values are in `global_changes` and the diff text.
         class.restart_required_sections.extend(
             diff.global_changes
                 .iter()
-                .map(|change| format!("[global].{}", change.render())),
+                .filter(|change| change.field != "[global]")
+                .map(|change| format!("[global].{}", change.field)),
         );
     }
     if diff.config_epoch_changed {
@@ -6688,8 +6702,8 @@ fn collect_neighbor_set_refs_from_statements(
 }
 
 /// The restart-required `[global]` edits between two configs, one entry per
-/// changed leaf field (`router_id`, `telemetry.log_format`), in field-path
-/// order. The SIGHUP reload ERROR and the config diff both use this one
+/// changed leaf field (`router_id`, `telemetry.log_format`), sorted by dotted
+/// path. The SIGHUP reload ERROR and the config diff both use this one
 /// comparator, so they name the same fields.
 ///
 /// Fields that a diff or reload reports on their own terms are left out:
@@ -6713,13 +6727,22 @@ pub(crate) fn global_restart_required_changes(old: &Global, new: &Global) -> Vec
     if *old == new {
         return Vec::new();
     }
+    global_leaf_changes(&json_config_value(old), &json_config_value(&new))
+}
+
+/// Field changes for two serialized `[global]` values whose structs differ.
+/// If the leaf walk names nothing (a field the serializer skips, or a
+/// serialization failure), one summarized `[global]` entry keeps the
+/// restart-required report from disappearing.
+fn global_leaf_changes(old: &serde_json::Value, new: &serde_json::Value) -> Vec<FieldChange> {
     let mut changes = Vec::new();
-    push_leaf_field_changes(
-        &mut changes,
-        "",
-        &json_config_value(old),
-        &json_config_value(&new),
-    );
+    push_leaf_field_changes(&mut changes, "", old, new);
+    if changes.is_empty() {
+        changes.push(FieldChange {
+            impact: Some(ConfigFieldImpact::RestartRequired),
+            ..FieldChange::summarized("[global]")
+        });
+    }
     changes
 }
 
@@ -6756,7 +6779,7 @@ fn push_leaf_field_changes(
         field: path.to_string().into(),
         old: old.clone(),
         new: new.clone(),
-        impact: None,
+        impact: Some(ConfigFieldImpact::RestartRequired),
         annotation: None,
         values_summarized: false,
     });

@@ -2402,28 +2402,60 @@ fn global_restart_required_edits_name_each_field_with_values() {
         assert!(text.contains(line), "missing {line:?}: {text}");
     }
 
+    assert!(
+        diff.global_changes
+            .iter()
+            .all(|change| change.impact == Some(ConfigFieldImpact::RestartRequired)),
+        "{:?}",
+        diff.global_changes
+    );
+    assert_eq!(json["global_changes"][1]["impact"], "restart_required");
+
+    // The transaction receipt lists names only: clients join the list with
+    // ", ", so an entry must never carry a value.
     let class = super::classify_config_transaction_v1(&diff);
-    for section in [
-        "[global]",
-        "[global].cluster_id: (unset) → 10.255.0.1",
-        "[global].router_id: 10.0.0.1 → 10.0.0.9",
-        "[global].telemetry.log_format: json → text",
-    ] {
-        assert!(
-            class
-                .restart_required_sections
-                .contains(&section.to_string()),
-            "missing {section:?}: {class:?}"
-        );
-    }
+    assert_eq!(
+        class.restart_required_sections,
+        vec![
+            "[global]",
+            "[global].cluster_id",
+            "[global].router_id",
+            "[global].telemetry.log_format",
+        ]
+    );
+}
+
+/// If the structs differ but the leaf walk names no field, the report keeps
+/// one summarized `[global]` entry instead of going empty.
+#[test]
+fn global_change_without_a_named_leaf_is_still_reported() {
+    let same = serde_json::json!({"router_id": "10.0.0.1"});
+    let changes = super::global_leaf_changes(&same, &same);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].field, "[global]");
+    assert_eq!(changes[0].render(), "[global]: <changed>");
+    assert_eq!(changes[0].impact, Some(ConfigFieldImpact::RestartRequired));
+}
+
+/// A control character in a value is escaped, so it cannot split a diff or
+/// log line.
+#[test]
+fn global_field_values_escape_control_characters() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.global.runtime_state_dir = "/var/lib/a\nb".to_string();
+    let changes = super::global_restart_required_changes(&old.global, &new.global);
+    let rendered = changes[0].render();
+    assert!(rendered.ends_with("/var/lib/a\\nb"), "{rendered}");
+    assert!(!rendered.contains('\n'), "{rendered}");
 }
 
 /// The diff and the SIGHUP reload ERROR share one `[global]` comparator, and
-/// it leaves out exactly the knobs reported on their own terms. Each row
+/// it leaves out the knobs reported on their own terms. Each row
 /// edits one field: a restart-required one must be named by the comparator;
 /// an exempt one must be absent from it and raise its own diff flag instead.
 #[test]
-fn global_restart_required_comparator_exempts_only_separately_reported_knobs() {
+fn global_restart_required_comparator_exempts_separately_reported_knobs() {
     type Edit = fn(&mut Global);
     type Flag = fn(&ConfigDiff) -> bool;
     let restart_required: [(&str, Edit); 5] = [

@@ -489,8 +489,9 @@ value, on every surface: the SIGHUP `[global] changed` `ERROR` line carries a
 `fields` value such as `router_id: 10.0.0.1 → 10.0.0.9, telemetry.log_format:
 json → text`; `rustbgpd --diff` lists each field under `[global] changed` and
 in the JSON `global_changes` array; and a config transaction's
-`restart_required_sections` (shown by `rbgp config diff`) adds one
-`[global].<field>: <old> → <new>` entry after `[global]`. Fields reported on
+`restart_required_sections` (shown by `rbgp config plan` and
+`rbgp config diff --history N`) adds one `[global].<field>` name after
+`[global]`, without values. Fields reported on
 their own terms stay out of that list on every surface: the honor knobs and
 `dynamic_neighbor_limit` (hot-applied), the BLACKHOLE FIB discard knobs (their
 own `ERROR` and `blackhole_fib_discard_changed`), and `ebgp_requires_policy`
