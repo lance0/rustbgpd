@@ -72,8 +72,8 @@ pub(super) struct BfdCoupling {
     /// Publishes the desired session set to the actor (level-triggered).
     desired_tx: watch::Sender<BfdRuntimeConfig>,
     /// Session state changes from the actor (per-peer coalescing, latest state
-    /// wins; a real transition is never masked by an ack). Taken into a
-    /// `run`-local at loop start so the `select!` arm doesn't borrow `self`.
+    /// wins; a real transition is never masked by an ack). Read by the run
+    /// loop and by a policy walk's seams.
     state_change_rx: Option<BfdStateChangeReceiver>,
     /// Accepted BFD membership; the published set overlays live admin state.
     pub(super) configured: HashMap<IpAddr, BfdSessionParams>,
@@ -641,7 +641,27 @@ impl PeerManager {
 
     /// Retry only failed enqueues, never a full BFD reconcile. Each turn visits
     /// at most 32 peers in address order, resuming after the previous batch.
+    #[cfg(test)]
     pub(super) fn retry_bfd_commands(&mut self, events: Option<&BfdStateChangeReceiver>) {
+        self.retry_bfd_commands_of(events, false);
+    }
+
+    /// [`Self::retry_bfd_commands`] against this manager's own event queue.
+    /// With `down_only`, a `Start` retry is left for a later turn.
+    fn retry_own_bfd_commands(&mut self, down_only: bool) {
+        let events = self.take_bfd_state_change_rx();
+        self.retry_bfd_commands_of(events.as_ref(), down_only);
+        if let Some(coupling) = self.bfd_coupling.as_mut() {
+            coupling.state_change_rx = events;
+        }
+    }
+
+    /// The run loop's BFD retry turn.
+    pub(super) fn retry_due_bfd_commands(&mut self) {
+        self.retry_own_bfd_commands(false);
+    }
+
+    fn retry_bfd_commands_of(&mut self, events: Option<&BfdStateChangeReceiver>, down_only: bool) {
         let Some(coupling) = self.bfd_coupling.as_ref() else {
             return;
         };
@@ -655,6 +675,7 @@ impl PeerManager {
                 std::ops::Bound::Unbounded,
             ))
             .chain(coupling.retries.range(..=cursor))
+            .filter(|(_, retry)| !(down_only && retry.start))
             .take(32)
             .map(|(peer, retry)| (*peer, *retry))
             .collect();
@@ -806,6 +827,12 @@ impl PeerManager {
             coupling
                 .initially_withheld
                 .extend(coupling.prior_initially_withheld.drain());
+            // A peer latched disabled while the generation suspended
+            // publication (a max-prefix breach or a session-crash latch
+            // served during its policy walk) has no entry yet.
+            let previously_disabled = std::mem::take(&mut coupling.disabled);
+            coupling.disabled =
+                disabled_from_peers(&self.peers, &coupling.configured, previously_disabled);
         }
         self.republish_bfd_desired();
     }
@@ -879,21 +906,8 @@ impl PeerManager {
             coupling.bound = bound;
         }
         let previously_disabled = std::mem::take(&mut coupling.disabled);
-        coupling.disabled = self
-            .peers
-            .iter()
-            .filter(|(_, managed)| !managed.enabled)
-            .map(|(key, _)| key.address)
-            .collect();
-        // A member with no peer keeps its state: a membership change that
-        // configuration did not make (a binding, a scope move) must not
-        // restart a session that a runtime deletion drained.
-        coupling
-            .disabled
-            .extend(previously_disabled.into_iter().filter(|peer| {
-                coupling.configured.contains_key(peer)
-                    && !self.peers.keys().any(|key| key.address == *peer)
-            }));
+        coupling.disabled =
+            disabled_from_peers(&self.peers, &coupling.configured, previously_disabled);
         coupling.reloading = false;
         coupling.rollback_lookup = false;
         let desired = BfdRuntimeConfig {
@@ -1324,12 +1338,121 @@ impl PeerManager {
         });
     }
 
-    /// Take the BFD state-change receiver into a `run`-local (so the `select!`
-    /// arm captures the local rather than `self`, mirroring the BMP interval).
-    pub(super) fn take_bfd_state_change_rx(&mut self) -> Option<BfdStateChangeReceiver> {
+    /// Take the BFD state-change receiver out for a call that also needs the
+    /// manager; the caller puts it back.
+    fn take_bfd_state_change_rx(&mut self) -> Option<BfdStateChangeReceiver> {
         self.bfd_coupling
             .as_mut()
             .and_then(|c| c.state_change_rx.take())
+    }
+
+    /// The run loop's BFD state-change arm: the next queued change. A closed
+    /// channel is dropped, so the arm stops polling it.
+    pub(super) async fn receive_bfd_state_change(
+        coupling: &mut Option<BfdCoupling>,
+    ) -> BfdStateChange {
+        loop {
+            let Some(events) = coupling
+                .as_mut()
+                .and_then(|coupling| coupling.state_change_rx.as_mut())
+            else {
+                return std::future::pending().await;
+            };
+            if let Some(change) = events.recv().await {
+                return change;
+            }
+            if let Some(coupling) = coupling.as_mut() {
+                coupling.state_change_rx = None;
+            }
+        }
+    }
+
+    /// Whether a queued change is one a generation's policy walk serves: a
+    /// genuine Down of an accepted member whose enabled peer is not held
+    /// yet, or is held with a `Start` still to deliver. The full handler
+    /// would stop BGP for exactly these.
+    fn bfd_down_served_in_generation(&self, change: &BfdStateChange) -> bool {
+        !change.resync
+            && !change.remote_admin_down
+            && matches!(change.state, SessionState::Down | SessionState::AdminDown)
+            && self.bfd_coupling.as_ref().is_some_and(|coupling| {
+                coupling
+                    .configured
+                    .get(&change.peer)
+                    .is_some_and(|params| params.revision == change.revision)
+                    && (!coupling.held_down.contains(&change.peer)
+                        || coupling
+                            .retries
+                            .get(&change.peer)
+                            .is_some_and(|retry| retry.start))
+            })
+            && self
+                .unique_peer_key_for_address(change.peer)
+                .and_then(|key| self.peers.get(&key))
+                .is_some_and(|managed| managed.enabled)
+    }
+
+    /// Serve at most `budget` queued BFD state changes, then the due command
+    /// retries, at a seam of a policy walk that owns the actor. Returns the
+    /// changes served.
+    ///
+    /// Outside a generation the ordinary handler runs. Inside one,
+    /// [`Self::handle_bfd_state_change`] ignores every change, so only a
+    /// genuine Down is taken from the queue: its BGP session is stopped and
+    /// held now. The hold is also recorded as a prior one, so an aborted
+    /// generation keeps it: the session has `BfdDown`, and only the BFD Up
+    /// that releases the hold sends its `Start`. An Up, a release and every
+    /// level report stay queued until the generation ends, and so does a
+    /// `Start` retry.
+    pub(super) async fn serve_bfd_events(&mut self, budget: usize) -> u64 {
+        let reloading = self
+            .bfd_coupling
+            .as_ref()
+            .is_some_and(|coupling| coupling.reloading);
+        let mut served = 0;
+        for _ in 0..budget {
+            let change = if reloading {
+                self.bfd_coupling
+                    .as_ref()
+                    .and_then(|coupling| coupling.state_change_rx.as_ref())
+                    .and_then(|events| {
+                        events.try_take_if(|change| self.bfd_down_served_in_generation(change))
+                    })
+            } else {
+                self.bfd_coupling
+                    .as_mut()
+                    .and_then(|coupling| coupling.state_change_rx.as_mut())
+                    .and_then(BfdStateChangeReceiver::try_recv)
+            };
+            let Some(change) = change else {
+                break;
+            };
+            served += 1;
+            if !reloading {
+                self.handle_bfd_state_change(change).await;
+                continue;
+            }
+            let peer = change.peer;
+            if let Err(error) = self.hold_bgp_for_bfd(peer).await {
+                warn!(%peer, %error, "BFD down: failed to stop BGP session");
+            } else {
+                info!(%peer, diagnostic = ?change.diagnostic,
+                    "BFD down during a reload generation — tearing down BGP session before the hold timer");
+            }
+            if let Some(coupling) = self.bfd_coupling.as_mut() {
+                coupling.prior_held.insert(peer);
+                coupling.prior_initially_withheld.remove(&peer);
+            }
+        }
+        // After the changes: a retry defers to a queued newer outcome.
+        if self.bfd_coupling.as_ref().is_some_and(|coupling| {
+            coupling
+                .retry_at
+                .is_some_and(|at| at <= tokio::time::Instant::now())
+        }) {
+            self.retry_own_bfd_commands(reloading);
+        }
+        served
     }
 
     /// Overlay live admin state onto the accepted BFD membership. Publication is
@@ -1498,6 +1621,26 @@ impl PeerManager {
             SessionState::Init | SessionState::Up => {}
         }
     }
+}
+
+/// The members whose BFD session must not run: every managed peer that is
+/// not enabled, and a member with no peer that was disabled before. Such a
+/// member keeps its state: a membership change that configuration did not
+/// make (a binding, a scope move) must not restart a session that a runtime
+/// deletion drained.
+fn disabled_from_peers(
+    peers: &super::peer_table::PeerTable,
+    configured: &HashMap<IpAddr, BfdSessionParams>,
+    previously_disabled: HashSet<IpAddr>,
+) -> HashSet<IpAddr> {
+    peers
+        .iter()
+        .filter(|(_, managed)| !managed.enabled)
+        .map(|(key, _)| key.address)
+        .chain(previously_disabled.into_iter().filter(|peer| {
+            configured.contains_key(peer) && !peers.keys().any(|key| key.address == *peer)
+        }))
+        .collect()
 }
 
 /// The BFD session `config`'s range for an accepted dynamic session runs to

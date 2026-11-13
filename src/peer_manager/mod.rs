@@ -308,6 +308,33 @@ fn bounded_fan_out<F: Future>(
 /// A small fixed budget prevents probe traffic from starving forward policy
 /// progress while still keeping the unchanged 200 ms end-to-end deadline.
 const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
+/// How many events of one kind (BFD state changes, session notifications,
+/// notification events) a policy walk serves at one of its seams. A flood
+/// costs the walk at most this many handlers per kind and unit.
+const OWNED_WALK_EVENT_BUDGET: usize = 8;
+
+/// A resolved policy snapshot's walk owns the actor: what it has served at
+/// its seams, and the notifications it holds until it ends.
+pub(super) struct OwnedWalkEvents {
+    /// Notifications that would retire a dynamic peer. Removing a captured
+    /// peer mid-walk would make the walk's rollback inexact, so they go back
+    /// on the notification channel when the walk ends.
+    held: Vec<SessionNotification>,
+    /// When the walk last finished serving events, or began.
+    served_at: tokio::time::Instant,
+    /// Longest interval between two such instants.
+    gap_max: Duration,
+    events_served: u64,
+    service: Duration,
+}
+
+/// One walk's event service, for its phase log line.
+#[derive(Default)]
+pub(super) struct OwnedWalkService {
+    pub(super) gap_max_us: u64,
+    pub(super) events_served: u64,
+    pub(super) service_us: u64,
+}
 
 /// Hard deadline for RIB channel admission and reply on a single-peer policy
 /// edit. Also used by per-peer outbound refresh and other bounded RIB steps.
@@ -962,12 +989,18 @@ pub struct PeerManager {
     /// spawned tasks and the inner future of `await_with_readiness{,_budget}`.
     /// The only `&mut self` futures raced in a `select!` or wrapped in a
     /// `timeout` are `plan_config_transaction`, `await_with_readiness` (whose
-    /// arms serve only readiness and operator reads and send deferred RIB
-    /// updates) and
+    /// arms serve only readiness, operator reads and link changes and send
+    /// deferred RIB updates) and
     /// `query_warm_checkpoint_capture`, and none of them drains session
     /// notifications. Keep it that way, or reset the depth where a drop can
     /// happen; the run loop `debug_assert!`s the depth is zero between steps.
     session_notification_depth: usize,
+    /// `Some` while a resolved policy snapshot's walk owns the actor (set and
+    /// cleared by `apply_resolved_policy_snapshot_with_prestage_reads`).
+    /// While it is, the walk serves BFD, link and session events at its
+    /// seams ([`Self::serve_owned_walk_events`]) and its waits serve link
+    /// changes; a notification that would retire a dynamic peer is held.
+    owned_walk: Option<OwnedWalkEvents>,
     /// Notifications a nested drain left for the outermost handler because
     /// they belong to a different peer, with the peer their session resolved
     /// to. Empty whenever the depth is zero.
@@ -1548,6 +1581,10 @@ impl PeerManager {
         F: Future,
     {
         tokio::pin!(future);
+        // A policy walk's waits can be long (one RIB unit, or the cohort's
+        // whole clean transition): fast external failover does not wait
+        // behind them. Both arms are non-blocking, as in the budget variant.
+        let serve_links = self.owned_walk.is_some();
         loop {
             tokio::select! {
                 biased;
@@ -1576,8 +1613,148 @@ impl PeerManager {
                         None => self.operator_rx = None,
                     }
                 }
+                changed = Self::receive_link_change(&mut self.link_check.changes), if serve_links => {
+                    if changed {
+                        self.handle_links_changed();
+                    }
+                }
+                () = async {
+                    match self.link_check.retry_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if serve_links => self.retry_link_checks(),
             }
         }
+    }
+
+    /// A policy walk takes ownership of the actor. `false` when a walk
+    /// already owns it or a notification handler is running, in which case
+    /// the caller serves and holds nothing.
+    pub(super) fn begin_owned_walk(&mut self) -> bool {
+        if self.owned_walk.is_some() || self.session_notification_depth > 0 {
+            return false;
+        }
+        self.owned_walk = Some(OwnedWalkEvents {
+            held: Vec::new(),
+            served_at: tokio::time::Instant::now(),
+            gap_max: Duration::ZERO,
+            events_served: 0,
+            service: Duration::ZERO,
+        });
+        true
+    }
+
+    /// The walk [`Self::begin_owned_walk`] started has ended: every held
+    /// notification goes back on the notification channel, where the run
+    /// loop (or a later walk's seam, which holds it again) receives it. Its
+    /// handler ignores a notification whose session is no longer current.
+    pub(super) fn end_owned_walk(&mut self) -> OwnedWalkService {
+        let Some(walk) = self.owned_walk.take() else {
+            return OwnedWalkService::default();
+        };
+        for notification in walk.held {
+            let _ = self.session_notify_tx.send(notification);
+        }
+        let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        OwnedWalkService {
+            gap_max_us: micros(walk.gap_max.max(walk.served_at.elapsed())),
+            events_served: walk.events_served,
+            service_us: micros(walk.service),
+        }
+    }
+
+    /// Hold `notification` for the end of the walk that owns the actor.
+    /// Gives it back when no walk does.
+    pub(super) fn hold_for_owned_walk(
+        &mut self,
+        notification: SessionNotification,
+    ) -> Option<SessionNotification> {
+        match self.owned_walk.as_mut() {
+            Some(walk) => {
+                walk.held.push(notification);
+                None
+            }
+            None => Some(notification),
+        }
+    }
+
+    /// Serve the events a long policy walk would otherwise hold until it
+    /// ends, at a seam between two of its units: BFD state changes and due
+    /// BFD command retries, link changes and link-check retries, session
+    /// lifecycle events, one round of session notifications, and
+    /// notification events, in that order. Each kind but the lifecycle
+    /// events, which are drained whole before the notifications as the run
+    /// loop drains them, is bounded by [`OWNED_WALK_EVENT_BUDGET`].
+    ///
+    /// Everything else stays behind the walk: the command channel (config and
+    /// peer mutations, inbound connections, `Shutdown`), internal commands,
+    /// max-prefix restart timers, discovery, reconciles and retention.
+    ///
+    /// Call it only between units: a handler can replace a peer's session or
+    /// latch the peer disabled, and a unit holds a session handle across its
+    /// awaits. It never removes a peer: a notification that would retire a
+    /// dynamic peer is held. Serving is not walk progress, so the caller
+    /// excludes the time from its stall budget and never renews it here.
+    /// A no-op when no walk owns the actor.
+    pub(super) async fn serve_owned_walk_events(&mut self) {
+        if self.owned_walk.is_none() || self.session_notification_depth > 0 {
+            return;
+        }
+        let started = tokio::time::Instant::now();
+        // Boxed: the handlers are not part of every walk's state machine.
+        let events_served = Box::pin(self.serve_owned_walk_events_now()).await;
+        if let Some(walk) = self.owned_walk.as_mut() {
+            walk.gap_max = walk
+                .gap_max
+                .max(started.saturating_duration_since(walk.served_at));
+            walk.served_at = tokio::time::Instant::now();
+            walk.events_served += events_served;
+            walk.service += started.elapsed();
+        }
+    }
+
+    async fn serve_owned_walk_events_now(&mut self) -> u64 {
+        let mut served = self.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
+        let links_changed = self.link_check.changes.as_mut().map(|changes| {
+            changes
+                .has_changed()
+                .inspect(|_| drop(changes.borrow_and_update()))
+        });
+        match links_changed {
+            Some(Ok(true)) => {
+                self.handle_links_changed();
+                served += 1;
+            }
+            Some(Err(_)) => self.link_check.changes = None,
+            Some(Ok(false)) | None => {}
+        }
+        if self
+            .link_check
+            .retry_at
+            .is_some_and(|at| at <= tokio::time::Instant::now())
+        {
+            self.retry_link_checks();
+        }
+        served += u64::try_from(self.session_lifecycle_rx.len()).unwrap_or(u64::MAX);
+        self.drain_ready_session_lifecycle_notifications();
+        if let Ok(notification) = self.session_notify_rx.try_recv() {
+            let more = self
+                .session_notify_rx
+                .ready_count()
+                .min(OWNED_WALK_EVENT_BUDGET - 1);
+            served += 1 + u64::try_from(more).unwrap_or(u64::MAX);
+            self.handle_session_notification_round(notification, more)
+                .await;
+        }
+        for _ in 0..OWNED_WALK_EVENT_BUDGET {
+            let Ok(event) = self.session_notification_event_rx.try_recv() else {
+                break;
+            };
+            self.publish_notification_event(event);
+            served += 1;
+        }
+        served
     }
 
     /// Await one lifecycle sweep's per-peer session commands, sent at once
@@ -1991,6 +2168,7 @@ impl PeerManager {
             session_notify_tx,
             session_notify_rx,
             session_notification_depth: 0,
+            owned_walk: None,
             deferred_session_notifications: VecDeque::new(),
             deferred_session_notification_counts: HashMap::new(),
             deferred_warning_crossings: HashMap::new(),
@@ -3496,14 +3674,10 @@ impl PeerManager {
             interval.tick().await;
         }
 
-        // Take the BFD state-change receiver into a local so the select! arm
-        // captures the local (not `self`), and publish the initial desired set
-        // (the configured set overlaid with the disabled/deleted set — empty at
-        // startup, so every configured peer starts enabled).
-        let mut bfd_state_change_rx = self.take_bfd_state_change_rx();
-        if bfd_state_change_rx.is_some() {
-            self.republish_bfd_desired();
-        }
+        // Publish the initial desired set (the configured set overlaid with
+        // the disabled/deleted set — empty at startup, so every configured
+        // peer starts enabled).
+        self.republish_bfd_desired();
 
         loop {
             if self.dampening_control_failed {
@@ -3516,6 +3690,12 @@ impl PeerManager {
             // builds the published import roster is exactly the peer table
             // and live dataset bindings.
             self.peers.settle_abandoned_batches();
+            if self.owned_walk.is_some() {
+                // No walk is dropped mid-flight; if one ever is, its held
+                // notifications are not lost and nothing more is held.
+                tracing::error!("policy walk did not end its event service; releasing it");
+                self.end_owned_walk();
+            }
             #[cfg(test)]
             self.assert_import_roster_projection();
             debug_assert!(
@@ -3794,7 +3974,7 @@ impl PeerManager {
                     } else {
                         std::future::pending::<()>().await;
                     }
-                } => self.retry_bfd_commands(bfd_state_change_rx.as_ref()),
+                } => self.retry_due_bfd_commands(),
                 () = async {
                     if let Some(deadline) = evpn_recovery_retry_at {
                         tokio::time::sleep_until(deadline).await;
@@ -3816,19 +3996,8 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => self.bfd_scope_retry_due(),
-                change = async {
-                    match bfd_state_change_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match change {
-                        Some(change) => self.handle_bfd_state_change(change).await,
-                        // The actor's state-change sender is gone; stop polling
-                        // a closed channel (recv would return None in a tight
-                        // loop otherwise).
-                        None => bfd_state_change_rx = None,
-                    }
+                change = Self::receive_bfd_state_change(&mut self.bfd_coupling) => {
+                    self.handle_bfd_state_change(change).await;
                 }
                 changed = Self::receive_link_change(&mut self.link_check.changes) => {
                     if changed {

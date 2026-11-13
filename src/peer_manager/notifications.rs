@@ -443,6 +443,23 @@ impl PeerManager {
             .dampening_admission
             .as_ref()
             .is_some_and(rustbgpd_rib::dampening::DampeningAdmission::is_blocked);
+        // A dynamic primary's exit retires the peer. A policy walk that owns
+        // the actor holds the whole notice, before the crash is counted.
+        if !pending
+            && dynamic
+            && enabled
+            && !blocked
+            && self
+                .hold_for_owned_walk(SessionNotification::TaskExited {
+                    session_id,
+                    role,
+                    peer_addr,
+                    cause: cause.clone(),
+                })
+                .is_none()
+        {
+            return;
+        }
         self.metrics.record_session_task_crash(
             &self.peer_metric_label(&peer_key),
             peer_key.interface.as_deref().unwrap_or(""),
@@ -671,6 +688,18 @@ impl PeerManager {
     /// Capture one finite outer round. Nested drains keep one peer's notices
     /// ordered; unrelated notices they discover belong to the following round.
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+        self.handle_session_notification_round(notification, usize::MAX)
+            .await;
+    }
+
+    /// [`Self::handle_session_notification`], capturing at most `more`
+    /// further queued notifications into the outer round: a policy walk's
+    /// seam bounds what one round takes from the channel.
+    pub(super) async fn handle_session_notification_round(
+        &mut self,
+        notification: SessionNotification,
+        more: usize,
+    ) {
         self.session_notification_depth += 1;
         if self.session_notification_depth > 1 {
             let mut retirements = Vec::new();
@@ -682,7 +711,7 @@ impl PeerManager {
         }
         let owner = self.peer_key_for_session(session_notification_id(&notification));
         self.defer_session_notification(owner, notification);
-        for _ in 0..self.session_notify_rx.ready_count() {
+        for _ in 0..self.session_notify_rx.ready_count().min(more) {
             if let Ok(notification) = self.session_notify_rx.try_recv() {
                 let owner = self.peer_key_for_session(session_notification_id(&notification));
                 self.defer_session_notification(owner, notification);
@@ -1191,8 +1220,18 @@ impl PeerManager {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
                     self.mark_unadmitted_disabled_dynamic(&peer_key);
                 } else if self.peers.get(&peer_key).is_some_and(|m| m.is_dynamic) {
-                    if let Some(retirement) =
-                        self.prepare_dynamic_notification_retirement(&peer_key)
+                    // Retiring removes the peer from the table. A policy
+                    // walk that owns the actor captured it, so the walk
+                    // holds the notice until it ends.
+                    if self
+                        .hold_for_owned_walk(SessionNotification::BackToIdle {
+                            session_id,
+                            role,
+                            peer_addr,
+                        })
+                        .is_some()
+                        && let Some(retirement) =
+                            self.prepare_dynamic_notification_retirement(&peer_key)
                     {
                         retirements.push(retirement);
                     }

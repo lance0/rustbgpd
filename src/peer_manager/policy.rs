@@ -1336,6 +1336,10 @@ impl PeerManager {
             remainder_targets: targets.len(),
             ..PolicySnapshotPhaseTimings::default()
         };
+        // From here to the return below the walk owns the actor: its seams
+        // serve BFD, link and session events, and a notification that would
+        // retire a dynamic peer is held until the walk has ended.
+        let owns_actor = self.begin_owned_walk();
         let outcome = self
             .apply_resolved_policy_snapshot_classified_inner(
                 targets,
@@ -1344,6 +1348,11 @@ impl PeerManager {
                 operator_reads,
             )
             .await;
+        let service = if owns_actor {
+            self.end_owned_walk()
+        } else {
+            super::OwnedWalkService::default()
+        };
         let total_us = elapsed_us(snapshot_started);
         let attributed_us = phases
             .preflight_us
@@ -1374,6 +1383,9 @@ impl PeerManager {
             convergence_check_us = phases.convergence_check_us,
             total_us,
             unattributed_us = total_us.saturating_sub(attributed_us),
+            owned_wait_service_gap_max_us = service.gap_max_us,
+            events_served = service.events_served,
+            event_service_us = service.service_us,
             "reload generation phase timing"
         );
         outcome
@@ -1590,6 +1602,16 @@ impl PeerManager {
                 }
             }
         }
+    }
+
+    /// A seam between two units of the walk: serve the events it would
+    /// otherwise hold ([`Self::serve_owned_walk_events`]). Serving is not
+    /// walk progress, so its time is taken out of `budget`, which is never
+    /// renewed here.
+    async fn serve_walk_events(&mut self, budget: &mut LazyRibBudget) {
+        let started = tokio::time::Instant::now();
+        self.serve_owned_walk_events().await;
+        budget.exclude_since(started);
     }
 
     async fn complete_policy_snapshot(
@@ -1957,6 +1979,7 @@ impl PeerManager {
                 );
             }
             self.drain_operator_queries(context.operator_reads).await;
+            self.serve_walk_events(&mut context.forward).await;
         }
 
         // The deferred RIB steps, one export pair at a time in
@@ -2023,6 +2046,7 @@ impl PeerManager {
                         )
                         .await);
                 }
+                self.serve_walk_events(&mut context.forward).await;
             }
             // This pair's Route Refreshes follow its own commit, not the
             // whole walk: until a member's refresh, its `AdjRibIn` holds
@@ -2498,6 +2522,9 @@ impl PeerManager {
                 .clone_from(&target.export_policy);
             captured.push(prior);
             self.drain_operator_queries(context.operator_reads).await;
+            // Between two members: no handler removes a peer, so the
+            // members still to set up stay in the table.
+            self.serve_walk_events(&mut context.forward).await;
             if captured.len() % COHORT_SETUP_PROGRESS_INTERVAL == 0
                 || captured.len() == targets.len()
             {
@@ -2644,6 +2671,7 @@ impl PeerManager {
                 }));
             }
             captured[index].adj_rib_in_may_have_moved = true;
+            self.serve_walk_events(&mut context.forward).await;
         }
         phase_timings.deferred_refresh_dispatch_us = elapsed_us(deferred_refresh_started);
         Some(Ok(captured))
@@ -2953,6 +2981,7 @@ impl PeerManager {
                 .chain(rest)
                 .collect();
             self.drain_operator_queries(operator_reads).await;
+            self.serve_walk_events(budget).await;
         }
         if commands > 0 {
             info!(
@@ -3284,6 +3313,9 @@ impl PeerManager {
             if plan.export_restore.is_none() {
                 self.finish_policy_rollback_rib_success(plan);
             }
+            // The restore task is detached and timed on its own progress,
+            // so there is no budget to take this out of.
+            self.serve_owned_walk_events().await;
         }
     }
 
@@ -3376,6 +3408,7 @@ impl PeerManager {
                     }
                 }
             }
+            self.serve_walk_events(&mut context.rollback).await;
         }
 
         let registered = match self.register_policy_rollback_rib(&plans, context).await {
@@ -3406,6 +3439,7 @@ impl PeerManager {
                 progress,
                 mut task,
             } = registered;
+            let mut completed = progress.clone();
             let stall_deadline = move || {
                 progress.borrow().map_or(deadline, |completed| {
                     deadline.max(completed + super::RIB_BATCH_REPLY_TIMEOUT)
@@ -3421,9 +3455,27 @@ impl PeerManager {
                     }
                 }
             };
-            let outcome = self
-                .await_with_readiness(wait, context.operator_reads)
-                .await;
+            // The restore task has no seam on this actor, so each command
+            // it completes is one: events are served while it runs the
+            // next. The task is detached and its stall detector reads its
+            // own progress, which serving neither renews nor delays.
+            let mut wait = std::pin::pin!(wait);
+            let outcome = loop {
+                let step = async {
+                    tokio::select! {
+                        biased;
+                        outcome = &mut wait => Some(outcome),
+                        Ok(()) = completed.changed() => None,
+                    }
+                };
+                match self
+                    .await_with_readiness(step, context.operator_reads)
+                    .await
+                {
+                    Some(outcome) => break outcome,
+                    None => self.serve_owned_walk_events().await,
+                }
+            };
             if matches!(outcome, Ok(Ok(Ok(_)))) {
                 // Later partitions of this rollback are measured from here.
                 context.rollback.progressed();

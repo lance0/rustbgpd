@@ -165,7 +165,7 @@ fn manager_with_full_rib_mailbox() -> (
 }
 
 /// Bring the session that dialed `listener` to Established.
-async fn accept_and_establish(listener: &TcpListener) -> tokio::net::TcpStream {
+pub(super) async fn accept_and_establish(listener: &TcpListener) -> tokio::net::TcpStream {
     let (mut client, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
         .await
         .expect("the restarted session connects")

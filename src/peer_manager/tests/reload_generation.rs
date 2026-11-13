@@ -53,6 +53,7 @@ struct GenerationSessionCounters {
     export_owners: Mutex<Vec<PolicyOwners>>,
     stops: AtomicU32,
     starts: AtomicU32,
+    bfd_downs: AtomicU32,
 }
 
 #[expect(
@@ -172,6 +173,9 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                 }
                 PeerCommand::Start => {
                     in_task.starts.fetch_add(1, Ordering::SeqCst);
+                }
+                PeerCommand::BfdDown => {
+                    in_task.bfd_downs.fetch_add(1, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -7910,4 +7914,195 @@ async fn set_peer_group_export_knob_edit_and_rollback_do_not_wait_for_member_ref
         harness.shutdown().await;
     }
     assert!(waiting.is_empty(), "{waiting:#?}");
+}
+
+/// The route-server fixture with a non-strict BFD session to 10.0.0.2: the
+/// harness, the sender the BFD actor would hold, and a candidate that moves
+/// only the export chain the three neighbors share (one cohort).
+fn bfd_walk_fixture() -> (
+    RsFixture,
+    GenerationHarness,
+    crate::bfd_runtime::BfdStateChangeSender,
+    Config,
+    IpAddr,
+) {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let with_bfd = |mut config: Config| {
+        config.bfd_profiles.push(crate::config::BfdProfileConfig {
+            name: "fast".into(),
+            min_tx_interval: 300,
+            min_rx_interval: 300,
+            multiplier: 3,
+        });
+        config
+            .neighbors
+            .iter_mut()
+            .find(|neighbor| neighbor.address == peer.to_string())
+            .unwrap()
+            .bfd = Some(crate::config::BfdConfig {
+            profile: "fast".into(),
+            enabled: true,
+            strict: false,
+            multihop: false,
+        });
+        config
+    };
+    let fixture = RsFixture::new();
+    let prior = with_bfd(fixture.load());
+    let mut harness = GenerationHarness::new(&prior);
+    let desired = crate::bfd_runtime::BfdRuntimeConfig::from_config(&prior).unwrap();
+    let configured = desired
+        .sessions
+        .iter()
+        .cloned()
+        .map(|params| (params.peer, params))
+        .collect();
+    let (desired_tx, _desired_rx) = tokio::sync::watch::channel(desired);
+    let (states, states_rx) = crate::bfd_runtime::state_change_channel();
+    harness.mgr = harness
+        .mgr
+        .with_bfd_coupling(desired_tx, states_rx, configured);
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    let candidate = with_bfd(fixture.load());
+    (fixture, harness, states, candidate, peer)
+}
+
+/// A genuine transition of `peer`'s accepted BFD session.
+fn bfd_transition(
+    harness: &GenerationHarness,
+    peer: IpAddr,
+    state: rustbgpd_bfd::SessionState,
+) -> crate::bfd_runtime::BfdStateChange {
+    let mut change = if state == rustbgpd_bfd::SessionState::Up {
+        up(peer)
+    } else {
+        down(peer)
+    };
+    change.revision = harness.mgr.bfd_coupling.as_ref().unwrap().configured[&peer].revision;
+    change
+}
+
+/// E-1 and E-2, inside a SIGHUP generation: a BFD Down that arrives while
+/// the generation's policy walk runs stops the BGP session at the walk's
+/// next seam, before its next RIB command. A later unit then fails; the
+/// generation ends `FullyCompensated`, the peer is still held, and the BFD
+/// Up that follows sends its `Start`.
+///
+/// LOAD-BEARING: a walk that serves nothing never delivers `BfdDown` (the
+/// generation's handler ignores the change); a hold that is not recorded as
+/// a prior one is dropped by the abort, and the Up then owes no `Start` to a
+/// session that was told `BfdDown`.
+#[tokio::test]
+async fn bfd_down_during_a_generation_is_served_and_survives_its_abort() {
+    let (_fixture, mut harness, states, candidate, peer) = bfd_walk_fixture();
+    let prior = harness.mgr.current_config.clone();
+    // Targets are walked in address order: the trigger before the failure.
+    let trigger: IpAddr = "10.0.0.9".parse().unwrap();
+    let failing: IpAddr = "2001:db8::3".parse().unwrap();
+
+    let injected = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (seen, stopped) = (Arc::clone(&injected), Arc::clone(&harness.counters[&peer]));
+    let relay = tokio::spawn(async move {
+        let mut served_before_next_command = None;
+        while let Some(update) = rx.recv().await {
+            // The walk cannot pass a command this relay has not forwarded.
+            if seen.load(Ordering::SeqCst) && served_before_next_command.is_none() {
+                let mut served = false;
+                for _ in 0..200 {
+                    served = stopped.bfd_downs.load(Ordering::SeqCst) == 1;
+                    if served {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                served_before_next_command = Some(served);
+            }
+            if downstream.send(update).await.is_err() {
+                break;
+            }
+        }
+        served_before_next_command
+    });
+    let change = bfd_transition(&harness, peer, rustbgpd_bfd::SessionState::Down);
+    let hook_states = states.clone();
+    *harness.counters[&trigger].on_export_install.lock().unwrap() = Some(Box::new(move |_| {
+        hook_states.send(change);
+        injected.store(true, Ordering::SeqCst);
+    }));
+    harness.counters[&failing]
+        .reject_export_updates
+        .store(1, Ordering::SeqCst);
+
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    assert_eq!(harness.counters[&peer].bfd_downs.load(Ordering::SeqCst), 1);
+    assert!(
+        harness.mgr.bfd_withholding(&peer),
+        "the aborted generation keeps the hold a real Down took"
+    );
+    assert_eq!(harness.counters[&peer].starts.load(Ordering::SeqCst), 0);
+
+    states.send(bfd_transition(
+        &harness,
+        peer,
+        rustbgpd_bfd::SessionState::Up,
+    ));
+    let change = PeerManager::receive_bfd_state_change(&mut harness.mgr.bfd_coupling).await;
+    harness.mgr.handle_bfd_state_change(change).await;
+    wait_counter(&harness.counters[&peer].starts, 1).await;
+    assert!(!harness.mgr.bfd_withholding(&peer));
+
+    harness.shutdown().await;
+    assert_eq!(relay.await.unwrap(), Some(true));
+}
+
+/// E-2: a BFD Up that arrives during a generation waits for the generation
+/// to end. The held session is not started inside it, the change stays
+/// queued, and the run loop's handler releases the hold afterwards.
+///
+/// LOAD-BEARING: a seam that takes every queued change consumes the Up
+/// inside the generation, whose handler ignores it, and the hold is never
+/// released.
+#[tokio::test]
+async fn bfd_up_during_a_generation_waits_for_the_generation_to_end() {
+    let (_fixture, mut harness, states, candidate, peer) = bfd_walk_fixture();
+    // Targets are walked in address order: the trigger before the failure.
+    let trigger: IpAddr = "10.0.0.9".parse().unwrap();
+    let failing: IpAddr = "2001:db8::3".parse().unwrap();
+    let down = bfd_transition(&harness, peer, rustbgpd_bfd::SessionState::Down);
+    harness.mgr.handle_bfd_state_change(down).await;
+    assert!(harness.mgr.bfd_withholding(&peer));
+
+    let change = bfd_transition(&harness, peer, rustbgpd_bfd::SessionState::Up);
+    let hook_states = states.clone();
+    *harness.counters[&trigger].on_export_install.lock().unwrap() =
+        Some(Box::new(move |_| hook_states.send(change)));
+    harness.counters[&failing]
+        .reject_export_updates
+        .store(1, Ordering::SeqCst);
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert!(harness.mgr.bfd_withholding(&peer));
+
+    let queued = tokio::time::timeout(
+        Duration::from_secs(5),
+        PeerManager::receive_bfd_state_change(&mut harness.mgr.bfd_coupling),
+    )
+    .await
+    .expect("the Up is still queued after the generation");
+    assert_eq!(queued.state, rustbgpd_bfd::SessionState::Up);
+    assert_eq!(harness.counters[&peer].starts.load(Ordering::SeqCst), 0);
+    harness.mgr.handle_bfd_state_change(queued).await;
+    wait_counter(&harness.counters[&peer].starts, 1).await;
+    assert!(!harness.mgr.bfd_withholding(&peer));
+    harness.shutdown().await;
 }

@@ -39,7 +39,7 @@ fn fake_bfd_peer_handle(counters: Arc<BfdCouplingCounters>) -> PeerHandle {
     PeerHandle::from_parts(tx, task)
 }
 
-fn bfd_params(peer: IpAddr, strict: bool) -> crate::bfd_runtime::BfdSessionParams {
+pub(super) fn bfd_params(peer: IpAddr, strict: bool) -> crate::bfd_runtime::BfdSessionParams {
     crate::bfd_runtime::BfdSessionParams {
         revision: 0,
         peer,
@@ -758,6 +758,33 @@ async fn bfd_reload_abort_restores_nonstrict_admission_without_publishing_candid
     assert!(!mgr.bfd_withholding(&peer));
     assert_eq!(*desired.borrow(), before);
     assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+/// A peer latched disabled while a generation suspended BFD publication (a
+/// max-prefix breach or a session-crash latch served during its policy walk
+/// calls `set_bfd_peer_disabled`, which a generation ignores) has its BFD
+/// session drained once the generation aborts, as a commit drains it.
+///
+/// LOAD-BEARING: an abort that keeps the generation's stale `disabled` set
+/// republishes the latched peer's BFD session as enabled.
+#[tokio::test]
+async fn bfd_reload_abort_drains_a_peer_disabled_during_the_generation() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, desired) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters));
+    let coupling = mgr.bfd_coupling.as_mut().unwrap();
+    coupling.prior_held.clone_from(&coupling.held_down);
+    coupling.pending = Some(coupling.configured.clone());
+    coupling.reloading = true;
+    mgr.peers.get_mut(&key(peer)).unwrap().enabled = false;
+    mgr.set_bfd_peer_disabled(peer, true);
+    mgr.abort_bfd_reload();
+    let published = desired.borrow().clone();
+    assert_eq!(published.sessions.len(), 1);
+    assert!(
+        !published.sessions[0].enabled,
+        "the disabled peer's BFD session is drained after the abort"
+    );
 }
 
 #[tokio::test]
