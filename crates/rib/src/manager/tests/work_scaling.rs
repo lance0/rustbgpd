@@ -1133,6 +1133,155 @@ fn shared_pair_longest_batch_is_flat_in_pair_size() {
     );
 }
 
+/// How one member's export-policy move reaches the RIB.
+#[derive(Clone, Copy, Debug)]
+enum SingletonMove {
+    /// `ReplacePeerExportPoliciesAuthoritatively` naming the one member.
+    Batch,
+    /// `ReplacePeerExportPolicy`.
+    PerPeer,
+}
+
+/// A fleet of `fleet` IPv4 unicast members, each on an export
+/// chain of its own and so alone in its update group, each holding
+/// [`RESIDUAL_ROWS`] rows. Member 0 moves to a new chain of its own. Returns
+/// the command's checkpoints and what it put on the wire.
+fn singleton_move(how: SingletonMove, fleet: usize) -> Work {
+    const OLD: u32 = 0xFC00_0100;
+    const NEW: u32 = 0xFC00_0200;
+    let old_of = |index: usize| OLD + u32::try_from(index).unwrap();
+    let arm = ResidualArm::MixedDestinations;
+    let (_tx, mut manager) = manager();
+    let mut receivers: Vec<_> = (0..fleet)
+        .map(|index| {
+            let (outbound_tx, receiver) = mpsc::channel(4096);
+            let mut up = test_peer_up(member(index), 1, outbound_tx);
+            if let RibUpdate::PeerUp {
+                export_policy,
+                peer_asn,
+                sendable_families,
+                ..
+            } = &mut up
+            {
+                *export_policy = Some(super::update_groups::community_chain(old_of(index)));
+                *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                *sendable_families = arm.families();
+            }
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, old_of),
+        vec![RESIDUAL_ROWS; fleet]
+    );
+    let groups: HashSet<_> = (0..fleet)
+        .map(|index| manager.grouped_member_of(member(index)).expect("grouped"))
+        .collect();
+    assert_eq!(
+        groups.len(),
+        fleet,
+        "every member is alone in its update group"
+    );
+    let mover = member(0);
+    let next = super::update_groups::community_chain(NEW);
+    let batches_before = manager
+        .policy_transition_stats
+        .batched_authoritative_shared_members;
+    let mut work = checkpoints_in(|| match how {
+        SingletonMove::Batch => {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements: vec![crate::PeerExportPolicyReplacement {
+                    peer: mover,
+                    export_policy: Some(next),
+                }],
+                reply,
+            });
+            assert_eq!(
+                response.try_recv().unwrap().unwrap(),
+                Vec::<PeerId>::new(),
+                "a unicast member alone in its group commits in the batch, as a shared cohort of one"
+            );
+        }
+        SingletonMove::PerPeer => {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+                peer: mover,
+                export_policy: Some(next),
+                reply,
+            });
+            response.try_recv().unwrap().unwrap();
+        }
+    });
+    assert_eq!(
+        manager
+            .policy_transition_stats
+            .batched_authoritative_shared_members
+            - batches_before,
+        usize::from(matches!(how, SingletonMove::Batch)),
+        "{how:?}: members moved on the shared transition"
+    );
+    // The wire: the mover re-exports its table under the new chain and no
+    // other member hears anything.
+    let (mut updates, mut announced, mut retagged) = (0, 0, HashSet::new());
+    while let Ok(update) = receivers[0].try_recv() {
+        updates += 1;
+        announced += update.announce.len();
+        retagged.extend(tagged_keys(&update, NEW));
+    }
+    assert_eq!(retagged.len(), RESIDUAL_ROWS, "{how:?}: re-exported table");
+    assert_eq!(
+        drain(&mut receivers[1..]),
+        (0, 0),
+        "{how:?}: no other member is sent anything"
+    );
+    work.insert("mover outbound updates", updates);
+    work.insert("mover announcements", announced);
+    work
+}
+
+/// The peer manager sends a remainder peer that is alone in its export pair
+/// to the RIB as an authoritative batch of one, not as the per-peer command.
+/// For a unicast member alone in its update group the batch moves it as a
+/// shared cohort of one (destination build plus the old-to-new delta) where
+/// the per-peer command regroups it and resyncs its whole table, and both
+/// put the same announcements on the wire. The batch must stay the cheaper
+/// command, and must not gain per-command work that grows with the
+/// registered fleet faster than the per-peer command's does: a walk over N
+/// such peers sends N of them.
+#[test]
+fn singleton_batch_of_one_costs_less_than_the_per_peer_command() {
+    let (batch, per_peer) = (
+        singleton_move(SingletonMove::Batch, 16),
+        singleton_move(SingletonMove::PerPeer, 16),
+    );
+    for unit in ["mover outbound updates", "mover announcements"] {
+        assert_eq!(batch[unit], per_peer[unit], "{unit}: the same wire output");
+    }
+    assert!(
+        batch[ALL] * 2 < per_peer[ALL],
+        "a batch of one must cost well under the per-peer command: {} vs {} checkpoints\n\
+         batch: {batch:?}\nper-peer: {per_peer:?}",
+        batch[ALL],
+        per_peer[ALL],
+    );
+    let (batch_wide, per_peer_wide) = (
+        singleton_move(SingletonMove::Batch, 64),
+        singleton_move(SingletonMove::PerPeer, 64),
+    );
+    let (batch_growth, per_peer_growth) = (
+        batch_wide[ALL] - batch[ALL],
+        per_peer_wide[ALL] - per_peer[ALL],
+    );
+    assert!(
+        batch_growth <= per_peer_growth,
+        "48 more registered peers cost the batch of one {batch_growth} more checkpoints and \
+         the per-peer command {per_peer_growth}: the batch gained per-command fleet work"
+    );
+}
+
 /// Update-group tables no member belongs to.
 fn memberless_groups(manager: &RibManager) -> usize {
     manager
