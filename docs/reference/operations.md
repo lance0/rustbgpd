@@ -1034,17 +1034,18 @@ a second for a peer with its own export policy. Served at each boundary
 - A static neighbor's session notifications. A session task that crashed is
   replaced and restarted on the policy the walk holds for that neighbor at
   that moment (the new one once its step has run, the prior one before, and
-  the restored one during a rollback); the third crash in ten minutes
-  latches the neighbor. A max-prefix breach stops the session and latches
-  the neighbor. An OPEN collision is resolved.
+  the restored one during a rollback). A neighbor held down by BFD has its
+  session replaced but not started until BFD is Up. The third crash in ten
+  minutes latches the neighbor. A max-prefix breach stops the session and
+  latches the neighbor. An OPEN collision is resolved.
 
 The bound is on what a boundary takes from each queue, not on what a served
 event's handler drains: session up and down events are taken whole, and a
 round of notifications that retires, replaces or promotes a session handles
 every session notification queued at that moment, as does a BFD Down that
-ends an inbound collision candidate. When a session is replaced inside a reload, operator
-reads of that peer's import counters show the old session's values until
-the reload ends.
+ends an inbound collision candidate. When a session is replaced inside a
+reload, operator reads of that peer's import counters show the old
+session's values until the reload ends.
 
 These still wait until the walk or rollback has ended:
 

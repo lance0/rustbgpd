@@ -519,7 +519,12 @@ impl PeerManager {
         }
         if self.bfd_withholding(&peer_addr) {
             // A BFD Down holds this peer: the Up that releases the hold
-            // sends the replacement its `Start`.
+            // sends the replacement its `Start`. An Up handled before this
+            // exit met the ended session and left the hold in place, so the
+            // desired state is republished for the BFD actor to re-confirm
+            // the level, as on the strict path. Inside a generation
+            // publication is suspended, and its commit or abort settles it.
+            self.set_bfd_peer_disabled(peer_addr, false);
             self.keep_bfd_hold_across_replacement(peer_addr);
             warn!(peer = %peer_addr, session_id, %cause, "session task crashed; replaced, the BFD hold withholds the restart until BFD Up");
             return;

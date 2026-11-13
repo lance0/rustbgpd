@@ -1939,3 +1939,107 @@ async fn held_task_exit_of_an_indebted_dynamic_peer_keeps_the_rollback_exact() {
     drop(mgr);
     rib.await.unwrap();
 }
+
+/// The exit notice of `peer`'s current session task.
+fn task_exited(mgr: &PeerManager, peer: IpAddr) -> SessionNotification {
+    SessionNotification::TaskExited {
+        session_id: mgr.peers[&key(peer)].session_id(),
+        role: SessionRole::Primary,
+        peer_addr: peer,
+        cause: "ended".into(),
+    }
+}
+
+/// A non-strict peer is held by a BFD Down and its session task has ended.
+/// The BFD Up that permits BGP again is handled before the task's exit, as
+/// a seam handles them, BFD first: the Up's `Start` meets the closed
+/// channel, and the hold stays. The exit republishes the desired state, the
+/// BFD actor re-confirms Up, and that acknowledgement starts the
+/// replacement. Inside a generation the Up stays queued and the replacement
+/// is held until the generation has ended.
+///
+/// LOAD-BEARING: with no republication nothing reports BFD Up again, so the
+/// replacement stays Idle and held until a BFD flap.
+#[tokio::test]
+async fn bfd_up_handled_before_a_held_peers_task_exit_starts_the_replacement() {
+    for in_generation in [false, true] {
+        let Lab {
+            mut mgr,
+            mut rib_rx,
+            peers,
+            ..
+        } = lab(2);
+        let peer = peers[1];
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let (commands, ended) = mpsc::channel(1);
+        drop(ended);
+        insert_test_managed_peer(
+            &mut mgr,
+            peer,
+            PeerHandle::from_parts(commands, tokio::spawn(async { Ok(()) })),
+            false,
+        );
+        mgr.peers
+            .get_mut(&key(peer))
+            .unwrap()
+            .transport_config
+            .remote_addr = listener.local_addr().unwrap();
+        let configured = HashMap::from([(peer, super::bfd::bfd_params(peer, false))]);
+        let (desired_tx, mut desired_rx) =
+            watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+        let (states, states_rx) = crate::bfd_runtime::state_change_channel();
+        let mut mgr = mgr.with_bfd_coupling(desired_tx, states_rx, configured);
+        mgr.bfd_coupling.as_mut().unwrap().held_down.insert(peer);
+        desired_rx.mark_unchanged();
+        if in_generation {
+            begin_generation(&mut mgr);
+        }
+        let ended_session = mgr.peers[&key(peer)].session_id();
+        let (notices, seam_states) = (mgr.session_notify_tx.clone(), states.clone());
+        let mut notice = Some(task_exited(&mgr, peer));
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                // The only unit's batch: both events wait for the seam after it.
+                if is_walk_command(&update)
+                    && let Some(notice) = notice.take()
+                {
+                    seam_states.send(up(peer));
+                    notices.send(notice).unwrap();
+                }
+                answer(update);
+            }
+        });
+        let result = mgr
+            .apply_resolved_policy_snapshot_classified(distinct_targets(&peers[..1]), true)
+            .await;
+        assert!(
+            result.is_ok(),
+            "{:?}",
+            result.err().map(|failure| failure.message().to_owned())
+        );
+        assert_ne!(mgr.peers[&key(peer)].session_id(), ended_session);
+        if in_generation {
+            assert!(mgr.bfd_withholding(&peer), "the generation keeps the hold");
+            let state = mgr.peers[&key(peer)]
+                .handle()
+                .query_state_timeout(Duration::from_secs(5))
+                .await
+                .expect("the replacement answers");
+            assert_eq!(state.fsm_state, SessionState::Idle);
+            mgr.abort_bfd_reload();
+        }
+        // The BFD actor answers a republished desired state by re-confirming
+        // each session's level.
+        if desired_rx.has_changed().unwrap() {
+            let mut ack = up(peer);
+            ack.resync = true;
+            states.send(ack);
+        }
+        mgr.serve_bfd_events(OWNED_WALK_EVENT_BUDGET).await;
+        assert!(!mgr.bfd_withholding(&peer), "in_generation={in_generation}");
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap_or_else(|_| panic!("in_generation={in_generation}: the replacement is started"))
+            .unwrap();
+    }
+}
