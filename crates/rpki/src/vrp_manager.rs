@@ -289,16 +289,22 @@ impl CacheInventoryAttachment {
 pub struct RpkiTableUpdate {
     /// The new merged VRP table snapshot.
     pub table: Arc<VrpTable>,
-    /// The VRP entries announced or withdrawn since the previously
-    /// distributed snapshot, when this update came from an RTR incremental
-    /// (serial) sync. The merged table is a union of per-server sets, so any
-    /// entry that differs between consecutive distributed snapshots is
-    /// guaranteed to appear in this list — a route's validation outcome can
-    /// only change if its prefix is covered by one of these entries, which
-    /// lets the RIB manager revalidate just the covered routes.
+    /// A superset of the VRP entries that differ between the previously
+    /// distributed snapshot and this one, whatever produced the update. The
+    /// merged table is a union of per-server sets, so a route's validation
+    /// outcome can only change if its prefix is covered by one of these
+    /// entries, which lets the RIB manager revalidate just the covered
+    /// routes.
     ///
-    /// `None` means no delta is known (full cache snapshot, cache reset,
-    /// resync, server loss) and consumers must revalidate everything.
+    /// For a full table that replaces a server's previous one, and for the
+    /// removal of a server's data (flush or expiry), the list is exactly the
+    /// entries that joined or left the merged table: an entry another server
+    /// still holds is not in it. For an RTR incremental (serial) sync it is
+    /// every entry the server announced or withdrawn.
+    ///
+    /// `None` means there is no baseline to compare with (a server's first
+    /// table, also after its data was flushed or expired) and consumers
+    /// must revalidate everything.
     pub delta: Option<Vec<VrpEntry>>,
 }
 
@@ -307,8 +313,14 @@ pub struct RpkiTableUpdate {
 pub struct AspaTableUpdate {
     /// The new merged ASPA table snapshot.
     pub table: Arc<AspaTable>,
-    /// Customer ASNs announced or withdrawn by an RTR incremental update.
-    /// `None` requires a full revalidation (full snapshot or server loss).
+    /// A superset of the customer ASNs whose merged provider set differs
+    /// from the previously distributed snapshot: the customers one server
+    /// announced or withdrew in an incremental update, those whose record
+    /// differs between a server's replacing full table and its previous
+    /// one, or those a removed server held. Another server's record for the
+    /// same customer is not taken into account.
+    ///
+    /// `None` requires a full revalidation (a server's first table).
     pub changed_customer_asns: Option<FxHashSet<u32>>,
 }
 
@@ -550,6 +562,7 @@ impl VrpManager {
     ///   the expire interval).
     /// - A lost flush or expiry is carried out again; the cache's data
     ///   leaves the tables. A second panic there ends the manager.
+    /// - A panic in an observer costs only that notification.
     /// - A lost connectivity change or inventory query costs only itself.
     ///
     /// Updates on the legacy channel are not covered: without the attachment
@@ -673,7 +686,10 @@ impl VrpManager {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.observe_removed(server);
                 }));
-                self.request_resync(server);
+                // No resync request: a client that sends a flush or an
+                // expiry has already dropped its epoch, so its next query
+                // is a Reset Query, and the manager expires data only for
+                // a cache that is already pending.
             }
         }
     }
@@ -684,9 +700,14 @@ impl VrpManager {
             server = server.map(tracing::field::display),
             "VRP manager panicked handling a message; continuing with its state as before it"
         );
-        if let Some(observer) = &self.fault_observer {
-            observer();
-        }
+        // Unwind safety, here and for the resync observer: the observers
+        // are the embedder's, and the manager's state does not depend on
+        // them.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(observer) = &self.fault_observer {
+                observer();
+            }
+        }));
     }
 
     /// Ask `server`'s client for a full table and hold what the cache last
@@ -699,9 +720,11 @@ impl VrpManager {
         inventory
             .resync_tx
             .send_modify(|requests| *requests.entry(server).or_default() += 1);
-        if let Some(observer) = &self.resync_observer {
-            observer(server, true);
-        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(observer) = &self.resync_observer {
+                observer(server, true);
+            }
+        }));
     }
 
     /// Drop `server`'s accepted state and data and redistribute.
@@ -886,9 +909,16 @@ impl VrpManager {
     async fn distribute(&mut self, staged: Staged) {
         let (vrp_update, aspa_update, resynchronized) = self.commit(staged);
         if let Some(update) = vrp_update {
+            info!(
+                v4 = update.table.v4_count(),
+                v6 = update.table.v6_count(),
+                total = update.table.len(),
+                "VRP table updated"
+            );
             let _ = self.rib_tx.send(update).await;
         }
         if let (Some(update), Some(aspa_tx)) = (aspa_update, &self.aspa_rib_tx) {
+            info!(records = update.table.len(), "ASPA table updated");
             let _ = aspa_tx.send(update).await;
         }
         if let (Some(server), Some(observer)) = (resynchronized, &self.resync_observer) {
@@ -906,6 +936,13 @@ impl VrpManager {
         self.injected_fault();
         let old_vrps = |server| self.server_tables.get(server);
         let old_aspas = |server| self.server_aspa_tables.get(server);
+        // Whether a cache other than `server` holds `entry`: such an entry
+        // stays in the merged table whatever `server` does with it.
+        let held_elsewhere = |server: SocketAddr, entry: &VrpEntry| {
+            self.server_tables
+                .iter()
+                .any(|(other, table)| *other != server && table.entries.contains(entry))
+        };
         let (server, incremental, vrps, aspas, vrp_delta, changed_customer_asns) = match update {
             VrpUpdate::FullTable {
                 server,
@@ -926,13 +963,18 @@ impl VrpManager {
                     .map(|r| (r.customer_asn, r.provider_asns))
                     .collect();
                 // A table that replaces this cache's previous one changes
-                // the merged table by at most the entries the two differ in
-                // (only this cache's set changes), so that difference is the
+                // the merged table by exactly the entries the two differ in
+                // that no other cache holds (only this cache's set changes,
+                // and the merged table is the union), so those are the
                 // delta. A cache's first table has no previous set to
                 // compare with, and downstream rescans.
+                // The ASPA set below is not narrowed the same way: the RIB
+                // scans every route for an ASPA update and uses the set only
+                // to skip detailed validation, so its size costs nothing.
                 let vrp_delta = old_vrps(&server).map(|old| {
                     old.entries
                         .symmetric_difference(&vrps.entries)
+                        .filter(|entry| !held_elsewhere(server, entry))
                         .cloned()
                         .collect()
                 });
@@ -1017,11 +1059,19 @@ impl VrpManager {
             }
             VrpUpdate::ServerDown { server } => {
                 info!(%server, "cache server down — removing entries");
-                // Only this cache's set leaves, so what it held is the
-                // delta. A cache that held nothing changes nothing.
+                // Only this cache's set leaves, so the delta is what it
+                // alone held: with two caches serving the same data, one
+                // of them expiring changes almost nothing. A cache that
+                // held nothing changes nothing.
                 let vrp_delta = Some(
                     old_vrps(&server)
-                        .map(|old| old.entries.iter().cloned().collect())
+                        .map(|old| {
+                            old.entries
+                                .iter()
+                                .filter(|entry| !held_elsewhere(server, entry))
+                                .cloned()
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 );
                 let changed = Some(
@@ -1123,16 +1173,9 @@ impl VrpManager {
             }
         }
         if let Some(update) = &vrp_update {
-            info!(
-                v4 = update.table.v4_count(),
-                v6 = update.table.v6_count(),
-                total = update.table.len(),
-                "VRP table updated"
-            );
             self.current_table = Some(Arc::clone(&update.table));
         }
         if let Some(update) = &aspa_update {
-            info!(records = update.table.len(), "ASPA table updated");
             self.current_aspa_table = Some(Arc::clone(&update.table));
         }
         (vrp_update, aspa_update, resynchronized)
@@ -2635,15 +2678,17 @@ mod tests {
             assert!(f.rib_rx.try_recv().is_err(), "published once");
             assert!(!covers(&update.table, 1) && covers(&update.table, 2));
             assert!(covers(&update.table, 9), "the other cache still holds it");
-            let mut delta = update.delta.unwrap();
-            delta.sort();
-            assert_eq!(delta, [host(1), host(9)]);
+            // Exactly what left the merged table: the other cache still
+            // holds host 9.
+            assert_eq!(update.delta, Some(vec![host(1)]));
             assert!(!f.mgr.server_tables.contains_key(&server1()));
             assert!(!f.mgr.server_aspa_tables.contains_key(&server1()));
             assert!(f.mgr.cache_list().rows[0].accepted.is_none());
             assert_eq!(f.budget.used(), 2, "the removed table's charge is released");
             assert_eq!(f.faults.load(Ordering::SeqCst), 1);
-            assert_eq!(f.pending(), [server1()]);
+            // The client that sent the removal has no epoch left, so no
+            // resync is asked of it.
+            assert_eq!(f.pending(), Vec::<SocketAddr>::new());
         }
     }
 
@@ -2700,8 +2745,9 @@ mod tests {
             .delta
             .expect("a replacing table carries its difference");
         delta.sort();
-        // Host 9 left this cache's set too; the other cache still has it.
-        assert_eq!(delta, [host(1), host(3), host(4), host(9)]);
+        // Host 9 left this cache's set too, but the other cache still has
+        // it, so it did not leave the merged table.
+        assert_eq!(delta, [host(1), host(3), host(4)]);
         assert_eq!(
             [1, 2, 3, 4, 9].map(|last| covers(&update.table, last)),
             [false, true, true, true, true]

@@ -1356,7 +1356,11 @@ impl RpkiFaultDaemon {
 fn rpki_manager_update_panic_keeps_bgp_up_and_resynchronizes_that_cache() {
     use rustbgpd_rpki::rtr_codec::RtrPdu;
 
-    // The second accepted End of Data, the second cache's, panics.
+    // The second accepted End of Data, the second cache's, panics. The
+    // injection is in an observer, after the table was applied, and both
+    // caches serve the same table, so the VRP count below shows only that
+    // nothing was dropped; the crate's tests pin that a panic before the
+    // commit leaves every set and table as it was.
     let mut f = RpkiFaultDaemon::start("vrp_manager_update_panic", 2);
     assert_eq!(read_rtr_pdu(&mut f.rtr[1]), RtrPdu::ResetQuery);
 

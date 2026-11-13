@@ -20,6 +20,8 @@
 - A full table that replaces a cache's previous one (after a Cache Reset, a
   reconnect without a usable serial, or a resynchronization), and the loss of
   a cache's data at flush or expire, now revalidate only the routes covered
-  by the VRPs or ASPA customers that actually changed. Previously each made
-  the RIB and every session re-evaluate all routes. A cache's first table
-  still re-evaluates everything.
+  by the VRPs that joined or left the merged table; a VRP another cache still
+  holds is not among them. For ASPA, detailed validation is limited to routes
+  whose path contains a customer whose record changed in that cache.
+  Previously each made the RIB and every session re-evaluate all routes. A
+  cache's first table still re-evaluates everything.

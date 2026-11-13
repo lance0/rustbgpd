@@ -2686,10 +2686,11 @@ tests:
               description: >-
                 rustbgpd on rs1:9179 has waited 15 minutes for a
                 full table from cache 192.0.2.11:3323 after a recovered VRP
-                manager panic. Validation still uses that cache's last applied
-                data, which is not being refreshed and is dropped at its expire
+                manager panic. Until its expire, validation uses that cache's
+                last applied data, unrefreshed
                 (bgp_rpki_cache_end_of_data_age_seconds against
-                bgp_rpki_cache_effective_expire_seconds). Check
+                bgp_rpki_cache_effective_expire_seconds); after it the cache
+                contributes nothing. Check
                 bgp_rpki_task_restarts_total{task="vrp_manager"} for repeated
                 panics, and run rbgp rpki caches for the cache's session state.
       - eval_time: 32m

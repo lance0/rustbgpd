@@ -26,9 +26,12 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   `VrpUpdate` channel are not covered.
 - A full table that replaces a cache's previous one, and the removal of a
   cache's data, now carry a delta in `RpkiTableUpdate::delta` and
-  `AspaTableUpdate::changed_customer_asns`: the entries the cache's two sets
-  differ in, or the entries removed. Previously both were `None`, which asks
-  consumers for a full revalidation. A cache's first table is still `None`.
+  `AspaTableUpdate::changed_customer_asns`. The VRP delta is exactly the
+  entries that joined or left the merged table (an entry another cache still
+  holds is not in it); the ASPA set is the customers whose record changed in
+  that cache. Previously both were `None`, which asks consumers for a full
+  revalidation. A cache's first table is still `None`.
+- A panic in a fault or resync observer no longer ends the manager.
 
 ## 0.10.0 - 2026-11-08
 

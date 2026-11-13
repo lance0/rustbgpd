@@ -2688,7 +2688,19 @@ async fn forward_validation_cache<U>(
             restart_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             "validation-table forwarder panicked; forwarding the latest table again in full"
         );
-        tokio::time::sleep(delay).await;
+        // Keep taking tables during the backoff, so the manager is never
+        // held behind it; only the newest matters.
+        let backoff_over = tokio::time::sleep(delay);
+        tokio::pin!(backoff_over);
+        loop {
+            tokio::select! {
+                () = &mut backoff_over => break,
+                update = updates.recv(), if open => match update {
+                    Some(update) => latest = Some(full(&update)),
+                    None => open = false,
+                },
+            }
+        }
         pending = latest.as_ref().map(&full);
     }
 }
