@@ -50,6 +50,13 @@ impl SessionCrashes {
                 .back()
                 .is_some_and(|at| now.duration_since(*at) < SESSION_CRASH_WINDOW)
     }
+
+    /// The latest crash's error and whether it latched the neighbor, while
+    /// the record is current.
+    pub(super) fn error(&self) -> Option<(&str, bool)> {
+        self.current(Instant::now())
+            .then_some((self.last_error.as_str(), self.latched))
+    }
 }
 
 struct NotificationRetirement {
@@ -264,8 +271,7 @@ impl PeerManager {
     pub(super) fn session_crash_error(&self, peer: &PeerKey) -> Option<(&str, bool)> {
         self.session_crashes
             .get(peer)
-            .filter(|crashes| crashes.current(Instant::now()))
-            .map(|crashes| (crashes.last_error.as_str(), crashes.latched))
+            .and_then(SessionCrashes::error)
     }
 
     /// Take `peer`'s crash record, to carry an interface-only neighbor's to
@@ -297,6 +303,13 @@ impl PeerManager {
         let unix_seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
+        // The recovery names the neighbor as `rbgp neighbor` selects it: an
+        // interface-only neighbor by its interface, which outlives the
+        // learned endpoint the record may move away from.
+        let selector = match peer_key.interface.as_deref() {
+            Some(interface) if self.interface_only_owns(Some(interface)) => interface.to_owned(),
+            _ => peer_key.label(),
+        };
         let crashes = self.session_crashes.entry(peer_key.clone()).or_default();
         while crashes
             .recent
@@ -313,9 +326,8 @@ impl PeerManager {
         let error = if latch {
             format!(
                 "session task crashed at unix time {unix_seconds} ({cause}), {count} times in \
-                 {window_minutes} minutes; peer latched disabled; run 'rbgp neighbor {} enable' \
-                 to restart it",
-                peer_key.label()
+                 {window_minutes} minutes; peer latched disabled; run 'rbgp neighbor {selector} \
+                 enable' to restart it"
             )
         } else {
             format!(

@@ -1773,15 +1773,32 @@ async fn a_session_crash_latch_moves_with_a_new_learned_address() {
     h.links_changed(snapshot(true, &[("swp1", 7, false)]));
     h.reconcile().await;
     assert!(!h.mgr.peers.contains_key(&old));
+    // Unbound, the row still says why it is down.
+    // Mutation-red: projecting only the held max-prefix latch drops it.
+    let rows = h.mgr.list_peers().await;
+    let unbound = rows
+        .iter()
+        .find(|info| info.interface.as_deref() == Some("swp1"))
+        .expect("the unbound row");
+    assert!(!unbound.enabled);
+    assert!(
+        unbound.last_error.contains("latched disabled"),
+        "{}",
+        unbound.last_error
+    );
     h.links_changed(snapshot(true, &[("swp1", 7, true)]));
     h.bind("swp1", Some(endpoint(3, 7))).await;
     let new = swp1_key(3);
     assert!(!h.mgr.peers[&new].enabled);
     assert!(h.mgr.session_crash_latched(&new), "carried");
     assert!(!h.mgr.session_crash_latched(&old), "nothing left behind");
+    // The recovery names the neighbor by its interface, which `rbgp
+    // neighbor` selects, not the endpoint the latch was recorded at.
+    // Mutation-red: naming the key gives `fe80::2%swp1`.
     let info = h.mgr.get_peer_info(&new).await.unwrap();
     assert!(
-        info.last_error.contains("latched disabled"),
+        info.last_error.contains("latched disabled")
+            && info.last_error.contains("'rbgp neighbor swp1 enable'"),
         "{}",
         info.last_error
     );

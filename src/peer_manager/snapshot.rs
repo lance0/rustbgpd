@@ -456,7 +456,7 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
 /// overrides any other error, a max-prefix latch's included: it alone
 /// names the recovery the neighbor waits for. Applied after the max-prefix
 /// overlay.
-fn apply_session_crash(info: &mut PeerInfo, crash: Option<(&str, bool)>) {
+pub(super) fn apply_session_crash(info: &mut PeerInfo, crash: Option<(&str, bool)>) {
     if let Some((crash, latched)) = crash
         && (latched || info.last_error.is_empty())
     {

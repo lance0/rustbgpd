@@ -977,6 +977,12 @@ impl PeerManager {
                             latch.deadline,
                         );
                     }
+                    super::snapshot::apply_session_crash(
+                        &mut info,
+                        held.crashes
+                            .as_ref()
+                            .and_then(super::notifications::SessionCrashes::error),
+                    );
                 }
                 Some(info)
             })
