@@ -914,6 +914,102 @@ fn shared_pair_longest_batch_is_flat_in_pair_size() {
     );
 }
 
+/// A pair whose target chain reads a dataset shares only its first batch.
+/// That batch builds the destination group; a later batch finds it occupied,
+/// and the batched transition does not read an occupied group's staged view
+/// across a dataset reference, so the RIB hands those members back and the
+/// paced walk moves each one with a resync of its own. Every member still
+/// ends in the one destination group with its table re-exported.
+#[test]
+fn dataset_pair_batches_after_the_first_go_to_the_paced_walk() {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    const BATCH: usize = 2;
+    let arm = ResidualArm::MixedDestinations;
+    // An empty dataset: the chain rejects nothing and tags every row.
+    let (next, _dataset) = super::local_route_export::allowed_dataset_chain(
+        "policy p {\n\
+         term drop { if route.prefix in allowed { reject } }\n\
+         term tag { add community 64512:17; accept }\n\
+         }",
+        false,
+    );
+    let (_tx, mut manager) = manager();
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let all: Vec<PeerId> = (0..2 * BATCH).map(member).collect();
+    let mut receivers: Vec<_> = (0..all.len())
+        .map(|index| {
+            let (outbound_tx, receiver) = mpsc::channel(4096);
+            let mut up = test_peer_up(member(index), 1, outbound_tx);
+            if let RibUpdate::PeerUp {
+                export_policy,
+                peer_asn,
+                sendable_families,
+                ..
+            } = &mut up
+            {
+                *export_policy = Some(arm.chain(OLD));
+                *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                *sendable_families = arm.families();
+            }
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; all.len()]
+    );
+    let replacements = |peers: &[PeerId]| -> Vec<crate::PeerExportPolicyReplacement> {
+        peers
+            .iter()
+            .map(|peer| crate::PeerExportPolicyReplacement {
+                peer: *peer,
+                export_policy: Some(next.clone()),
+            })
+            .collect()
+    };
+    let mut deferred = Vec::new();
+    for batch in all.chunks(BATCH) {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(batch),
+            reply,
+        });
+        deferred.push(response.try_recv().unwrap().unwrap());
+    }
+    assert_eq!(
+        deferred,
+        vec![Vec::new(), all[BATCH..].to_vec()],
+        "the first batch commits shared; the second finds the dataset destination occupied \
+         and is handed back whole"
+    );
+    let mut pending = deferred.pop().unwrap();
+    while !pending.is_empty() {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ApplyPacedExportPolicies {
+            replacements: replacements(&pending),
+            cost: None,
+            reply,
+        });
+        pending = response.try_recv().unwrap().unwrap().pending;
+    }
+    let destination = manager.grouped_member_of(all[0]);
+    assert!(
+        destination.is_some()
+            && all
+                .iter()
+                .all(|peer| manager.grouped_member_of(*peer) == destination),
+        "batched and paced members share one destination group"
+    );
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| NEW),
+        vec![RESIDUAL_ROWS; all.len()],
+        "re-exported tables"
+    );
+}
+
 /// Update-group tables no member belongs to.
 fn memberless_groups(manager: &RibManager) -> usize {
     manager
