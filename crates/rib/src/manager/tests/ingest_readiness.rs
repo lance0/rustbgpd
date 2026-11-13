@@ -1010,3 +1010,82 @@ fn condition_rescan_answers_readiness_at_every_visited_row() {
         }
     }
 }
+
+/// A customer-role session (RFC 9234) behind `routes` OTC-carrying routes
+/// from another source goes down, so its teardown turn releases one
+/// egress-denied entry per blocked prefix.
+fn otc_blocked_member_teardown(routes: u16) -> CountedTurn {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let source = peer_v4(SOURCE);
+    register_test_peer(&mut manager, source, 0);
+    let announced = (0..routes)
+        .map(|index| {
+            let [high, low] = index.to_be_bytes();
+            let mut route = make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 18, high, low), 32),
+                SOURCE,
+            );
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::OnlyToCustomer(64512));
+            });
+            route
+        })
+        .collect();
+    manager.handle_update(super::lifecycle::test_routes_received(source, announced));
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), usize::from(routes));
+
+    let member = peer_v4(CLIENT);
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer: member,
+        session_id: 1,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    });
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(usize::from(routes) + 8);
+    manager.handle_update(super::lifecycle::test_peer_up(member, 1, outbound_tx));
+    let mut sent = 0;
+    while let Ok(update) = outbound_rx.try_recv() {
+        sent += update.announce.len();
+    }
+    assert_eq!(sent, 0, "every route carries OTC");
+    assert_eq!(
+        manager.peer_otc_blocked[&member].len(),
+        usize::from(routes),
+        "one egress-denied entry per prefix"
+    );
+
+    let turn = counted_turn(
+        &mut manager,
+        readiness_tx,
+        crate::manager::OTC_BLOCKED_RELEASE,
+        |manager| {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: member,
+                session_id: 1,
+            });
+        },
+    );
+    assert!(!manager.peer_otc_blocked.contains_key(&member));
+    assert!(!manager.pending_otc_blocked.contains_key(&member));
+    assert_eq!(manager.loc_rib.len(), usize::from(routes));
+    turn
+}
+
+/// A departing customer-role session's RFC 9234 egress-denied entries are
+/// released one at a time, answering readiness at each of them.
+#[test]
+fn otc_blocked_teardown_answers_readiness_while_releasing_denied_entries() {
+    for routes in [256_u16, 1024] {
+        let turn = otc_blocked_member_teardown(routes);
+        let rows = usize::from(routes);
+        assert!(
+            turn.visited >= 2 * rows,
+            "{routes}: the release checkpoints around every entry: {turn:?}"
+        );
+        assert!(
+            turn.answered >= rows,
+            "{routes}: the release answered {}: {turn:?}",
+            turn.answered
+        );
+    }
+}

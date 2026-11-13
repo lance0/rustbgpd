@@ -1765,6 +1765,10 @@ const EVPN_RECOVERY_RETIRE: &str = "evpn_recovery_retire";
 /// condition rescan visits, in a range walk or in the per-prefix observation.
 const CONDITION_SCAN_ROW: &str = "condition_scan_row";
 
+/// [`counted_checkpoint`] stage: one RFC 9234 egress-denied entry of a
+/// departing session, released at teardown.
+const OTC_BLOCKED_RELEASE: &str = "otc_blocked_release";
+
 /// Classify only the current helper callback, never a remembered stage or ordinal.
 #[expect(clippy::ref_option, reason = "cleanup borrows its existing owner")]
 fn replacement_readiness_cleanup_checkpoint(
