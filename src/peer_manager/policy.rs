@@ -2063,6 +2063,10 @@ impl PeerManager {
                     }
                     applied[*applied_idx].adj_rib_in_may_have_moved = true;
                 }
+                // The refreshes are session round trips, not RIB work: the
+                // stall budget must not charge the next unit's RIB step for
+                // them, as the per-peer command does not charge its own.
+                context.forward.progressed();
             }
             // Every captured target belongs to a completed unit here.
             if let Some(elapsed_ms) = progress.due() {
@@ -3195,8 +3199,10 @@ impl PeerManager {
         // Both waits below admit the operator-read lane on the transaction's
         // terms, reporting live state after session restoration was attempted.
         // Some restores may have failed; admission does not imply a common
-        // generation or an available RIB query lane. The rollback's own
-        // two-minute budget is unchanged.
+        // generation or an available RIB query lane. Serving reads does
+        // not change the rollback's bound: the enqueue below waits to the
+        // transaction's rollback deadline, and the restore that follows is
+        // bounded by the stall timeout, renewed by each completed command.
         match tokio::time::timeout_at(
             deadline,
             self.await_with_readiness(enqueued_rx, context.operator_reads),

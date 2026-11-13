@@ -349,8 +349,12 @@ table, that deadline rolled back a reload of roughly 80 or more peers with
 distinct export chains although every RIB command was completing, and the
 rollback then repeated the same work in reverse. Both forward budgets are
 now stall detectors, on the rule the rollback wait uses: after each
-completed unit (a remainder target, a pair's batch, a paced command) the
-budget expires `RIB_BATCH_REPLY_TIMEOUT` later. A walk that keeps completing
+completed step (a target's session legs or its whole per-peer apply, a
+batch, a paced command, a group's Route Refreshes) the budget expires
+`RIB_BATCH_REPLY_TIMEOUT` later. The refreshes are session round trips, not
+RIB work; renewing after them keeps a group whose refreshes are slow from
+spending the stall timeout of the RIB command that follows, as the per-peer
+command already excludes its own refresh from the budget. A walk that keeps completing
 units commits however long it takes; a walk whose RIB completes no unit for
 two minutes rolls back, as does one where a peer refuses or fails its step.
 Expiry still admits no further command, and an admitted command stays ahead
@@ -386,11 +390,20 @@ unicast, mixed destinations under one source group) is handed back and
 applied by the paced walk, whose body is the per-peer command's own regroup
 and resync, so its end state is unchanged at the cost of one short extra RIB
 command. A member with no RIB registration is skipped inside the batch, as
-the per-peer command's typed absence was accepted. The walk's order changes
-with it: every planned peer's session legs run before the first RIB batch,
-batches follow in the order each export pair first appears, and a peer's
-Route Refresh follows its pair's commit instead of its own session leg. The
-per-peer command remains for a target that carries retry intent or an
+the per-peer command's typed absence was accepted. The walk's order is the
+remainder amendment's rule, now with every eligible Established peer
+planned: units run in the caller's order of each unit's first target. A pair
+of any size, one member included, runs where its first member stands in
+groups of at most 100; each group runs its session legs, its batch with any
+paced commands and its Route Refreshes before the next unit starts. A target
+on the per-peer command is a unit of its own in its caller position, whole,
+as before. With every peer planned, running the legs ahead of the walk would
+have put all N sessions on the candidate import chain, each with its Route
+Refresh pending and the RIB still exporting to it under the old chain, for
+the whole walk, which is minutes at 150 distinct chains and a full table,
+and a failed reload would have exposed all N sessions instead of the ones
+reached. Interleaved, that state lasts one unit, and the rollback restores
+the units reached. The per-peer command remains for a target that carries retry intent or an
 unconfirmed install, an RFC 8212 presence transition, every target of a
 snapshot that names a peer twice, the honor-knob fan-outs and a single-peer
 hot update.

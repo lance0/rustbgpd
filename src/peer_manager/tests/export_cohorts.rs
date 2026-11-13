@@ -3426,3 +3426,319 @@ async fn restored_rollback_partition_renews_the_budget_for_the_next_partition() 
         ]
     );
 }
+
+/// One RIB command of [`run_three_single_member_pairs`]: its kind, its
+/// members, and how many times each of the three sessions had been given an
+/// export chain when the command reached the RIB.
+type InterleavedRibCommand = (&'static str, Vec<IpAddr>, [usize; 3]);
+
+/// One export-only snapshot of three peers, each alone in its export pair,
+/// so the walk has three units of one member. The RIB stub records the
+/// session installs it finds as each command arrives, before it replies;
+/// with `refuse_second` it refuses the second pair's batch. Returns the
+/// snapshot result, the peers, the RIB commands and the final installs.
+async fn run_three_single_member_pairs(
+    refuse_second: bool,
+) -> (
+    Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String>,
+    [IpAddr; 3],
+    Vec<InterleavedRibCommand>,
+    [usize; 3],
+) {
+    let peer = |last| IpAddr::V4(Ipv4Addr::new(10, 36, 9, last));
+    let peers = [peer(1), peer(2), peer(3)];
+    let installs: [Arc<AtomicUsize>; 3] = std::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
+    let installed = {
+        let installs = installs.clone();
+        move || {
+            installs
+                .clone()
+                .map(|installs| installs.load(Ordering::SeqCst))
+        }
+    };
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let installed_at_command = installed.clone();
+    let rib_task = tokio::spawn(async move {
+        let mut commands: Vec<InterleavedRibCommand> = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let members = replacement_addrs(&replacements);
+                    let refused = refuse_second && members == [peers[1]];
+                    commands.push(("batch", members, installed_at_command()));
+                    let _ = reply.send(if refused {
+                        Err(rustbgpd_rib::RibCommandError::internal("batch refused"))
+                    } else {
+                        Ok(Vec::new())
+                    });
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    commands.push((
+                        "restore",
+                        replacement_addrs(&replacements),
+                        installed_at_command(),
+                    ));
+                    let _ = reply.send(Ok(restored_receipts(&replacements)));
+                }
+                _ => {}
+            }
+        }
+        commands
+    });
+    let mut manager = test_peer_manager();
+    manager.rib_tx = rib_tx;
+    for (&address, installs) in peers.iter().zip(&installs) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            established_export_policy_test_session(address, Arc::clone(installs), None),
+            false,
+        );
+    }
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            peers
+                .iter()
+                .enumerate()
+                .map(|(index, &address)| export_pair_target(address, index))
+                .collect(),
+        )
+        .await;
+    for &address in &peers {
+        assert_eq!(
+            manager
+                .peers
+                .get(&key(address))
+                .unwrap()
+                .export_policy
+                .is_some(),
+            result.is_ok(),
+            "{address} must finish on the chain the snapshot's outcome names"
+        );
+        manager.delete_peer(key(address), false).await.unwrap();
+    }
+    drop(manager);
+    (result, peers, rib_task.await.unwrap(), installed())
+}
+
+/// The walk completes one unit before it starts the next: a peer's session
+/// is given the candidate chain only when the walk reaches its own unit, not
+/// ahead of the first RIB batch. So the third peer's session leg is not sent
+/// until the second pair's batch has committed, and a failure at the second
+/// pair restores exactly the two pairs reached and leaves the third session
+/// as it was, never hot-applied.
+#[tokio::test]
+async fn walk_reaches_a_session_only_with_its_own_unit() {
+    let (result, peers, commands, _) = run_three_single_member_pairs(false).await;
+    result.expect("three single-member pairs commit");
+    assert_eq!(
+        commands,
+        vec![
+            ("batch", vec![peers[0]], [1, 0, 0]),
+            ("batch", vec![peers[1]], [1, 1, 0]),
+            ("batch", vec![peers[2]], [1, 1, 1]),
+        ],
+        "each pair's batch finds only the sessions of the units reached so far on the candidate chain"
+    );
+
+    let (result, peers, commands, installed) = run_three_single_member_pairs(true).await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("batch refused") && error.contains("already-applied peers restored")
+        }),
+        "{result:?}"
+    );
+    assert_eq!(
+        commands,
+        vec![
+            ("batch", vec![peers[0]], [1, 0, 0]),
+            ("batch", vec![peers[1]], [1, 1, 0]),
+            // Each restored session takes its prior chain back before the
+            // RIB restore; the third was never given the candidate.
+            ("restore", vec![peers[0], peers[1]], [2, 2, 0]),
+        ],
+        "the refused second batch restores exactly the two pairs reached"
+    );
+    // LOAD-BEARING: running every session leg ahead of the first batch
+    // hot-applies the third session and then has to restore it.
+    assert_eq!(
+        installed[2], 0,
+        "the third peer's session was never hot-applied"
+    );
+}
+
+/// A session that acknowledges policy updates and takes `delay` to
+/// acknowledge each Route Refresh.
+fn slow_refresh_policy_handle(peer_addr: IpAddr, delay: Duration) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(peer_addr, SessionState::Established);
+                    state.negotiated_session = Some(test_negotiated_session(true));
+                    let _ = reply.send(state);
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    tokio::time::sleep(delay).await;
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// A unit's Route Refreshes are session round trips, not RIB work, so they
+/// do not spend the stall timeout of the RIB step that follows them. Here a
+/// pair of 100 members refreshes three families each at 450 ms a refresh,
+/// 135 s in all and every one inside its own deadline; the next unit is a
+/// peer with export retry intent, whose per-peer RIB command is sent straight
+/// after. The RIB answers every command at once, so nothing stalled and the
+/// walk must commit.
+///
+/// LOAD-BEARING: without the renewal after a unit's refreshes, that command
+/// is refused at admission, 120 s after the pair's batch, and the reload
+/// rolls back.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the timed RIB stub, the cohort, the slow-refresh pair and the retrying peer"
+)]
+async fn unit_route_refreshes_do_not_spend_the_next_units_stall_timeout() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = |index: usize| {
+        IpAddr::V4(Ipv4Addr::new(
+            10,
+            38,
+            u8::try_from(index / 250).unwrap(),
+            u8::try_from(index % 250 + 1).unwrap(),
+        ))
+    };
+    // The cohort is the largest pair, so the slow pair stays in the remainder.
+    let cohort: Vec<IpAddr> = (0..101).map(peer).collect();
+    let pair: Vec<IpAddr> = (101..201).map(peer).collect();
+    let retrying = peer(201);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let rib_task = tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        let mut commands: Vec<(&'static str, usize, u64)> = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            let at = started.elapsed().as_secs();
+            match update {
+                RibUpdate::ReplacePeerExportPolicies {
+                    replacements,
+                    reply,
+                } => {
+                    commands.push(("cohort", replacements.len(), at));
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    commands.push(("batch", replacements.len(), at));
+                    let _ = reply.send(Ok(Vec::new()));
+                }
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    commands.push(("single", 1, at));
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    commands.push(("restore", replacements.len(), at));
+                    let _ = reply.send(Ok(restored_receipts(&replacements)));
+                }
+                _ => {}
+            }
+        }
+        commands
+    });
+    let mut manager = test_peer_manager();
+    manager.rib_tx = rib_tx;
+    let installs = Arc::new(AtomicUsize::new(0));
+    for &address in cohort.iter().chain([&retrying]) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            established_export_policy_test_session(address, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    manager
+        .peers
+        .get_mut(&key(retrying))
+        .unwrap()
+        .pending_export_apply = true;
+    for &address in &pair {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            slow_refresh_policy_handle(address, Duration::from_millis(450)),
+            false,
+        );
+        manager
+            .peers
+            .get_mut(&key(address))
+            .unwrap()
+            .transport_config
+            .peer
+            .families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::Multicast),
+        ];
+    }
+    let import_next = validation_policy_chain(ImportValidationDependency::Rpki);
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            cohort
+                .iter()
+                .map(|&address| export_pair_target(address, 0))
+                .chain(pair.iter().map(|&address| ResolvedPeerPolicy {
+                    import_policy: Some(import_next.clone()),
+                    ..export_pair_target(address, 1)
+                }))
+                .chain([export_pair_target(retrying, 2)])
+                .collect(),
+        )
+        .await;
+    for &address in cohort.iter().chain(&pair).chain([&retrying]) {
+        manager.delete_peer(key(address), false).await.unwrap();
+    }
+    drop(manager);
+    let commands = rib_task.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "no RIB command stalled, so the walk must commit: {result:?}; RIB commands: {commands:?}"
+    );
+    assert_eq!(
+        commands,
+        vec![
+            ("cohort", 101, 0),
+            ("batch", 100, 0),
+            // 100 members x 3 families x 450 ms of Route Refreshes later.
+            ("single", 1, 135),
+        ]
+    );
+}
