@@ -3,6 +3,16 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- `RtrClient::run` recovers from a panic while it connects or runs a session.
+  The panic is handled as a lost session: the held data and its expiry are
+  kept, the manager is told the cache disconnected, and after the retry
+  interval the client reconnects and resynchronizes with a Reset Query.
+  Previously the panic ended the client's task, and the data it had
+  delivered was never expired. The additive `RtrClient::with_restart_observer`
+  is called once per recovered panic.
+
 ## 0.10.0 - 2026-11-08
 
 - Recheck the held data expiry while applying buffered RTR PDUs. An End of

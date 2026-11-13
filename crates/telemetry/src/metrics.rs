@@ -830,6 +830,7 @@ struct BgpMetricsInner {
     rpki_cache_effective_expire_seconds: IntGaugeVec,
     rpki_cache_end_of_data_ready: IntGaugeVec,
     rpki_cache_connected: IntGaugeVec,
+    rpki_rtr_client_restarts: IntCounterVec,
     rpki_cache_end_of_data_accepted_at: Arc<Mutex<BTreeMap<String, Instant>>>,
 
     // ── ASPA ───────────────────────────────────────────────────
@@ -2623,6 +2624,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_rtr_client_restarts = IntCounterVec::new(
+            Opts::new(
+                "bgp_rpki_rtr_client_restarts_total",
+                "Times the RTR client of this configured cache panicked and restarted its session; each restart is handled as an ordinary session loss: the contribution is retained until the effective expire and the client reconnects after the retry interval with a Reset Query",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
         let rpki_cache_end_of_data_accepted_at = Arc::new(Mutex::new(BTreeMap::new()));
 
         let aspa_records = IntGauge::new(
@@ -3789,6 +3799,9 @@ impl BgpMetrics {
             .register(Box::new(rpki_cache_connected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rpki_rtr_client_restarts.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(RpkiCacheEndOfDataAgeCollector::new(Arc::clone(
                 &rpki_cache_end_of_data_accepted_at,
             ))))
@@ -4187,6 +4200,7 @@ impl BgpMetrics {
             rpki_cache_effective_expire_seconds,
             rpki_cache_end_of_data_ready,
             rpki_cache_connected,
+            rpki_rtr_client_restarts,
             rpki_cache_end_of_data_accepted_at,
             aspa_records,
             validation_import_refreshes,
@@ -6704,6 +6718,20 @@ impl BgpMetrics {
             .set(i64::from(connected));
     }
 
+    /// Create one cache's RTR client restart counter at zero, so the series
+    /// exists before the first restart.
+    pub fn seed_rpki_rtr_client_restarts(&self, cache: &str) {
+        let _ = self.0.rpki_rtr_client_restarts.with_label_values(&[cache]);
+    }
+
+    /// Count one restart of a cache's RTR client after a panic.
+    pub fn record_rpki_rtr_client_restart(&self, cache: &str) {
+        self.0
+            .rpki_rtr_client_restarts
+            .with_label_values(&[cache])
+            .inc();
+    }
+
     /// Record the monotonic instant of one cache's last accepted End of Data
     /// (`Some`), or remove its age series when the retained contribution is
     /// dropped by a flush or expiry (`None`). The exported age is computed
@@ -8711,6 +8739,19 @@ mod tests {
         ));
         assert!(text.contains("bgp_rpki_cache_connected{cache=\"192.0.2.10:3323\"} 0"));
         assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 1"));
+    }
+
+    #[test]
+    fn rpki_rtr_client_restarts_are_seeded_at_zero_and_counted_per_cache() {
+        let m = BgpMetrics::new();
+        m.seed_rpki_rtr_client_restarts("192.0.2.10:3323");
+        m.seed_rpki_rtr_client_restarts("192.0.2.11:3323");
+        let seeded = gather_text(&m);
+        assert!(seeded.contains("bgp_rpki_rtr_client_restarts_total{cache=\"192.0.2.10:3323\"} 0"));
+        m.record_rpki_rtr_client_restart("192.0.2.10:3323");
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_rpki_rtr_client_restarts_total{cache=\"192.0.2.10:3323\"} 1"));
+        assert!(text.contains("bgp_rpki_rtr_client_restarts_total{cache=\"192.0.2.11:3323\"} 0"));
     }
 
     #[test]

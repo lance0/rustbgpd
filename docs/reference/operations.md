@@ -1384,8 +1384,27 @@ RIB manager failure instead.
 
 ### RPKI subsystem task exits unexpectedly
 
-The daemon treats an unexpected return or panic from the VRP manager, either
-validation-table forwarder, or any configured RTR client task as fatal. It logs
+A panic in one cache's RTR client is not fatal. The client logs
+`RTR client panicked; restarting its session with the held data retained`,
+leaves a panic report, and handles the panic as an ordinary loss of that RTR
+session: the cache's VRPs and ASPAs stay in use until the effective expire,
+and after `retry_interval` the client reconnects and resynchronizes with a
+Reset Query. BGP sessions and the other caches are not touched.
+`bgp_rpki_rtr_client_restarts_total{cache}` counts these restarts; a cache
+whose client keeps restarting shows `bgp_rpki_cache_connected` at `0` and
+loses its data at the expire like any unreachable cache.
+
+`rbgp doctor` reports any panic report as `crashes.recent` FAIL, "the daemon
+has crashed recently", so it also flags a recovered RTR client panic while the
+daemon kept running. Tell the two apart by the report's `location` and by the
+daemon: a recovered client panic has a non-zero
+`bgp_rpki_rtr_client_restarts_total{cache}`, the ERROR log above with that
+cache as `server`, and no `initiating coordinated shutdown` after it. The
+report is still worth attaching to a bug report.
+
+The daemon treats an unexpected return or panic from the VRP manager or either
+validation-table forwarder as fatal, and likewise an RTR client task that ends
+despite the restart. It logs
 `RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
 shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
@@ -3078,6 +3097,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
 | `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times that cache's RTR client panicked and restarted its session. `0` from startup for each configured cache. Each restart is an ordinary session loss: retained data stays in use until the effective expire and the client reconnects after `retry_interval` with a Reset Query |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data, computed at scrape time from a monotonic clock (the age `rbgp rpki caches` shows). Absent until the first End of Data and after a flush or expiry; advances through an ordinary disconnect. `bgp_rpki_cache_effective_expire_seconds` minus this value is the time left before the retained contribution expires |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Import re-evaluation work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed` (an inbound Route Refresh was sent), `skipped_not_established`, `skipped_state_unknown`, or `failed`. With `[rpki] local_revalidation`, `revalidated_locally` counts peers re-evaluated from retained input and `fallback_refresh` counts peers whose retained input was incomplete and that were refreshed instead. A state-query or re-evaluation-request timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
@@ -3217,6 +3237,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `RTR client panicked; restarting its session with the held data retained` | ERROR | One cache's RTR client panicked (`server`); it reconnects after `retry_interval` and the cache's data stays in use until it expires. Not fatal |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `metrics/readiness server exited unexpectedly; restarting it in place` | ERROR | The `/metrics`, `/readyz` and `/livez` server ended on its own. Not fatal: BGP keeps running and the server restarts after `restart_in_ms` (100 ms doubling to a 10 s cap), with `exit` naming the cause. Counted in `bgp_management_server_crashes_total{server="metrics"}` |
@@ -3660,7 +3681,10 @@ rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines
 Crash reports: a daemon panic writes a small TOML report (panic message,
 source location, thread, version — never environment variables or argv)
 to `<runtime_state_dir>/crash/panic-<ts>-<pid>-<n>.toml`, keeping the 10
-most recent. Each report is written to a temporary file and renamed into
+most recent. A panic at the same source location as the report the daemon
+wrote last writes no new report, so a recovered panic that repeats (an RTR
+client restarting on every retry) cannot push older reports out; it is still
+logged and counted every time. Each report is written to a temporary file and renamed into
 place, so a report is either complete or absent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
 ticket usually pinpoints the crash without a core dump.
 
