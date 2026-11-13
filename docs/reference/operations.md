@@ -992,18 +992,61 @@ of per-neighbor export policies, raise `--timeout` (at most 3600) and read
 the outcome with `rbgp config last-reload`.
 
 While the walk or a rollback runs, the peer manager serves readiness probes,
-the operator reads its owner admits and its queued RIB updates, and nothing
-else. Inbound connections are not accepted, so a dynamic neighbor or a
-session the peer dials does not come up; session up, down and notification
-events from existing sessions are not processed; BFD state changes,
-max-prefix restart timers, link and interface-discovery events,
-configuration changes and peer lifecycle commands all wait until it ends. A first SIGTERM waits for it too; a second forces the fail-stop
+the operator reads its owner admits, its queued RIB updates and link-state
+changes at any moment, so fast external failover does not wait for it.
+
+Between two units of the walk it also serves the events of existing
+sessions. A unit is one peer's session step, one RIB batch or paced command,
+or, during a rollback, one restore command: at a full table, on the order of
+a second for a peer with its own export policy. Served there, at most eight
+of each kind per unit:
+
+- A BFD state change that takes a session down, and a `BfdDown` that is
+  being retried because the session's mailbox was full. The BGP session is
+  stopped within about one unit of BFD detecting the failure.
+- Session up and down events and NOTIFICATION events, so event subscribers
+  and the session history see them as they happen.
+- A static neighbor's session notifications. A session task that crashed is
+  replaced and restarted on the policy the walk holds for that neighbor at
+  that moment (the new one once its step has run, the prior one before, and
+  the restored one during a rollback); the third crash in ten minutes
+  latches the neighbor. A max-prefix breach stops the session and latches
+  the neighbor. An OPEN collision is resolved.
+
+These still wait until the walk or rollback has ended:
+
+- Inbound connections: a dynamic neighbor, or a session the peer dials,
+  does not come up.
+- The removal of a dynamic neighbor whose session went idle or whose task
+  ended. It stays in the peer table, so a rollback can restore it, and is
+  removed right after.
+- During a SIGHUP reload, a BFD Up and every other BFD change that would
+  release a held session: the session is started once the reload has
+  committed or rolled back. A policy change made over gRPC serves BFD Up
+  between units like BFD Down.
+- Max-prefix restart timers, interface-discovery events and the rebinding
+  of an interface-only neighbor, configuration changes and peer lifecycle
+  commands.
+
+One wait has no unit boundary: the shared transition of the largest group
+of peers that make the same export change, reported as
+`cohort_rib_transition_us`. Session events and BFD changes wait for it;
+link-state changes, readiness and admitted reads do not.
+
+The `reload generation phase timing` line reports this service:
+`owned_wait_service_gap_max_us` is the longest interval in which no session
+event could be served (one unit, or the shared transition),
+`events_served` counts the events served between units and
+`event_service_us` is the time spent serving them. That time is not counted
+against the two-minute stall timeout, and serving an event never renews it.
+
+A first SIGTERM waits for the walk too; a second forces the fail-stop
 exit described in the settlement guide. A SIGHUP that arrives meanwhile is
 coalesced as described above. A peer whose session drops during the walk is
-skipped, and the peer manager acts on the drop only after the walk. Once the
-session re-establishes it carries the new policy; a peer that dials in can
-do so only after the walk, since inbound connections wait. If the reload is
-rolled back, the peer is restored to the prior policy with the others.
+skipped. Once the session re-establishes it carries the new policy; a peer
+that dials in can do so only after the walk, since inbound connections
+wait. If the reload is rolled back, the peer is restored to the prior policy
+with the others.
 
 During a rollback the Route Refreshes that re-evaluate imports under the
 prior policy are sent early, once the first restore command is queued. Until

@@ -366,6 +366,64 @@ unconfirmed install, an RFC 8212 presence transition, every target of a
 snapshot that names a peer twice, the honor-knob fan-outs and a single-peer
 hot update.
 
+**Amended:** 2026-11-13 — the walk serves session events between its units.
+Section 1 says the peer manager services only its readiness lane while it
+awaits a session or RIB reply, and later amendments added admitted operator
+reads. With the forward walks and the rollback wait bounded by a stall
+timeout instead of two minutes in total, a walk can hold the actor for many
+minutes, and everything else the run loop does waited for it: a BFD Down
+did not stop its BGP session, a crashed session task was not restarted and
+no session event was published until the walk ended. The owner now serves a
+fixed set of events at the seams it already had, where it drains operator
+reads: after each target's session step, after each pair batch and paced
+command, between the members of a cohort's session setup and of each
+deferred-refresh loop, between a rollback's session steps, and, while it
+waits for the detached restore, each time that task completes a RIB command.
+Served there: BFD state changes and due BFD command retries, link changes
+and link-check retries, session lifecycle events, one round of session
+notifications, and NOTIFICATION events, in the run loop's order (lifecycle
+events before a notification, queued BFD changes before a BFD retry). BFD
+changes, session notifications and NOTIFICATION events are bounded at eight
+per seam, so a flood costs a unit a fixed amount of work. Serving is not
+progress: the stall budget is never renewed at a seam, and the time spent
+serving is taken out of it. Nothing is served inside a unit, which holds a
+session handle across its awaits, except link changes, which only ask
+sessions to check and are served in every wait of the walk, including the
+cohort's clean transition, the one long wait with no seam.
+
+Ownership is unchanged. The command receiver, internal commands, max-prefix
+restart timers, discovery, reconciles and retention stay behind the
+transaction, so no mutation, inbound connection or shutdown runs inside it.
+A served handler may replace a static peer's session or latch the peer
+disabled; it never removes a peer the walk captured. The one notification
+that would, a dynamic peer's session going idle or its task ending, is held
+and put back on the notification channel when the transaction returns, so
+the run loop retires the peer after the owning command, as before. A
+replaced session is spawned from the manager's bookkeeping, which the walk
+advances only when a session acknowledges a chain: a peer whose step has run
+restarts on the candidate chain, one still to walk on the prior chain and is
+then walked, and one replaced during a rollback on the restored chain. Its
+RIB identity is the peer's slot, which a replacement keeps.
+
+A SIGHUP generation suspends BFD coupling for its whole length, and the
+ordinary handler ignores every change while it does. Inside a generation a
+seam therefore takes only a genuine Down of an accepted member from the
+queue, stops the BGP session and records the hold as a prior one, so a
+generation that aborts keeps it and the BFD Up that follows still sends the
+`Start` the stopped session is owed. An Up, a release and every level
+report stay queued until the generation ends, as does a `Start` retry; a
+`BfdDown` retry runs. A peer latched disabled inside a generation has its
+BFD session drained when the generation ends either way: an abort now
+recomputes the disabled set from the peer table as a commit does. Outside a
+generation the ordinary handler runs at the seam.
+
+The phase line reports the result: `owned_wait_service_gap_max_us` (the
+longest interval between two seams, or from the walk's start or to its
+end), `events_served` and `event_service_us`. Later work, not in this
+amendment: inbound connections for static peers, which need a lane of their
+own off the command channel; max-prefix restart timers and BFD Up inside a
+generation; and a seam inside the cohort's clean transition.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
