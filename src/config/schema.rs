@@ -754,6 +754,12 @@ pub struct MrtConfig {
     /// Dump filename prefix. Default `"rib"`.
     #[serde(default = "default_mrt_file_prefix")]
     pub file_prefix: String,
+    /// Keep at most this many `<file_prefix>.*.mrt[.gz]` dumps; the oldest
+    /// are deleted after each successful publish. Unset keeps every dump.
+    /// Must be >= 1. Restart-required like the rest of `[mrt]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_files: Option<u32>,
 }
 
 fn default_mrt_dump_interval() -> u64 {

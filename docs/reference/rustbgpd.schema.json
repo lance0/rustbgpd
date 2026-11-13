@@ -2042,6 +2042,15 @@
           "type": "string",
           "default": "rib"
         },
+        "max_files": {
+          "description": "Keep at most this many `<file_prefix>.*.mrt[.gz]` dumps; the oldest\nare deleted after each successful publish. Unset keeps every dump.\nMust be >= 1. Restart-required like the rest of `[mrt]`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
         "output_dir": {
           "description": "Directory MRT dump files are written to.",
           "type": "string"

@@ -139,6 +139,17 @@ fn mrt_zero_dump_interval_is_rejected_before_manager_start() {
 }
 
 #[test]
+fn mrt_max_files_defaults_to_keep_all_and_rejects_zero() {
+    let base = format!("{}\n[mrt]\noutput_dir = '/tmp/mrt'\n", valid_toml());
+    assert_eq!(parse(&base).unwrap().mrt.unwrap().max_files, None);
+    let retained = parse(&format!("{base}max_files = 24\n")).unwrap();
+    assert_eq!(retained.mrt.unwrap().max_files, Some(24));
+    assert!(
+        matches!(parse(&format!("{base}max_files = 0\n")), Err(ConfigError::InvalidMrtConfig { reason }) if reason == "max_files must be > 0")
+    );
+}
+
+#[test]
 fn valid_config_parses() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(config.global.asn, 65001);

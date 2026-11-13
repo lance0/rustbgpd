@@ -4941,16 +4941,21 @@ output_dir = "/var/lib/rustbgpd/mrt"
 dump_interval = 7200        # seconds between periodic dumps (default 7200)
 compress = true             # gzip output files (default false)
 file_prefix = "rib"         # filename prefix (default "rib")
+max_files = 48              # keep the newest 48 dumps (default: keep all)
 ```
 
 ### MRT section fields
 
 | Field           | Type    | Required | Default  | Description                              |
 |-----------------|---------|----------|----------|------------------------------------------|
-| `output_dir`    | string  | yes      | --       | Directory for MRT dump files (created lazily; must be writable) |
+| `output_dir`    | string  | yes      | --       | Directory for MRT dump files (created lazily with mode 0700; see [Output files](#output-files)) |
 | `dump_interval` | u64     | no       | 7200     | Seconds between periodic dumps (must be > 0) |
 | `compress`      | bool    | no       | false    | Compress output files with gzip           |
 | `file_prefix`   | string  | no       | `"rib"`  | Nonempty filename component; no `/`, `\`, NUL, `.` or `..` |
+| `max_files`     | u32     | no       | unset    | Keep at most this many dumps; unset keeps every dump (must be > 0) |
+
+Every `[mrt]` field is restart-required; see the
+[reload matrix](reload-matrix.md#rpki-bmp-mrt).
 
 ### Output files
 
@@ -4962,6 +4967,46 @@ names:
 ```
 
 For example: `rib.20260305.143022.123456789.mrt.gz`
+
+Dump files are created with mode 0600. A missing `output_dir`, and any
+missing parent, is created 0700. An existing `output_dir` is held to the same
+rules as [`runtime_state_dir`](#global): it must be a real directory (not a
+symlink, however the path is spelled; a path ending in `..` is refused) owned
+by the daemon user and not group- or world-writable, and every
+directory above it, along the configured path and its resolved form, must be
+owned by root or the daemon user and not writable by other users unless it is
+sticky, as `/tmp` is. Retention deletes the oldest dump names in this
+directory, so a user who could add files to it, or rename it and put another
+directory in its place, could make it delete other data. Each dump opens the
+directory once, checks the opened handle, and then writes, renames and prunes
+relative to that handle, so renaming the path afterwards cannot redirect it.
+If a check fails, the
+dump fails with a permission error and the `mrt_*` failure metrics record it;
+the checks run before every dump, so fixing ownership or mode takes effect
+without a restart. Like the runtime-state checks, they read only the owner and
+mode bits; POSIX ACL grants are not inspected. A directory that group or other
+can read is logged as a warning, once per directory, and left as it is, so a
+directory you share on purpose keeps its mode. The dump files themselves stay
+0600.
+
+### Retention and disk growth
+
+Without `max_files`, every dump is kept: the directory grows by one full RIB
+snapshot per `dump_interval`, plus one per on-demand trigger. Put
+`output_dir` on its own filesystem, or set `max_files`, so dumps cannot fill
+the filesystem that holds runtime state and config history.
+
+With `max_files = N`, each successful publish is followed by deletion of the
+oldest dumps until at most N remain, the new one included. Age is the
+timestamp in the filename. Only regular files whose whole name matches
+`{file_prefix}.{YYYYMMDD.HHMMSS}.{nanoseconds}.mrt` or `.mrt.gz` are
+counted or deleted, so other files in the directory, temporary files and
+dumps written under another prefix are never touched. Both extensions count
+together, so toggling `compress` does not double the retained set. A failed
+dump deletes nothing, and the dump just published is never deleted. A
+deletion failure is logged and leaves the older dumps in place; it does not
+fail the dump. To keep a day of dumps at the default two-hour interval, set
+`max_files = 12`. Archive dumps elsewhere first if you need a longer history.
 
 ### What is dumped
 
@@ -6482,6 +6527,7 @@ quoting it:
 | Non-empty `discard_path_attributes` requires effective `route_server_client = true`; type 0 and protected types 1/2/3/6/7/14/15/17/18/33/35 are rejected | `invalid neighbor config ... discard_path_attributes` / `invalid route server config` |
 | MRT `output_dir` must not be empty | `output_dir must not be empty` |
 | MRT `dump_interval` must be > 0 | `dump_interval must be > 0` |
+| MRT `max_files`, when set, must be > 0 | `max_files must be > 0` |
 | BMP collector `address` must be a valid `ip:port` | `invalid BMP collector config: collectors[...]: invalid address` |
 | BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
 | `cluster_id` must be a valid IPv4 address | `invalid route reflector config: invalid cluster_id` |

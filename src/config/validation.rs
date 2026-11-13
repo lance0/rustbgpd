@@ -914,6 +914,11 @@ impl Config {
                     reason: "dump_interval must be > 0".to_string(),
                 });
             }
+            if mrt.max_files == Some(0) {
+                return Err(ConfigError::InvalidMrtConfig {
+                    reason: "max_files must be > 0".to_string(),
+                });
+            }
         }
 
         // Eagerly validate all policies at load time
