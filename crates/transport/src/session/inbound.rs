@@ -1139,15 +1139,14 @@ impl PeerSession {
             Prefix::V4(_) => Afi::Ipv4,
             Prefix::V6(_) => Afi::Ipv6,
         };
-        let eviction = self.rejected_routes.insert(
-            ImportDecisionKey {
-                afi,
-                safi: Safi::Unicast,
-                prefix,
-                path_id,
-            },
-            entry,
-        );
+        let key = ImportDecisionKey {
+            afi,
+            safi: Safi::Unicast,
+            prefix,
+            path_id,
+        };
+        self.refresh_accounting_replay_retained(&key);
+        let eviction = self.rejected_routes.insert(key, entry);
         if let Some(evictions_since_reset) = eviction {
             self.metrics
                 .record_rejected_route_eviction(&self.peer_label);

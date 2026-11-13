@@ -10,6 +10,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 use tokio::time::{Instant, Sleep};
 
 use super::PeerSession;
+use super::import_decision_cache::ImportDecisionKey;
 
 type Family = (Afi, Safi);
 
@@ -29,6 +30,12 @@ struct RefreshMaxPrefixWindow {
     /// populated while the family's `max_prefixes_received_*` bound is set;
     /// swept through `forget_rejected_path` at the boundary.
     stale_rejected: HashSet<(Prefix, u32)>,
+    /// Rejected-route store identities of this unicast family retained
+    /// before `BoRR` and not re-rejected in this window. At the boundary
+    /// (`EoRR` or the admitted timeout) the peer no longer announces them,
+    /// so they leave the store with the accepted stale set. An identity
+    /// accepted or withdrawn in the window already left the store.
+    stale_retained: HashSet<ImportDecisionKey>,
 }
 
 enum RefreshStaleIdentities {
@@ -63,9 +70,6 @@ impl PeerSession {
     /// fresh snapshot and deadline.
     pub(super) fn begin_refresh_accounting(&mut self, afi: Afi, safi: Safi) {
         let family = (afi, safi);
-        if matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
-            self.unicast_refresh_window_opened = true;
-        }
         if safi == Safi::Unicast
             && let Some(retention) = self.validation_retention.as_mut()
         {
@@ -84,6 +88,14 @@ impl PeerSession {
                 .iter()
                 .filter(|prefix| unicast_family(**prefix) == family)
                 .map(|prefix| (*prefix, 0))
+                .collect(),
+            _ => HashSet::new(),
+        };
+        let stale_retained = match family {
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => self
+                .rejected_routes
+                .family_keys(afi, safi)
+                .into_iter()
                 .collect(),
             _ => HashSet::new(),
         };
@@ -142,6 +154,7 @@ impl PeerSession {
                 deadline: Instant::now() + rustbgpd_rib::ERR_REFRESH_TIMEOUT,
                 stale,
                 stale_rejected,
+                stale_retained,
             },
         );
         self.arm_refresh_accounting_timer();
@@ -171,6 +184,13 @@ impl PeerSession {
         for (prefix, path_id) in window.stale_rejected {
             self.forget_rejected_path(prefix, path_id);
         }
+        if !window.stale_retained.is_empty() {
+            for key in &window.stale_retained {
+                self.rejected_routes.remove(key);
+            }
+            self.metrics
+                .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
+        }
         self.reconcile_max_prefix_modes();
         self.sync_max_prefix_capacity_metrics();
     }
@@ -187,6 +207,18 @@ impl PeerSession {
                 0
             };
             window.stale_rejected.remove(&(prefix, path_id));
+        }
+    }
+
+    /// A rejection retained inside an open window replays that store
+    /// identity, so the boundary sweep keeps it.
+    pub(super) fn refresh_accounting_replay_retained(&mut self, key: &ImportDecisionKey) {
+        if let Some(window) = self
+            .refresh_accounting
+            .windows
+            .get_mut(&(key.afi, key.safi))
+        {
+            window.stale_retained.remove(key);
         }
     }
 

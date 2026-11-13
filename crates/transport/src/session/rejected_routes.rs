@@ -18,7 +18,8 @@
 //!
 //! Lifecycle: an entry is inserted (or refreshed) on rejection, removed
 //! when the same `(AFI, SAFI, prefix, path_id)` identity is later
-//! accepted or explicitly withdrawn, and the whole store resets on
+//! accepted or explicitly withdrawn, or when an RFC 7313 enhanced refresh
+//! ends without the peer re-announcing it, and the whole store resets on
 //! session reset — the same per-session contract as the decision cache.
 //!
 //! Bound: two independent caps, both enforced.
@@ -335,6 +336,23 @@ impl RejectedRouteStore {
         if let Some(entry) = removed {
             self.account(Self::unicast_index(key), entry.reason, false);
         }
+    }
+
+    /// Retained identities of one family, unordered, without touching LRU
+    /// recency. Bounded by the cap; used to snapshot an RFC 7313 refresh.
+    #[allow(
+        dead_code,
+        reason = "the isolated store-allocation tool omits the production refresh caller"
+    )]
+    pub(super) fn family_keys(&self, afi: Afi, safi: Safi) -> Vec<ImportDecisionKey> {
+        self.entries.as_ref().map_or_else(Vec::new, |entries| {
+            entries
+                .iter()
+                .map(|(key, _)| key)
+                .filter(|key| key.afi == afi && key.safi == safi)
+                .cloned()
+                .collect()
+        })
     }
 
     /// Drop everything — session reset, same contract as

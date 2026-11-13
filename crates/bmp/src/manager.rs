@@ -2251,8 +2251,8 @@ mod tests {
              count only when it is exact: RFC 9972 type 19 per negotiated IPv4/IPv6 unicast \
              family, plus the RFC 7854 total (type {adj_rib_in_type}) and its RFC 9972 twin \
              (type 18) when no other family is negotiated. Exact means rejected-route \
-             retention is enabled with no eviction, max-prefix `Block` withholding or unicast \
-             enhanced route refresh since the session reset and no unicast Add-Path receive; \
+             retention is enabled with no eviction or max-prefix `Block` withholding since \
+             the session reset and no unicast Add-Path receive; \
              otherwise types \
              {adj_rib_in_type}/18/19 are omitted rather than approximated. When available, \
              reports also carry the RFC 8671 post-policy Adj-RIB-Out total (type \

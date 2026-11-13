@@ -933,42 +933,158 @@ async fn pre_policy_route_counts_omit_block_withholding_and_add_path() {
     );
 }
 
-/// An RFC 7313 boundary sweep does not reach the rejected-route store, so a
-/// denied route the peer leaves out of an enhanced refresh stays retained.
-/// The pre-policy count is omitted from the first unicast refresh window until
-/// the session resets. Break-to-red: dropping the latch reports a count that
-/// still includes the omitted rejection.
-#[tokio::test]
-async fn pre_policy_route_counts_omitted_after_enhanced_refresh() {
-    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let accepted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-    let (mut session, _metrics) =
-        retention_session_with_chain(Some(deny_prefix_chain(&[denied])), |_| {});
+fn policy_rejects_v4(count: u64) -> crate::PolicyRejectCounts {
+    crate::PolicyRejectCounts {
+        ipv4_unicast: count,
+        ipv6_unicast: 0,
+    }
+}
+
+fn retained_v4_prefixes(session: &PeerSession) -> Vec<Prefix> {
     session
-        .process_update(retention_update(&[denied, accepted], &[]))
+        .rejected_routes
+        .snapshot()
+        .into_iter()
+        .map(|(key, _)| key.prefix)
+        .collect()
+}
+
+/// Two policy denies and one accept, then an enhanced refresh opened on a
+/// live RIB channel that replays the accept and only `kept`.
+async fn refresh_session_replaying_one_rejection(
+    omitted: Ipv4Prefix,
+    kept: Ipv4Prefix,
+    accepted: Ipv4Prefix,
+) -> (PeerSession, mpsc::Receiver<RibUpdate>) {
+    let (mut session, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[omitted, kept])), |_| {});
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    session.rib_tx = rib_tx;
+    session
+        .process_update(retention_update(&[omitted, kept, accepted], &[]))
         .await;
     assert_eq!(
         query_pre_policy_route_counts(&mut session).await,
-        Some(pre_policy_v4(2))
+        Some(pre_policy_v4(3))
+    );
+    assert_eq!(
+        query_policy_reject_counts(&mut session).await,
+        Some(policy_rejects_v4(2))
     );
 
     session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
     session
-        .process_update(retention_update(&[accepted], &[]))
+        .process_update(retention_update(&[kept, accepted], &[]))
         .await;
-    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
-    assert_eq!(
-        session.rejected_routes.len(),
-        1,
-        "the omitted rejection is still retained"
-    );
-    assert_eq!(query_pre_policy_route_counts(&mut session).await, None);
+    (session, rib_rx)
+}
 
-    session.clear_known_routes();
-    session.rejected_routes.clear();
+/// RFC 7313: a rejection the peer leaves out of an enhanced refresh is stale
+/// at `EoRR` and leaves the rejected-route store together with the accepted
+/// stale set, so BMP types 22 and 7/18/19 stay exact across the refresh.
+/// Before `EoRR` the omitted rejection is still counted, like an accepted
+/// stale route. Break-to-red: dropping the store sweep leaves `omitted`
+/// retained and the counts at 3 and 2.
+#[tokio::test]
+async fn enhanced_refresh_sweeps_omitted_rejection_at_eorr() {
+    let omitted = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let (mut session, _rib_rx) =
+        refresh_session_replaying_one_rejection(omitted, kept, accepted).await;
     assert_eq!(
         query_pre_policy_route_counts(&mut session).await,
-        Some(pre_policy_v4(0)),
-        "a session reset restores authority"
+        Some(pre_policy_v4(3)),
+        "the omitted rejection is stale, not yet purged, inside the window"
     );
+
+    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    assert_eq!(retained_v4_prefixes(&session), vec![Prefix::V4(kept)]);
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(2))
+    );
+    assert_eq!(
+        query_policy_reject_counts(&mut session).await,
+        Some(policy_rejects_v4(1))
+    );
+}
+
+/// The timed-out window closes on the same admitted boundary as `EoRR` and
+/// sweeps the store the same way. While the RIB cannot admit the timeout the
+/// window stays open and nothing is swept, so the count still includes the
+/// stale rejection alongside the unswept accepted set. Break-to-red: dropping
+/// the store sweep leaves the count at 3 after the admitted timeout.
+#[tokio::test(start_paused = true)]
+async fn enhanced_refresh_timeout_sweeps_omitted_rejection_only_when_admitted() {
+    let omitted = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let (mut session, rib_rx) =
+        refresh_session_replaying_one_rejection(omitted, kept, accepted).await;
+    tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
+
+    let (live_tx, mut live_rx) = mpsc::channel(64);
+    drop(rib_rx);
+    assert_eq!(session.expire_refresh_accounting_windows(), Err(()));
+    assert!(session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(session.rejected_routes.len(), 2);
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(3))
+    );
+
+    session.rib_tx = live_tx;
+    session.expire_refresh_accounting_windows().unwrap();
+    assert!(matches!(
+        live_rx.try_recv(),
+        Ok(RibUpdate::RouteRefreshTimeout {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            ..
+        })
+    ));
+    assert_eq!(retained_v4_prefixes(&session), vec![Prefix::V4(kept)]);
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(2))
+    );
+    assert_eq!(
+        query_policy_reject_counts(&mut session).await,
+        Some(policy_rejects_v4(1))
+    );
+}
+
+/// A rejection re-sent inside the window is a replay even when an eviction
+/// in the same window drops a stale identity first; the sweep then finds that
+/// identity absent without the per-reason counters drifting, and the counts
+/// stay omitted because the store lost authority. Break-to-red: dropping the
+/// in-window replay sweeps the re-rejected `first`.
+#[tokio::test]
+async fn enhanced_refresh_sweep_keeps_replays_across_eviction() {
+    let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    let third = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 102, 0), 24);
+    let (mut session, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[first, second, third])), |config| {
+            config.reject_retention_capacity = 2;
+        });
+    session
+        .process_update(retention_update(&[first, second], &[]))
+        .await;
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .process_update(retention_update(&[first], &[]))
+        .await;
+    session
+        .process_update(retention_update(&[third], &[]))
+        .await;
+    assert_eq!(session.rejected_routes.evictions_since_reset(), 1);
+    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    assert_eq!(
+        retained_v4_prefixes(&session),
+        vec![Prefix::V4(first), Prefix::V4(third)]
+    );
+    assert_eq!(session.rejected_routes.policy_reject_counts(), (2, 0));
+    assert_eq!(query_pre_policy_route_counts(&mut session).await, None);
 }

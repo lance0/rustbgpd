@@ -579,11 +579,6 @@ pub(crate) struct PeerSession {
     /// accepted set nor the rejected-route store, so the pre-policy
     /// Adj-RIB-In count is unknown until the session restarts.
     unicast_announcement_withheld: bool,
-    /// Set when an RFC 7313 enhanced-refresh window opens for IPv4/IPv6
-    /// unicast; cleared only on session reset. The boundary sweep does not
-    /// reach the rejected-route store, so a rejection the peer stops
-    /// announcing during the refresh may stay counted.
-    unicast_refresh_window_opened: bool,
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
@@ -1918,14 +1913,13 @@ impl PeerSession {
     /// Exact pre-policy Adj-RIB-In unicast route counts: accepted prefixes
     /// plus retained rejections other than treat-as-withdraw. `None` unless
     /// every route the peer still announces is in one of those two sets —
-    /// retention enabled with no eviction, no `Block` withholding, no unicast
-    /// enhanced refresh — and both count the same unit (one route per prefix,
-    /// so no unicast Add-Path receive).
+    /// retention enabled with no eviction and no `Block` withholding — and
+    /// both count the same unit (one route per prefix, so no unicast Add-Path
+    /// receive). An RFC 7313 boundary sweeps both sets together.
     pub(super) fn pre_policy_route_counts(&self) -> Option<crate::PrePolicyRouteCounts> {
         if !self.reject_retention_enabled
             || self.rejected_routes.evictions_since_reset() != 0
             || self.unicast_announcement_withheld
-            || self.unicast_refresh_window_opened
             || self.receives_add_path_for_family((Afi::Ipv4, Safi::Unicast))
             || self.receives_add_path_for_family((Afi::Ipv6, Safi::Unicast))
         {
@@ -2167,7 +2161,6 @@ impl PeerSession {
         self.max_prefix_warned = [false; MaxPrefixScope::ALL.len()];
         self.max_prefix_blocking = [false; MaxPrefixScope::ALL.len()];
         self.unicast_announcement_withheld = false;
-        self.unicast_refresh_window_opened = false;
         self.known_flowspec.clear();
         self.known_evpn.clear();
         self.known_bgpls.clear();
@@ -2572,7 +2565,6 @@ impl PeerSession {
             max_prefix_warning_crossings: Default::default(),
             max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
             unicast_announcement_withheld: false,
-            unicast_refresh_window_opened: false,
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             evpn_discard_warned: [false; 256],
