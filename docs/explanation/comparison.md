@@ -767,7 +767,8 @@ OSPF, IS-IS, PIM, and more. Best choice when you need a mature full routing stac
 with broad AFI/SAFI coverage and production-default kernel FIB integration.
 
 **BIRD** dominates IXP route server deployments. Best-in-class memory efficiency
-and a powerful filter language. BIRD 3 adds multithreading for 5000+ peer scale.
+and a powerful filter language. BIRD 3 adds multithreading; its maintainers
+report scaling it past 5000 peers ([BIRD project](https://bird.nic.cz/)).
 Lacks a programmatic API — management is CLI/config-file only.
 
 **GoBGP** pioneered the API-first model with gRPC as its primary interface. Broadest
