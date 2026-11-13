@@ -4298,7 +4298,10 @@ until the next session reset rather than exported as a false lower bound.
 The pre-policy Adj-RIB-In route count (BMP RFC 7854 type 7 and RFC 9972
 types 18/19) is accepted routes plus retained rejections other than RFC 7606
 treat-as-withdraw, so it needs the same authority, plus no max-prefix `Block`
-withholding since the session reset and no unicast Add-Path receive. Type 19
+withholding and no IPv4/IPv6-unicast RFC 7313 enhanced route refresh since the
+session reset, and no unicast Add-Path receive. An enhanced refresh can leave
+a rejection the peer stopped announcing in the store, so the count stays
+omitted until the session resets. Type 19
 covers each negotiated IPv4/IPv6-unicast family. Types 7 and 18 are totals,
 so they are sent only when no other family is negotiated: other families do
 not retain denied routes. Raise `capacity` toward the expected rejected-route
@@ -4785,7 +4788,7 @@ BMP messages sent to collectors:
 | **Peer Up** (Type 3) | BGP session reaches Established (includes raw OPEN PDUs) |
 | **Peer Down** (Type 2) | BGP session leaves Established |
 | **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU); with `rib_out_post`, also every outbound UPDATE (post-policy Adj-RIB-Out, RFC 8671); with `loc_rib`, every Loc-RIB best-path change plus the connect-time table dump (RFC 9069) |
-| **Stats Report** (Type 1) | Periodic per-peer export every 60s (exact pre-policy Adj-RIB-In counts: RFC 9972 type 19 per negotiated IPv4/IPv6-unicast family, plus the RFC 7854 type 7 and RFC 9972 type 18 total when no other family is negotiated, all omitted unless rejected-route retention is enabled with no eviction or max-prefix `Block` withholding since the session reset and unicast Add-Path receive is off; RFC 9972 post-policy Adj-RIB-In gauges type 20 + negotiated IPv4/IPv6-unicast types 21/23, omitted under effective unicast Add-Path receive; exact retained policy-rejection type 22 per negotiated IPv4/IPv6-unicast family, omitted when retention is disabled or has evicted an entry; exact per-path RPKI Invalid/Valid/NotFound types 35/36/37 per negotiated IPv4/IPv6-unicast family, omitted until a VRP table is authoritative and emitted as zero rows for authoritative empty families; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17; with `loc_rib`, Loc-RIB gauges type 8 + per-AFI/SAFI type 10) |
+| **Stats Report** (Type 1) | Periodic per-peer export every 60s (exact pre-policy Adj-RIB-In counts: RFC 9972 type 19 per negotiated IPv4/IPv6-unicast family, plus the RFC 7854 type 7 and RFC 9972 type 18 total when no other family is negotiated, all omitted unless rejected-route retention is enabled with no eviction or max-prefix `Block` withholding or unicast enhanced route refresh since the session reset and unicast Add-Path receive is off; RFC 9972 post-policy Adj-RIB-In gauges type 20 + negotiated IPv4/IPv6-unicast types 21/23, omitted under effective unicast Add-Path receive; exact retained policy-rejection type 22 per negotiated IPv4/IPv6-unicast family, omitted when retention is disabled or has evicted an entry; exact per-path RPKI Invalid/Valid/NotFound types 35/36/37 per negotiated IPv4/IPv6-unicast family, omitted until a VRP table is authoritative and emitted as zero rows for authoritative empty families; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17; with `loc_rib`, Loc-RIB gauges type 8 + per-AFI/SAFI type 10) |
 | **Termination** (Type 5) | On coordinated daemon shutdown (and on client channel shutdown) |
 
 Route Monitoring messages carry the original raw BGP UPDATE PDU bytes

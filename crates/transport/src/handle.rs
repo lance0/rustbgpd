@@ -1254,8 +1254,8 @@ pub struct PeerSessionState {
     pub policy_reject_counts: Option<PolicyRejectCounts>,
     /// Exact pre-policy unicast route counts. Present only when rejected-route
     /// retention is enabled with no eviction, unicast Add-Path receive is not
-    /// negotiated, and max-prefix `Block` has withheld no unicast announcement
-    /// since the current session began.
+    /// negotiated, and neither max-prefix `Block` withholding nor a unicast
+    /// enhanced route refresh has happened since the current session began.
     pub pre_policy_route_counts: Option<PrePolicyRouteCounts>,
     /// Family-local counts, effective finite limits, and remaining capacity.
     pub max_prefix: MaxPrefixState,

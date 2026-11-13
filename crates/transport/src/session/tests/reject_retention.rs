@@ -932,3 +932,43 @@ async fn pre_policy_route_counts_omit_block_withholding_and_add_path() {
         Some(crate::PolicyRejectCounts::default())
     );
 }
+
+/// An RFC 7313 boundary sweep does not reach the rejected-route store, so a
+/// denied route the peer leaves out of an enhanced refresh stays retained.
+/// The pre-policy count is omitted from the first unicast refresh window until
+/// the session resets. Break-to-red: dropping the latch reports a count that
+/// still includes the omitted rejection.
+#[tokio::test]
+async fn pre_policy_route_counts_omitted_after_enhanced_refresh() {
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let (mut session, _metrics) =
+        retention_session_with_chain(Some(deny_prefix_chain(&[denied])), |_| {});
+    session
+        .process_update(retention_update(&[denied, accepted], &[]))
+        .await;
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(2))
+    );
+
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .process_update(retention_update(&[accepted], &[]))
+        .await;
+    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    assert_eq!(
+        session.rejected_routes.len(),
+        1,
+        "the omitted rejection is still retained"
+    );
+    assert_eq!(query_pre_policy_route_counts(&mut session).await, None);
+
+    session.clear_known_routes();
+    session.rejected_routes.clear();
+    assert_eq!(
+        query_pre_policy_route_counts(&mut session).await,
+        Some(pre_policy_v4(0)),
+        "a session reset restores authority"
+    );
+}

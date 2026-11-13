@@ -2057,8 +2057,8 @@ carries inactive (absent), unlimited (zero), or finite.
   VRP table. Unavailable observations are omitted rather than reported as zero.
 - Pre-policy type 19 is accepted routes plus retained rejections other than
   RFC 7606 treat-as-withdraw. It requires authoritative reject retention, no
-  max-prefix `Block` withholding since the session reset, and no unicast
-  Add-Path receive. Global type 18, and RFC 7854 type 7 with the same value
+  max-prefix `Block` withholding and no RFC 7313 enhanced route refresh of a
+  unicast family since the session reset, and no unicast Add-Path receive. Global type 18, and RFC 7854 type 7 with the same value
   as §5 recommends, also require that no family other than IPv4/IPv6 unicast
   is negotiated, because denied routes of other families are not retained.
 - See the [BMP configuration contract](configuration.md#bmp) for
