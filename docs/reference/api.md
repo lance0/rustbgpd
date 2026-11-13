@@ -1276,10 +1276,10 @@ and which owner did:
 
 When more than one owner holds a neighbor, `admin_state` names the first of
 `SESSION_CRASH_LATCHED`, `MAX_PREFIX_LATCHED`, `CONFIG_ADMIN_DOWN` and
-`OPERATOR_DISABLED`. A latch outranks the others because only an explicit
-enable lifts it, and the crash latch outranks the max-prefix latch because a
-max-prefix restart cannot lift it. A configured `admin_down` outranks a later
-operator disable.
+`OPERATOR_DISABLED`. A latch outranks the others because its message is the
+reported `last_error`, and the crash latch outranks the max-prefix latch
+because a max-prefix restart cannot lift it. A configured `admin_down`
+outranks a later operator disable.
 
 A held-down neighbor settles to `state` `IDLE` and is not trying to connect.
 Disabling a session sends a Cease without replacing `last_error`, so for
