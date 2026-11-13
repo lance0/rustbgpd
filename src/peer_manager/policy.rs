@@ -403,6 +403,15 @@ impl LazyRibBudget {
             .get_or_insert_with(|| tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT)
     }
 
+    /// A unit of the walk completed, which proves the RIB is serving it: the
+    /// budget now expires `RIB_BATCH_REPLY_TIMEOUT` after that unit, and never
+    /// earlier than it already did. A walk that keeps completing units is
+    /// slow, not stalled, and is not cut off on elapsed time.
+    fn progressed(&mut self) {
+        let renewed = tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT;
+        self.0 = Some(self.0.map_or(renewed, |deadline| deadline.max(renewed)));
+    }
+
     /// Do not charge this proof budget for other work that ran since
     /// `since`: an anchored deadline moves later by that elapsed time.
     fn exclude_since(&mut self, since: tokio::time::Instant) {
@@ -444,7 +453,11 @@ struct PolicyRollbackPeerPlan {
 }
 
 struct RegisteredPolicyRollbackRib {
+    /// The rollback budget when the restore was registered. The wait never
+    /// expires before it.
     deadline: tokio::time::Instant,
+    /// When the restore last completed a RIB command; `None` until the first.
+    progress: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
     task: tokio::task::JoinHandle<
         Result<Vec<PeerExportPolicyRestoreReceipt>, RuntimeConfigPolicyFailureCode>,
     >,
@@ -556,6 +569,189 @@ pub(super) fn paced_remaining(
     // Progress: something was applied or skipped, so the walk cannot loop.
     (applied.len() == outcome.applied && pending.len() < sent.len() && ordered && applied_first)
         .then_some(pending)
+}
+
+/// How often a long restore reports its progress.
+const RESTORE_PROGRESS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The RIB half of one policy rollback partition, run as a detached task so
+/// that neither its caller's wait ending nor its caller being dropped
+/// abandons it: the task owns every send and every reply to the end.
+///
+/// `replacements` are the captured priors in forward order; the restore runs
+/// newest first. Members returning to the same prior chain go back in
+/// `RestorePeerExportPoliciesAuthoritatively` batches of at most
+/// `PAIR_BATCH_MEMBERS`, as the forward walk sends them; a batch restores
+/// shared cohorts in its turn and acknowledges each residual member as
+/// `Deferred`. Those are then restored by `RestorePacedExportPolicies`
+/// commands before the next batch. Every command is sent only after the
+/// previous reply, so other RIB work runs between them and no turn grows
+/// with restored members x rows. `enqueued` fires once the first command is
+/// in the RIB queue; `progress` records each completed command for the
+/// caller's stall detector.
+///
+/// Receipts come back newest first, one per member: `Restored`, or
+/// `NotFound` for a member that was not registered when its command ran.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the rollback task keeps the batch, its paced restore walk and the receipt accounting in one owner"
+)]
+async fn restore_export_policies_in_rib(
+    rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
+    replacements: Vec<PeerExportPolicyReplacement>,
+    enqueued: oneshot::Sender<()>,
+    progress: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+) -> Result<Vec<PeerExportPolicyRestoreReceipt>, RuntimeConfigPolicyFailureCode> {
+    use RuntimeConfigPolicyFailureCode as Code;
+    let started = tokio::time::Instant::now();
+    let execution: Vec<PeerExportPolicyReplacement> = replacements.into_iter().rev().collect();
+    let members = execution.len();
+    // Members by the prior chain they return to, in execution order.
+    let mut shapes: Vec<Vec<usize>> = Vec::new();
+    for (index, replacement) in execution.iter().enumerate() {
+        match shapes
+            .iter_mut()
+            .find(|shape| execution[shape[0]].export_policy == replacement.export_policy)
+        {
+            Some(shape) => shape.push(index),
+            None => shapes.push(vec![index]),
+        }
+    }
+    info!(
+        members,
+        prior_chains = shapes.len(),
+        "policy rollback: restoring export policies in the RIB"
+    );
+    // Per member: restored (`true`), not registered (`false`), or not settled.
+    let mut settled: Vec<Option<bool>> = vec![None; members];
+    let mut enqueued = Some(enqueued);
+    let (mut commands, mut last_logged) = (0_usize, started);
+    let mut completed = |settled: &[Option<bool>]| {
+        commands += 1;
+        let now = tokio::time::Instant::now();
+        progress.send_replace(Some(now));
+        if now.duration_since(last_logged) >= RESTORE_PROGRESS_LOG_INTERVAL {
+            last_logged = now;
+            info!(
+                members,
+                settled = settled.iter().flatten().count(),
+                commands,
+                elapsed_ms =
+                    u64::try_from(now.duration_since(started).as_millis()).unwrap_or(u64::MAX),
+                "policy rollback: export-policy restore in progress"
+            );
+        }
+    };
+    // The paced walk's estimate and window carry across batches: each command
+    // offers at most twice the members the previous one restored.
+    let (mut cost, mut window) = (None, 1_usize);
+    // A prior chain larger than `PAIR_BATCH_MEMBERS` goes back in several
+    // batches, newest members first, so no one restore turn grows with the
+    // pair: the bound the forward walk keeps for the same reason.
+    for shape in shapes
+        .iter()
+        .flat_map(|shape| shape.chunks(PAIR_BATCH_MEMBERS))
+    {
+        // The RIB executes a batch in reverse supplied order.
+        let batch = shape
+            .iter()
+            .rev()
+            .map(|&index| execution[index].clone())
+            .collect();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements: batch,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Code::RollbackBatchUnavailable)?;
+        if let Some(enqueued) = enqueued.take() {
+            let _ = enqueued.send(());
+        }
+        let receipts = reply_rx
+            .await
+            .map_err(|_| Code::RollbackBatchReplyLost)?
+            .map_err(|_| Code::RollbackBatchRejected)?;
+        if receipts.len() != shape.len() {
+            return Err(Code::RollbackBatchReplyLost);
+        }
+        let mut paced: Vec<usize> = Vec::new();
+        for (&index, receipt) in shape.iter().zip(receipts) {
+            if receipt.peer() != execution[index].peer {
+                return Err(Code::RollbackBatchReplyLost);
+            }
+            match receipt {
+                PeerExportPolicyRestoreReceipt::Restored { .. } => settled[index] = Some(true),
+                PeerExportPolicyRestoreReceipt::NotFound { .. } => settled[index] = Some(false),
+                PeerExportPolicyRestoreReceipt::Deferred { .. } => paced.push(index),
+            }
+        }
+        completed(&settled);
+        while !paced.is_empty() {
+            let take = window.min(paced.len());
+            let sent: Vec<PeerExportPolicyReplacement> = paced[..take]
+                .iter()
+                .map(|&index| execution[index].clone())
+                .collect();
+            let sent_peers: Vec<PeerId> = sent.iter().map(|replacement| replacement.peer).collect();
+            let (reply_tx, reply_rx) = oneshot::channel();
+            rib_tx
+                .send(RibUpdate::RestorePacedExportPolicies {
+                    replacements: sent,
+                    cost,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Code::RollbackBatchUnavailable)?;
+            let outcome = reply_rx
+                .await
+                .map_err(|_| Code::RollbackBatchReplyLost)?
+                .map_err(|_| Code::RollbackBatchRejected)?;
+            let remaining =
+                paced_remaining(&sent_peers, &outcome).ok_or(Code::RollbackBatchReplyLost)?;
+            for (position, peer) in sent_peers.iter().enumerate() {
+                if !remaining.contains(&position) {
+                    settled[paced[position]] = Some(!outcome.skipped.contains(peer));
+                }
+            }
+            cost = outcome.cost;
+            window = outcome.applied.saturating_mul(2).max(1);
+            let rest = paced.split_off(take);
+            paced = remaining
+                .into_iter()
+                .map(|position| paced[position])
+                .chain(rest)
+                .collect();
+            completed(&settled);
+        }
+    }
+    info!(
+        members,
+        restored = settled
+            .iter()
+            .filter(|member| **member == Some(true))
+            .count(),
+        not_registered = settled
+            .iter()
+            .filter(|member| **member == Some(false))
+            .count(),
+        commands,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "policy rollback: export policies restored in the RIB"
+    );
+    Ok(execution
+        .iter()
+        .zip(settled)
+        .map(|(replacement, restored)| {
+            let peer = replacement.peer;
+            if restored == Some(true) {
+                PeerExportPolicyRestoreReceipt::Restored { peer }
+            } else {
+                PeerExportPolicyRestoreReceipt::NotFound { peer }
+            }
+        })
+        .collect())
 }
 
 fn metric_count(value: usize) -> u64 {
@@ -2927,40 +3123,33 @@ impl PeerManager {
         }
 
         let deadline = context.rollback.deadline();
-        let rib_tx = self.rib_tx.clone();
         let (enqueued_tx, enqueued_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if rib_tx
-                .send(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
-                    replacements,
-                    reply: reply_tx,
-                })
-                .await
-                .is_err()
-            {
-                return Err(RuntimeConfigPolicyFailureCode::RollbackBatchUnavailable);
-            }
-            let _ = enqueued_tx.send(());
-            match reply_rx.await {
-                Err(_) => Err(RuntimeConfigPolicyFailureCode::RollbackBatchReplyLost),
-                Ok(Err(_)) => Err(RuntimeConfigPolicyFailureCode::RollbackBatchRejected),
-                Ok(Ok(receipts)) => Ok(receipts),
-            }
-        });
+        let (progress_tx, progress) = tokio::sync::watch::channel(None);
+        let task = tokio::spawn(restore_export_policies_in_rib(
+            self.rib_tx.clone(),
+            replacements,
+            enqueued_tx,
+            progress_tx,
+        ));
 
         // Both waits below admit the operator-read lane on the transaction's
         // terms, reporting live state after session restoration was attempted.
         // Some restores may have failed; admission does not imply a common
-        // generation or an available RIB query lane. The rollback's own
-        // two-minute budget is unchanged.
+        // generation or an available RIB query lane. Serving reads does
+        // not change the rollback's bound: the enqueue below waits to the
+        // transaction's rollback deadline, and the restore that follows is
+        // bounded by the stall timeout, renewed by each completed command.
         match tokio::time::timeout_at(
             deadline,
             self.await_with_readiness(enqueued_rx, context.operator_reads),
         )
         .await
         {
-            Ok(Ok(())) => Ok(Some(RegisteredPolicyRollbackRib { deadline, task })),
+            Ok(Ok(())) => Ok(Some(RegisteredPolicyRollbackRib {
+                deadline,
+                progress,
+                task,
+            })),
             Err(_) => {
                 // Dropping a JoinHandle detaches rather than cancels it. The
                 // task still owns both the queued send and its late receiver,
@@ -3037,6 +3226,12 @@ impl PeerManager {
         }
     }
 
+    /// `batch_enqueued`: the restore task's first RIB command is queued.
+    /// The rest of the restore is not: a member's Route Refresh can run
+    /// before its own restore command, and until that command the member
+    /// receives the refresh's results under the candidate export chain.
+    /// Its restore command then re-exports its whole table. Restoring what
+    /// the Loc-RIB accepts is not held back for that.
     async fn finish_policy_rollback_refreshes(
         &mut self,
         plans: &[PolicyRollbackPeerPlan],
@@ -3055,11 +3250,15 @@ impl PeerManager {
 
     /// Re-apply captured prior chains (reverse of application order) to restore
     /// live peers during a transaction rollback. Session/bookkeeping restores
-    /// run first. Every required RIB send is then registered in reverse order
-    /// before any Route Refresh, and all RIB sends/replies share one lazy
-    /// absolute deadline across this top-level policy transaction. Timing out or
-    /// dropping the caller detaches the exact registered aggregate so FIFO repair
-    /// can continue while conservative pending flags retain retry intent. While
+    /// run first. The RIB restore is then registered as one detached task, and
+    /// its first command is in the RIB queue before any Route Refresh; the
+    /// task sends the rest, newest first, each after the previous reply. The
+    /// wait on it is a stall detector across this top-level policy
+    /// transaction: it ends `RIB_BATCH_REPLY_TIMEOUT` after the last
+    /// completed restore command. Timing out or dropping the caller detaches
+    /// the task, which still owns every remaining send and reply, so the
+    /// repair continues while conservative pending flags retain retry
+    /// intent. While
     /// the aggregate is awaited, the operator-read lane is admitted on the
     /// transaction's terms (`context.operator_reads`); the ordinary command
     /// receiver stays unpolled, so mutations remain behind the rollback.
@@ -3116,7 +3315,8 @@ impl PeerManager {
                     Some(&mut plan),
                     None,
                     // Rollback planning returns before the RIB step; the
-                    // registered aggregate below carries the rollback budget.
+                    // restore task registered below is awaited under the
+                    // rollback's stall detector.
                     None,
                     context.operator_reads,
                 )
@@ -3154,12 +3354,42 @@ impl PeerManager {
             .await;
 
         if let Some(registered) = registered {
-            match tokio::time::timeout_at(
-                registered.deadline,
-                self.await_with_readiness(registered.task, context.operator_reads),
-            )
-            .await
-            {
+            // A stall detector, not a total deadline: the wait expires
+            // `RIB_BATCH_REPLY_TIMEOUT` after the restore last completed a
+            // RIB command, and never before the registered rollback budget.
+            // The restore's work list is fixed, so a restore that keeps
+            // completing commands ends; fencing it on elapsed time would
+            // drop every session for a rollback that was succeeding.
+            // Dropping the handle on expiry detaches the task, which still
+            // owns every remaining send and reply.
+            let RegisteredPolicyRollbackRib {
+                deadline,
+                progress,
+                mut task,
+            } = registered;
+            let stall_deadline = move || {
+                progress.borrow().map_or(deadline, |completed| {
+                    deadline.max(completed + super::RIB_BATCH_REPLY_TIMEOUT)
+                })
+            };
+            let wait = async move {
+                loop {
+                    let expires = stall_deadline();
+                    match tokio::time::timeout_at(expires, &mut task).await {
+                        Ok(joined) => break Ok(joined),
+                        Err(_) if stall_deadline() > expires => {}
+                        Err(elapsed) => break Err(elapsed),
+                    }
+                }
+            };
+            let outcome = self
+                .await_with_readiness(wait, context.operator_reads)
+                .await;
+            if matches!(outcome, Ok(Ok(Ok(_)))) {
+                // Later partitions of this rollback are measured from here.
+                context.rollback.progressed();
+            }
+            match outcome {
                 Err(_) => {
                     for plan in plans.iter().filter(|plan| plan.export_restore.is_some()) {
                         self.retain_policy_rollback_rib_intent(plan);
@@ -3213,7 +3443,10 @@ impl PeerManager {
                                     );
                                     self.finish_policy_rollback_rib_success(plan);
                                 }
-                                PeerExportPolicyRestoreReceipt::NotFound { .. } => {
+                                // The restore task settles every deferred
+                                // member; one left over is an unproven restore.
+                                PeerExportPolicyRestoreReceipt::NotFound { .. }
+                                | PeerExportPolicyRestoreReceipt::Deferred { .. } => {
                                     let code =
                                         RuntimeConfigPolicyFailureCode::RollbackReceiptNotFound;
                                     failure_code.get_or_insert(code);

@@ -1100,13 +1100,17 @@ pub enum PeerExportPolicyRestoreReceipt {
     Restored { peer: PeerId },
     /// The peer was no longer registered when the rollback batch executed.
     NotFound { peer: PeerId },
+    /// The peer is registered and still holds the chain being rolled back:
+    /// its restore resyncs its whole table, so the batch left it for a
+    /// [`RibUpdate::RestorePacedExportPolicies`] command.
+    Deferred { peer: PeerId },
 }
 
 impl PeerExportPolicyRestoreReceipt {
     #[must_use]
     pub const fn peer(self) -> PeerId {
         match self {
-            Self::Restored { peer } | Self::NotFound { peer } => peer,
+            Self::Restored { peer } | Self::NotFound { peer } | Self::Deferred { peer } => peer,
         }
     }
 }
@@ -3859,18 +3863,37 @@ pub enum RibUpdate {
         /// Response channel: what was applied and what remains.
         reply: oneshot::Sender<Result<PacedApplyOutcome, RibCommandError>>,
     },
-    /// Restore prior export policies as one exact rollback-only actor call.
+    /// Restore prior export policies: the first command of an exact
+    /// rollback.
     ///
     /// Duplicate peer identities reject the complete batch before mutation.
     /// Otherwise replacements execute in reverse supplied order and return one
     /// ordered [`PeerExportPolicyRestoreReceipt`] per input member. A missing
     /// outbound registration is acknowledged as `NotFound`, never silently
-    /// collapsed into success.
+    /// collapsed into success. Shared cohorts are restored in this call. A
+    /// residual member whose session sends any family is left on its
+    /// installed chain and acknowledged as `Deferred`, as the forward batch
+    /// hands such members back: the caller restores them through
+    /// [`RibUpdate::RestorePacedExportPolicies`]. The command is never
+    /// skipped, whether or not its caller still holds the reply.
     RestorePeerExportPoliciesAuthoritatively {
         /// Prior policies in original forward-application order.
         replacements: Vec<PeerExportPolicyReplacement>,
         /// Ordered receipts in rollback execution order.
         reply: oneshot::Sender<Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError>>,
+    },
+    /// Restore members a rollback batch acknowledged as `Deferred`: one
+    /// command of the paced restore, with the semantics and reply of
+    /// [`RibUpdate::ApplyPacedExportPolicies`], except that it is applied
+    /// even when its caller has dropped the reply. A rollback is never
+    /// abandoned.
+    RestorePacedExportPolicies {
+        /// Remaining members, newest first.
+        replacements: Vec<PeerExportPolicyReplacement>,
+        /// The walk's cost estimate from the previous reply.
+        cost: Option<PacedMemberCost>,
+        /// Response channel: what was restored and what remains.
+        reply: oneshot::Sender<Result<PacedApplyOutcome, RibCommandError>>,
     },
     /// Create and stage the prospective destination update-group of an
     /// upcoming [`RibUpdate::ReplacePeerExportPolicies`] cohort — without
@@ -4544,6 +4567,7 @@ impl RibUpdate {
             | Self::ReplacePeerExportPoliciesAuthoritatively { .. }
             | Self::ApplyPacedExportPolicies { .. }
             | Self::RestorePeerExportPoliciesAuthoritatively { .. }
+            | Self::RestorePacedExportPolicies { .. }
             | Self::PrepareExportPolicyDestination { .. }
             | Self::DiscardPreparedExportPolicyDestination { .. }
             | Self::ReevaluatePeerExportPolicies { .. }

@@ -815,10 +815,12 @@ pub(in crate::manager) fn paced_admits_next(
 /// How the authoritative batch treats its residual members.
 #[derive(Clone, Copy)]
 enum ResidualMode {
-    /// Apply every residual member (rollback and direct callers).
+    /// Apply every residual member in the one call: the whole-list reference
+    /// the batch tests compare against. No command takes it.
+    #[cfg(test)]
     All,
     /// Hand back every residual member whose session sends any family
-    /// unapplied (the forward batch).
+    /// unapplied (the forward batch and the rollback batch).
     DeferSenders,
     /// Apply residual members in caller order while the turn budget allows
     /// (one command of the paced walk); hand back the rest.
@@ -6071,17 +6073,65 @@ impl RibManager {
         // the detached receiver owns the late acknowledgement, while this actor
         // must still repair the RIB. Never use `reply.is_closed()` as a reason to
         // skip compensation.
-        let result = self.restore_export_policy_replacements_synchronously(replacements);
+        let result = self.restore_export_policy_replacements_deferring_residual(replacements);
         let _ = reply.send(result);
     }
 
-    /// Execute one exact rollback-only batch.
+    /// A whole rollback in one call, for tests: the rollback batch, then
+    /// paced restore commands until no member is left `Deferred`.
+    #[cfg(test)]
+    pub(in crate::manager) fn restore_export_policy_replacements_synchronously(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+    ) -> Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError> {
+        let chains: HashMap<PeerId, Option<PolicyChain>> = replacements
+            .iter()
+            .map(|replacement| (replacement.peer, replacement.export_policy.clone()))
+            .collect();
+        let mut receipts =
+            self.restore_export_policy_replacements_deferring_residual(replacements)?;
+        let mut pending: Vec<PeerId> = receipts
+            .iter()
+            .filter(|receipt| matches!(receipt, PeerExportPolicyRestoreReceipt::Deferred { .. }))
+            .map(|receipt| receipt.peer())
+            .collect();
+        let mut cost = None;
+        while !pending.is_empty() {
+            let outcome = self.apply_paced_export_policies(
+                pending
+                    .iter()
+                    .map(|peer| PeerExportPolicyReplacement {
+                        peer: *peer,
+                        export_policy: chains[peer].clone(),
+                    })
+                    .collect(),
+                cost,
+            )?;
+            for receipt in &mut receipts {
+                let peer = receipt.peer();
+                if outcome.skipped.contains(&peer) {
+                    *receipt = PeerExportPolicyRestoreReceipt::NotFound { peer };
+                } else if pending.contains(&peer) && !outcome.pending.contains(&peer) {
+                    *receipt = PeerExportPolicyRestoreReceipt::Restored { peer };
+                }
+            }
+            cost = outcome.cost;
+            pending = outcome.pending;
+        }
+        Ok(receipts)
+    }
+
+    /// Execute the batch of one exact rollback.
     ///
     /// Validation is complete before the shared authoritative mutation kernel
     /// runs. Duplicate identities reject wholesale instead of inheriting the
     /// forward batch's last-writer-wins fallback. Receipts preserve the actual
     /// newest-first execution order and make every departed peer explicit.
-    pub(in crate::manager) fn restore_export_policy_replacements_synchronously(
+    /// Shared cohorts are restored here; a residual member whose session
+    /// sends any family keeps its installed chain and is acknowledged as
+    /// `Deferred` for a paced restore command, so the rollback's longest turn
+    /// does not grow with restored members x rows.
+    pub(in crate::manager) fn restore_export_policy_replacements_deferring_residual(
         &mut self,
         mut replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError> {
@@ -6119,7 +6169,7 @@ impl RibManager {
                 .inspect(|_| checkpoint())
                 .rev()
                 .collect::<Vec<_>>();
-            let receipts = execution
+            let mut receipts = execution
                 .iter()
                 .inspect(|_| checkpoint())
                 .map(|replacement| {
@@ -6134,10 +6184,23 @@ impl RibManager {
                     }
                 })
                 .collect::<Vec<_>>();
-            manager.apply_export_policy_replacements_synchronously(execution)?;
-            // A walk that failed before a refused cohort's first mover joined
-            // leaves that cohort's destination memberless.
-            manager.discard_refused_cohort_destinations();
+            // The batch first retires a destination the failed forward walk
+            // left memberless. One this rollback's own refused cohort leaves
+            // is adopted or retired by its paced restore commands.
+            let mut deferred: HashSet<PeerId> = manager
+                .apply_export_policy_replacements(execution, ResidualMode::DeferSenders)?
+                .deferred
+                .into_iter()
+                .inspect(|_| checkpoint())
+                .collect();
+            for receipt in &mut receipts {
+                checkpoint();
+                let peer = receipt.peer();
+                if deferred.contains(&peer) {
+                    *receipt = PeerExportPolicyRestoreReceipt::Deferred { peer };
+                }
+            }
+            super::retire_hash_set(&mut deferred, &mut || checkpoint());
             Ok(receipts)
         })
     }
@@ -6168,6 +6231,7 @@ impl RibManager {
     /// longer registered are skipped (serial-loop parity); a member
     /// whose emission cannot be prepared is marked dirty and healed by
     /// the ordinary resync from the committed state.
+    #[cfg(test)]
     pub(in crate::manager) fn apply_export_policy_replacements_synchronously(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
@@ -6176,8 +6240,8 @@ impl RibManager {
             .map(|_| ())
     }
 
-    /// The forward authoritative batch: as
-    /// [`Self::apply_export_policy_replacements_synchronously`], except that
+    /// The forward authoritative batch: the batch body described on the
+    /// test-only `apply_export_policy_replacements_synchronously`, except that
     /// residual members whose session sends any family are left unapplied,
     /// with their installed chain untouched, and returned in caller order.
     /// Shared cohorts still commit here. A residual move resyncs the member's
@@ -6187,7 +6251,7 @@ impl RibManager {
     /// [`Self::apply_paced_export_policies`], a few per RIB command within
     /// [`PACED_TURN_BUDGET`], and other work runs between those commands
     /// instead of waiting behind one actor turn growing with moved members ×
-    /// rows. Rollback batches stay whole.
+    /// rows. The rollback batch hands the same members back.
     pub(in crate::manager) fn apply_export_policy_replacements_deferring_residual(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
@@ -6503,6 +6567,10 @@ impl RibManager {
         // term-hit counters survive), kept only so a deferred member can be
         // returned with its installed chain untouched.
         let mut displaced: HashMap<PeerId, Option<Option<PolicyChain>>> = HashMap::new();
+        let tracks_displaced = matches!(
+            mode,
+            ResidualMode::DeferSenders | ResidualMode::Paced { .. }
+        );
         // Install the new chains (content-equal INSTANCE guard — see
         // `replace_peer_export_policy_synchronously` for the ADR-0096
         // term-hit rationale), then classify each member's destination.
@@ -6546,7 +6614,7 @@ impl RibManager {
                 let prior = self
                     .export_chains
                     .replace(replacement.peer, replacement.export_policy.clone());
-                if !matches!(mode, ResidualMode::All) {
+                if tracks_displaced {
                     displaced.insert(replacement.peer, prior);
                 }
             }
@@ -6690,18 +6758,30 @@ impl RibManager {
         let mut deferred: HashSet<PeerId> = HashSet::new();
         let (mut applied, mut recompute_max, mut over_budget) =
             (0_usize, std::time::Duration::ZERO, false);
-        let mut estimate = match mode {
-            ResidualMode::Paced { cost, .. } => cost,
-            _ => None,
+        let mut estimate = if let ResidualMode::Paced { cost, .. } = mode {
+            cost
+        } else {
+            None
         };
         let mut applied_peers = Vec::new();
         let phase = std::time::Instant::now();
         let mut evpn_feeds = HashMap::new();
         for peer in residual {
             checkpoint();
+            // A member whose installed chain already equals its target has
+            // nothing to move: its chain, and with it its group key and
+            // every exported row, stand as they are. It counts as applied
+            // without the regroup below, which resyncs an ungrouped member's
+            // whole table whatever the chain did; a rollback names every
+            // captured member, and most of them the RIB never moved. The
+            // comparison above reads the chain installed now, so a member
+            // that registered under the candidate chain mid-walk is not
+            // equal and is still restored.
+            let unchanged = tracks_displaced && !displaced.contains_key(&peer);
             let hand_back = match mode {
+                #[cfg(test)]
                 ResidualMode::All => false,
-                ResidualMode::DeferSenders => self.sends_any_family(peer),
+                ResidualMode::DeferSenders => !unchanged && self.sends_any_family(peer),
                 ResidualMode::Paced { started, .. } => {
                     #[cfg(test)]
                     let elapsed = self
@@ -6709,7 +6789,11 @@ impl RibManager {
                         .unwrap_or_else(|| started.elapsed());
                     #[cfg(not(test))]
                     let elapsed = started.elapsed();
-                    over_budget = over_budget || !paced_admits_next(elapsed, applied, estimate);
+                    // An unchanged member costs nothing, so it never ends
+                    // the applied prefix; one behind the prefix's end is
+                    // still handed back, in caller order.
+                    over_budget = over_budget
+                        || !(unchanged || paced_admits_next(elapsed, applied, estimate));
                     over_budget
                 }
             };
@@ -6724,6 +6808,11 @@ impl RibManager {
                     None => {}
                 }
                 deferred.insert(peer);
+                continue;
+            }
+            if unchanged {
+                applied += 1;
+                applied_peers.push(peer);
                 continue;
             }
             let member_started = std::time::Instant::now();
