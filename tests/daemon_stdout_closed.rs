@@ -147,8 +147,9 @@ fn healthy_check_and_diff_bytes_streams_and_statuses_are_exact() {
     assert!(text.stderr.is_empty());
     assert_eq!(
         text.stdout,
-        b"Restart-required changes:\n  ! [global] changed\n\n\
-          Plan: no neighbor changes \xc2\xb7 daemon restart required for some changes\n"
+        "Restart-required changes:\n  ! [global] changed\n      listen_port: 1179 \u{2192} 1180\n\n\
+          Plan: no neighbor changes \u{b7} daemon restart required for some changes\n"
+            .as_bytes()
     );
 
     let json = run(&[clean, "--diff".into(), changed, "--json".into()], false);
@@ -158,6 +159,7 @@ fn healthy_check_and_diff_bytes_streams_and_statuses_are_exact() {
         serde_json::from_slice(&json.stdout).expect("complete JSON diff");
     assert_eq!(value["has_actionable_changes"], true);
     assert_eq!(value["restart_required"]["global_changed"], true);
+    assert_eq!(value["global_changes"][0]["field"], "listen_port");
     let mut expected = serde_json::to_vec_pretty(&value).unwrap();
     expected.push(b'\n');
     assert_eq!(
