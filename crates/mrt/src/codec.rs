@@ -21,7 +21,7 @@ pub(crate) const TABLE_DUMP_V2: u16 = 13;
 pub(crate) const PEER_INDEX_TABLE: u16 = 1;
 pub(crate) const RIB_IPV4_UNICAST: u16 = 2;
 pub(crate) const RIB_IPV6_UNICAST: u16 = 4;
-/// RFC 6396 §4.3.5 — generic RIB record carrying any AFI/SAFI.
+/// RFC 6396 §4.3.3 — generic RIB record carrying any AFI/SAFI.
 /// Used here for L2VPN/EVPN (AFI 25 / SAFI 70).
 pub(crate) const RIB_GENERIC: u16 = 6;
 pub(crate) const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
@@ -652,7 +652,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
 /// `EvpnRibRoute.attributes` was stripped of `MP_REACH_NLRI` at decode
 /// (per MP-BGP architecture). For the MRT encoding we add a fresh
 /// `MP_REACH_NLRI` carrying the next-hop only — the EVPN NLRI itself
-/// rides in the `RIB_GENERIC` record header per RFC 6396 §4.3.5, not
+/// rides in the `RIB_GENERIC` record header per RFC 6396 §4.3.3, not
 /// in the attribute. The attribute's NLRI/AFI/SAFI fields are dropped
 /// when the entry is serialized by the internal MRT RIB-attribute
 /// encoder, which rewrites `MP_REACH_NLRI` to the RFC 6396 §4.3.4
@@ -678,7 +678,7 @@ pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
 }
 /// Encode a single EVPN route as a `RIB_GENERIC` (subtype 6) record.
 ///
-/// Layout per RFC 6396 §4.3.5:
+/// Layout per RFC 6396 §4.3.3:
 /// ```text
 ///   Sequence Number (4)
 ///   AFI (2)              = 25 (L2VPN)
@@ -1674,7 +1674,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
         }
         group_start = group_end;
     }
-    // 6. Encode EVPN routes as RIB_GENERIC records (RFC 6396 §4.3.5).
+    // 6. Encode EVPN routes as RIB_GENERIC records (RFC 6396 §4.3.3).
     // EVPN does not use Add-Path in this codebase, and EVPN keys are
     // already per-route (RD + ESI + ETag + MAC + IP), so each route maps
     // to a single-entry RIB_GENERIC record. Sort for deterministic output

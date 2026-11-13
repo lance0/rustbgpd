@@ -885,4 +885,48 @@ mod tests {
         drop(trigger_tx);
         handle.await.unwrap();
     }
+
+    /// The record timestamp is taken when the walk starts, so every route
+    /// in the file was read at or after it. The RIB answers a second later
+    /// here; a timestamp taken after the walk would carry that second.
+    #[tokio::test(start_paused = true)]
+    async fn record_timestamp_is_the_start_of_the_walk() {
+        let dir = private_tempdir();
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let manager = MrtManager::new(
+            test_config(dir.path().to_path_buf()),
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::LOCALHOST,
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(manager.run());
+        let unix_now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await else {
+            panic!("RIB query");
+        };
+        // Wall-clock time: the record timestamp is not on tokio's clock.
+        std::thread::sleep(Duration::from_millis(1100));
+        let answered = unix_now();
+        let _ = reply.send(MrtSnapshotChunk::default());
+
+        let path = reply_rx.await.unwrap().expect("dump");
+        let bytes = std::fs::read(path).unwrap();
+        let record = u64::from(u32::from_be_bytes(bytes[..4].try_into().unwrap()));
+        assert!(
+            record < answered,
+            "record timestamp {record} is not before the RIB answered at {answered}"
+        );
+        drop(trigger_tx);
+        handle.await.unwrap();
+    }
 }

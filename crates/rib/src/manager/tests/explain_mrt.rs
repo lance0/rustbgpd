@@ -1551,3 +1551,272 @@ fn mrt_snapshot_under_churn_keeps_its_consistency_model() {
         assert_eq!(listed[&joiner], 65_005);
     }
 }
+
+/// [`drain_mrt_snapshot`] with a caller-chosen row budget, straight through
+/// the chunk builder, so a small table still takes many turns.
+fn drain_mrt_snapshot_with_budget(
+    manager: &mut RibManager,
+    budget: usize,
+    mut between: impl FnMut(&mut RibManager, usize),
+) -> (crate::update::MrtSnapshotData, Vec<usize>) {
+    let mut snapshot = crate::update::MrtSnapshotAssembler::default();
+    let mut turns = Vec::new();
+    let mut cursor = None;
+    loop {
+        let chunk = manager.mrt_snapshot_chunk(cursor, budget);
+        turns.push(chunk.routes.len() + chunk.evpn_routes.len());
+        assert!(turns.len() < 10_000, "the walk does not advance");
+        cursor = snapshot.push(chunk);
+        if cursor.is_none() {
+            return (snapshot.finish(), turns);
+        }
+        between(manager, turns.len());
+    }
+}
+
+/// The fixed cost of a unicast turn is one prefix-index seek per neighbor,
+/// whatever the table holds: a many-neighbor shape reports it next to the
+/// rows, which stay within one prefix of the budget.
+#[test]
+fn mrt_snapshot_unicast_turn_at_many_peers() {
+    const PEERS: u16 = 800;
+    const PREFIXES: u32 = 30;
+    let budget = crate::update::MRT_SNAPSHOT_CHUNK_ROWS;
+    let mut manager = mrt_test_manager();
+    for index in 0..PEERS {
+        let [high, low] = index.to_be_bytes();
+        let peer = peer_v4(Ipv4Addr::new(10, 78, high, low));
+        seed_mrt_rib(&mut manager, peer, PREFIXES, 0);
+    }
+    let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |_, _| {});
+    assert_eq!(
+        snapshot.routes.len(),
+        usize::from(PEERS) * PREFIXES as usize
+    );
+    let max = turns.iter().copied().max().unwrap();
+    println!(
+        "mrt snapshot unicast: peers={PEERS} rows={} turns={} longest_turn_rows={max} seeks_per_turn={}",
+        snapshot.routes.len(),
+        turns.len(),
+        manager.ribs.len()
+    );
+    assert!(max < budget + usize::from(PEERS), "{max}");
+}
+
+/// The prefix-ordered walk resumes correctly when the cursor is a prefix
+/// most neighbors do not hold (a covering /8 or /16 over their /24s), across
+/// both address families, and keeps every Add-Path path of a prefix.
+#[test]
+fn mrt_snapshot_walks_nested_prefixes_and_add_path() {
+    let mut manager = mrt_test_manager();
+    let peers = [mrt_test_peer(21), mrt_test_peer(22), mrt_test_peer(23)];
+    let v4 =
+        |a: u8, b: u8, c: u8, len: u8| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), len));
+    let v6 = |text: &str, len: u8| {
+        Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(text.parse().unwrap(), len))
+    };
+    let held: [Vec<Prefix>; 3] = [
+        vec![
+            v4(10, 0, 0, 8),
+            v4(10, 1, 0, 16),
+            v4(10, 1, 1, 24),
+            v6("2001:db8::", 32),
+            v6("2001:db8:1:1::", 64),
+        ],
+        vec![
+            v4(10, 1, 0, 16),
+            v4(10, 1, 1, 24),
+            v4(10, 2, 0, 16),
+            v6("2001:db8:1::", 48),
+        ],
+        vec![
+            v4(10, 1, 1, 24),
+            v4(11, 0, 0, 8),
+            v6("2001:db8:1:1::", 64),
+            v6("2001:db9::", 32),
+        ],
+    ];
+    let mut expected = HashSet::new();
+    for (peer, prefixes) in peers.into_iter().zip(&held) {
+        let rib = manager
+            .ribs
+            .entry(peer)
+            .or_insert_with(|| AdjRibIn::new(peer));
+        for &prefix in prefixes {
+            // The shared /24 carries three Add-Path paths on every neighbor.
+            let paths = if prefix == v4(10, 1, 1, 24) {
+                1..4
+            } else {
+                0..1
+            };
+            for path_id in paths {
+                let mut route = mrt_test_route(peer, 0, 0);
+                route.prefix = prefix;
+                route.path_id = path_id;
+                rib.insert(route);
+                expected.insert((peer, prefix, path_id));
+            }
+        }
+    }
+
+    // Budget 1: every turn stops after one prefix, so every prefix is a cursor.
+    let (snapshot, turns) = drain_mrt_snapshot_with_budget(&mut manager, 1, |_, _| {});
+    assert_eq!(
+        snapshot.routes.len(),
+        expected.len(),
+        "a route copied twice"
+    );
+    let copied: HashSet<_> = snapshot
+        .routes
+        .iter()
+        .map(|route| (route.peer, route.prefix, route.path_id))
+        .collect();
+    assert_eq!(copied, expected);
+    // Nine distinct prefixes, one per turn, then the EVPN turn.
+    assert_eq!(turns.len(), 10);
+    assert_eq!(
+        turns.iter().copied().max(),
+        Some(9),
+        "the Add-Path prefix is one turn"
+    );
+}
+
+/// One prefix is one instant: a turn whose budget runs out inside a prefix
+/// still reads that prefix from every neighbor before it stops.
+#[test]
+fn mrt_snapshot_reads_one_prefix_from_every_peer_in_one_turn() {
+    let mut manager = mrt_test_manager();
+    let peers = [mrt_test_peer(31), mrt_test_peer(32), mrt_test_peer(33)];
+    for peer in peers {
+        seed_mrt_rib(&mut manager, peer, 6, 0);
+    }
+    // Budget 4 over 3 neighbors: the first turn reaches the budget one row
+    // into prefix 1 and must finish it; prefix 2 belongs to the next turn.
+    let (snapshot, turns) = drain_mrt_snapshot_with_budget(&mut manager, 4, |manager, turn| {
+        if turn == 1 {
+            for peer in peers {
+                let rib = manager.ribs.get_mut(&peer).unwrap();
+                rib.insert(mrt_test_route(peer, 1, 9));
+                rib.insert(mrt_test_route(peer, 2, 9));
+            }
+        }
+    });
+    assert_eq!(turns[0], 6, "the first turn ends on a prefix boundary");
+    let versions = |n: u32| -> Vec<IpAddr> {
+        snapshot
+            .routes
+            .iter()
+            .filter(|route| route.prefix == mrt_test_prefix(n))
+            .map(|route| route.next_hop)
+            .collect()
+    };
+    let old = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 0));
+    let new = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+    assert_eq!(
+        versions(1),
+        [old; 3],
+        "prefix 1 was read whole before the change"
+    );
+    assert_eq!(
+        versions(2),
+        [new; 3],
+        "prefix 2 was read whole after the change"
+    );
+}
+
+/// A chunk query whose caller is already gone copies nothing.
+#[test]
+fn canceled_mrt_snapshot_chunk_copies_no_rows() {
+    let mut manager = mrt_test_manager();
+    seed_mrt_rib(&mut manager, mrt_test_peer(41), 3, 0);
+    crate::manager::queries::mrt_chunks_built::take();
+
+    let (reply, receiver) = oneshot::channel();
+    drop(receiver);
+    manager.handle_update(RibUpdate::QueryMrtSnapshotChunk {
+        cursor: None,
+        reply,
+    });
+    assert_eq!(crate::manager::queries::mrt_chunks_built::take(), 0);
+
+    let (reply, mut receiver) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryMrtSnapshotChunk {
+        cursor: None,
+        reply,
+    });
+    assert_eq!(receiver.try_recv().unwrap().routes.len(), 3);
+    assert_eq!(crate::manager::queries::mrt_chunks_built::take(), 1);
+}
+
+/// EVPN tables that are single hash tables when the walk reaches them and
+/// split before it resumes: the table already read is not read again, and
+/// the one the cursor stopped in front of is read whole, each route once.
+#[test]
+fn mrt_snapshot_evpn_table_that_splits_mid_walk_is_read_once() {
+    const BEFORE: u32 = 10_000;
+    const AFTER: u32 = 20_000;
+    let mut manager = mrt_test_manager();
+    let mut peers = [mrt_test_peer(51), mrt_test_peer(52)];
+    peers.sort_unstable();
+    for peer in peers {
+        seed_mrt_rib(&mut manager, peer, 0, BEFORE);
+        assert_eq!(manager.ribs[&peer].iter_evpn_shards().count(), 1);
+    }
+    let mut grown = false;
+    let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |manager, turn| {
+        // Turn 1 is unicast (empty); turn 2 reads the first neighbor's
+        // single table and stops in front of the second.
+        if turn == 2 {
+            grown = true;
+            for peer in peers {
+                let rib = manager.ribs.get_mut(&peer).unwrap();
+                for tag in BEFORE..AFTER {
+                    rib.insert_evpn(mrt_test_evpn(peer, tag, 0));
+                }
+                assert!(rib.iter_evpn_shards().count() > 1, "the table split");
+            }
+        }
+    });
+    assert!(grown);
+    assert_eq!(turns[1], BEFORE as usize);
+    let mut seen = HashSet::new();
+    for route in &snapshot.evpn_routes {
+        assert!(
+            seen.insert((route.peer, route.key())),
+            "an EVPN route copied twice"
+        );
+    }
+    let rows_of = |peer| {
+        snapshot
+            .evpn_routes
+            .iter()
+            .filter(|route| route.peer == peer)
+            .count()
+    };
+    assert_eq!(rows_of(peers[0]), BEFORE as usize);
+    assert_eq!(rows_of(peers[1]), AFTER as usize);
+}
+
+/// A neighbor is listed once, with the identity of the first chunk that
+/// read its routes: one that rebinds or restarts mid-dump keeps that entry
+/// for the routes read afterward.
+#[test]
+fn mrt_snapshot_lists_a_neighbor_with_its_first_identity() {
+    let peer = mrt_test_peer(61);
+    let entry = |peer_asn| crate::update::MrtPeerEntry {
+        peer_asn,
+        ..crate::update::MrtPeerEntry::capture(peer, 0, Ipv4Addr::UNSPECIFIED)
+    };
+    let mut snapshot = crate::update::MrtSnapshotAssembler::default();
+    for peer_asn in [65_001, 65_002] {
+        snapshot.push(crate::update::MrtSnapshotChunk {
+            peers: vec![entry(peer_asn)],
+            routes: vec![mrt_test_route(peer, peer_asn, 0)],
+            ..Default::default()
+        });
+    }
+    let snapshot = snapshot.finish();
+    assert_eq!(snapshot.routes.len(), 2);
+    assert_eq!(snapshot.peers.len(), 1);
+    assert_eq!(snapshot.peers[0].peer_asn, 65_001);
+}

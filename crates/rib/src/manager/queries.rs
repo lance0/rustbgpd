@@ -106,8 +106,8 @@ pub(super) fn filter_rows<'a, T: Clone + 'a>(
     }
 }
 
-/// [`filter_rows`] plus the reply, sharing `send_mrt_snapshot`'s cancellation
-/// rule: an abandoned caller (dropped receiver — e.g. a canceled gRPC request
+/// [`filter_rows`] plus the reply, sharing the MRT snapshot chunk's
+/// cancellation rule: an abandoned caller (dropped receiver — e.g. a canceled gRPC request
 /// whose query was already queued behind other work) skips the copy entirely.
 pub(super) fn send_filtered_rows<'a, T: Clone + 'a>(
     rows: impl Iterator<Item = &'a T>,
@@ -120,6 +120,23 @@ pub(super) fn send_filtered_rows<'a, T: Clone + 'a>(
     }
     if reply.send(filter_rows(rows, filter)).is_err() {
         warn!("query caller dropped before receiving response");
+    }
+}
+
+/// MRT snapshot chunks built on this thread, for the cancellation test.
+#[cfg(test)]
+pub(super) mod mrt_chunks_built {
+    thread_local! {
+        static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn record() {
+        BUILT.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The chunks built since the last call.
+    pub(crate) fn take() -> usize {
+        BUILT.with(|count| count.replace(0))
     }
 }
 
@@ -4474,6 +4491,8 @@ impl RibManager {
     ) -> MrtSnapshotChunk {
         use std::cmp::Reverse;
 
+        #[cfg(test)]
+        mrt_chunks_built::record();
         let mut chunk = MrtSnapshotChunk::default();
         // Each source gets an entry with the address it has in this turn:
         // the encoder runs after the RIB moves on and must not resolve a
