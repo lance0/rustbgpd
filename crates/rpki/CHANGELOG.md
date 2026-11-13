@@ -31,7 +31,9 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   holds is not in it); the ASPA set is the customers whose record changed in
   that cache. Previously both were `None`, which asks consumers for a full
   revalidation. A cache's first table is still `None`.
-- A panic in a fault or resync observer no longer ends the manager.
+- A panic in any `VrpManager` observer is counted as a fault and costs only
+  that notification; it no longer ends the manager or marks a cache for
+  resynchronization.
 
 ## 0.10.0 - 2026-11-08
 

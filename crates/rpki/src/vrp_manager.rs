@@ -214,6 +214,16 @@ pub struct CacheUpdateHandle(
     pub(crate) watch::Receiver<ResyncRequests>,
 );
 
+// The handle and the attachment were unwind safe before they carried the
+// resync watch, and still are: they hold only channel endpoints and plain
+// collections, and a panic while one is borrowed leaves nothing half
+// written (the watch value is replaced under its own lock, which does not
+// poison).
+impl std::panic::UnwindSafe for CacheUpdateHandle {}
+impl std::panic::RefUnwindSafe for CacheUpdateHandle {}
+impl std::panic::UnwindSafe for CacheInventoryAttachment {}
+impl std::panic::RefUnwindSafe for CacheInventoryAttachment {}
+
 /// Inventory state and receivers owned by one [`VrpManager`].
 ///
 /// Attach this to the manager before running it. Retain update senders for
@@ -526,8 +536,20 @@ impl VrpManager {
         else {
             return;
         };
+        let accepted_at = state.accepted.as_ref().map(|m| m.accepted_at);
         if let Some(observer) = &self.end_of_data_observer {
-            observer(server, state.accepted.as_ref().map(|m| m.accepted_at));
+            self.observe(|| observer(server, accepted_at));
+        }
+    }
+
+    /// Call an embedder's observer. A panic in it is counted and logged as a
+    /// fault and costs only that notification: every observer runs after the
+    /// state it reports was installed, so the panic says nothing about the
+    /// update and must not be handled as a lost one.
+    fn observe(&self, notify: impl FnOnce()) {
+        // Unwind safety: the manager's state does not depend on observers.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(notify)).is_err() {
+            self.record_fault("observer", None);
         }
     }
 
@@ -541,7 +563,7 @@ impl VrpManager {
         };
         state.connected = connected;
         if let Some(observer) = &self.connectivity_observer {
-            observer(server, connected);
+            self.observe(|| observer(server, connected));
         }
     }
 
@@ -562,7 +584,8 @@ impl VrpManager {
     ///   the expire interval).
     /// - A lost flush or expiry is carried out again; the cache's data
     ///   leaves the tables. A second panic there ends the manager.
-    /// - A panic in an observer costs only that notification.
+    /// - A panic in an observer is counted as a fault and costs only that
+    ///   notification; the update it reported is already installed.
     /// - A lost connectivity change or inventory query costs only itself.
     ///
     /// Updates on the legacy channel are not covered: without the attachment
@@ -681,11 +704,7 @@ impl VrpManager {
                 // cache, nothing can make its data leave on time, and the
                 // manager ends instead of holding it.
                 self.remove_cache(server).await;
-                // Unwind safety: the observers are the embedder's; the
-                // removal above is complete whatever they do.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.observe_removed(server);
-                }));
+                self.observe_removed(server);
                 // No resync request: a client that sends a flush or an
                 // expiry has already dropped its epoch, so its next query
                 // is a Reset Query, and the manager expires data only for
@@ -700,9 +719,8 @@ impl VrpManager {
             server = server.map(tracing::field::display),
             "VRP manager panicked handling a message; continuing with its state as before it"
         );
-        // Unwind safety, here and for the resync observer: the observers
-        // are the embedder's, and the manager's state does not depend on
-        // them.
+        // Unwind safety: the observer is the embedder's, and the manager's
+        // state does not depend on it.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(observer) = &self.fault_observer {
                 observer();
@@ -720,11 +738,9 @@ impl VrpManager {
         inventory
             .resync_tx
             .send_modify(|requests| *requests.entry(server).or_default() += 1);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Some(observer) = &self.resync_observer {
-                observer(server, true);
-            }
-        }));
+        if let Some(observer) = &self.resync_observer {
+            self.observe(|| observer(server, true));
+        }
     }
 
     /// Drop `server`'s accepted state and data and redistribute.
@@ -743,7 +759,7 @@ impl VrpManager {
 
     fn observe_removed(&self, server: SocketAddr) {
         if let Some(observer) = &self.readiness_observer {
-            observer(server, false);
+            self.observe(|| observer(server, false));
         }
         self.notify_end_of_data(server);
     }
@@ -901,7 +917,7 @@ impl VrpManager {
         let ready = staged.vrps.is_some();
         self.distribute(staged).await;
         if let Some(observer) = &self.readiness_observer {
-            observer(server, ready);
+            self.observe(|| observer(server, ready));
         }
     }
 
@@ -922,7 +938,7 @@ impl VrpManager {
             let _ = aspa_tx.send(update).await;
         }
         if let (Some(server), Some(observer)) = (resynchronized, &self.resync_observer) {
-            observer(server, false);
+            self.observe(|| observer(server, false));
         }
     }
 
@@ -2454,6 +2470,7 @@ mod tests {
             Arc::clone(&resyncs),
             Arc::clone(&observer_panics),
         );
+        let resync_panics = Arc::clone(&observer_panics);
         let mgr = VrpManager::new(legacy_rx, rib_tx)
             .with_cache_inventory(attachment)
             .with_aspa_tx(aspa_tx)
@@ -2462,6 +2479,10 @@ mod tests {
             })
             .with_resync_observer(move |server, pending| {
                 resync_log.lock().unwrap().push((server, pending));
+                assert!(
+                    pending || !resync_panics.load(Ordering::SeqCst),
+                    "injected observer panic"
+                );
             })
             .with_connectivity_observer(move |_, _| {
                 assert!(!panics.load(Ordering::SeqCst), "injected observer panic");
@@ -2637,6 +2658,46 @@ mod tests {
         assert_eq!(f.faults.load(Ordering::SeqCst), 1);
         assert_eq!(f.pending(), Vec::<SocketAddr>::new());
         assert!(f.rib_rx.try_recv().is_err());
+    }
+
+    /// An observer that panics when told a cache has resynchronized does
+    /// not undo the resynchronization: the full table is installed and
+    /// published, the cache is no longer pending, and no further full table
+    /// is asked of it.
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_the_resynchronized_notification_leaves_the_cache_resynchronized() {
+        let mut f = recovering().await;
+        f.inject(1);
+        let lost = f.delta(server1(), 3, 1);
+        f.mgr.receive(lost).await;
+        assert_eq!(f.pending(), [server1()]);
+
+        f.observer_panics.store(true, Ordering::SeqCst);
+        let resync = f.full(server1(), &[3, 4], 500);
+        f.mgr.receive(resync).await;
+        f.observer_panics.store(false, Ordering::SeqCst);
+
+        assert_eq!(f.pending(), Vec::<SocketAddr>::new());
+        assert_eq!(f.updates.1.borrow()[&server1()], 1, "no second request");
+        assert!(covers(&f.rib_rx.try_recv().expect("published").table, 3));
+        assert_eq!(
+            f.faults.load(Ordering::SeqCst),
+            2,
+            "the loss and the observer"
+        );
+        // Serial deltas are applied again.
+        let applied = f.delta(server1(), 5, 3);
+        f.mgr.receive(applied).await;
+        assert!(covers(&f.rib_rx.try_recv().unwrap().table, 5));
+    }
+
+    /// The two types an embedder holds across its own unwinding code keep
+    /// the auto traits they were published with.
+    #[test]
+    fn inventory_handles_stay_unwind_safe() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<CacheUpdateHandle>();
+        assert_unwind_safe::<CacheInventoryAttachment>();
     }
 
     /// A panic in an inventory query loses that query: the caller gets an

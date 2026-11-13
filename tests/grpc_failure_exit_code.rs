@@ -1353,41 +1353,27 @@ impl RpkiFaultDaemon {
     }
 }
 
-/// A panic in the VRP manager while it handles one cache's update ends
-/// neither the daemon nor BGP nor the other cache's RTR session. The cache
-/// is marked resync pending and the table in force stays; its client sends a
-/// Reset Query on the same session, and the full table clears the mark.
+/// A panic raised while the VRP manager handles one cache's update, here
+/// in its End of Data observer, ends neither the daemon nor BGP nor either
+/// RTR session. The update was already applied, so the tables stay, no cache
+/// becomes resync pending and no Reset Query is sent; the panic is counted.
+/// The crate's tests cover a panic before the update is applied, which
+/// leaves the previous data in use and asks that cache for a full table.
 #[test]
-fn rpki_manager_update_panic_keeps_bgp_up_and_resynchronizes_that_cache() {
-    use rustbgpd_rpki::rtr_codec::RtrPdu;
-
-    // The second accepted End of Data, the second cache's, panics. The
-    // injection is in an observer, after the table was applied, and both
-    // caches serve the same table, so the VRP count below shows only that
-    // nothing was dropped; the crate's tests pin that a panic before the
-    // commit leaves every set and table as it was.
+fn rpki_manager_update_panic_keeps_bgp_up_and_the_tables_in_use() {
+    // The second accepted End of Data, the second cache's, panics.
     let mut f = RpkiFaultDaemon::start("vrp_manager_update_panic", 2);
-    assert_eq!(read_rtr_pdu(&mut f.rtr[1]), RtrPdu::ResetQuery);
-
-    let held = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1");
+    let after = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1");
     for expected in [
-        f.cache_row("bgp_rpki_cache_resync_pending", 1, 1),
         f.cache_row("bgp_rpki_cache_resync_pending", 0, 0),
+        f.cache_row("bgp_rpki_cache_resync_pending", 1, 0),
         f.cache_row("bgp_rpki_cache_end_of_data_ready", 1, 1),
         "bgp_rpki_vrp_count{afi=\"ipv4\"} 1".to_string(),
         "bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 0".to_string(),
         "bgp_rpki_task_restarts_total{task=\"aspa_forwarder\"} 0".to_string(),
     ] {
-        assert!(held.contains(&expected), "missing {expected}\n{held}");
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
     }
-
-    write_rtr_full_table(&mut f.rtr[1], 101);
-    let pending = f.cache_row("bgp_rpki_cache_resync_pending", 1, 0);
-    let after = f.wait_for_metric(&pending);
-    assert!(
-        after.contains("bgp_rpki_vrp_count{afi=\"ipv4\"} 1"),
-        "{after}"
-    );
 
     let logs = f.daemon.logs();
     for message in [
@@ -1397,21 +1383,9 @@ fn rpki_manager_update_panic_keeps_bgp_up_and_resynchronizes_that_cache() {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
     f.assert_routing_untouched();
-    assert_connection_stays_open(&mut f.rtr[0], false, &logs);
-    f.assert_clean_stop();
-}
-
-/// A stop requested while a cache is still resync pending, its client
-/// waiting out the retry interval or its Reset Query unanswered, exits 0
-/// without waiting for the cache.
-#[test]
-fn sigterm_while_a_cache_is_resync_pending_exits_zero() {
-    use rustbgpd_rpki::rtr_codec::RtrPdu;
-
-    let mut f = RpkiFaultDaemon::start("vrp_manager_update_panic", 2);
-    assert_eq!(read_rtr_pdu(&mut f.rtr[1]), RtrPdu::ResetQuery);
-    let pending = f.cache_row("bgp_rpki_cache_resync_pending", 1, 1);
-    f.wait_for_metric(&pending);
+    for session in &mut f.rtr {
+        assert_connection_stays_open(session, false, &logs);
+    }
     f.assert_clean_stop();
 }
 
