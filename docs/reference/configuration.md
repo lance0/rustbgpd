@@ -1,3 +1,4 @@
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times the cache's RTR client panicked and restarted its session; the restart is handled as an ordinary session loss |
 # Configuration Reference
 
 > **Document class: REFERENCE.**

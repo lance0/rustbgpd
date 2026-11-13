@@ -1,3 +1,5 @@
+| `RTR client panicked; restarting its session with the held data retained` | ERROR | One cache's RTR client panicked (`server`); it reconnects after `retry_interval` and the cache's data stays in use until it expires. Not fatal |
+| `bgp_rpki_rtr_client_restarts_total{cache}` | Times that cache's RTR client panicked and restarted its session. `0` from startup for each configured cache. Each restart is an ordinary session loss: retained data stays in use until the effective expire and the client reconnects after `retry_interval` with a Reset Query |
 # Operations Guide
 
 > **Document class: REFERENCE.**
@@ -1347,8 +1349,19 @@ RIB manager failure instead.
 
 ### RPKI subsystem task exits unexpectedly
 
-The daemon treats an unexpected return or panic from the VRP manager, either
-validation-table forwarder, or any configured RTR client task as fatal. It logs
+A panic in one cache's RTR client is not fatal. The client logs
+`RTR client panicked; restarting its session with the held data retained`,
+leaves a panic report, and handles the panic as an ordinary loss of that RTR
+session: the cache's VRPs and ASPAs stay in use until the effective expire,
+and after `retry_interval` the client reconnects and resynchronizes with a
+Reset Query. BGP sessions and the other caches are not touched.
+`bgp_rpki_rtr_client_restarts_total{cache}` counts these restarts; a cache
+whose client keeps restarting shows `bgp_rpki_cache_connected` at `0` and
+loses its data at the expire like any unreachable cache.
+
+The daemon treats an unexpected return or panic from the VRP manager or either
+validation-table forwarder as fatal, and likewise an RTR client task that ends
+despite the restart. It logs
 `RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
 shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.

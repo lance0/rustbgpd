@@ -4124,8 +4124,9 @@ const TEST_LEASE_EXPIRY_PANIC_ENV: &str = "RUSTBGPD_TEST_LEASE_EXPIRY_PANIC";
 const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE";
 
 /// Test-only fault injection; never set this in production. The only accepted
-/// values are `rtr_client_panic` and `vrp_manager_panic`; all others are
-/// ignored without echoing them.
+/// values are `rtr_client_panic`, which panics the second connection attempt
+/// of the first cache's RTR client (opened without transport authentication),
+/// and `vrp_manager_panic`; all others are ignored without echoing them.
 const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
 
 /// One aggregate budget to abort and account for every RPKI task after the
@@ -4315,6 +4316,7 @@ fn observe_rpki_cache_metrics(
         let label = cache.to_string();
         metrics.set_rpki_cache_end_of_data_ready(&label, false);
         metrics.set_rpki_cache_connected(&label, false);
+        metrics.seed_rpki_rtr_client_restarts(&label);
     }
     let readiness = metrics.clone();
     let connectivity = metrics.clone();
@@ -5730,12 +5732,17 @@ async fn run<T>(
                 max_expire_interval: server.max_expire_interval,
             };
             let expire_metrics = metrics.clone();
+            let restart_metrics = metrics.clone();
             let cache_label = addr.to_string();
+            let restart_label = cache_label.clone();
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
                 .with_record_limits(max_cache_records, Arc::clone(&record_budget))
                 .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
+                })
+                .with_restart_observer(move || {
+                    restart_metrics.record_rpki_rtr_client_restart(&restart_label);
                 });
             // Authenticated caches dial through the transport crate so TCP MD5
             // or TCP-AO is installed before the SYN leaves; the material was
@@ -5775,14 +5782,21 @@ async fn run<T>(
                 client
             };
             info!(server = %addr, "spawning RTR client for RPKI cache");
-            let handle = rpki_tasks.spawn(async move {
-                assert!(
-                    !(test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClientPanic)
-                        && cache_ordinal == 0),
-                    "injected RTR client task panic"
-                );
-                client.run().await;
-            });
+            let client = if test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClientPanic)
+                && cache_ordinal == 0
+            {
+                let dials = std::sync::atomic::AtomicUsize::new(0);
+                client.with_dialer(move |remote| {
+                    let dial = dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    async move {
+                        assert!(dial != 1, "injected RTR client task panic");
+                        tokio::net::TcpStream::connect(remote).await
+                    }
+                })
+            } else {
+                client
+            };
+            let handle = rpki_tasks.spawn(client.run());
             register_rpki_task_kind(
                 &mut rpki_task_registry,
                 handle.id(),

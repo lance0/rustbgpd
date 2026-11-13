@@ -24,13 +24,14 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant as TokioInstant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::aspa::AspaRecord;
 use crate::rtr_codec::{RtrDecodeError, RtrEncodeError, RtrPdu};
@@ -401,9 +402,24 @@ pub struct RtrClient {
     /// Told the effective expire interval (seconds) at start and after
     /// every End of Data; see [`Self::with_expire_observer`].
     expire_observer: Option<Box<dyn Fn(u64) + Send + Sync>>,
+    /// Told each time the client restarts after a panic; see
+    /// [`Self::with_restart_observer`].
+    restart_observer: Option<Box<dyn Fn() + Send + Sync>>,
     /// Opens every transport connection to the cache; see
     /// [`Self::with_dialer`]. `None` is a plain `TcpStream::connect`.
     dialer: Option<RtrDialer>,
+}
+
+/// Drive `future` to completion, or to `None` if it panics. The panic hook
+/// has already reported the panic; the future is dropped without another
+/// poll.
+async fn catch_panic<F: Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx)))
+            .map_or(Poll::Ready(None), |poll| poll.map(Some))
+    })
+    .await
 }
 
 /// Bound a configured refresh/retry interval to the §6 minimum and the
@@ -504,6 +520,7 @@ impl RtrClient {
             held_records: 0,
             held_charge: None,
             expire_observer: None,
+            restart_observer: None,
             dialer: None,
         }
     }
@@ -604,6 +621,15 @@ impl RtrClient {
         self
     }
 
+    /// Call `observer` each time [`Self::run`] recovers from a panic by
+    /// restarting the cache's session — the hook behind the
+    /// `bgp_rpki_rtr_client_restarts_total` counter.
+    #[must_use]
+    pub fn with_restart_observer(mut self, observer: impl Fn() + Send + Sync + 'static) -> Self {
+        self.restart_observer = Some(Box::new(observer));
+        self
+    }
+
     fn observe_expire(&self) {
         if let Some(observer) = &self.expire_observer {
             observer(self.expire_interval.as_secs());
@@ -650,19 +676,52 @@ impl RtrClient {
 
     /// Main event loop — connects, keeps the RTR session open, and reconnects
     /// on failure.
+    ///
+    /// A panic while connecting or running a session is handled as a lost
+    /// session: the cache's validated data is retained until its expire
+    /// interval, and the client reconnects after the retry interval and
+    /// resynchronizes with a Reset Query.
     pub async fn run(mut self) {
         self.observe_expire();
         loop {
             self.prepare_fresh_connection_attempt();
-            if let Err(e) = self.connect_and_run().await {
-                warn!(
-                    server = %self.config.server_addr,
-                    error = %e,
-                    "RTR connection failed"
-                );
-                self.handle_disconnected_session(false).await;
+            match catch_panic(self.connect_and_run()).await {
+                Some(Ok(())) => {}
+                Some(Err(e)) => {
+                    warn!(
+                        server = %self.config.server_addr,
+                        error = %e,
+                        "RTR connection failed"
+                    );
+                    self.handle_disconnected_session(false).await;
+                }
+                None => self.restart_after_panic().await,
             }
         }
+    }
+
+    /// Recover from a panic in a connection attempt or session, whose
+    /// stream the unwind already closed. The held data and its expiry
+    /// instant are kept, exactly as for a dropped connection. The epoch is
+    /// not: the panic may have struck after the epoch advanced but before
+    /// its update reached the manager, so only a full table is known to
+    /// match what the manager holds. End of Data sets the expiry instant
+    /// before it sends the update, so delivered data always has one.
+    async fn restart_after_panic(&mut self) {
+        error!(
+            server = %self.config.server_addr,
+            "RTR client panicked; restarting its session with the held data retained"
+        );
+        if let Some(observer) = &self.restart_observer {
+            observer();
+        }
+        self.send_enhanced(EnhancedVrpUpdate::Disconnected {
+            server: self.config.server_addr,
+            flush: false,
+        })
+        .await;
+        self.epoch = None;
+        self.handle_disconnected_session(false).await;
     }
 
     fn prepare_fresh_connection_attempt(&mut self) {
@@ -6096,5 +6155,141 @@ mod tests {
         // Exactly half the number space away is undefined in RFC 1982;
         // treated as a regression (the conservative reading).
         assert!(!serial_not_before(0, 1 << 31));
+    }
+
+    fn host_prefixes_and_end_of_data(serial: u32, last_octets: &[u8]) -> Vec<RtrPdu> {
+        let mut pdus = vec![RtrPdu::CacheResponse { session_id: 7 }];
+        pdus.extend(last_octets.iter().map(|&last| RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 32,
+            max_len: 32,
+            prefix: Ipv4Addr::new(203, 0, 113, last),
+            asn: 65001,
+        }));
+        pdus.push(RtrPdu::EndOfData {
+            session_id: 7,
+            serial,
+            refresh: 60,
+            retry: 0,
+            expire: 3600,
+        });
+        pdus
+    }
+
+    /// A panic inside a session is a lost session, not a dead client. The
+    /// manager sees an ordinary disconnect and keeps the cache's data, with
+    /// nothing published in the gap; the client comes back and
+    /// resynchronizes with a Reset Query, because the held serial may be
+    /// ahead of what the manager received.
+    #[tokio::test]
+    async fn panic_in_a_session_retains_data_and_resynchronizes_with_a_reset_query() {
+        use std::sync::Mutex;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attachment, handle, _queries) = CacheInventoryAttachment::new([addr]);
+        let (vrp_tx, vrp_rx) = mpsc::channel(8);
+        let (table_tx, mut table_rx) = mpsc::channel(8);
+        let transitions = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&transitions);
+        let manager = tokio::spawn(
+            crate::VrpManager::new(vrp_rx, table_tx)
+                .with_cache_inventory(attachment)
+                .with_connectivity_observer(move |_, connected| {
+                    seen.lock().unwrap().push(connected);
+                })
+                .run(),
+        );
+
+        // The expire observer runs at start and inside each End of Data
+        // commit: the third call panics in the second transaction, before
+        // its update is delivered.
+        let expire_calls = AtomicUsize::new(0);
+        let restarts = Arc::new(AtomicUsize::new(0));
+        let restart_counter = Arc::clone(&restarts);
+        let client = zero_retry_client(addr, vrp_tx)
+            .with_cache_inventory(handle)
+            .with_expire_observer(move |_| {
+                assert!(
+                    expire_calls.fetch_add(1, Ordering::SeqCst) != 2,
+                    "injected RTR client panic"
+                );
+            })
+            .with_restart_observer(move || {
+                restart_counter.fetch_add(1, Ordering::SeqCst);
+            });
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(&mut stream, &host_prefixes_and_end_of_data(100, &[1])).await;
+        assert_eq!(table_rx.recv().await.unwrap().table.len(), 1);
+
+        notify_and_expect_serial_query(&mut stream, 101, 100).await;
+        write_pdus(&mut stream, &host_prefixes_and_end_of_data(101, &[2])).await;
+
+        let (mut stream2, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the client did not reconnect after its panic")
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert_eq!(restarts.load(Ordering::SeqCst), 1);
+        // The panic closed the old connection.
+        assert_eq!(stream.read(&mut [0u8; 1]).await.unwrap(), 0);
+
+        // The next table the manager publishes is the resynchronized one:
+        // the retained data was neither flushed nor changed in between.
+        write_pdus(&mut stream2, &host_prefixes_and_end_of_data(101, &[3, 4])).await;
+        assert_eq!(table_rx.recv().await.unwrap().table.len(), 2);
+        assert_eq!(*transitions.lock().unwrap(), [true, false, true]);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+        manager.abort();
+    }
+
+    /// Data held when the client panics keeps its original expiry: with
+    /// the cache unreachable afterwards (every later dial panics too), the
+    /// client flushes the cache's data exactly at the expire interval of
+    /// the last End of Data, as it does across failed reconnects.
+    #[tokio::test(start_paused = true)]
+    async fn data_held_across_a_panic_is_flushed_at_its_original_expiry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let dials = AtomicUsize::new(0);
+        let restarts = Arc::new(AtomicUsize::new(0));
+        let restart_counter = Arc::clone(&restarts);
+        let client = RtrClient::new(test_config(addr, 60, 5, 3600), vrp_tx)
+            .with_dialer(move |remote| {
+                let first = dials.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    assert!(first, "injected RTR client panic");
+                    TcpStream::connect(remote).await
+                }
+            })
+            .with_restart_observer(move || {
+                restart_counter.fetch_add(1, Ordering::SeqCst);
+            });
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 5, 120).await;
+        let accepted_at = TokioInstant::now();
+        drop(stream);
+
+        assert_eq!(
+            vrp_rx.recv().await,
+            Some(VrpUpdate::ServerDown { server: addr })
+        );
+        assert_eq!(
+            accepted_at.elapsed(),
+            Duration::from_secs(120),
+            "flushed at the End of Data expire, neither earlier nor later"
+        );
+        assert!(restarts.load(Ordering::SeqCst) > 0);
+
+        client_handle.abort();
+        let _ = client_handle.await;
     }
 }
